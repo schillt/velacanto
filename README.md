@@ -4,8 +4,10 @@ Velacanto is an early-stage native music player for Apple platforms. It plays
 device-local audio in place and is being built to stream from personal Jellyfin
 and Navidrome libraries through source adapters.
 
-> **Status:** Pre-alpha. The project is preparing its first functional
-> prototype and is not ready for general use.
+> **Status:** Pre-alpha. Roadmap Slices 0 and 1 are complete. Local playback
+> works, and the Jellyfin connect → authenticate → restore → logout flow has
+> been verified on a physical iPhone. Browse and stream support is implemented
+> but still needs complete real-server stabilization.
 
 ## Goal for 0.1.0
 
@@ -53,11 +55,10 @@ with the selected Xcode beta:
 
 Use `lint`, `macos`, `test`, or `ios-simulator` instead of `all` to run one
 step. The current interface has working local-file playback and a generated
-diagnostic tone. Playback state is owned at the app level, publishes Now Playing
-metadata, and accepts system play, pause, stop, toggle, and seek commands.
-Jellyfin connectivity begins in the next delivery slice. The background path
-and Control Center pause/resume controls have been verified on a sideloaded
-physical iPhone.
+diagnostic tone, plus an early Jellyfin integration. Playback state is owned at
+the app level, publishes Now Playing metadata, and accepts system play, pause,
+stop, toggle, and seek commands. The background path and Control Center
+pause/resume controls have been verified on a sideloaded physical iPhone.
 
 Build output defaults to the ignored `DerivedData` directory. To keep generated
 data outside the checkout, set `VELACANTO_DERIVED_DATA_PATH`:
@@ -73,6 +74,25 @@ DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer \
   xcrun swift-format lint --configuration .swift-format --strict \
   --recursive Velacanto VelacantoTests
 ```
+
+### Jellyfin early access
+
+Choose **Connect to Jellyfin**, enter the complete server address, connect, and
+sign in with an existing Jellyfin account. Remote servers require HTTPS.
+Explicit HTTP addresses are accepted only for loopback, private, link-local,
+`.local`, and unqualified local-network hosts.
+
+After sign-in, Velacanto lists accessible music libraries, albums, and tracks.
+Selecting a track requests Jellyfin's universal audio stream and sends it
+through the same app-level player used for local files. The access token is
+stored in Keychain, the password is never persisted, the device identifier
+remains stable across launches, and logout removes the saved token.
+
+The connection and session path is covered by unit tests and has been verified
+against a real Jellyfin server on a physical iPhone, including relaunch and
+logout. Album browsing and streaming compile on both platforms, but the complete
+connect → browse → play journey and negative network cases still need the smoke
+tests listed in the [known issues](docs/known-issues.md).
 
 ### Local playback
 

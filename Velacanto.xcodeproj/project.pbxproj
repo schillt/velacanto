@@ -18,6 +18,11 @@
 		000000000000000000000209 /* Sources/LocalFiles/DemoToneFactory.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000112 /* Sources/LocalFiles/DemoToneFactory.swift */; };
 		000000000000000000000210 /* Platform/Media/SystemMediaController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000113 /* Platform/Media/SystemMediaController.swift */; };
 		000000000000000000000211 /* Core/Playback/AudioPlayerEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000114 /* Core/Playback/AudioPlayerEngine.swift */; };
+		000000000000000000000212 /* Core/JellyfinAPI/JellyfinAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000115 /* Core/JellyfinAPI/JellyfinAPI.swift */; };
+		000000000000000000000213 /* Core/Session/JellyfinSessionController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000116 /* Core/Session/JellyfinSessionController.swift */; };
+		000000000000000000000214 /* Features/Jellyfin/JellyfinAccessView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000117 /* Features/Jellyfin/JellyfinAccessView.swift */; };
+		000000000000000000000215 /* Sources/Jellyfin/JellyfinPlaybackAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000118 /* Sources/Jellyfin/JellyfinPlaybackAdapter.swift */; };
+		000000000000000000000216 /* JellyfinFoundationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000119 /* JellyfinFoundationTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -45,6 +50,11 @@
 		000000000000000000000112 /* Sources/LocalFiles/DemoToneFactory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/LocalFiles/DemoToneFactory.swift; sourceTree = "<group>"; };
 		000000000000000000000113 /* Platform/Media/SystemMediaController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Platform/Media/SystemMediaController.swift; sourceTree = "<group>"; };
 		000000000000000000000114 /* Core/Playback/AudioPlayerEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Core/Playback/AudioPlayerEngine.swift; sourceTree = "<group>"; };
+		000000000000000000000115 /* Core/JellyfinAPI/JellyfinAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Core/JellyfinAPI/JellyfinAPI.swift; sourceTree = "<group>"; };
+		000000000000000000000116 /* Core/Session/JellyfinSessionController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Core/Session/JellyfinSessionController.swift; sourceTree = "<group>"; };
+		000000000000000000000117 /* Features/Jellyfin/JellyfinAccessView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Jellyfin/JellyfinAccessView.swift; sourceTree = "<group>"; };
+		000000000000000000000118 /* Sources/Jellyfin/JellyfinPlaybackAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/Jellyfin/JellyfinPlaybackAdapter.swift; sourceTree = "<group>"; };
+		000000000000000000000119 /* JellyfinFoundationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JellyfinFoundationTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -95,6 +105,10 @@
 				000000000000000000000111 /* Sources/LocalFiles/LocalFilePlaybackAdapter.swift */,
 				000000000000000000000112 /* Sources/LocalFiles/DemoToneFactory.swift */,
 				000000000000000000000113 /* Platform/Media/SystemMediaController.swift */,
+				000000000000000000000115 /* Core/JellyfinAPI/JellyfinAPI.swift */,
+				000000000000000000000116 /* Core/Session/JellyfinSessionController.swift */,
+				000000000000000000000117 /* Features/Jellyfin/JellyfinAccessView.swift */,
+				000000000000000000000118 /* Sources/Jellyfin/JellyfinPlaybackAdapter.swift */,
 				000000000000000000000107 /* Resources/Info.plist */,
 				000000000000000000000108 /* Resources/PrivacyInfo.xcprivacy */,
 			);
@@ -105,6 +119,7 @@
 			isa = PBXGroup;
 			children = (
 				000000000000000000000104 /* PlaybackFoundationTests.swift */,
+				000000000000000000000119 /* JellyfinFoundationTests.swift */,
 			);
 			path = VelacantoTests;
 			sourceTree = "<group>";
@@ -218,6 +233,10 @@
 				000000000000000000000208 /* Sources/LocalFiles/LocalFilePlaybackAdapter.swift in Sources */,
 				000000000000000000000209 /* Sources/LocalFiles/DemoToneFactory.swift in Sources */,
 				000000000000000000000210 /* Platform/Media/SystemMediaController.swift in Sources */,
+				000000000000000000000212 /* Core/JellyfinAPI/JellyfinAPI.swift in Sources */,
+				000000000000000000000213 /* Core/Session/JellyfinSessionController.swift in Sources */,
+				000000000000000000000214 /* Features/Jellyfin/JellyfinAccessView.swift in Sources */,
+				000000000000000000000215 /* Sources/Jellyfin/JellyfinPlaybackAdapter.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -226,6 +245,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				000000000000000000000204 /* PlaybackFoundationTests.swift in Sources */,
+				000000000000000000000216 /* JellyfinFoundationTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

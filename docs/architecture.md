@@ -19,25 +19,25 @@ flowchart TB
 
     subgraph Application["Application state"]
         Coordinator["App state and coordinator<br/>(playback owner implemented)"]
-        Models["Shared domain models<br/>(playback implemented; server planned)"]
+        Models["Shared domain models<br/>(playback and Jellyfin implemented)"]
     end
 
     subgraph Core["Shared core services"]
-        Session["Session service<br/>(Slice 1 planned)"]
-        API["Jellyfin API client<br/>(Slice 1 planned)"]
-        Library["Music library repository<br/>(Slice 2 planned)"]
+        Session["Session service<br/>(Slice 1 complete)"]
+        API["Jellyfin API client<br/>(Slice 1 complete)"]
+        Library["Music library access<br/>(first browse slice implemented)"]
         Playback["Playback coordinator<br/>(foundation implemented)"]
     end
 
     subgraph Sources["Playback source adapters"]
         LocalAdapter["Local Files adapter<br/>(implemented)"]
-        JellyfinAdapter["Jellyfin adapter<br/>(Slice 3 planned)"]
+        JellyfinAdapter["Jellyfin adapter<br/>(Slice 3 implemented)"]
         NavidromeAdapter["Navidrome adapter<br/>(after 0.1)"]
     end
 
     subgraph Apple["Apple platform services"]
-        Networking["URLSession and local-network policy<br/>(ATS foundation implemented)"]
-        Keychain["Keychain<br/>(Slice 1 planned)"]
+        Networking["URLSession and local-network policy<br/>(implemented)"]
+        Keychain["Keychain<br/>(implemented)"]
         Engine["Audio player engine<br/>(implemented)"]
         AV["AVFoundation and AVAudioSession<br/>(implemented)"]
         Media["Now Playing and remote commands<br/>(implemented)"]
@@ -95,6 +95,19 @@ waiting, playing, pause, completion, stall, and failure events into an explicit
 provider-neutral playback state. Periodic time observations update the in-app
 progress display; system Now Playing metadata is republished only when the item,
 duration, seek position, or playback state changes.
+
+## Delivery status
+
+Slices 0 and 1 are complete. The Jellyfin connection and session boundary has
+been exercised against a real server on a physical iPhone through connect,
+authentication, relaunch, restoration, and logout. Automated tests cover URL
+policy, unreachable-server and rejected-credential states, persisted-session
+expiration, orphaned credential cleanup, request construction, and decoding.
+
+The remaining 0.1 work is not part of the authentication boundary: album
+artwork, complete real-server browse and playback validation, live negative
+network cases, and audio interruption and route handling remain tracked in the
+[roadmap](roadmap.md).
 
 ## Local-file playback journey
 
@@ -210,7 +223,8 @@ sequenceDiagram
 
 - The password is transient and is not persisted by Velacanto.
 - The access token is stored in Keychain and removed on logout.
-- Tokens and passwords must not appear in logs, fixtures, screenshots, or Git.
+- Real tokens and passwords must not appear in logs, fixtures, screenshots, or
+  Git. Tests use clearly synthetic credential values.
 - Remote servers use HTTPS by default.
 - Local servers require an explicit local-network purpose string and the
   narrowest transport-security policy that supports the approved use case.
@@ -221,38 +235,36 @@ sequenceDiagram
 
 ## Source layout
 
-The project now has the playback foundation in place. Planned directories are
-listed here so new slices extend the established boundaries instead of moving
-responsibilities into the prototype view:
+The project now has the playback foundation and first Jellyfin vertical slice
+in place. The layout keeps endpoint, session, source-adapter, and presentation
+responsibilities out of the prototype view:
 
 ```text
 Velacanto/
 ├── App/                         # implemented: app-lifetime ownership
 ├── Features/
-│   ├── Prototype/               # implemented: temporary foundation UI
-│   ├── Connection/              # Slice 1
-│   ├── Authentication/          # Slice 1
-│   └── Library/                 # Slice 2
+│   ├── Prototype/               # implemented: source selection and player UI
+│   └── Jellyfin/                # implemented: connection, auth, and browse UI
 ├── Core/
 │   ├── Models/                  # implemented: source and playback contracts
 │   ├── Playback/                # implemented: coordinator and player engine
-│   ├── Session/                 # Slice 1
-│   └── JellyfinAPI/             # Slice 1
+│   ├── Session/                 # implemented: restore, credentials, and logout
+│   └── JellyfinAPI/             # implemented: auth, browse, and stream requests
 ├── Sources/
 │   ├── LocalFiles/              # implemented
-│   ├── Jellyfin/                # Slice 3
+│   ├── Jellyfin/                # implemented: playback request adapter
 │   └── Navidrome/               # after 0.1
 ├── Platform/
 │   ├── Media/                   # implemented
-│   ├── Keychain/                # Slice 1
-│   └── Networking/              # Slice 1
+│   ├── Keychain/                # implemented in the session boundary
+│   └── Networking/              # implemented in the Jellyfin API actor
 └── Resources/
 
 VelacantoTests/
 ├── Playback/                    # implemented in the foundation test target
-├── JellyfinAPI/                 # Slice 1
-├── Session/                     # Slice 1
-└── Features/                    # Slices 1 and 2
+├── JellyfinAPI/                 # request, URL, and decoding coverage
+├── Session/                     # persistence and expiration coverage
+└── Features/                    # controller-state coverage
 ```
 
 ## Related documents

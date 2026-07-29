@@ -7,6 +7,8 @@ technical planning.
 
 - [0.1.0 plan](0.1-plan.md) — scope, delivery slices, and acceptance criteria.
 - [Roadmap](roadmap.md) — ordered work, checkpoints, and later opportunities.
+- [Known issues](known-issues.md) — current pre-alpha limitations and live-test
+  gaps.
 - [Architecture](architecture.md) — intended component boundaries and runtime
   interactions.
 

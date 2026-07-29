@@ -3,6 +3,7 @@ import UniformTypeIdentifiers
 
 struct PrototypeContentView: View {
     @ObservedObject var playback: AudioPlaybackCoordinator
+    @ObservedObject var jellyfin: JellyfinSessionController
     @State private var isChoosingLocalFile = false
     @State private var isPreparingTestTone = false
     @State private var selectionError: String?
@@ -45,7 +46,7 @@ struct PrototypeContentView: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text("0.1.0 interface prototype")
                     .font(.headline)
-                Text("Real local playback is available; server connections come next.")
+                Text("Local playback and the first Jellyfin connection flow are available.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             }
@@ -122,6 +123,38 @@ struct PrototypeContentView: View {
                 )
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            } else if source.id == .jellyfin {
+                HStack {
+                    NavigationLink {
+                        JellyfinAccessView(
+                            jellyfin: jellyfin,
+                            playback: playback
+                        )
+                    } label: {
+                        Label(
+                            jellyfin.isSignedIn ? "Open Music Library" : "Connect to Jellyfin",
+                            systemImage: jellyfin.isSignedIn
+                                ? "music.note.house.fill"
+                                : "network"
+                        )
+                    }
+                    .buttonStyle(.borderedProminent)
+
+                    Spacer()
+                }
+
+                if let session = jellyfin.session {
+                    Label(
+                        "Signed in to \(session.serverName) as \(session.username)",
+                        systemImage: "checkmark.circle.fill"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                } else if jellyfin.phase == .restoring {
+                    Label("Checking for a saved Jellyfin session…", systemImage: "clock")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
         .padding(14)
@@ -296,8 +329,8 @@ private struct PrototypeMusicSource: Identifiable {
             displayName: "Jellyfin",
             symbolName: "server.rack",
             summary: "Connect to and stream from a personal Jellyfin music library.",
-            availabilityText: "NEXT ADAPTER",
-            isAvailable: false
+            availabilityText: "EARLY ACCESS",
+            isAvailable: true
         ),
         PrototypeMusicSource(
             id: MusicSourceID(rawValue: "navidrome"),
@@ -315,5 +348,8 @@ private struct PrototypeMusicSource: Identifiable {
 }
 
 #Preview {
-    PrototypeContentView(playback: AudioPlaybackCoordinator())
+    PrototypeContentView(
+        playback: AudioPlaybackCoordinator(),
+        jellyfin: JellyfinSessionController(autoRestore: false)
+    )
 }

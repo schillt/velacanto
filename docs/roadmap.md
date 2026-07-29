@@ -6,7 +6,17 @@ The detailed feature boundary and acceptance criteria remain in the
 
 ## Current focus
 
+Slices 0 and 1 are complete. Manual URL entry, public server information,
+authentication, session restoration, and logout are implemented and the full
+Slice 1 happy path has been verified against a real Jellyfin server on a
+physical iPhone. Current work is album artwork, complete browse-and-play
+real-server validation, live failure testing, and playback lifecycle reporting.
+
+## Foundation status
+
 ### Slice 0 — Project foundation
+
+**Status: Complete.**
 
 - [x] Establish the public repository and Git workflow.
 - [x] Document the 0.1.0 scope and architecture.
@@ -27,12 +37,13 @@ The detailed feature boundary and acceptance criteria remain in the
 - [x] Add a shared playback coordinator and direct local-file source adapter.
 - [x] Produce clean macOS and generic simulator builds with passing foundation
   tests.
-- [ ] Run the app and tests on a booted iOS Simulator.
+- [x] Run the app and tests on a booted iOS Simulator.
 
-The macOS build, nine foundation tests, and generic iOS Simulator build pass.
-Local playback, observed engine state, resource lifetime, and system-media
-behavior are covered at the coordinator boundary. The iOS 27 Simulator runtime
-is installed; a booted simulator run remains pending.
+The macOS build, twenty-two foundation and Jellyfin tests, and generic iOS
+Simulator build pass. Local playback, observed engine state, resource lifetime,
+system-media behavior, Jellyfin URL policy, request construction, decoding,
+session persistence, and stream handoff are covered. The app launches and all
+twenty-two tests pass on macOS and a booted iOS 27 Simulator.
 
 Xcode account sign-in is complete and the July 29 preflight recognizes one
 valid Personal Team development identity. The connected iPhone is registered,
@@ -50,25 +61,34 @@ destinations without secrets or machine-local configuration in Git.
 
 ### Slice 1 — Connect and authenticate
 
-- [ ] Normalize and validate a user-entered server URL.
-- [ ] Query public Jellyfin server information.
-- [ ] Authenticate a username and password.
-- [ ] Store the access token in Keychain.
-- [ ] Persist a stable app-generated Jellyfin device identifier.
-- [ ] Restore a valid session at launch.
-- [ ] Log out and delete the stored token.
-- [ ] Cover invalid URL, unreachable server, bad credentials, and expired token.
+**Status: Complete.**
+
+- [x] Normalize and validate a user-entered server URL.
+- [x] Query public Jellyfin server information.
+- [x] Authenticate a username and password.
+- [x] Store the access token in Keychain.
+- [x] Persist a stable app-generated Jellyfin device identifier.
+- [x] Restore a valid session at launch.
+- [x] Log out and delete the stored token.
+- [x] Cover invalid URL, unreachable server, bad credentials, and expired token
+  behavior with automated tests.
+
+On July 29, 2026, the connect → authenticate → relaunch → restore → logout
+journey was verified against a real Jellyfin server on a physical iPhone.
+Unreachable-server and bad-credential behavior has automated coverage but still
+needs physical-device testing under Slice 4.
 
 **Exit gate:** A user can connect, authenticate, relaunch into the session, and
 log out without Velacanto persisting the password.
 
 ### Slice 2 — Browse music
 
-- [ ] Locate the signed-in user's music libraries.
-- [ ] Load albums and artwork for the selected music library.
-- [ ] Open an album and show tracks in server order.
-- [ ] Represent loading, empty, retryable, and terminal error states.
-- [ ] Add decoding and view-model state tests.
+- [x] Locate the signed-in user's music libraries.
+- [x] Load albums for the selected music library.
+- [ ] Load album artwork.
+- [x] Open an album and show tracks in server order.
+- [x] Represent loading, empty, retryable, and terminal error states.
+- [x] Add decoding and view-model state tests.
 
 **Exit gate:** A signed-in user can navigate from their music library to a
 specific playable track.
@@ -78,7 +98,7 @@ specific playable track.
 - [x] Play a user-selected local audio file in place without copying it.
 - [x] Establish source-neutral play, pause, seek, elapsed-time, and duration
   behavior for local and future server adapters.
-- [ ] Resolve and begin the selected Jellyfin audio stream.
+- [x] Resolve and begin the selected Jellyfin audio stream.
 - [x] Configure the iOS playback audio session.
 - [x] Enable the iOS background-audio mode and keep playback at app scope.
 - [x] Observe readiness, waiting, play, pause, completion, stalls, and player
@@ -97,11 +117,12 @@ to the expected system media controls.
 ### Slice 4 — Stabilize 0.1.0
 
 - [ ] Exercise the complete flow against a non-production Jellyfin server.
+- [ ] Test an unreachable server and bad credentials on a physical device.
 - [ ] Test denied local-network access and network loss.
 - [ ] Test empty libraries, expired sessions, and unsupported tracks.
 - [ ] Run clean iOS and macOS builds and all unit tests.
-- [ ] Audit logs and tracked files for credentials and tokens.
-- [ ] Document known issues.
+- [x] Audit logs and tracked files for credentials and tokens.
+- [x] Document known issues.
 
 **Exit gate:** The complete connect → browse → play journey satisfies the
 [0.1.0 acceptance criteria](0.1-plan.md#acceptance-criteria).
