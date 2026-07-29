@@ -17,6 +17,11 @@ technical planning.
 - [Architecture decision records](decisions/README.md) — durable technical
   decisions and their consequences.
 
+## Product design
+
+- [Foundational product design](design/README.md) — approved iOS and macOS
+  direction, interactive prototype, and implementation guidance.
+
 ## Visualizations
 
 - [Visualization guide](visualizations/README.md) — how to open and maintain the

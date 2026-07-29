@@ -29,6 +29,8 @@ after the core playback experience is proven.
 - [Roadmap](docs/roadmap.md) — ordered work and exit gates.
 - [Architecture](docs/architecture.md) — component and runtime diagrams.
 - [Decision records](docs/decisions/README.md) — durable technical choices.
+- [Foundational product design](docs/design/README.md) — approved iOS and macOS
+  interface direction and interactive prototype.
 - [Interactive architecture visualization](docs/visualizations/README.md) —
   standalone runtime and delivery-plan explorer.
 
