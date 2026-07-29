@@ -11,14 +11,37 @@ The detailed feature boundary and acceptance criteria remain in the
 - [x] Establish the public repository and Git workflow.
 - [x] Document the 0.1.0 scope and architecture.
 - [x] Add a repeatable pre-build readiness check.
-- [ ] Select and initialize the required Xcode beta toolchain.
-- [ ] Confirm minimum supported iOS and macOS versions.
-- [ ] Decide whether macOS is release-ready or compile-tested in 0.1.0.
-- [ ] Generate the SwiftUI app and unit-test targets.
-- [ ] Configure `com.chameleonenterprise.velacanto` and Apple signing.
-- [ ] Add local-network purpose text and the narrow ATS policy.
-- [ ] Add and validate the privacy manifest.
-- [ ] Produce clean simulator builds and passing foundation tests.
+- [x] Select and initialize the required Xcode beta toolchain.
+- [x] Finish installing the required iOS Simulator runtime.
+- [x] Confirm minimum supported iOS and macOS versions.
+- [x] Decide whether macOS is release-ready or compile-tested in 0.1.0.
+- [x] Generate the SwiftUI app and unit-test targets.
+- [x] Create a valid Xcode-managed Personal Team signing identity.
+- [x] Enable Developer Mode, register the connected iPhone, and generate its
+  temporary development provisioning profile.
+- [x] Produce and install a signed physical-device build.
+- [x] Trust the Personal Team developer profile on the iPhone and complete the
+  first launch.
+- [x] Add local-network purpose text and the narrow ATS policy.
+- [x] Add and validate the privacy manifest.
+- [x] Add a shared playback coordinator and direct local-file source adapter.
+- [x] Produce clean macOS and generic simulator builds with passing foundation
+  tests.
+- [ ] Run the app and tests on a booted iOS Simulator.
+
+The macOS build, six foundation tests, and generic iOS Simulator build pass.
+Local playback and system-media behavior are covered at the coordinator
+boundary. The iOS 27 Simulator runtime is installed; a booted simulator run
+remains pending.
+
+Xcode account sign-in is complete and the July 29 preflight recognizes one
+valid Personal Team development identity. The connected iPhone is registered,
+provisioned, and running a signed Velacanto build. A 60-second local diagnostic
+track continued after returning to the Home Screen, appeared with correct
+metadata and timing in Control Center, and responded to Control Center pause
+and resume. The team identifier remains a local build setting rather than a
+value committed to the project. Paid Apple Developer Program enrollment is
+deferred to 1.0.
 
 **Exit gate:** A clean checkout builds and tests on the selected iOS and macOS
 destinations without secrets or machine-local configuration in Git.
@@ -52,13 +75,18 @@ specific playable track.
 
 ### Slice 3 — Stream and control playback
 
+- [x] Play a user-selected local audio file in place without copying it.
+- [x] Share play, pause, seek, elapsed-time, and duration behavior across source
+  adapters.
 - [ ] Resolve and begin the selected audio stream.
-- [ ] Implement play, pause, seek, elapsed time, and duration.
-- [ ] Configure the playback audio session.
-- [ ] Enable and test iOS background audio.
+- [x] Configure the iOS playback audio session.
+- [x] Enable the iOS background-audio mode and keep playback at app scope.
 - [ ] Handle interruptions, route changes, and failed streams.
-- [ ] Publish now-playing metadata.
-- [ ] Handle system play and pause commands.
+- [x] Publish now-playing metadata.
+- [x] Handle system play, pause, stop, toggle, and seek commands.
+- [x] Verify background playback, device lock, metadata, pause, and resume in
+  Control Center on a physical iPhone.
+- [ ] Repeat the smoke test on a booted iOS Simulator.
 
 **Exit gate:** The selected track keeps playing under screen lock and responds
 to the expected system media controls.
@@ -86,14 +114,13 @@ These items remain intentionally outside 0.1.0:
 - Lyrics.
 - Casting and explicit transcoding controls.
 - Multiple saved servers or users.
-- Analytics and App Store release automation.
+- Navidrome/Subsonic server connectivity. Its source adapter boundary is
+  reserved, but Jellyfin remains the first server implementation.
+- Analytics, paid Apple Developer Program enrollment, TestFlight, and App Store
+  release automation. Public distribution will be reconsidered for 1.0.
 
 ## Decisions still required
 
-- Minimum iOS and macOS deployment targets.
-- The macOS release commitment for 0.1.0.
-- Local plain-HTTP server support policy.
-- Apple Developer team and bundle-ID registration.
 - Non-production Jellyfin test-server ownership.
 - Public source license and contribution policy.
 

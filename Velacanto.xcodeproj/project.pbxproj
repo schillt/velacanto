@@ -1,0 +1,453 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 71;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		000000000000000000000201 /* App/VelacantoApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000101 /* App/VelacantoApp.swift */; };
+		000000000000000000000202 /* Features/Prototype/PrototypeContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000102 /* Features/Prototype/PrototypeContentView.swift */; };
+		000000000000000000000203 /* Core/Playback/PlaybackTimeFormatter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000103 /* Core/Playback/PlaybackTimeFormatter.swift */; };
+		000000000000000000000204 /* PlaybackFoundationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000104 /* PlaybackFoundationTests.swift */; };
+		000000000000000000000205 /* Resources/PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000108 /* Resources/PrivacyInfo.xcprivacy */; };
+		000000000000000000000206 /* Core/Models/MusicSource.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000109 /* Core/Models/MusicSource.swift */; };
+		000000000000000000000207 /* Core/Playback/AudioPlaybackCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000110 /* Core/Playback/AudioPlaybackCoordinator.swift */; };
+		000000000000000000000208 /* Sources/LocalFiles/LocalFilePlaybackAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000111 /* Sources/LocalFiles/LocalFilePlaybackAdapter.swift */; };
+		000000000000000000000209 /* Sources/LocalFiles/DemoToneFactory.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000112 /* Sources/LocalFiles/DemoToneFactory.swift */; };
+		000000000000000000000210 /* Platform/Media/SystemMediaController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000113 /* Platform/Media/SystemMediaController.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		000000000000000000000701 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 000000000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 000000000000000000000401;
+			remoteInfo = Velacanto;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		000000000000000000000101 /* App/VelacantoApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App/VelacantoApp.swift; sourceTree = "<group>"; };
+		000000000000000000000102 /* Features/Prototype/PrototypeContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Prototype/PrototypeContentView.swift; sourceTree = "<group>"; };
+		000000000000000000000103 /* Core/Playback/PlaybackTimeFormatter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Core/Playback/PlaybackTimeFormatter.swift; sourceTree = "<group>"; };
+		000000000000000000000104 /* PlaybackFoundationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackFoundationTests.swift; sourceTree = "<group>"; };
+		000000000000000000000105 /* Velacanto.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Velacanto.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		000000000000000000000106 /* VelacantoTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = VelacantoTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		000000000000000000000107 /* Resources/Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Resources/Info.plist; sourceTree = "<group>"; };
+		000000000000000000000108 /* Resources/PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Resources/PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		000000000000000000000109 /* Core/Models/MusicSource.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Core/Models/MusicSource.swift; sourceTree = "<group>"; };
+		000000000000000000000110 /* Core/Playback/AudioPlaybackCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Core/Playback/AudioPlaybackCoordinator.swift; sourceTree = "<group>"; };
+		000000000000000000000111 /* Sources/LocalFiles/LocalFilePlaybackAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/LocalFiles/LocalFilePlaybackAdapter.swift; sourceTree = "<group>"; };
+		000000000000000000000112 /* Sources/LocalFiles/DemoToneFactory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/LocalFiles/DemoToneFactory.swift; sourceTree = "<group>"; };
+		000000000000000000000113 /* Platform/Media/SystemMediaController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Platform/Media/SystemMediaController.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		000000000000000000000302 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		000000000000000000000305 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		000000000000000000000002 = {
+			isa = PBXGroup;
+			children = (
+				000000000000000000000004 /* Velacanto */,
+				000000000000000000000005 /* VelacantoTests */,
+				000000000000000000000003 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		000000000000000000000003 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				000000000000000000000105 /* Velacanto.app */,
+				000000000000000000000106 /* VelacantoTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		000000000000000000000004 /* Velacanto */ = {
+			isa = PBXGroup;
+			children = (
+				000000000000000000000101 /* App/VelacantoApp.swift */,
+				000000000000000000000102 /* Features/Prototype/PrototypeContentView.swift */,
+				000000000000000000000103 /* Core/Playback/PlaybackTimeFormatter.swift */,
+				000000000000000000000109 /* Core/Models/MusicSource.swift */,
+				000000000000000000000110 /* Core/Playback/AudioPlaybackCoordinator.swift */,
+				000000000000000000000111 /* Sources/LocalFiles/LocalFilePlaybackAdapter.swift */,
+				000000000000000000000112 /* Sources/LocalFiles/DemoToneFactory.swift */,
+				000000000000000000000113 /* Platform/Media/SystemMediaController.swift */,
+				000000000000000000000107 /* Resources/Info.plist */,
+				000000000000000000000108 /* Resources/PrivacyInfo.xcprivacy */,
+			);
+			path = Velacanto;
+			sourceTree = "<group>";
+		};
+		000000000000000000000005 /* VelacantoTests */ = {
+			isa = PBXGroup;
+			children = (
+				000000000000000000000104 /* PlaybackFoundationTests.swift */,
+			);
+			path = VelacantoTests;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		000000000000000000000401 /* Velacanto */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 000000000000000000000502 /* Build configuration list for PBXNativeTarget "Velacanto" */;
+			buildPhases = (
+				000000000000000000000301 /* Sources */,
+				000000000000000000000302 /* Frameworks */,
+				000000000000000000000303 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = Velacanto;
+			productName = Velacanto;
+			productReference = 000000000000000000000105 /* Velacanto.app */;
+			productType = "com.apple.product-type.application";
+		};
+		000000000000000000000402 /* VelacantoTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 000000000000000000000503 /* Build configuration list for PBXNativeTarget "VelacantoTests" */;
+			buildPhases = (
+				000000000000000000000304 /* Sources */,
+				000000000000000000000305 /* Frameworks */,
+				000000000000000000000306 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				000000000000000000000702 /* PBXTargetDependency */,
+			);
+			name = VelacantoTests;
+			productName = VelacantoTests;
+			productReference = 000000000000000000000106 /* VelacantoTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		000000000000000000000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2700;
+				LastUpgradeCheck = 2700;
+				TargetAttributes = {
+					000000000000000000000401 = {
+						CreatedOnToolsVersion = 27.0;
+					};
+					000000000000000000000402 = {
+						CreatedOnToolsVersion = 27.0;
+						TestTargetID = 000000000000000000000401;
+					};
+				};
+			};
+			buildConfigurationList = 000000000000000000000501 /* Build configuration list for PBXProject "Velacanto" */;
+			compatibilityVersion = "Xcode 16.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = 000000000000000000000002;
+			minimizedProjectReferenceProxies = 1;
+			productRefGroup = 000000000000000000000003 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				000000000000000000000401 /* Velacanto */,
+				000000000000000000000402 /* VelacantoTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		000000000000000000000303 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				000000000000000000000205 /* Resources/PrivacyInfo.xcprivacy in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		000000000000000000000306 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		000000000000000000000301 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				000000000000000000000201 /* App/VelacantoApp.swift in Sources */,
+				000000000000000000000202 /* Features/Prototype/PrototypeContentView.swift in Sources */,
+				000000000000000000000203 /* Core/Playback/PlaybackTimeFormatter.swift in Sources */,
+				000000000000000000000206 /* Core/Models/MusicSource.swift in Sources */,
+				000000000000000000000207 /* Core/Playback/AudioPlaybackCoordinator.swift in Sources */,
+				000000000000000000000208 /* Sources/LocalFiles/LocalFilePlaybackAdapter.swift in Sources */,
+				000000000000000000000209 /* Sources/LocalFiles/DemoToneFactory.swift in Sources */,
+				000000000000000000000210 /* Platform/Media/SystemMediaController.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		000000000000000000000304 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				000000000000000000000204 /* PlaybackFoundationTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		000000000000000000000702 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 000000000000000000000401 /* Velacanto */;
+			targetProxy = 000000000000000000000701 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		000000000000000000000601 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		000000000000000000000602 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SWIFT_COMPILATION_MODE = wholemodule;
+			};
+			name = Release;
+		};
+		000000000000000000000603 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Velacanto/Resources/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = Velacanto;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.music";
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.chameleonenterprise.velacanto;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		000000000000000000000604 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Velacanto/Resources/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = Velacanto;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.music";
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.chameleonenterprise.velacanto;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		000000000000000000000605 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.chameleonenterprise.velacanto.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx";
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Velacanto.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Velacanto";
+			};
+			name = Debug;
+		};
+		000000000000000000000606 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.chameleonenterprise.velacanto.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx";
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Velacanto.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Velacanto";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		000000000000000000000501 /* Build configuration list for PBXProject "Velacanto" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				000000000000000000000601 /* Debug */,
+				000000000000000000000602 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		000000000000000000000502 /* Build configuration list for PBXNativeTarget "Velacanto" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				000000000000000000000603 /* Debug */,
+				000000000000000000000604 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		000000000000000000000503 /* Build configuration list for PBXNativeTarget "VelacantoTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				000000000000000000000605 /* Debug */,
+				000000000000000000000606 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 000000000000000000000001 /* Project object */;
+}

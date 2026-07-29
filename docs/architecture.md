@@ -28,6 +28,12 @@ flowchart TB
         Playback["Playback coordinator"]
     end
 
+    subgraph Sources["Playback source adapters"]
+        LocalAdapter["Local Files adapter"]
+        JellyfinAdapter["Jellyfin adapter"]
+        NavidromeAdapter["Navidrome adapter later"]
+    end
+
     subgraph Apple["Apple platform services"]
         Networking["URLSession and local-network policy"]
         Keychain["Keychain"]
@@ -35,7 +41,9 @@ flowchart TB
         Media["Now Playing and remote commands"]
     end
 
+    LocalFile["User-selected audio file"]
     Jellyfin["Jellyfin server"]
+    Navidrome["Navidrome server later"]
 
     User --> IOS
     User --> Mac
@@ -53,12 +61,48 @@ flowchart TB
     Library --> API
     Library --> Models
     Playback --> Models
+    Playback --> LocalAdapter
+    Playback --> JellyfinAdapter
+    Playback -. "future" .-> NavidromeAdapter
+    LocalAdapter --> LocalFile
+    JellyfinAdapter --> API
+    NavidromeAdapter --> Networking
     API --> Networking
     Networking --> Jellyfin
-    Playback --> Jellyfin
+    Networking -. "future" .-> Navidrome
     Playback --> AV
     Playback <--> Media
     Media <--> SystemUI
+```
+
+Every source adapter resolves its own selection into the same provider-neutral
+playback request. The coordinator therefore sees a playable URL and metadata,
+not Jellyfin, Navidrome, or file-picker details. Local Files passes the selected
+URL through unchanged and holds its security-scoped access only for the active
+item. The app owns this coordinator rather than an individual view, so playback
+and the temporary file-access lease survive navigation and backgrounding until
+the user stops playback, replaces the item, or the app terminates.
+
+## Local-file playback journey
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant UI as SwiftUI
+    participant Files as System file picker
+    participant Adapter as Local Files adapter
+    participant Player as Playback coordinator
+    participant AV as AVFoundation
+
+    User->>UI: Open Audio File
+    UI->>Files: Request one audio file
+    Files-->>UI: Security-scoped file URL
+    UI->>Adapter: Create playback request
+    Adapter-->>UI: Same URL plus temporary access lease
+    UI->>Player: Play request
+    Player->>AV: Play selected URL in place
+    User->>Player: Stop or replace item
+    Player->>Player: Release file access
 ```
 
 ## Primary user journey
@@ -96,11 +140,35 @@ sequenceDiagram
     App-->>UI: Browse state
 
     User->>UI: Select track
-    UI->>Player: Play item
-    Player->>JF: Request audio stream
-    JF-->>Player: Audio bytes
+    UI->>App: Play item
+    App->>API: Resolve Jellyfin stream URL
+    API->>JF: Request playable stream
+    JF-->>API: Stream response
+    API-->>App: Provider-neutral playback request
+    App->>Player: Play request
     Player->>OS: Publish playback state and metadata
-    OS-->>Player: Play, pause, and route commands
+    OS-->>Player: Play, pause, stop, toggle, and seek
+```
+
+## Background and system-control lifecycle
+
+```mermaid
+sequenceDiagram
+    participant App as App-lifetime state
+    participant Player as Playback coordinator
+    participant Audio as AVAudioSession and AVPlayer
+    participant Media as Now Playing and remote commands
+    participant System as Lock Screen and Control Center
+
+    App->>Player: Retain one coordinator
+    Player->>Audio: Activate playback audio session
+    Player->>Media: Publish item, timing, and playback rate
+    Media->>System: Present current media controls
+    System-->>Media: Play, pause, stop, toggle, or seek
+    Media-->>Player: Forward command
+    Player->>Audio: Apply command
+    Player->>Media: Publish updated state
+    Note over App,Audio: View navigation does not release the player
 ```
 
 ## Responsibilities
@@ -112,7 +180,8 @@ sequenceDiagram
 | Session service | Authentication, restoration, logout, stable device identity | Password persistence or library browsing |
 | Jellyfin API client | Authenticated requests, endpoint details, response decoding | UI state or playback controls |
 | Library repository | Music views, albums, tracks, artwork, browse errors | Credential storage or audio routing |
-| Playback coordinator | Stream resolution, player state, interruptions, routes, system controls | User authentication or library presentation |
+| Playback source adapters | Source-specific URL resolution and the shortest required access lifetime | Transport controls, audio-session policy, or unrelated source APIs |
+| Playback coordinator | Player state, temporary resource access, audio-session policy, interruptions, routes, and system controls | User authentication, source-specific resolution, or library presentation |
 | Platform adapters | Keychain, networking policy, audio, now-playing integration | Product navigation or domain rules |
 
 ## Security and privacy boundaries
@@ -125,6 +194,8 @@ sequenceDiagram
   narrowest transport-security policy that supports the approved use case.
 - The privacy manifest must reflect the APIs and data flows actually present in
   the shipped target.
+- User-selected local files are played from their original URL. Velacanto does
+  not copy, upload, index, or persist access to them.
 
 ## Intended source layout
 
@@ -140,10 +211,14 @@ Velacanto/
 │   ├── Library/
 │   └── NowPlaying/
 ├── Core/
-│   ├── JellyfinAPI/
+│   ├── Models/
 │   ├── Session/
 │   ├── Playback/
-│   └── Models/
+│   └── JellyfinAPI/
+├── Sources/
+│   ├── LocalFiles/
+│   ├── Jellyfin/
+│   └── Navidrome/
 ├── Platform/
 │   ├── Keychain/
 │   ├── Networking/

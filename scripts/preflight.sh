@@ -10,6 +10,13 @@ elif [ "$#" -gt 0 ]; then
   exit 2
 fi
 
+if [ "$skip_xcode" = false ] &&
+  [ -z "${DEVELOPER_DIR:-}" ] &&
+  [ -d /Applications/Xcode-beta.app/Contents/Developer ]; then
+  DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer
+  export DEVELOPER_DIR
+fi
+
 failures=0
 warnings=0
 
@@ -105,6 +112,35 @@ if find . -maxdepth 2 -name '*.xcodeproj' -print -quit | grep -q .; then
   pass "An Xcode project exists"
 else
   warn "No Xcode project exists yet"
+fi
+
+if [ -f Velacanto/Resources/PrivacyInfo.xcprivacy ] &&
+  plutil -lint Velacanto/Resources/PrivacyInfo.xcprivacy >/dev/null; then
+  pass "Privacy manifest exists and is a valid property list"
+else
+  fail "Privacy manifest is missing or invalid"
+fi
+
+if [ -f Velacanto/Resources/Info.plist ] &&
+  plutil -extract NSAppTransportSecurity.NSAllowsLocalNetworking raw \
+    Velacanto/Resources/Info.plist 2>/dev/null | grep -q '^true$'; then
+  pass "Local-network ATS exception is configured"
+else
+  fail "Local-network ATS exception is missing"
+fi
+
+if plutil -extract NSAppTransportSecurity.NSAllowsArbitraryLoads raw \
+  Velacanto/Resources/Info.plist >/dev/null 2>&1; then
+  fail "Global arbitrary network loads are enabled"
+else
+  pass "Global arbitrary network loads remain disabled"
+fi
+
+if plutil -extract UIBackgroundModes.0 raw \
+  Velacanto/Resources/Info.plist 2>/dev/null | grep -q '^audio$'; then
+  pass "iOS background audio mode is configured"
+else
+  fail "iOS background audio mode is missing"
 fi
 
 identity_count=$(security find-identity -v -p codesigning 2>/dev/null | awk '/valid identities found/ { print $1 }')

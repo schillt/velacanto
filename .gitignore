@@ -2,12 +2,17 @@
 .DS_Store
 
 # Xcode user data and build products
-DerivedData/
-build/
+/DerivedData*/
+/build/
 *.xcuserstate
 xcuserdata/
 *.xccheckout
 *.xcscmblueprint
+*.xcresult
+*.xcarchive
+*.ipa
+*.dSYM
+*.dSYM.zip
 
 # Swift Package Manager generated state
 .build/
