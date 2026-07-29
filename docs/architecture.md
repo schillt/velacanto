@@ -75,13 +75,20 @@ flowchart TB
     Media <--> SystemUI
 ```
 
-Every source adapter resolves its own selection into the same provider-neutral
-playback request. The coordinator therefore sees a playable URL and metadata,
-not Jellyfin, Navidrome, or file-picker details. Local Files passes the selected
-URL through unchanged and holds its security-scoped access only for the active
-item. The app owns this coordinator rather than an individual view, so playback
-and the temporary file-access lease survive navigation and backgrounding until
-the user stops playback, replaces the item, or the app terminates.
+Every source adapter asynchronously resolves its own selection into the same
+provider-neutral playback request. The coordinator therefore sees display
+metadata, an opaque resource lease, and a playback-asset factory rather than
+Jellyfin, Navidrome, or file-picker details. Local Files passes the selected URL
+through unchanged and holds its security-scoped access only for the active item.
+The app owns this coordinator rather than an individual view, so playback and
+the temporary file-access lease survive navigation and backgrounding until the
+user stops playback, replaces the item, or the app terminates.
+
+The main-actor playback engine owns AVFoundation and translates item readiness,
+waiting, playing, pause, completion, stall, and failure events into an explicit
+provider-neutral playback state. Periodic time observations update the in-app
+progress display; system Now Playing metadata is republished only when the item,
+duration, seek position, or playback state changes.
 
 ## Local-file playback journey
 
@@ -97,8 +104,8 @@ sequenceDiagram
     User->>UI: Open Audio File
     UI->>Files: Request one audio file
     Files-->>UI: Security-scoped file URL
-    UI->>Adapter: Create playback request
-    Adapter-->>UI: Same URL plus temporary access lease
+    UI->>Adapter: Resolve playback request
+    Adapter-->>UI: Asset factory plus temporary access lease
     UI->>Player: Play request
     Player->>AV: Play selected URL in place
     User->>Player: Stop or replace item
@@ -180,8 +187,9 @@ sequenceDiagram
 | Session service | Authentication, restoration, logout, stable device identity | Password persistence or library browsing |
 | Jellyfin API client | Authenticated requests, endpoint details, response decoding | UI state or playback controls |
 | Library repository | Music views, albums, tracks, artwork, browse errors | Credential storage or audio routing |
-| Playback source adapters | Source-specific URL resolution and the shortest required access lifetime | Transport controls, audio-session policy, or unrelated source APIs |
-| Playback coordinator | Player state, temporary resource access, audio-session policy, interruptions, routes, and system controls | User authentication, source-specific resolution, or library presentation |
+| Playback source adapters | Asynchronous source-specific asset resolution and the shortest required access lifetime | Transport controls, audio-session policy, or unrelated source APIs |
+| Playback coordinator | Observed player state, opaque resource leases, audio-session policy, interruptions, routes, and system controls | User authentication, source-specific resolution, or library presentation |
+| AVFoundation playback engine | Player-item readiness, timing, waiting, completion, stalls, and failures | Source identity, navigation, or authentication |
 | Platform adapters | Keychain, networking policy, audio, now-playing integration | Product navigation or domain rules |
 
 ## Security and privacy boundaries

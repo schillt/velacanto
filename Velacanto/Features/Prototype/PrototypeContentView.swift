@@ -8,6 +8,7 @@ struct PrototypeContentView: View {
     @State private var selectionError: String?
 
     private let localFiles = LocalFilePlaybackAdapter()
+    private let sources = PrototypeMusicSource.all
 
     var body: some View {
         NavigationStack {
@@ -66,7 +67,7 @@ struct PrototypeContentView: View {
             Text("Music sources")
                 .font(.title2.bold())
 
-            ForEach(MusicSourceKind.allCases) { source in
+            ForEach(sources) { source in
                 sourceRow(source)
             }
         }
@@ -74,7 +75,7 @@ struct PrototypeContentView: View {
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 22))
     }
 
-    private func sourceRow(_ source: MusicSourceKind) -> some View {
+    private func sourceRow(_ source: PrototypeMusicSource) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 14) {
                 Image(systemName: source.symbolName)
@@ -95,10 +96,10 @@ struct PrototypeContentView: View {
 
                 Text(source.availabilityText)
                     .font(.caption2.weight(.bold))
-                    .foregroundStyle(source == .localFiles ? .cyan : .secondary)
+                    .foregroundStyle(source.isAvailable ? .cyan : .secondary)
             }
 
-            if source == .localFiles {
+            if source.id == .localFiles {
                 HStack {
                     Button("Open Audio File…") {
                         selectionError = nil
@@ -124,7 +125,7 @@ struct PrototypeContentView: View {
             }
         }
         .padding(14)
-        .background(.cyan.opacity(source == .localFiles ? 0.10 : 0.035))
+        .background(.cyan.opacity(source.isAvailable ? 0.10 : 0.035))
         .clipShape(RoundedRectangle(cornerRadius: 16))
     }
 
@@ -135,8 +136,10 @@ struct PrototypeContentView: View {
                 .font(.title2.bold())
 
             if let item = playback.currentItem {
+                let source = PrototypeMusicSource.presentation(for: item.source)
+
                 HStack(spacing: 14) {
-                    Image(systemName: item.source.symbolName)
+                    Image(systemName: source?.symbolName ?? "music.note")
                         .font(.title)
                         .foregroundStyle(.white)
                         .frame(width: 64, height: 64)
@@ -145,7 +148,7 @@ struct PrototypeContentView: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(item.title)
                             .font(.headline)
-                        Text("\(item.artist) • \(item.source.displayName)")
+                        Text("\(item.artist) • \(source?.displayName ?? item.source.rawValue)")
                             .foregroundStyle(.secondary)
                     }
 
@@ -154,13 +157,17 @@ struct PrototypeContentView: View {
                     Button {
                         playback.togglePlayback()
                     } label: {
-                        Image(systemName: playback.isPlaying ? "pause.fill" : "play.fill")
-                            .font(.title2)
-                            .frame(width: 44, height: 44)
+                        Image(
+                            systemName: playback.showsPauseControl
+                                ? "pause.fill"
+                                : "play.fill"
+                        )
+                        .font(.title2)
+                        .frame(width: 44, height: 44)
                     }
                     .buttonStyle(.borderedProminent)
                     .clipShape(Circle())
-                    .accessibilityLabel(playback.isPlaying ? "Pause" : "Play")
+                    .accessibilityLabel(playback.showsPauseControl ? "Pause" : "Play")
 
                     Button {
                         playback.stop()
@@ -209,14 +216,21 @@ struct PrototypeContentView: View {
     }
 
     private func handleLocalFileSelection(_ result: Result<URL, Error>) {
-        do {
-            let url = try result.get()
-            let request = try localFiles.playbackRequest(
-                for: LocalFileSelection(url: url)
-            )
-            selectionError = nil
-            playback.play(request)
-        } catch {
+        switch result {
+        case .success(let url):
+            Task { @MainActor in
+                do {
+                    let request = try await localFiles.playbackRequest(
+                        for: LocalFileSelection(url: url)
+                    )
+                    selectionError = nil
+                    playback.play(request)
+                } catch {
+                    selectionError = error.localizedDescription
+                }
+            }
+
+        case .failure(let error):
             selectionError = error.localizedDescription
         }
     }
@@ -225,21 +239,25 @@ struct PrototypeContentView: View {
         isPreparingTestTone = true
         selectionError = nil
 
-        do {
-            let url = try DemoToneFactory.makeURL()
-            let request = try localFiles.playbackRequest(
-                for: LocalFileSelection(
-                    url: url,
-                    title: "Velacanto playback test",
-                    artist: "440 Hz local tone"
-                )
-            )
-            playback.play(request)
-        } catch {
-            selectionError = error.localizedDescription
-        }
+        Task { @MainActor in
+            defer {
+                isPreparingTestTone = false
+            }
 
-        isPreparingTestTone = false
+            do {
+                let url = try await DemoToneFactory.makeURL()
+                let request = try await localFiles.playbackRequest(
+                    for: LocalFileSelection(
+                        url: url,
+                        title: "Velacanto playback test",
+                        artist: "440 Hz local tone"
+                    )
+                )
+                playback.play(request)
+            } catch {
+                selectionError = error.localizedDescription
+            }
+        }
     }
 
     private var background: some View {
@@ -253,6 +271,46 @@ struct PrototypeContentView: View {
             endPoint: .bottomTrailing
         )
         .ignoresSafeArea()
+    }
+}
+
+private struct PrototypeMusicSource: Identifiable {
+    let id: MusicSourceID
+    let displayName: String
+    let symbolName: String
+    let summary: String
+    let availabilityText: String
+    let isAvailable: Bool
+
+    static let all = [
+        PrototypeMusicSource(
+            id: .localFiles,
+            displayName: "Local Files",
+            symbolName: "folder.fill",
+            summary: "Open one audio file in place. Velacanto never copies it into an app library.",
+            availabilityText: "AVAILABLE NOW",
+            isAvailable: true
+        ),
+        PrototypeMusicSource(
+            id: .jellyfin,
+            displayName: "Jellyfin",
+            symbolName: "server.rack",
+            summary: "Connect to and stream from a personal Jellyfin music library.",
+            availabilityText: "NEXT ADAPTER",
+            isAvailable: false
+        ),
+        PrototypeMusicSource(
+            id: MusicSourceID(rawValue: "navidrome"),
+            displayName: "Navidrome",
+            symbolName: "music.note.list",
+            summary: "Use the same player with a Navidrome/Subsonic-compatible library.",
+            availabilityText: "PLANNED",
+            isAvailable: false
+        ),
+    ]
+
+    static func presentation(for sourceID: MusicSourceID) -> PrototypeMusicSource? {
+        all.first { $0.id == sourceID }
     }
 }
 

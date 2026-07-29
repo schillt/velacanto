@@ -33,6 +33,7 @@ final class MediaPlayerSystemMediaController: SystemMediaControlling {
     private let commandCenter: MPRemoteCommandCenter
     private let nowPlayingInfoCenter: MPNowPlayingInfoCenter
     private var commandTargets: [(command: MPRemoteCommand, target: Any)] = []
+    private var commandsAreEnabled: Bool?
 
     init(
         commandCenter: MPRemoteCommandCenter = .shared(),
@@ -106,7 +107,6 @@ final class MediaPlayerSystemMediaController: SystemMediaControlling {
         var info: [String: Any] = [
             MPMediaItemPropertyTitle: item.title,
             MPMediaItemPropertyArtist: item.artist,
-            MPMediaItemPropertyAlbumTitle: item.source.displayName,
             MPNowPlayingInfoPropertyMediaType: MPNowPlayingInfoMediaType.audio.rawValue,
             MPNowPlayingInfoPropertyElapsedPlaybackTime: max(snapshot.elapsed, 0),
             MPNowPlayingInfoPropertyPlaybackRate: snapshot.isPlaying ? 1.0 : 0.0,
@@ -116,6 +116,10 @@ final class MediaPlayerSystemMediaController: SystemMediaControlling {
 
         if snapshot.duration.isFinite, snapshot.duration > 0 {
             info[MPMediaItemPropertyPlaybackDuration] = snapshot.duration
+        }
+
+        if let albumTitle = item.albumTitle, !albumTitle.isEmpty {
+            info[MPMediaItemPropertyAlbumTitle] = albumTitle
         }
 
         return info
@@ -133,6 +137,9 @@ final class MediaPlayerSystemMediaController: SystemMediaControlling {
     }
 
     private func setCommandsEnabled(_ isEnabled: Bool) {
+        guard commandsAreEnabled != isEnabled else { return }
+        commandsAreEnabled = isEnabled
+
         commandCenter.playCommand.isEnabled = isEnabled
         commandCenter.pauseCommand.isEnabled = isEnabled
         commandCenter.stopCommand.isEnabled = isEnabled

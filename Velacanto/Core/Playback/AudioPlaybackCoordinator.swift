@@ -4,21 +4,24 @@ import Combine
 @MainActor
 final class AudioPlaybackCoordinator: ObservableObject {
     @Published private(set) var currentItem: PlaybackItem?
-    @Published private(set) var isPlaying = false
+    @Published private(set) var playbackState = PlaybackState.idle
     @Published private(set) var elapsed: TimeInterval = 0
     @Published private(set) var duration: TimeInterval = 0
     @Published private(set) var errorMessage: String?
 
-    private let player = AVPlayer()
+    private let engine: any AudioPlayerEngine
     private let systemMediaController: SystemMediaControlling
-    private var timeObserver: Any?
-    private var resourceAccess: SecurityScopedResourceAccess?
+    private var resourceLease: (any PlaybackResourceLease)?
 
     init(
+        engine: any AudioPlayerEngine = AVFoundationAudioPlayerEngine(),
         systemMediaController: SystemMediaControlling = MediaPlayerSystemMediaController()
     ) {
+        self.engine = engine
         self.systemMediaController = systemMediaController
-        installTimeObserver()
+        engine.eventHandler = { [weak self] event in
+            self?.handle(event)
+        }
         registerSystemMediaCommands()
     }
 
@@ -31,33 +34,43 @@ final class AudioPlaybackCoordinator: ObservableObject {
         currentItem != nil
     }
 
-    func play(_ request: PlaybackRequest) {
-        player.pause()
+    var isPlaying: Bool {
+        playbackState == .playing
+    }
 
-        resourceAccess = request.resourceAccess
+    var showsPauseControl: Bool {
+        switch playbackState {
+        case .loading, .waiting, .playing:
+            true
+        case .idle, .paused, .ended, .failed:
+            false
+        }
+    }
+
+    func play(_ request: PlaybackRequest) {
+        let playerItem = request.asset.makePlayerItem()
+
         currentItem = request.item
         elapsed = 0
         duration = 0
         errorMessage = nil
-
-        player.replaceCurrentItem(with: AVPlayerItem(url: request.mediaURL))
+        playbackState = .loading
+        engine.load(playerItem)
+        resourceLease = request.asset.resourceLease
+        publishNowPlaying()
 
         do {
             try configureAudioSession()
-            player.play()
-            isPlaying = true
-            publishNowPlaying()
+            engine.play()
         } catch {
-            isPlaying = false
-            errorMessage = error.localizedDescription
-            publishNowPlaying()
+            apply(.failed(error.localizedDescription))
         }
     }
 
     func togglePlayback() {
-        guard player.currentItem != nil else { return }
+        guard engine.hasCurrentItem else { return }
 
-        if isPlaying {
+        if showsPauseControl {
             pausePlayback()
         } else {
             resumePlayback()
@@ -65,101 +78,91 @@ final class AudioPlaybackCoordinator: ObservableObject {
     }
 
     func seek(toProgress progress: Double) {
-        guard duration.isFinite, duration > 0 else { return }
+        guard progress.isFinite, duration.isFinite, duration > 0 else { return }
 
         let clampedProgress = min(max(progress, 0), 1)
         seek(toTime: duration * clampedProgress)
     }
 
     func seek(toTime time: TimeInterval) {
-        guard player.currentItem != nil else { return }
+        guard engine.hasCurrentItem, time.isFinite else { return }
 
         let upperBound = duration.isFinite && duration > 0 ? duration : time
         let target = min(max(time, 0), upperBound)
-        player.seek(to: CMTime(seconds: target, preferredTimescale: 600))
+        engine.seek(to: target)
         elapsed = target
         publishNowPlaying()
     }
 
     func pausePlayback() {
-        guard player.currentItem != nil else { return }
-
-        player.pause()
-        isPlaying = false
-        publishNowPlaying()
+        guard engine.hasCurrentItem else { return }
+        engine.pause()
     }
 
     func resumePlayback() {
-        guard player.currentItem != nil else { return }
+        guard engine.hasCurrentItem else { return }
 
-        if duration > 0, elapsed >= duration {
-            player.seek(to: .zero)
+        if playbackState == .ended || (duration > 0 && elapsed >= duration) {
+            engine.seek(to: 0)
             elapsed = 0
         }
 
         do {
             try configureAudioSession()
-            player.play()
-            isPlaying = true
             errorMessage = nil
+            engine.play()
         } catch {
-            isPlaying = false
-            errorMessage = error.localizedDescription
+            apply(.failed(error.localizedDescription))
         }
-        publishNowPlaying()
     }
 
     func stop() {
-        player.pause()
-        player.replaceCurrentItem(with: nil)
-        resourceAccess = nil
+        engine.stop()
+        resourceLease = nil
         currentItem = nil
         elapsed = 0
         duration = 0
-        isPlaying = false
+        playbackState = .idle
         errorMessage = nil
         systemMediaController.update(.empty)
         deactivateAudioSession()
     }
 
-    private func installTimeObserver() {
-        let interval = CMTime(seconds: 0.25, preferredTimescale: 600)
-
-        timeObserver = player.addPeriodicTimeObserver(
-            forInterval: interval,
-            queue: .main
-        ) { [weak self] time in
-            Task { @MainActor [weak self] in
-                self?.updatePlaybackState(time: time)
+    private func handle(_ event: AudioPlayerEngineEvent) {
+        switch event {
+        case .timeChanged(let newElapsed, let newDuration):
+            let previousDuration = duration
+            if newElapsed.isFinite {
+                elapsed = max(newElapsed, 0)
             }
+            if newDuration.isFinite, newDuration > 0 {
+                duration = newDuration
+            }
+            if duration != previousDuration {
+                publishNowPlaying()
+            }
+
+        case .stateChanged(let state):
+            apply(state)
         }
     }
 
-    private func updatePlaybackState(time: CMTime) {
-        let currentSeconds = time.seconds
-        if currentSeconds.isFinite {
-            elapsed = max(currentSeconds, 0)
+    private func apply(_ state: PlaybackState) {
+        if case .failed = playbackState, errorMessage != nil {
+            switch state {
+            case .failed:
+                break
+            case .idle, .loading, .waiting, .playing, .paused, .ended:
+                return
+            }
         }
 
-        if let itemDuration = player.currentItem?.duration.seconds,
-            itemDuration.isFinite,
-            itemDuration > 0
-        {
-            duration = itemDuration
-        }
+        guard state != playbackState else { return }
 
-        if let error = player.currentItem?.error ?? player.error {
-            errorMessage = error.localizedDescription
-            isPlaying = false
-            publishNowPlaying()
-            return
+        playbackState = state
+        if case .failed(let message) = state {
+            errorMessage = message
         }
-
-        if duration > 0, elapsed >= duration - 0.05 {
-            elapsed = duration
-            isPlaying = false
-        }
-
         publishNowPlaying()
     }
 
@@ -209,11 +212,5 @@ final class AudioPlaybackCoordinator: ObservableObject {
                 options: .notifyOthersOnDeactivation
             )
         #endif
-    }
-
-    isolated deinit {
-        if let timeObserver {
-            player.removeTimeObserver(timeObserver)
-        }
     }
 }

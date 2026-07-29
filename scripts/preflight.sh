@@ -2,6 +2,9 @@
 
 set -u
 
+project_root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+cd "$project_root"
+
 skip_xcode=false
 if [ "${1:-}" = "--skip-xcode" ]; then
   skip_xcode=true

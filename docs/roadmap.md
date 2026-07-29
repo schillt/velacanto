@@ -29,10 +29,10 @@ The detailed feature boundary and acceptance criteria remain in the
   tests.
 - [ ] Run the app and tests on a booted iOS Simulator.
 
-The macOS build, six foundation tests, and generic iOS Simulator build pass.
-Local playback and system-media behavior are covered at the coordinator
-boundary. The iOS 27 Simulator runtime is installed; a booted simulator run
-remains pending.
+The macOS build, nine foundation tests, and generic iOS Simulator build pass.
+Local playback, observed engine state, resource lifetime, and system-media
+behavior are covered at the coordinator boundary. The iOS 27 Simulator runtime
+is installed; a booted simulator run remains pending.
 
 Xcode account sign-in is complete and the July 29 preflight recognizes one
 valid Personal Team development identity. The connected iPhone is registered,

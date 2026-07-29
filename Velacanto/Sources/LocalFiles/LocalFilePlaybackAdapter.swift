@@ -1,6 +1,6 @@
 import Foundation
 
-struct LocalFileSelection {
+struct LocalFileSelection: Sendable {
     let url: URL
     let title: String?
     let artist: String?
@@ -13,9 +13,9 @@ struct LocalFileSelection {
 }
 
 struct LocalFilePlaybackAdapter: PlaybackSourceAdapter {
-    let source = MusicSourceKind.localFiles
+    let source = MusicSourceID.localFiles
 
-    func playbackRequest(for selection: LocalFileSelection) throws -> PlaybackRequest {
+    func playbackRequest(for selection: LocalFileSelection) async throws -> PlaybackRequest {
         guard selection.url.isFileURL else {
             throw LocalFilePlaybackError.notAFileURL
         }
@@ -24,6 +24,7 @@ struct LocalFilePlaybackAdapter: PlaybackSourceAdapter {
             selection.title
             ?? selection.url.deletingPathExtension().lastPathComponent
         let artist = selection.artist ?? "Local file"
+        let resourceLease = SecurityScopedResourceAccess(url: selection.url)
 
         return PlaybackRequest(
             item: PlaybackItem(
@@ -31,8 +32,10 @@ struct LocalFilePlaybackAdapter: PlaybackSourceAdapter {
                 artist: artist,
                 source: source
             ),
-            mediaURL: selection.url,
-            resourceAccess: SecurityScopedResourceAccess(url: selection.url)
+            asset: PlaybackAsset(
+                url: selection.url,
+                resourceLease: resourceLease
+            )
         )
     }
 }
@@ -48,7 +51,7 @@ enum LocalFilePlaybackError: LocalizedError {
     }
 }
 
-final class SecurityScopedResourceAccess {
+final class SecurityScopedResourceAccess: PlaybackResourceLease, @unchecked Sendable {
     private let url: URL
     private let didStartAccessing: Bool
 

@@ -3,31 +3,75 @@ import AVFoundation
 enum DemoToneFactory {
     static let duration: TimeInterval = 60
 
-    static func makeURL() throws -> URL {
-        let directory = FileManager.default.temporaryDirectory
+    static func makeURL() async throws -> URL {
+        try await DemoToneStore.shared.makeURL()
+    }
+}
+
+private actor DemoToneStore {
+    static let shared = DemoToneStore()
+
+    func makeURL() throws -> URL {
+        let fileManager = FileManager.default
+        let directory = fileManager.temporaryDirectory
             .appendingPathComponent("Velacanto", isDirectory: true)
         let url = directory.appendingPathComponent("playback-test-tone-60s.caf")
 
-        try FileManager.default.createDirectory(
+        try fileManager.createDirectory(
             at: directory,
             withIntermediateDirectories: true
         )
 
-        if FileManager.default.fileExists(atPath: url.path) {
+        if isValidTone(at: url) {
             return url
         }
 
-        let sampleRate = 44_100.0
+        if fileManager.fileExists(atPath: url.path) {
+            try fileManager.removeItem(at: url)
+        }
+
+        let pendingURL = directory.appendingPathComponent(
+            "playback-test-tone-\(UUID().uuidString).caf"
+        )
+        defer {
+            try? fileManager.removeItem(at: pendingURL)
+        }
+
+        let format = try makeFormat()
+        let buffer = try makeBuffer(format: format)
+        let audioFile = try AVAudioFile(forWriting: pendingURL, settings: format.settings)
+        try audioFile.write(from: buffer)
+        try fileManager.moveItem(at: pendingURL, to: url)
+        return url
+    }
+
+    private func isValidTone(at url: URL) -> Bool {
+        guard FileManager.default.fileExists(atPath: url.path),
+            let file = try? AVAudioFile(forReading: url),
+            file.processingFormat.sampleRate > 0
+        else {
+            return false
+        }
+
+        let measuredDuration = Double(file.length) / file.processingFormat.sampleRate
+        return abs(measuredDuration - DemoToneFactory.duration) < 0.01
+    }
+
+    private func makeFormat() throws -> AVAudioFormat {
         guard
             let format = AVAudioFormat(
-                standardFormatWithSampleRate: sampleRate,
+                standardFormatWithSampleRate: 44_100,
                 channels: 1
             )
         else {
             throw DemoToneError.couldNotCreateAudioFormat
         }
+        return format
+    }
 
-        let frameCount = AVAudioFrameCount(sampleRate * duration)
+    private func makeBuffer(format: AVAudioFormat) throws -> AVAudioPCMBuffer {
+        let sampleRate = format.sampleRate
+        let frameCount = AVAudioFrameCount(sampleRate * DemoToneFactory.duration)
         guard
             let buffer = AVAudioPCMBuffer(
                 pcmFormat: format,
@@ -49,9 +93,7 @@ enum DemoToneFactory {
             samples[frame] = Float(sample * envelope * 0.12)
         }
 
-        let audioFile = try AVAudioFile(forWriting: url, settings: format.settings)
-        try audioFile.write(from: buffer)
-        return url
+        return buffer
     }
 }
 

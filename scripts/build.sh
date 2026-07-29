@@ -4,6 +4,7 @@ set -eu
 
 project_root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 build_mode=${1:-all}
+cd "$project_root"
 
 if [ -z "${DEVELOPER_DIR:-}" ]; then
   if [ -d /Applications/Xcode-beta.app/Contents/Developer ]; then
@@ -56,9 +57,17 @@ build_ios_simulator() {
     build
 }
 
+lint_swift() {
+  xcrun swift-format lint \
+    --recursive \
+    "$project_root/Velacanto" \
+    "$project_root/VelacantoTests"
+}
+
 case "$build_mode" in
   all)
     "$project_root/scripts/preflight.sh"
+    lint_swift
     build_macos
     test_macos
     build_ios_simulator
@@ -72,8 +81,11 @@ case "$build_mode" in
   ios-simulator)
     build_ios_simulator
     ;;
+  lint)
+    lint_swift
+    ;;
   *)
-    printf 'Usage: %s [all|macos|test|ios-simulator]\n' "$0" >&2
+    printf 'Usage: %s [all|macos|test|ios-simulator|lint]\n' "$0" >&2
     exit 2
     ;;
 esac

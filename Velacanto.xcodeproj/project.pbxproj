@@ -17,6 +17,7 @@
 		000000000000000000000208 /* Sources/LocalFiles/LocalFilePlaybackAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000111 /* Sources/LocalFiles/LocalFilePlaybackAdapter.swift */; };
 		000000000000000000000209 /* Sources/LocalFiles/DemoToneFactory.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000112 /* Sources/LocalFiles/DemoToneFactory.swift */; };
 		000000000000000000000210 /* Platform/Media/SystemMediaController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000113 /* Platform/Media/SystemMediaController.swift */; };
+		000000000000000000000211 /* Core/Playback/AudioPlayerEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000114 /* Core/Playback/AudioPlayerEngine.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -43,6 +44,7 @@
 		000000000000000000000111 /* Sources/LocalFiles/LocalFilePlaybackAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/LocalFiles/LocalFilePlaybackAdapter.swift; sourceTree = "<group>"; };
 		000000000000000000000112 /* Sources/LocalFiles/DemoToneFactory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/LocalFiles/DemoToneFactory.swift; sourceTree = "<group>"; };
 		000000000000000000000113 /* Platform/Media/SystemMediaController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Platform/Media/SystemMediaController.swift; sourceTree = "<group>"; };
+		000000000000000000000114 /* Core/Playback/AudioPlayerEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Core/Playback/AudioPlayerEngine.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -89,6 +91,7 @@
 				000000000000000000000103 /* Core/Playback/PlaybackTimeFormatter.swift */,
 				000000000000000000000109 /* Core/Models/MusicSource.swift */,
 				000000000000000000000110 /* Core/Playback/AudioPlaybackCoordinator.swift */,
+				000000000000000000000114 /* Core/Playback/AudioPlayerEngine.swift */,
 				000000000000000000000111 /* Sources/LocalFiles/LocalFilePlaybackAdapter.swift */,
 				000000000000000000000112 /* Sources/LocalFiles/DemoToneFactory.swift */,
 				000000000000000000000113 /* Platform/Media/SystemMediaController.swift */,
@@ -211,6 +214,7 @@
 				000000000000000000000203 /* Core/Playback/PlaybackTimeFormatter.swift in Sources */,
 				000000000000000000000206 /* Core/Models/MusicSource.swift in Sources */,
 				000000000000000000000207 /* Core/Playback/AudioPlaybackCoordinator.swift in Sources */,
+				000000000000000000000211 /* Core/Playback/AudioPlayerEngine.swift in Sources */,
 				000000000000000000000208 /* Sources/LocalFiles/LocalFilePlaybackAdapter.swift in Sources */,
 				000000000000000000000209 /* Sources/LocalFiles/DemoToneFactory.swift in Sources */,
 				000000000000000000000210 /* Platform/Media/SystemMediaController.swift in Sources */,
@@ -337,7 +341,6 @@
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx";
 				SUPPORTS_MACCATALYST = NO;
-				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 6.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -362,7 +365,6 @@
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx";
 				SUPPORTS_MACCATALYST = NO;
-				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 6.0;
 				TARGETED_DEVICE_FAMILY = "1,2";

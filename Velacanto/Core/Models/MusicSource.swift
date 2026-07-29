@@ -1,85 +1,80 @@
+import AVFoundation
 import Foundation
 
-enum MusicSourceKind: String, CaseIterable, Identifiable {
-    case localFiles
-    case jellyfin
-    case navidrome
+struct MusicSourceID: RawRepresentable, Hashable, Identifiable, Sendable {
+    let rawValue: String
 
     var id: Self { self }
 
-    var displayName: String {
-        switch self {
-        case .localFiles:
-            "Local Files"
-        case .jellyfin:
-            "Jellyfin"
-        case .navidrome:
-            "Navidrome"
-        }
+    init(rawValue: String) {
+        self.rawValue = rawValue
     }
 
-    var symbolName: String {
-        switch self {
-        case .localFiles:
-            "folder.fill"
-        case .jellyfin:
-            "server.rack"
-        case .navidrome:
-            "music.note.list"
-        }
-    }
-
-    var summary: String {
-        switch self {
-        case .localFiles:
-            "Open one audio file in place. Velacanto never copies it into an app library."
-        case .jellyfin:
-            "Connect to and stream from a personal Jellyfin music library."
-        case .navidrome:
-            "Use the same player with a Navidrome/Subsonic-compatible library."
-        }
-    }
-
-    var availabilityText: String {
-        switch self {
-        case .localFiles:
-            "AVAILABLE NOW"
-        case .jellyfin:
-            "NEXT ADAPTER"
-        case .navidrome:
-            "PLANNED"
-        }
-    }
+    static let localFiles = MusicSourceID(rawValue: "local-files")
+    static let jellyfin = MusicSourceID(rawValue: "jellyfin")
 }
 
-struct PlaybackItem: Identifiable, Equatable {
-    let id: UUID
+struct PlaybackItem: Identifiable, Equatable, Sendable {
+    let id: String
     let title: String
     let artist: String
-    let source: MusicSourceKind
+    let albumTitle: String?
+    let source: MusicSourceID
 
     init(
-        id: UUID = UUID(),
+        id: String = UUID().uuidString,
         title: String,
         artist: String,
-        source: MusicSourceKind
+        albumTitle: String? = nil,
+        source: MusicSourceID
     ) {
         self.id = id
         self.title = title
         self.artist = artist
+        self.albumTitle = albumTitle
         self.source = source
     }
 }
 
-struct PlaybackRequest {
-    let item: PlaybackItem
-    let mediaURL: URL
-    let resourceAccess: SecurityScopedResourceAccess?
+protocol PlaybackResourceLease: AnyObject, Sendable {}
+
+struct PlaybackAsset: Sendable {
+    let resourceLease: (any PlaybackResourceLease)?
+
+    private let playerItemFactory: @MainActor @Sendable () -> AVPlayerItem
+
+    init(
+        url: URL,
+        resourceLease: (any PlaybackResourceLease)? = nil
+    ) {
+        self.resourceLease = resourceLease
+        playerItemFactory = {
+            AVPlayerItem(url: url)
+        }
+    }
+
+    init(
+        resourceLease: (any PlaybackResourceLease)? = nil,
+        playerItemFactory: @escaping @MainActor @Sendable () -> AVPlayerItem
+    ) {
+        self.resourceLease = resourceLease
+        self.playerItemFactory = playerItemFactory
+    }
+
+    @MainActor
+    func makePlayerItem() -> AVPlayerItem {
+        playerItemFactory()
+    }
 }
 
-protocol PlaybackSourceAdapter {
-    associatedtype Selection
+struct PlaybackRequest: Sendable {
+    let item: PlaybackItem
+    let asset: PlaybackAsset
+}
 
-    var source: MusicSourceKind { get }
-    func playbackRequest(for selection: Selection) throws -> PlaybackRequest
+protocol PlaybackSourceAdapter: Sendable {
+    associatedtype Selection: Sendable
+
+    var source: MusicSourceID { get }
+    func playbackRequest(for selection: Selection) async throws -> PlaybackRequest
 }
