@@ -51,13 +51,13 @@ with the selected Xcode beta:
 ./scripts/build.sh all
 ```
 
-Use `macos`, `test`, or `ios-simulator` instead of `all` to run one step. The
-current interface has working local-file playback and a generated diagnostic
-tone. Playback state is owned at the app level, publishes Now Playing metadata,
-and accepts system play, pause, stop, toggle, and seek commands. Jellyfin
-connectivity begins in the next delivery slice. The background path and Control
-Center pause/resume controls have been verified on a sideloaded physical
-iPhone.
+Use `lint`, `macos`, `test`, or `ios-simulator` instead of `all` to run one
+step. The current interface has working local-file playback and a generated
+diagnostic tone. Playback state is owned at the app level, publishes Now Playing
+metadata, and accepts system play, pause, stop, toggle, and seek commands.
+Jellyfin connectivity begins in the next delivery slice. The background path
+and Control Center pause/resume controls have been verified on a sideloaded
+physical iPhone.
 
 Build output defaults to the ignored `DerivedData` directory. To keep generated
 data outside the checkout, set `VELACANTO_DERIVED_DATA_PATH`:

@@ -59,6 +59,8 @@ build_ios_simulator() {
 
 lint_swift() {
   xcrun swift-format lint \
+    --configuration "$project_root/.swift-format" \
+    --strict \
     --recursive \
     "$project_root/Velacanto" \
     "$project_root/VelacantoTests"

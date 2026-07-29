@@ -1,7 +1,8 @@
 # Velacanto architecture
 
 This document describes the intended 0.1.0 structure. It is a design target,
-not a claim that every component has already been implemented.
+not a claim that every component has already been implemented. The
+[roadmap](roadmap.md) is the source of truth for delivery status.
 
 ## Component map
 
@@ -11,34 +12,35 @@ flowchart TB
     SystemUI["Lock Screen, Control Center, routes"]
 
     subgraph Presentation["Platform presentation"]
-        IOS["iOS SwiftUI"]
-        Mac["macOS SwiftUI"]
+        IOS["iOS SwiftUI<br/>(prototype implemented)"]
+        Mac["macOS SwiftUI<br/>(prototype implemented)"]
         CarPlay["CarPlay later"]
     end
 
     subgraph Application["Application state"]
-        Coordinator["App state and coordinator"]
-        Models["Shared domain models"]
+        Coordinator["App state and coordinator<br/>(playback owner implemented)"]
+        Models["Shared domain models<br/>(playback implemented; server planned)"]
     end
 
     subgraph Core["Shared core services"]
-        Session["Session service"]
-        API["Jellyfin API client"]
-        Library["Music library repository"]
-        Playback["Playback coordinator"]
+        Session["Session service<br/>(Slice 1 planned)"]
+        API["Jellyfin API client<br/>(Slice 1 planned)"]
+        Library["Music library repository<br/>(Slice 2 planned)"]
+        Playback["Playback coordinator<br/>(foundation implemented)"]
     end
 
     subgraph Sources["Playback source adapters"]
-        LocalAdapter["Local Files adapter"]
-        JellyfinAdapter["Jellyfin adapter"]
-        NavidromeAdapter["Navidrome adapter later"]
+        LocalAdapter["Local Files adapter<br/>(implemented)"]
+        JellyfinAdapter["Jellyfin adapter<br/>(Slice 3 planned)"]
+        NavidromeAdapter["Navidrome adapter<br/>(after 0.1)"]
     end
 
     subgraph Apple["Apple platform services"]
-        Networking["URLSession and local-network policy"]
-        Keychain["Keychain"]
-        AV["AVFoundation and AVAudioSession"]
-        Media["Now Playing and remote commands"]
+        Networking["URLSession and local-network policy<br/>(ATS foundation implemented)"]
+        Keychain["Keychain<br/>(Slice 1 planned)"]
+        Engine["Audio player engine<br/>(implemented)"]
+        AV["AVFoundation and AVAudioSession<br/>(implemented)"]
+        Media["Now Playing and remote commands<br/>(implemented)"]
     end
 
     LocalFile["User-selected audio file"]
@@ -55,22 +57,26 @@ flowchart TB
     Coordinator --> Library
     Coordinator --> Playback
     Coordinator --> Models
+    Coordinator --> LocalAdapter
+    Coordinator --> JellyfinAdapter
+    Coordinator -. "after 0.1" .-> NavidromeAdapter
 
     Session --> API
     Session --> Keychain
     Library --> API
     Library --> Models
     Playback --> Models
-    Playback --> LocalAdapter
-    Playback --> JellyfinAdapter
-    Playback -. "future" .-> NavidromeAdapter
+    LocalAdapter -- "PlaybackRequest" --> Playback
+    JellyfinAdapter -- "PlaybackRequest" --> Playback
+    NavidromeAdapter -. "PlaybackRequest" .-> Playback
     LocalAdapter --> LocalFile
     JellyfinAdapter --> API
     NavidromeAdapter --> Networking
     API --> Networking
     Networking --> Jellyfin
     Networking -. "future" .-> Navidrome
-    Playback --> AV
+    Playback --> Engine
+    Engine --> AV
     Playback <--> Media
     Media <--> SystemUI
 ```
@@ -119,6 +125,7 @@ sequenceDiagram
     actor User
     participant UI as SwiftUI
     participant App as App coordinator
+    participant Adapter as Jellyfin adapter
     participant API as Jellyfin API client
     participant Keys as Keychain
     participant JF as Jellyfin server
@@ -148,10 +155,12 @@ sequenceDiagram
 
     User->>UI: Select track
     UI->>App: Play item
-    App->>API: Resolve Jellyfin stream URL
+    App->>Adapter: Resolve selected track
+    Adapter->>API: Resolve Jellyfin playback info
     API->>JF: Request playable stream
     JF-->>API: Stream response
-    API-->>App: Provider-neutral playback request
+    API-->>Adapter: Provider response
+    Adapter-->>App: Provider-neutral playback request
     App->>Player: Play request
     Player->>OS: Publish playback state and metadata
     OS-->>Player: Play, pause, stop, toggle, and seek
@@ -163,12 +172,17 @@ sequenceDiagram
 sequenceDiagram
     participant App as App-lifetime state
     participant Player as Playback coordinator
+    participant Engine as Audio player engine
     participant Audio as AVAudioSession and AVPlayer
     participant Media as Now Playing and remote commands
     participant System as Lock Screen and Control Center
 
     App->>Player: Retain one coordinator
     Player->>Audio: Activate playback audio session
+    Player->>Engine: Load and control player item
+    Engine->>Audio: Apply AVPlayer operations
+    Audio-->>Engine: Readiness, timing, wait, end, failure
+    Engine-->>Player: Observed playback state
     Player->>Media: Publish item, timing, and playback rate
     Media->>System: Present current media controls
     System-->>Media: Play, pause, stop, toggle, or seek
@@ -205,39 +219,40 @@ sequenceDiagram
 - User-selected local files are played from their original URL. Velacanto does
   not copy, upload, index, or persist access to them.
 
-## Intended source layout
+## Source layout
 
-The exact Xcode group structure will be confirmed during project generation.
-The intended responsibility split is:
+The project now has the playback foundation in place. Planned directories are
+listed here so new slices extend the established boundaries instead of moving
+responsibilities into the prototype view:
 
 ```text
 Velacanto/
-├── App/
+├── App/                         # implemented: app-lifetime ownership
 ├── Features/
-│   ├── Connection/
-│   ├── Authentication/
-│   ├── Library/
-│   └── NowPlaying/
+│   ├── Prototype/               # implemented: temporary foundation UI
+│   ├── Connection/              # Slice 1
+│   ├── Authentication/          # Slice 1
+│   └── Library/                 # Slice 2
 ├── Core/
-│   ├── Models/
-│   ├── Session/
-│   ├── Playback/
-│   └── JellyfinAPI/
+│   ├── Models/                  # implemented: source and playback contracts
+│   ├── Playback/                # implemented: coordinator and player engine
+│   ├── Session/                 # Slice 1
+│   └── JellyfinAPI/             # Slice 1
 ├── Sources/
-│   ├── LocalFiles/
-│   ├── Jellyfin/
-│   └── Navidrome/
+│   ├── LocalFiles/              # implemented
+│   ├── Jellyfin/                # Slice 3
+│   └── Navidrome/               # after 0.1
 ├── Platform/
-│   ├── Keychain/
-│   ├── Networking/
-│   └── Media/
+│   ├── Media/                   # implemented
+│   ├── Keychain/                # Slice 1
+│   └── Networking/              # Slice 1
 └── Resources/
 
 VelacantoTests/
-├── JellyfinAPI/
-├── Session/
-├── Playback/
-└── Features/
+├── Playback/                    # implemented in the foundation test target
+├── JellyfinAPI/                 # Slice 1
+├── Session/                     # Slice 1
+└── Features/                    # Slices 1 and 2
 ```
 
 ## Related documents

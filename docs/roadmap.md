@@ -76,12 +76,15 @@ specific playable track.
 ### Slice 3 — Stream and control playback
 
 - [x] Play a user-selected local audio file in place without copying it.
-- [x] Share play, pause, seek, elapsed-time, and duration behavior across source
-  adapters.
-- [ ] Resolve and begin the selected audio stream.
+- [x] Establish source-neutral play, pause, seek, elapsed-time, and duration
+  behavior for local and future server adapters.
+- [ ] Resolve and begin the selected Jellyfin audio stream.
 - [x] Configure the iOS playback audio session.
 - [x] Enable the iOS background-audio mode and keep playback at app scope.
-- [ ] Handle interruptions, route changes, and failed streams.
+- [x] Observe readiness, waiting, play, pause, completion, stalls, and player
+  failures through the injectable playback engine.
+- [ ] Handle audio-session interruptions and route changes.
+- [ ] Validate recovery behavior for failed Jellyfin streams.
 - [x] Publish now-playing metadata.
 - [x] Handle system play, pause, stop, toggle, and seek commands.
 - [x] Verify background playback, device lock, metadata, pause, and resume in
