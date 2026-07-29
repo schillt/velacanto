@@ -19,8 +19,14 @@ The first milestone will let a user:
 Velacanto is initially planned for iOS and macOS. CarPlay support will follow
 after the core playback experience is proven.
 
-See the [0.1.0 project plan](docs/0.1-plan.md) for scope, technical direction,
-delivery slices, and acceptance criteria.
+## Project documentation
+
+- [0.1.0 plan](docs/0.1-plan.md) — scope and acceptance criteria.
+- [Roadmap](docs/roadmap.md) — ordered work and exit gates.
+- [Architecture](docs/architecture.md) — component and runtime diagrams.
+- [Decision records](docs/decisions/README.md) — durable technical choices.
+- [Interactive architecture visualization](docs/visualizations/README.md) —
+  standalone runtime and delivery-plan explorer.
 
 ## Development
 
