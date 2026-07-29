@@ -238,10 +238,13 @@ private struct JellyfinAlbumsView: View {
                         )
                     } label: {
                         HStack(spacing: 12) {
-                            Image(systemName: "square.stack.fill")
-                                .font(.title2)
-                                .foregroundStyle(.purple)
-                                .frame(width: 36)
+                            JellyfinArtworkView(
+                                item: album,
+                                jellyfin: jellyfin,
+                                cornerRadius: 9,
+                                maxWidth: 160
+                            )
+                            .frame(width: 54, height: 54)
 
                             VStack(alignment: .leading, spacing: 3) {
                                 Text(album.name)
@@ -276,7 +279,7 @@ private struct JellyfinAlbumsView: View {
     }
 }
 
-private struct JellyfinTracksView: View {
+struct JellyfinTracksView: View {
     let album: JellyfinItem
     @ObservedObject var jellyfin: JellyfinSessionController
     @ObservedObject var playback: AudioPlaybackCoordinator
@@ -287,6 +290,34 @@ private struct JellyfinTracksView: View {
 
     var body: some View {
         List {
+            if !isLoading {
+                Section {
+                    HStack(alignment: .top, spacing: 16) {
+                        JellyfinArtworkView(
+                            item: album,
+                            jellyfin: jellyfin,
+                            cornerRadius: 14,
+                            maxWidth: 480
+                        )
+                        .frame(width: 116, height: 116)
+
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text(album.name)
+                                .font(.title2.weight(.semibold))
+                            Text(album.displayArtist)
+                                .foregroundStyle(.secondary)
+                            if let childCount = album.childCount {
+                                Text("\(childCount) tracks")
+                                    .font(.caption)
+                                    .foregroundStyle(.tertiary)
+                            }
+                        }
+                        .padding(.top, 4)
+                    }
+                    .padding(.vertical, 6)
+                }
+            }
+
             if isLoading {
                 ProgressView("Loading tracks…")
                     .frame(maxWidth: .infinity)
@@ -348,29 +379,6 @@ private struct JellyfinTracksView: View {
                 ErrorMessageView(message: errorMessage)
             }
 
-            if playback.currentItem?.source == .jellyfin {
-                Section("Now Playing") {
-                    HStack {
-                        VStack(alignment: .leading) {
-                            Text(playback.currentItem?.title ?? "")
-                            Text(playback.currentItem?.artist ?? "")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        Button {
-                            playback.togglePlayback()
-                        } label: {
-                            Image(
-                                systemName: playback.showsPauseControl
-                                    ? "pause.fill"
-                                    : "play.fill"
-                            )
-                        }
-                        .buttonStyle(.borderedProminent)
-                    }
-                }
-            }
         }
         .navigationTitle(album.name)
         .task(id: album.id) {
@@ -416,7 +424,7 @@ private struct JellyfinTracksView: View {
     }
 }
 
-private struct ErrorMessageView: View {
+struct ErrorMessageView: View {
     let message: String
 
     var body: some View {

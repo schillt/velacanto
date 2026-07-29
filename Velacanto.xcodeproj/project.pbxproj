@@ -23,6 +23,8 @@
 		000000000000000000000214 /* Features/Jellyfin/JellyfinAccessView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000117 /* Features/Jellyfin/JellyfinAccessView.swift */; };
 		000000000000000000000215 /* Sources/Jellyfin/JellyfinPlaybackAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000118 /* Sources/Jellyfin/JellyfinPlaybackAdapter.swift */; };
 		000000000000000000000216 /* JellyfinFoundationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000119 /* JellyfinFoundationTests.swift */; };
+		000000000000000000000217 /* App/VelacantoRootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000120 /* App/VelacantoRootView.swift */; };
+		000000000000000000000218 /* Features/Library/MusicLibraryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000121 /* Features/Library/MusicLibraryView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -55,6 +57,8 @@
 		000000000000000000000117 /* Features/Jellyfin/JellyfinAccessView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Jellyfin/JellyfinAccessView.swift; sourceTree = "<group>"; };
 		000000000000000000000118 /* Sources/Jellyfin/JellyfinPlaybackAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/Jellyfin/JellyfinPlaybackAdapter.swift; sourceTree = "<group>"; };
 		000000000000000000000119 /* JellyfinFoundationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JellyfinFoundationTests.swift; sourceTree = "<group>"; };
+		000000000000000000000120 /* App/VelacantoRootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App/VelacantoRootView.swift; sourceTree = "<group>"; };
+		000000000000000000000121 /* Features/Library/MusicLibraryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Library/MusicLibraryView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -97,6 +101,8 @@
 			isa = PBXGroup;
 			children = (
 				000000000000000000000101 /* App/VelacantoApp.swift */,
+				000000000000000000000120 /* App/VelacantoRootView.swift */,
+				000000000000000000000121 /* Features/Library/MusicLibraryView.swift */,
 				000000000000000000000102 /* Features/Prototype/PrototypeContentView.swift */,
 				000000000000000000000103 /* Core/Playback/PlaybackTimeFormatter.swift */,
 				000000000000000000000109 /* Core/Models/MusicSource.swift */,
@@ -237,6 +243,8 @@
 				000000000000000000000213 /* Core/Session/JellyfinSessionController.swift in Sources */,
 				000000000000000000000214 /* Features/Jellyfin/JellyfinAccessView.swift in Sources */,
 				000000000000000000000215 /* Sources/Jellyfin/JellyfinPlaybackAdapter.swift in Sources */,
+				000000000000000000000217 /* App/VelacantoRootView.swift in Sources */,
+				000000000000000000000218 /* Features/Library/MusicLibraryView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -348,6 +356,7 @@
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = B9X8T5LT8Q;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
@@ -372,6 +381,7 @@
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = B9X8T5LT8Q;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;

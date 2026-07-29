@@ -57,6 +57,22 @@ final class JellyfinFoundationTests: XCTestCase {
         }
     }
 
+    func testJellyfinTokenStoreUsesAppPreferences() throws {
+        let suiteName = "VelacantoTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+        let store = UserDefaultsJellyfinTokenStore(defaults: defaults)
+
+        XCTAssertNil(try store.loadToken())
+        try store.saveToken("access-token")
+        XCTAssertEqual(try store.loadToken(), "access-token")
+
+        try store.deleteToken()
+        XCTAssertNil(try store.loadToken())
+    }
+
     func testRequestBuilderPreservesBasePathAndBuildsClientAuthorization() throws {
         let server = try JellyfinServerURL("https://example.com/jellyfin")
         let builder = JellyfinRequestBuilder(
@@ -140,6 +156,7 @@ final class JellyfinFoundationTests: XCTestCase {
                 "CollectionType": "music",
                 "AlbumArtist": "Velacanto",
                 "Artists": ["Velacanto"],
+                "ImageTags": {"Primary": "album-image-tag"},
                 "ChildCount": 9
               }],
               "TotalRecordCount": 1
@@ -162,6 +179,39 @@ final class JellyfinFoundationTests: XCTestCase {
         XCTAssertEqual(items.totalRecordCount, 1)
         XCTAssertEqual(items.items.first?.displayArtist, "Velacanto")
         XCTAssertEqual(items.items.first?.childCount, 9)
+        XCTAssertEqual(items.items.first?.primaryImageTag, "album-image-tag")
+    }
+
+    func testArtworkURLUsesAuthenticatedJellyfinImageEndpoint() throws {
+        let server = try JellyfinServerURL("https://example.com/jellyfin")
+        let builder = JellyfinRequestBuilder(
+            server: server,
+            deviceID: "stable-device",
+            accessToken: "access-token"
+        )
+
+        let url = try builder.artworkURL(
+            itemID: "album-id",
+            imageTag: "image-tag",
+            maxWidth: 720
+        )
+        let components = try XCTUnwrap(
+            URLComponents(url: url, resolvingAgainstBaseURL: false)
+        )
+        let query = Dictionary(
+            uniqueKeysWithValues: (components.queryItems ?? []).compactMap { item in
+                item.value.map { (item.name, $0) }
+            }
+        )
+
+        XCTAssertEqual(
+            components.path,
+            "/jellyfin/Items/album-id/Images/Primary"
+        )
+        XCTAssertEqual(query["tag"], "image-tag")
+        XCTAssertEqual(query["maxWidth"], "720")
+        XCTAssertEqual(query["quality"], "90")
+        XCTAssertEqual(query["api_key"], "access-token")
     }
 
     func testPlaybackAdapterCreatesSourceNeutralJellyfinRequest() async throws {
@@ -174,7 +224,8 @@ final class JellyfinFoundationTests: XCTestCase {
               "AlbumArtist": "Velacanto",
               "Artists": ["Velacanto"],
               "Album": "Open Roads",
-              "IndexNumber": 2
+              "IndexNumber": 2,
+              "RunTimeTicks": 1800000000
             }
             """.utf8
         )
@@ -195,6 +246,53 @@ final class JellyfinFoundationTests: XCTestCase {
         XCTAssertEqual(request.item.artist, "Velacanto")
         XCTAssertEqual(request.item.albumTitle, "Open Roads")
         XCTAssertEqual(request.item.source, .jellyfin)
+        XCTAssertEqual(track.duration, 180)
+    }
+
+    func testMusicCatalogCombinesLibrariesAndRemovesDuplicateAlbums() async throws {
+        let decoder = JSONDecoder()
+        let firstLibrary = try decoder.decode(
+            JellyfinItem.self,
+            from: Data(#"{"Id":"library-a","Name":"Main Music"}"#.utf8)
+        )
+        let secondLibrary = try decoder.decode(
+            JellyfinItem.self,
+            from: Data(#"{"Id":"library-b","Name":"Archive"}"#.utf8)
+        )
+        let alphaAlbum = try decoder.decode(
+            JellyfinItem.self,
+            from: Data(
+                #"{"Id":"album-a","Name":"Alpha","Type":"MusicAlbum"}"#.utf8
+            )
+        )
+        let sharedAlbum = try decoder.decode(
+            JellyfinItem.self,
+            from: Data(
+                #"{"Id":"album-shared","Name":"Zebra","Type":"MusicAlbum"}"#.utf8
+            )
+        )
+        let api = FakeJellyfinAPI(
+            availableLibraries: [firstLibrary, secondLibrary],
+            albumsByLibrary: [
+                firstLibrary.id: [sharedAlbum],
+                secondLibrary.id: [alphaAlbum, sharedAlbum],
+            ]
+        )
+        let controller = JellyfinSessionController(
+            tokenStore: RecordingTokenStore(),
+            sessionStore: RecordingSessionStore(),
+            autoRestore: false,
+            makeClient: { _, _, _ in api }
+        )
+
+        await controller.connect(to: "https://example.com")
+        await controller.signIn(username: "Tyler", password: "correct")
+        let albums = try await controller.musicAlbums()
+
+        XCTAssertEqual(
+            albums.map(\.id),
+            ["album-a", "album-shared"]
+        )
     }
 
     func testSessionSignInPersistsTokenButNeverPasswordThenLogoutDeletesIt() async throws {
@@ -429,17 +527,23 @@ private actor FakeJellyfinAPI: JellyfinAPIService {
     private let authenticationError: JellyfinAPIError?
     private let currentUserError: JellyfinAPIError?
     private let albumsError: JellyfinAPIError?
+    private let availableLibraries: [JellyfinItem]
+    private let albumsByLibrary: [String: [JellyfinItem]]
 
     init(
         publicServerInfoError: JellyfinAPIError? = nil,
         authenticationError: JellyfinAPIError? = nil,
         currentUserError: JellyfinAPIError? = nil,
-        albumsError: JellyfinAPIError? = nil
+        albumsError: JellyfinAPIError? = nil,
+        availableLibraries: [JellyfinItem] = [],
+        albumsByLibrary: [String: [JellyfinItem]] = [:]
     ) {
         self.publicServerInfoError = publicServerInfoError
         self.authenticationError = authenticationError
         self.currentUserError = currentUserError
         self.albumsError = albumsError
+        self.availableLibraries = availableLibraries
+        self.albumsByLibrary = albumsByLibrary
     }
 
     func publicServerInfo() async throws -> JellyfinServerInfo {
@@ -475,14 +579,44 @@ private actor FakeJellyfinAPI: JellyfinAPIService {
     }
 
     func libraries(userID: String) async throws -> [JellyfinItem] {
-        []
+        availableLibraries
     }
 
     func albums(userID: String, libraryID: String) async throws -> [JellyfinItem] {
         if let albumsError {
             throw albumsError
         }
+        return albumsByLibrary[libraryID] ?? []
+    }
+
+    func albums(
+        userID: String,
+        libraryID: String,
+        artistID: String
+    ) async throws -> [JellyfinItem] {
+        if let albumsError {
+            throw albumsError
+        }
         return []
+    }
+
+    func artists(userID: String, libraryID: String) async throws -> [JellyfinItem] {
+        []
+    }
+
+    func songs(userID: String, libraryID: String) async throws -> [JellyfinItem] {
+        []
+    }
+
+    func playlists(userID: String) async throws -> [JellyfinItem] {
+        []
+    }
+
+    func playlistItems(
+        userID: String,
+        playlistID: String
+    ) async throws -> [JellyfinItem] {
+        []
     }
 
     func tracks(userID: String, albumID: String) async throws -> [JellyfinItem] {
@@ -491,6 +625,28 @@ private actor FakeJellyfinAPI: JellyfinAPIService {
 
     func streamURL(itemID: String, userID: String) async throws -> URL {
         guard let url = URL(string: "https://example.com/Audio/\(itemID)/universal") else {
+            throw JellyfinAPIError.invalidResponse
+        }
+        return url
+    }
+
+    func artworkURL(
+        itemID: String,
+        imageTag: String?,
+        maxWidth: Int
+    ) async throws -> URL {
+        guard
+            var components = URLComponents(
+                string: "https://example.com/Items/\(itemID)/Images/Primary"
+            )
+        else {
+            throw JellyfinAPIError.invalidResponse
+        }
+        components.queryItems = [
+            URLQueryItem(name: "tag", value: imageTag),
+            URLQueryItem(name: "maxWidth", value: String(maxWidth)),
+        ]
+        guard let url = components.url else {
             throw JellyfinAPIError.invalidResponse
         }
         return url

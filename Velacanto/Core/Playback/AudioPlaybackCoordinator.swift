@@ -8,17 +8,22 @@ final class AudioPlaybackCoordinator: ObservableObject {
     @Published private(set) var elapsed: TimeInterval = 0
     @Published private(set) var duration: TimeInterval = 0
     @Published private(set) var errorMessage: String?
+    @Published private(set) var recentItems: [PlaybackItem]
 
     private let engine: any AudioPlayerEngine
     private let systemMediaController: SystemMediaControlling
+    private let historyStore: (any PlaybackHistoryStoring)?
     private var resourceLease: (any PlaybackResourceLease)?
 
     init(
         engine: any AudioPlayerEngine = AVFoundationAudioPlayerEngine(),
-        systemMediaController: SystemMediaControlling = MediaPlayerSystemMediaController()
+        systemMediaController: SystemMediaControlling = MediaPlayerSystemMediaController(),
+        historyStore: (any PlaybackHistoryStoring)? = nil
     ) {
         self.engine = engine
         self.systemMediaController = systemMediaController
+        self.historyStore = historyStore
+        recentItems = historyStore?.loadItems() ?? []
         engine.eventHandler = { [weak self] event in
             self?.handle(event)
         }
@@ -55,6 +60,7 @@ final class AudioPlaybackCoordinator: ObservableObject {
         duration = 0
         errorMessage = nil
         playbackState = .loading
+        recordInHistory(request.item)
         engine.load(playerItem)
         resourceLease = request.asset.resourceLease
         publishNowPlaying()
@@ -145,6 +151,13 @@ final class AudioPlaybackCoordinator: ObservableObject {
         case .stateChanged(let state):
             apply(state)
         }
+    }
+
+    private func recordInHistory(_ item: PlaybackItem) {
+        recentItems.removeAll { $0.id == item.id && $0.source == item.source }
+        recentItems.insert(item, at: 0)
+        recentItems = Array(recentItems.prefix(12))
+        historyStore?.saveItems(recentItems)
     }
 
     private func apply(_ state: PlaybackState) {

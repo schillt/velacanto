@@ -163,6 +163,22 @@ final class PlaybackFoundationTests: XCTestCase {
         XCTAssertNil(retainedLease)
     }
 
+    func testPlaybackCoordinatorRecordsSourceNeutralRecentItems() async throws {
+        let engine = RecordingAudioPlayerEngine()
+        let history = RecordingPlaybackHistoryStore()
+        let coordinator = AudioPlaybackCoordinator(
+            engine: engine,
+            systemMediaController: RecordingSystemMediaController(),
+            historyStore: history
+        )
+        let request = try await makePlaybackRequest()
+
+        coordinator.play(request)
+
+        XCTAssertEqual(coordinator.recentItems.first, request.item)
+        XCTAssertEqual(history.savedItems.first, request.item)
+    }
+
     func testNowPlayingMetadataContainsSemanticMediaFields() {
         let item = PlaybackItem(
             title: "Night Drive",
@@ -303,3 +319,15 @@ private final class RecordingSystemMediaController: SystemMediaControlling {
 }
 
 private final class RecordingResourceLease: PlaybackResourceLease, @unchecked Sendable {}
+
+private final class RecordingPlaybackHistoryStore: PlaybackHistoryStoring {
+    private(set) var savedItems: [PlaybackItem] = []
+
+    func loadItems() -> [PlaybackItem] {
+        []
+    }
+
+    func saveItems(_ items: [PlaybackItem]) {
+        savedItems = items
+    }
+}

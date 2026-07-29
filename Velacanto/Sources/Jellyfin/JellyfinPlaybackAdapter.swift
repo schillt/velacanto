@@ -19,7 +19,9 @@ struct JellyfinPlaybackAdapter: PlaybackSourceAdapter {
                 title: selection.track.name,
                 artist: selection.track.displayArtist,
                 albumTitle: selection.track.album,
-                source: source
+                source: source,
+                artworkItemID: selection.track.artworkItemID,
+                artworkTag: selection.track.primaryImageTag
             ),
             asset: PlaybackAsset(url: selection.streamURL)
         )

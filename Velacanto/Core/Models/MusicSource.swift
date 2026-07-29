@@ -1,7 +1,7 @@
 import AVFoundation
 import Foundation
 
-struct MusicSourceID: RawRepresentable, Hashable, Identifiable, Sendable {
+struct MusicSourceID: RawRepresentable, Hashable, Identifiable, Codable, Sendable {
     let rawValue: String
 
     var id: Self { self }
@@ -14,25 +14,60 @@ struct MusicSourceID: RawRepresentable, Hashable, Identifiable, Sendable {
     static let jellyfin = MusicSourceID(rawValue: "jellyfin")
 }
 
-struct PlaybackItem: Identifiable, Equatable, Sendable {
+struct PlaybackItem: Identifiable, Equatable, Codable, Sendable {
     let id: String
     let title: String
     let artist: String
     let albumTitle: String?
     let source: MusicSourceID
+    let artworkItemID: String?
+    let artworkTag: String?
 
     init(
         id: String = UUID().uuidString,
         title: String,
         artist: String,
         albumTitle: String? = nil,
-        source: MusicSourceID
+        source: MusicSourceID,
+        artworkItemID: String? = nil,
+        artworkTag: String? = nil
     ) {
         self.id = id
         self.title = title
         self.artist = artist
         self.albumTitle = albumTitle
         self.source = source
+        self.artworkItemID = artworkItemID
+        self.artworkTag = artworkTag
+    }
+}
+
+protocol PlaybackHistoryStoring {
+    func loadItems() -> [PlaybackItem]
+    func saveItems(_ items: [PlaybackItem])
+}
+
+struct UserDefaultsPlaybackHistoryStore: PlaybackHistoryStoring {
+    private let defaults: UserDefaults
+    private let key = "velacanto.playback-history"
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+    }
+
+    func loadItems() -> [PlaybackItem] {
+        guard
+            let data = defaults.data(forKey: key),
+            let items = try? JSONDecoder().decode([PlaybackItem].self, from: data)
+        else {
+            return []
+        }
+        return items
+    }
+
+    func saveItems(_ items: [PlaybackItem]) {
+        guard let data = try? JSONEncoder().encode(items) else { return }
+        defaults.set(data, forKey: key)
     }
 }
 

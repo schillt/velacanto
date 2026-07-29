@@ -1,6 +1,5 @@
 import Combine
 import Foundation
-import Security
 
 struct JellyfinSession: Codable, Equatable, Sendable {
     let serverURL: URL
@@ -33,72 +32,27 @@ protocol JellyfinSessionPersisting {
     func saveDeviceID(_ deviceID: String)
 }
 
-struct KeychainJellyfinTokenStore: JellyfinTokenStoring {
-    private let service = "com.chameleonenterprise.velacanto.jellyfin"
-    private let account = "access-token"
+struct UserDefaultsJellyfinTokenStore: JellyfinTokenStoring {
+    private let defaults: UserDefaults
+    private let tokenKey = "jellyfin.access-token"
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+    }
 
     func loadToken() throws -> String? {
-        var query = baseQuery
-        query[kSecReturnData as String] = true
-        query[kSecMatchLimit as String] = kSecMatchLimitOne
-
-        var result: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        if status == errSecItemNotFound {
-            return nil
-        }
-        guard status == errSecSuccess else {
-            throw JellyfinCredentialStoreError.keychain(status)
-        }
-        guard
-            let data = result as? Data,
-            let token = String(data: data, encoding: .utf8),
-            !token.isEmpty
-        else {
-            throw JellyfinCredentialStoreError.invalidToken
-        }
-        return token
+        defaults.string(forKey: tokenKey)
     }
 
     func saveToken(_ token: String) throws {
-        guard let data = token.data(using: .utf8), !token.isEmpty else {
+        guard !token.isEmpty else {
             throw JellyfinCredentialStoreError.invalidToken
         }
-
-        let update = [kSecValueData as String: data]
-        let updateStatus = SecItemUpdate(
-            baseQuery as CFDictionary,
-            update as CFDictionary
-        )
-        if updateStatus == errSecSuccess {
-            return
-        }
-        guard updateStatus == errSecItemNotFound else {
-            throw JellyfinCredentialStoreError.keychain(updateStatus)
-        }
-
-        var item = baseQuery
-        item[kSecValueData as String] = data
-        item[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        let addStatus = SecItemAdd(item as CFDictionary, nil)
-        guard addStatus == errSecSuccess else {
-            throw JellyfinCredentialStoreError.keychain(addStatus)
-        }
+        defaults.set(token, forKey: tokenKey)
     }
 
     func deleteToken() throws {
-        let status = SecItemDelete(baseQuery as CFDictionary)
-        guard status == errSecSuccess || status == errSecItemNotFound else {
-            throw JellyfinCredentialStoreError.keychain(status)
-        }
-    }
-
-    private var baseQuery: [String: Any] {
-        [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-        ]
+        defaults.removeObject(forKey: tokenKey)
     }
 }
 
@@ -135,13 +89,10 @@ struct UserDefaultsJellyfinSessionStore: JellyfinSessionPersisting {
 }
 
 enum JellyfinCredentialStoreError: LocalizedError, Equatable {
-    case keychain(OSStatus)
     case invalidToken
 
     var errorDescription: String? {
         switch self {
-        case .keychain:
-            "Velacanto could not securely update the saved Jellyfin session."
         case .invalidToken:
             "Jellyfin returned an invalid access token."
         }
@@ -170,7 +121,7 @@ final class JellyfinSessionController: ObservableObject {
 
     convenience init(autoRestore: Bool = true) {
         self.init(
-            tokenStore: KeychainJellyfinTokenStore(),
+            tokenStore: UserDefaultsJellyfinTokenStore(),
             sessionStore: UserDefaultsJellyfinSessionStore(),
             autoRestore: autoRestore
         )
@@ -334,6 +285,100 @@ final class JellyfinSessionController: ObservableObject {
         }
     }
 
+    func musicAlbums(for artist: JellyfinItem? = nil) async throws -> [JellyfinItem] {
+        guard let session, let client else {
+            throw JellyfinSessionError.notSignedIn
+        }
+        do {
+            var results: [JellyfinItem] = []
+            for library in libraries {
+                if let artist {
+                    results += try await client.albums(
+                        userID: session.userID,
+                        libraryID: library.id,
+                        artistID: artist.id
+                    )
+                } else {
+                    results += try await client.albums(
+                        userID: session.userID,
+                        libraryID: library.id
+                    )
+                }
+            }
+            return uniqueItems(results)
+        } catch {
+            handleExpiredSessionIfNeeded(error)
+            throw error
+        }
+    }
+
+    func musicArtists() async throws -> [JellyfinItem] {
+        guard let session, let client else {
+            throw JellyfinSessionError.notSignedIn
+        }
+        do {
+            var results: [JellyfinItem] = []
+            for library in libraries {
+                results += try await client.artists(
+                    userID: session.userID,
+                    libraryID: library.id
+                )
+            }
+            return uniqueItems(results)
+        } catch {
+            handleExpiredSessionIfNeeded(error)
+            throw error
+        }
+    }
+
+    func musicSongs() async throws -> [JellyfinItem] {
+        guard let session, let client else {
+            throw JellyfinSessionError.notSignedIn
+        }
+        do {
+            var results: [JellyfinItem] = []
+            for library in libraries {
+                results += try await client.songs(
+                    userID: session.userID,
+                    libraryID: library.id
+                )
+            }
+            return uniqueItems(results)
+        } catch {
+            handleExpiredSessionIfNeeded(error)
+            throw error
+        }
+    }
+
+    func musicPlaylists() async throws -> [JellyfinItem] {
+        guard let session, let client else {
+            throw JellyfinSessionError.notSignedIn
+        }
+        do {
+            return uniqueItems(
+                try await client.playlists(userID: session.userID)
+            )
+        } catch {
+            handleExpiredSessionIfNeeded(error)
+            throw error
+        }
+    }
+
+    func tracks(inPlaylist playlist: JellyfinItem) async throws -> [JellyfinItem] {
+        guard let session, let client else {
+            throw JellyfinSessionError.notSignedIn
+        }
+        do {
+            return try await client.playlistItems(
+                userID: session.userID,
+                playlistID: playlist.id
+            )
+        } catch {
+            handleExpiredSessionIfNeeded(error)
+            throw error
+        }
+    }
+
     func tracks(in album: JellyfinItem) async throws -> [JellyfinItem] {
         guard let session, let client else {
             throw JellyfinSessionError.notSignedIn
@@ -368,6 +413,41 @@ final class JellyfinSessionController: ObservableObject {
             handleExpiredSessionIfNeeded(error)
             throw error
         }
+    }
+
+    func playbackRequest(for item: PlaybackItem) async throws -> PlaybackRequest {
+        guard item.source == .jellyfin else {
+            throw JellyfinSessionError.unsupportedHistoryItem
+        }
+        guard let session, let client else {
+            throw JellyfinSessionError.notSignedIn
+        }
+        do {
+            let streamURL = try await client.streamURL(
+                itemID: item.id,
+                userID: session.userID
+            )
+            return PlaybackRequest(
+                item: item,
+                asset: PlaybackAsset(url: streamURL)
+            )
+        } catch {
+            handleExpiredSessionIfNeeded(error)
+            throw error
+        }
+    }
+
+    func artworkURL(
+        itemID: String,
+        imageTag: String?,
+        maxWidth: Int
+    ) async -> URL? {
+        guard let client else { return nil }
+        return try? await client.artworkURL(
+            itemID: itemID,
+            imageTag: imageTag,
+            maxWidth: maxWidth
+        )
     }
 
     func editServer() {
@@ -452,6 +532,16 @@ final class JellyfinSessionController: ObservableObject {
         errorMessage = JellyfinSessionError.expiredSession.localizedDescription
     }
 
+    private func uniqueItems(_ items: [JellyfinItem]) -> [JellyfinItem] {
+        var seen = Set<String>()
+        return
+            items
+            .filter { seen.insert($0.id).inserted }
+            .sorted {
+                $0.name.localizedStandardCompare($1.name) == .orderedAscending
+            }
+    }
+
     private func clearSession() {
         session = nil
         candidateServer = nil
@@ -468,6 +558,7 @@ enum JellyfinSessionError: LocalizedError, Equatable {
     case notSignedIn
     case expiredSession
     case serverSetupIncomplete
+    case unsupportedHistoryItem
 
     var errorDescription: String? {
         switch self {
@@ -479,6 +570,8 @@ enum JellyfinSessionError: LocalizedError, Equatable {
             "The saved Jellyfin session expired. Please sign in again."
         case .serverSetupIncomplete:
             "That Jellyfin server has not completed its initial setup."
+        case .unsupportedHistoryItem:
+            "This recent item must be opened again from its original source."
         }
     }
 }

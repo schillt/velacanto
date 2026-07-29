@@ -2,15 +2,23 @@ import SwiftUI
 
 @main
 struct VelacantoApp: App {
-    @StateObject private var playback = AudioPlaybackCoordinator()
+    @StateObject private var playback = AudioPlaybackCoordinator(
+        historyStore: UserDefaultsPlaybackHistoryStore()
+    )
     @StateObject private var jellyfin = JellyfinSessionController()
 
     var body: some Scene {
         WindowGroup {
-            PrototypeContentView(
+            VelacantoRootView(
                 playback: playback,
                 jellyfin: jellyfin
             )
         }
+
+        #if os(macOS)
+            Settings {
+                VelacantoSettingsView(jellyfin: jellyfin)
+            }
+        #endif
     }
 }
