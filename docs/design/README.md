@@ -22,6 +22,13 @@ The July 29, 2026 concept combines:
 The direction is inspired by Apple Music's clarity and platform conventions,
 but Velacanto retains its own cyan accent and personal-library focus.
 
+## Implementation planning
+
+[Native UI merge readiness](ui-merge-readiness.md) records the verified
+functional baseline, native interface contract, issue-ready work packages,
+open scope decisions, and acceptance gate for tying this design to the working
+app.
+
 ## Interactive prototype
 
 [Open the foundational UI prototype](foundational-ui.html).
