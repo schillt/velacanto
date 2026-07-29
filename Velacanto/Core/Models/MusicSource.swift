@@ -62,7 +62,16 @@ struct UserDefaultsPlaybackHistoryStore: PlaybackHistoryStoring {
         else {
             return []
         }
-        return items
+
+        let cleanedItems = items.filter {
+            !($0.source == .localFiles
+                && $0.title == "Velacanto playback check"
+                && $0.artist == "440 Hz local tone")
+        }
+        if cleanedItems.count != items.count {
+            saveItems(cleanedItems)
+        }
+        return cleanedItems
     }
 
     func saveItems(_ items: [PlaybackItem]) {
@@ -105,6 +114,17 @@ struct PlaybackAsset: Sendable {
 struct PlaybackRequest: Sendable {
     let item: PlaybackItem
     let asset: PlaybackAsset
+    let recordsHistory: Bool
+
+    init(
+        item: PlaybackItem,
+        asset: PlaybackAsset,
+        recordsHistory: Bool = true
+    ) {
+        self.item = item
+        self.asset = asset
+        self.recordsHistory = recordsHistory
+    }
 }
 
 protocol PlaybackSourceAdapter: Sendable {

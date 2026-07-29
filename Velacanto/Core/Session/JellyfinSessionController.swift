@@ -364,6 +364,25 @@ final class JellyfinSessionController: ObservableObject {
         }
     }
 
+    func searchMusic(query: String) async throws -> [JellyfinItem] {
+        let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedQuery.isEmpty else { return [] }
+        guard let session, let client else {
+            throw JellyfinSessionError.notSignedIn
+        }
+
+        do {
+            return try await client.searchMusic(
+                userID: session.userID,
+                query: trimmedQuery,
+                limit: 60
+            )
+        } catch {
+            handleExpiredSessionIfNeeded(error)
+            throw error
+        }
+    }
+
     func tracks(inPlaylist playlist: JellyfinItem) async throws -> [JellyfinItem] {
         guard let session, let client else {
             throw JellyfinSessionError.notSignedIn

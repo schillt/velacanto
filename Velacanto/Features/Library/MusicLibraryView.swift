@@ -4,50 +4,52 @@ struct MusicLibraryView: View {
     @ObservedObject var playback: AudioPlaybackCoordinator
     @ObservedObject var jellyfin: JellyfinSessionController
 
-    let isPreparingTestTone: Bool
     let openLocalFile: () -> Void
-    let playTestTone: () -> Void
-    let showAccount: () -> Void
+    let showProfile: () -> Void
 
     var body: some View {
         List {
-            Section {
-                ForEach(MusicLibraryCategory.allCases) { category in
-                    if jellyfin.isSignedIn {
+            if jellyfin.isSignedIn {
+                Section {
+                    ForEach(MusicLibraryCategory.allCases) { category in
                         NavigationLink {
                             destination(for: category)
                         } label: {
                             MusicLibraryCategoryRow(category: category)
                         }
-                    } else {
-                        Button(action: showAccount) {
-                            MusicLibraryCategoryRow(category: category)
-                        }
-                        .buttonStyle(.plain)
+                    }
+                } header: {
+                    Text("Your Music")
+                } footer: {
+                    if let session = jellyfin.session {
+                        Text(
+                            "Music from every library available to \(session.username) is combined here."
+                        )
                     }
                 }
-            } header: {
-                Text("Your Music")
-            } footer: {
-                Text(libraryFooter)
+            } else {
+                Section {
+                    ContentUnavailableView {
+                        Label(
+                            "Connect Your Music Library",
+                            systemImage: "music.note.house"
+                        )
+                    } description: {
+                        Text(
+                            jellyfin.phase == .restoring
+                                ? "Restoring your saved Jellyfin session…"
+                                : "Add a Jellyfin server from your profile to browse albums, artists, songs, and playlists."
+                        )
+                    } actions: {
+                        Button("Open Profile", action: showProfile)
+                            .buttonStyle(.borderedProminent)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 24)
+                }
             }
 
-            Section("Sources") {
-                Button(action: showAccount) {
-                    Label {
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text("Jellyfin")
-                                .foregroundStyle(.primary)
-                            Text(jellyfinStatus)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    } icon: {
-                        MusicLibrarySourceIcon(symbolName: "server.rack")
-                    }
-                }
-                .buttonStyle(.plain)
-
+            Section("Local Music") {
                 Button(action: openLocalFile) {
                     Label {
                         VStack(alignment: .leading, spacing: 3) {
@@ -58,57 +60,19 @@ struct MusicLibraryView: View {
                                 .foregroundStyle(.secondary)
                         }
                     } icon: {
-                        MusicLibrarySourceIcon(symbolName: "folder")
+                        SourceIcon(symbolName: "folder")
                     }
                 }
                 .buttonStyle(.plain)
-            }
-
-            Section {
-                Button(action: playTestTone) {
-                    Label {
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(
-                                isPreparingTestTone
-                                    ? "Preparing Playback Check…"
-                                    : "Run Playback Check"
-                            )
-                            .foregroundStyle(.primary)
-                            Text("Play a generated 440 Hz diagnostic tone")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    } icon: {
-                        if isPreparingTestTone {
-                            ProgressView()
-                                .controlSize(.small)
-                        } else {
-                            Image(systemName: "waveform.badge.magnifyingglass")
-                                .foregroundStyle(.cyan)
-                        }
-                    }
-                }
-                .buttonStyle(.plain)
-                .disabled(isPreparingTestTone)
-            } header: {
-                Text("Playback Tools")
-            } footer: {
-                Text(
-                    "The playback check uses the same player and system media controls as your music."
-                )
             }
         }
         .navigationTitle("Library")
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
-                Button(action: showAccount) {
-                    MusicLibraryAccountAvatar(username: jellyfin.session?.username)
+                Button(action: showProfile) {
+                    AccountAvatar(username: jellyfin.session?.username)
                 }
-                .accessibilityLabel(
-                    jellyfin.isSignedIn
-                        ? "Jellyfin account"
-                        : "Connect Jellyfin account"
-                )
+                .accessibilityLabel("Profile and settings")
             }
         }
     }
@@ -127,26 +91,6 @@ struct MusicLibraryView: View {
         }
     }
 
-    private var libraryFooter: String {
-        if let session = jellyfin.session {
-            return
-                "Music from every library available to \(session.username) is combined here."
-        }
-        if jellyfin.phase == .restoring {
-            return "Restoring your saved Jellyfin library…"
-        }
-        return "Connect Jellyfin to browse albums, artists, songs, and playlists."
-    }
-
-    private var jellyfinStatus: String {
-        if let session = jellyfin.session {
-            return "\(session.username) · \(session.serverName)"
-        }
-        if jellyfin.phase == .restoring {
-            return "Restoring saved session"
-        }
-        return "Not connected"
-    }
 }
 
 private enum MusicLibraryCategory: String, CaseIterable, Identifiable {
@@ -218,6 +162,54 @@ private struct MusicLibraryCategoryRow: View {
         }
         .padding(.vertical, 3)
         .contentShape(Rectangle())
+    }
+}
+
+struct MusicDetailHeader: View {
+    let item: JellyfinItem
+    @ObservedObject var jellyfin: JellyfinSessionController
+    let subtitle: String
+    let detail: String?
+
+    var body: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .top, spacing: 16) {
+                artwork
+                metadata
+            }
+
+            VStack(alignment: .leading, spacing: 12) {
+                artwork
+                metadata
+            }
+        }
+        .padding(.vertical, 6)
+    }
+
+    private var artwork: some View {
+        JellyfinArtworkView(
+            item: item,
+            jellyfin: jellyfin,
+            cornerRadius: 14,
+            maxWidth: 480
+        )
+        .frame(width: 116, height: 116)
+    }
+
+    private var metadata: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(item.name)
+                .font(.title2.weight(.semibold))
+            Text(subtitle)
+                .foregroundStyle(.secondary)
+            if let detail {
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .padding(.top, 4)
+        .fixedSize(horizontal: false, vertical: true)
     }
 }
 
@@ -424,7 +416,7 @@ private struct MusicArtistsView: View {
     }
 }
 
-private struct MusicArtistView: View {
+struct MusicArtistView: View {
     let artist: JellyfinItem
     @ObservedObject var jellyfin: JellyfinSessionController
     @ObservedObject var playback: AudioPlaybackCoordinator
@@ -732,7 +724,7 @@ private struct MusicPlaylistsView: View {
     }
 }
 
-private struct MusicPlaylistView: View {
+struct MusicPlaylistView: View {
     let playlist: JellyfinItem
     @ObservedObject var jellyfin: JellyfinSessionController
     @ObservedObject var playback: AudioPlaybackCoordinator
@@ -746,31 +738,14 @@ private struct MusicPlaylistView: View {
         List {
             if !isLoading {
                 Section {
-                    HStack(alignment: .top, spacing: 16) {
-                        JellyfinArtworkView(
-                            item: playlist,
-                            jellyfin: jellyfin,
-                            cornerRadius: 14,
-                            maxWidth: 480
-                        )
-                        .frame(width: 116, height: 116)
-
-                        VStack(alignment: .leading, spacing: 5) {
-                            Text(playlist.name)
-                                .font(.title2.weight(.semibold))
-                            Text("Playlist")
-                                .foregroundStyle(.secondary)
-                            if !songs.isEmpty {
-                                Text(
-                                    "\(songs.count) \(songs.count == 1 ? "song" : "songs")"
-                                )
-                                .font(.caption)
-                                .foregroundStyle(.tertiary)
-                            }
-                        }
-                        .padding(.top, 4)
-                    }
-                    .padding(.vertical, 6)
+                    MusicDetailHeader(
+                        item: playlist,
+                        jellyfin: jellyfin,
+                        subtitle: "Playlist",
+                        detail: songs.isEmpty
+                            ? nil
+                            : "\(songs.count) \(songs.count == 1 ? "song" : "songs")"
+                    )
                 }
             }
 
@@ -928,41 +903,5 @@ private struct MusicCatalogErrorView: View {
                 .buttonStyle(.borderedProminent)
         }
         .padding(.top, 40)
-    }
-}
-
-private struct MusicLibrarySourceIcon: View {
-    let symbolName: String
-
-    var body: some View {
-        Image(systemName: symbolName)
-            .font(.body.weight(.medium))
-            .foregroundStyle(.cyan)
-            .frame(width: 34, height: 34)
-            .background(.cyan.opacity(0.10), in: .rect(cornerRadius: 10))
-    }
-}
-
-private struct MusicLibraryAccountAvatar: View {
-    let username: String?
-
-    var body: some View {
-        Text(initials)
-            .font(.caption.weight(.semibold))
-            .foregroundStyle(.cyan)
-            .frame(width: 34, height: 34)
-            .background(.cyan.opacity(0.08), in: Circle())
-            .overlay {
-                Circle()
-                    .stroke(.cyan.opacity(0.18), lineWidth: 1)
-            }
-    }
-
-    private var initials: String {
-        let parts = (username ?? "VC")
-            .split(whereSeparator: \.isWhitespace)
-            .prefix(2)
-        let value = parts.compactMap(\.first).map(String.init).joined()
-        return value.isEmpty ? "VC" : value.uppercased()
     }
 }

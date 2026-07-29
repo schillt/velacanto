@@ -612,6 +612,14 @@ private actor FakeJellyfinAPI: JellyfinAPIService {
         []
     }
 
+    func searchMusic(
+        userID: String,
+        query: String,
+        limit: Int
+    ) async throws -> [JellyfinItem] {
+        []
+    }
+
     func playlistItems(
         userID: String,
         playlistID: String

@@ -353,6 +353,11 @@ protocol JellyfinAPIService: Sendable {
     func artists(userID: String, libraryID: String) async throws -> [JellyfinItem]
     func songs(userID: String, libraryID: String) async throws -> [JellyfinItem]
     func playlists(userID: String) async throws -> [JellyfinItem]
+    func searchMusic(
+        userID: String,
+        query: String,
+        limit: Int
+    ) async throws -> [JellyfinItem]
     func playlistItems(
         userID: String,
         playlistID: String
@@ -511,6 +516,30 @@ actor JellyfinAPIClient: JellyfinAPIService {
             ),
         ]
         return try await items(userID: userID, query: query)
+    }
+
+    func searchMusic(
+        userID: String,
+        query: String,
+        limit: Int
+    ) async throws -> [JellyfinItem] {
+        let queryItems = [
+            URLQueryItem(name: "SearchTerm", value: query),
+            URLQueryItem(
+                name: "IncludeItemTypes",
+                value: "Audio,MusicAlbum,MusicArtist,Playlist"
+            ),
+            URLQueryItem(name: "Recursive", value: "true"),
+            URLQueryItem(name: "Limit", value: String(limit)),
+            URLQueryItem(name: "SortBy", value: "SortName"),
+            URLQueryItem(name: "SortOrder", value: "Ascending"),
+            URLQueryItem(
+                name: "Fields",
+                value:
+                    "Album,AlbumArtist,Artists,AlbumId,AlbumPrimaryImageTag,ChildCount,ImageTags,RunTimeTicks"
+            ),
+        ]
+        return try await items(userID: userID, query: queryItems)
     }
 
     func playlistItems(

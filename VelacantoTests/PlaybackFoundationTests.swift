@@ -179,6 +179,28 @@ final class PlaybackFoundationTests: XCTestCase {
         XCTAssertEqual(history.savedItems.first, request.item)
     }
 
+    func testPlaybackCoordinatorDoesNotRecordDiagnostics() async throws {
+        let engine = RecordingAudioPlayerEngine()
+        let history = RecordingPlaybackHistoryStore()
+        let coordinator = AudioPlaybackCoordinator(
+            engine: engine,
+            systemMediaController: RecordingSystemMediaController(),
+            historyStore: history
+        )
+        let request = try await makePlaybackRequest()
+
+        coordinator.play(
+            PlaybackRequest(
+                item: request.item,
+                asset: request.asset,
+                recordsHistory: false
+            )
+        )
+
+        XCTAssertTrue(coordinator.recentItems.isEmpty)
+        XCTAssertTrue(history.savedItems.isEmpty)
+    }
+
     func testNowPlayingMetadataContainsSemanticMediaFields() {
         let item = PlaybackItem(
             title: "Night Drive",

@@ -1,6 +1,14 @@
 import AVFoundation
 import Combine
 
+private enum AudioSessionError: LocalizedError {
+    case activationFailed
+
+    var errorDescription: String? {
+        "The audio session could not be activated."
+    }
+}
+
 @MainActor
 final class AudioPlaybackCoordinator: ObservableObject {
     @Published private(set) var currentItem: PlaybackItem?
@@ -11,13 +19,13 @@ final class AudioPlaybackCoordinator: ObservableObject {
     @Published private(set) var recentItems: [PlaybackItem]
 
     private let engine: any AudioPlayerEngine
-    private let systemMediaController: SystemMediaControlling
+    private var systemMediaController: (any SystemMediaControlling)?
     private let historyStore: (any PlaybackHistoryStoring)?
     private var resourceLease: (any PlaybackResourceLease)?
 
     init(
         engine: any AudioPlayerEngine = AVFoundationAudioPlayerEngine(),
-        systemMediaController: SystemMediaControlling = MediaPlayerSystemMediaController(),
+        systemMediaController: (any SystemMediaControlling)? = nil,
         historyStore: (any PlaybackHistoryStoring)? = nil
     ) {
         self.engine = engine
@@ -27,7 +35,9 @@ final class AudioPlaybackCoordinator: ObservableObject {
         engine.eventHandler = { [weak self] event in
             self?.handle(event)
         }
-        registerSystemMediaCommands()
+        if systemMediaController != nil {
+            registerSystemMediaCommands()
+        }
     }
 
     var progress: Double {
@@ -53,6 +63,7 @@ final class AudioPlaybackCoordinator: ObservableObject {
     }
 
     func play(_ request: PlaybackRequest) {
+        prepareSystemMediaController()
         let playerItem = request.asset.makePlayerItem()
 
         currentItem = request.item
@@ -60,17 +71,14 @@ final class AudioPlaybackCoordinator: ObservableObject {
         duration = 0
         errorMessage = nil
         playbackState = .loading
-        recordInHistory(request.item)
+        if request.recordsHistory {
+            recordInHistory(request.item)
+        }
         engine.load(playerItem)
         resourceLease = request.asset.resourceLease
         publishNowPlaying()
 
-        do {
-            try configureAudioSession()
-            engine.play()
-        } catch {
-            apply(.failed(error.localizedDescription))
-        }
+        startPlaybackAfterAudioSessionActivation()
     }
 
     func togglePlayback() {
@@ -113,13 +121,8 @@ final class AudioPlaybackCoordinator: ObservableObject {
             elapsed = 0
         }
 
-        do {
-            try configureAudioSession()
-            errorMessage = nil
-            engine.play()
-        } catch {
-            apply(.failed(error.localizedDescription))
-        }
+        errorMessage = nil
+        startPlaybackAfterAudioSessionActivation()
     }
 
     func stop() {
@@ -130,7 +133,7 @@ final class AudioPlaybackCoordinator: ObservableObject {
         duration = 0
         playbackState = .idle
         errorMessage = nil
-        systemMediaController.update(.empty)
+        systemMediaController?.update(.empty)
         deactivateAudioSession()
     }
 
@@ -180,7 +183,7 @@ final class AudioPlaybackCoordinator: ObservableObject {
     }
 
     private func registerSystemMediaCommands() {
-        systemMediaController.registerCommands(
+        systemMediaController?.registerCommands(
             play: { [weak self] in
                 self?.resumePlayback()
             },
@@ -200,30 +203,70 @@ final class AudioPlaybackCoordinator: ObservableObject {
     }
 
     private func publishNowPlaying() {
-        systemMediaController.update(
+        systemMediaController?.update(
             NowPlayingSnapshot(
                 item: currentItem,
                 elapsed: elapsed,
                 duration: duration,
+
                 isPlaying: isPlaying
             )
         )
     }
 
-    private func configureAudioSession() throws {
+    private func prepareSystemMediaController() {
+        guard systemMediaController == nil else { return }
+        systemMediaController = MediaPlayerSystemMediaController()
+        registerSystemMediaCommands()
+    }
+
+    private func startPlaybackAfterAudioSessionActivation() {
+        #if os(iOS)
+            let itemID = currentItem?.id
+            Task { [weak self] in
+                guard let self else { return }
+                do {
+                    try await configureAudioSession()
+                    guard currentItem?.id == itemID else { return }
+                    engine.play()
+                } catch {
+                    apply(.failed(error.localizedDescription))
+                }
+            }
+        #else
+            engine.play()
+        #endif
+    }
+
+    private func configureAudioSession() async throws {
         #if os(iOS)
             let session = AVAudioSession.sharedInstance()
             try session.setCategory(.playback, mode: .default)
-            try session.setActive(true)
+            if #available(iOS 27.0, *) {
+                guard try await session.activate(options: []) else {
+                    throw AudioSessionError.activationFailed
+                }
+            } else {
+                try session.setActive(true)
+            }
         #endif
     }
 
     private func deactivateAudioSession() {
         #if os(iOS)
-            try? AVAudioSession.sharedInstance().setActive(
-                false,
-                options: .notifyOthersOnDeactivation
-            )
+            let session = AVAudioSession.sharedInstance()
+            if #available(iOS 27.0, *) {
+                Task {
+                    _ = try? await session.deactivate(
+                        options: .notifyOthersOnDeactivation
+                    )
+                }
+            } else {
+                try? session.setActive(
+                    false,
+                    options: .notifyOthersOnDeactivation
+                )
+            }
         #endif
     }
 }

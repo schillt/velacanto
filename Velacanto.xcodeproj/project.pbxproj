@@ -8,7 +8,6 @@
 
 /* Begin PBXBuildFile section */
 		000000000000000000000201 /* App/VelacantoApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000101 /* App/VelacantoApp.swift */; };
-		000000000000000000000202 /* Features/Prototype/PrototypeContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000102 /* Features/Prototype/PrototypeContentView.swift */; };
 		000000000000000000000203 /* Core/Playback/PlaybackTimeFormatter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000103 /* Core/Playback/PlaybackTimeFormatter.swift */; };
 		000000000000000000000204 /* PlaybackFoundationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000104 /* PlaybackFoundationTests.swift */; };
 		000000000000000000000205 /* Resources/PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000108 /* Resources/PrivacyInfo.xcprivacy */; };
@@ -25,6 +24,8 @@
 		000000000000000000000216 /* JellyfinFoundationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000119 /* JellyfinFoundationTests.swift */; };
 		000000000000000000000217 /* App/VelacantoRootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000120 /* App/VelacantoRootView.swift */; };
 		000000000000000000000218 /* Features/Library/MusicLibraryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000121 /* Features/Library/MusicLibraryView.swift */; };
+		000000000000000000000219 /* Features/Profile/ProfileView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000122 /* Features/Profile/ProfileView.swift */; };
+		000000000000000000000220 /* Features/Search/MusicSearchView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000123 /* Features/Search/MusicSearchView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -39,7 +40,6 @@
 
 /* Begin PBXFileReference section */
 		000000000000000000000101 /* App/VelacantoApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App/VelacantoApp.swift; sourceTree = "<group>"; };
-		000000000000000000000102 /* Features/Prototype/PrototypeContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Prototype/PrototypeContentView.swift; sourceTree = "<group>"; };
 		000000000000000000000103 /* Core/Playback/PlaybackTimeFormatter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Core/Playback/PlaybackTimeFormatter.swift; sourceTree = "<group>"; };
 		000000000000000000000104 /* PlaybackFoundationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackFoundationTests.swift; sourceTree = "<group>"; };
 		000000000000000000000105 /* Velacanto.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Velacanto.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -59,6 +59,8 @@
 		000000000000000000000119 /* JellyfinFoundationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JellyfinFoundationTests.swift; sourceTree = "<group>"; };
 		000000000000000000000120 /* App/VelacantoRootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App/VelacantoRootView.swift; sourceTree = "<group>"; };
 		000000000000000000000121 /* Features/Library/MusicLibraryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Library/MusicLibraryView.swift; sourceTree = "<group>"; };
+		000000000000000000000122 /* Features/Profile/ProfileView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Profile/ProfileView.swift; sourceTree = "<group>"; };
+		000000000000000000000123 /* Features/Search/MusicSearchView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Search/MusicSearchView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -103,7 +105,8 @@
 				000000000000000000000101 /* App/VelacantoApp.swift */,
 				000000000000000000000120 /* App/VelacantoRootView.swift */,
 				000000000000000000000121 /* Features/Library/MusicLibraryView.swift */,
-				000000000000000000000102 /* Features/Prototype/PrototypeContentView.swift */,
+				000000000000000000000122 /* Features/Profile/ProfileView.swift */,
+				000000000000000000000123 /* Features/Search/MusicSearchView.swift */,
 				000000000000000000000103 /* Core/Playback/PlaybackTimeFormatter.swift */,
 				000000000000000000000109 /* Core/Models/MusicSource.swift */,
 				000000000000000000000110 /* Core/Playback/AudioPlaybackCoordinator.swift */,
@@ -231,7 +234,6 @@
 			buildActionMask = 2147483647;
 			files = (
 				000000000000000000000201 /* App/VelacantoApp.swift in Sources */,
-				000000000000000000000202 /* Features/Prototype/PrototypeContentView.swift in Sources */,
 				000000000000000000000203 /* Core/Playback/PlaybackTimeFormatter.swift in Sources */,
 				000000000000000000000206 /* Core/Models/MusicSource.swift in Sources */,
 				000000000000000000000207 /* Core/Playback/AudioPlaybackCoordinator.swift in Sources */,
@@ -245,6 +247,8 @@
 				000000000000000000000215 /* Sources/Jellyfin/JellyfinPlaybackAdapter.swift in Sources */,
 				000000000000000000000217 /* App/VelacantoRootView.swift in Sources */,
 				000000000000000000000218 /* Features/Library/MusicLibraryView.swift in Sources */,
+				000000000000000000000219 /* Features/Profile/ProfileView.swift in Sources */,
+				000000000000000000000220 /* Features/Search/MusicSearchView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

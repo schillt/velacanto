@@ -14,11 +14,5 @@ struct VelacantoApp: App {
                 jellyfin: jellyfin
             )
         }
-
-        #if os(macOS)
-            Settings {
-                VelacantoSettingsView(jellyfin: jellyfin)
-            }
-        #endif
     }
 }

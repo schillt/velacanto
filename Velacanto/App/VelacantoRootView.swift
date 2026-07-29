@@ -4,6 +4,7 @@ import UniformTypeIdentifiers
 enum AppDestination: String, Hashable, Identifiable, CaseIterable {
     case home
     case library
+    case search
 
     var id: Self { self }
 
@@ -13,6 +14,8 @@ enum AppDestination: String, Hashable, Identifiable, CaseIterable {
             "Home"
         case .library:
             "Library"
+        case .search:
+            "Search"
         }
     }
 
@@ -22,6 +25,8 @@ enum AppDestination: String, Hashable, Identifiable, CaseIterable {
             "house"
         case .library:
             "rectangle.stack"
+        case .search:
+            "magnifyingglass"
         }
     }
 }
@@ -33,7 +38,7 @@ struct VelacantoRootView: View {
     @State private var selectedDestination = AppDestination.home
     @State private var isChoosingLocalFile = false
     @State private var isPreparingTestTone = false
-    @State private var isShowingAccount = false
+    @State private var isShowingProfile = false
     @State private var isShowingNowPlaying = false
     @State private var actionError: String?
 
@@ -60,20 +65,24 @@ struct VelacantoRootView: View {
                 jellyfin: jellyfin
             )
         }
-        .sheet(isPresented: $isShowingAccount) {
+        .sheet(isPresented: $isShowingProfile) {
             NavigationStack {
-                JellyfinAccessView(
+                ProfileView(
                     jellyfin: jellyfin,
-                    playback: playback
+                    isPreparingPlaybackCheck: isPreparingTestTone,
+                    runPlaybackCheck: playTestTone
                 )
                 .toolbar {
                     ToolbarItem(placement: .confirmationAction) {
                         Button("Done") {
-                            isShowingAccount = false
+                            isShowingProfile = false
                         }
                     }
                 }
             }
+            #if os(macOS)
+                .frame(minWidth: 500, minHeight: 480)
+            #endif
         }
         .alert(
             "Couldn’t Play Audio",
@@ -153,6 +162,17 @@ struct VelacantoRootView: View {
                         library
                     }
                 }
+
+                Tab(
+                    AppDestination.search.title,
+                    systemImage: AppDestination.search.symbolName,
+                    value: AppDestination.search,
+                    role: .search
+                ) {
+                    NavigationStack {
+                        search
+                    }
+                }
             }
         }
     #endif
@@ -160,7 +180,7 @@ struct VelacantoRootView: View {
     #if os(macOS)
         private var macOSRoot: some View {
             NavigationSplitView {
-                List(AppDestination.allCases, selection: $selectedDestination) {
+                List([AppDestination.home, .library], selection: $selectedDestination) {
                     destination in
                     Label(destination.title, systemImage: destination.symbolName)
                         .tag(destination)
@@ -186,10 +206,12 @@ struct VelacantoRootView: View {
                         home
                     case .library:
                         library
+                    case .search:
+                        search
                     }
                 }
             }
-            .frame(minWidth: 820, minHeight: 620)
+            .frame(minWidth: 700, minHeight: 500)
         }
     #endif
 
@@ -201,11 +223,14 @@ struct VelacantoRootView: View {
                 isChoosingLocalFile = true
             },
             playRecentItem: playRecentItem,
-            showAccount: {
-                isShowingAccount = true
+            showProfile: {
+                isShowingProfile = true
             },
             showNowPlaying: {
                 isShowingNowPlaying = true
+            },
+            showLibrary: {
+                selectedDestination = .library
             }
         )
     }
@@ -214,13 +239,21 @@ struct VelacantoRootView: View {
         MusicLibraryView(
             playback: playback,
             jellyfin: jellyfin,
-            isPreparingTestTone: isPreparingTestTone,
             openLocalFile: {
                 isChoosingLocalFile = true
             },
-            playTestTone: playTestTone,
-            showAccount: {
-                isShowingAccount = true
+            showProfile: {
+                isShowingProfile = true
+            }
+        )
+    }
+
+    private var search: some View {
+        MusicSearchView(
+            playback: playback,
+            jellyfin: jellyfin,
+            showProfile: {
+                isShowingProfile = true
             }
         )
     }
@@ -254,14 +287,20 @@ struct VelacantoRootView: View {
             }
             do {
                 let url = try await DemoToneFactory.makeURL()
-                let request = try await localFiles.playbackRequest(
+                let localRequest = try await localFiles.playbackRequest(
                     for: LocalFileSelection(
                         url: url,
                         title: "Velacanto playback check",
                         artist: "440 Hz local tone"
                     )
                 )
-                playback.play(request)
+                playback.play(
+                    PlaybackRequest(
+                        item: localRequest.item,
+                        asset: localRequest.asset,
+                        recordsHistory: false
+                    )
+                )
             } catch {
                 actionError = error.localizedDescription
             }
@@ -282,15 +321,14 @@ struct VelacantoRootView: View {
 }
 
 private struct HomeView: View {
-    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
-
     @ObservedObject var playback: AudioPlaybackCoordinator
     @ObservedObject var jellyfin: JellyfinSessionController
 
     let openLocalFile: () -> Void
     let playRecentItem: (PlaybackItem) -> Void
-    let showAccount: () -> Void
+    let showProfile: () -> Void
     let showNowPlaying: () -> Void
+    let showLibrary: () -> Void
 
     var body: some View {
         ScrollView {
@@ -311,14 +349,10 @@ private struct HomeView: View {
         .navigationTitle("Home")
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
-                Button(action: showAccount) {
+                Button(action: showProfile) {
                     AccountAvatar(username: jellyfin.session?.username)
                 }
-                .accessibilityLabel(
-                    jellyfin.isSignedIn
-                        ? "Jellyfin account"
-                        : "Connect Jellyfin account"
-                )
+                .accessibilityLabel("Profile and settings")
             }
         }
     }
@@ -329,43 +363,38 @@ private struct HomeView: View {
             SectionEyebrow("Continue Listening")
 
             if let item = playback.currentItem {
-                Group {
-                    if horizontalSizeClass == .compact {
-                        VStack(alignment: .leading, spacing: 16) {
-                            Button(action: showNowPlaying) {
-                                PlaybackArtworkView(
-                                    item: item,
-                                    jellyfin: jellyfin
-                                )
-                                .aspectRatio(1.55, contentMode: .fill)
-                                .contentShape(.rect(cornerRadius: 18))
-                            }
-                            .buttonStyle(.plain)
-
-                            NowPlayingSummary(
-                                playback: playback,
-                                showsTransportButton: true
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 24) {
+                        Button(action: showNowPlaying) {
+                            HomePlaybackArtwork(
+                                item: item,
+                                jellyfin: jellyfin
                             )
                         }
-                    } else {
-                        HStack(spacing: 24) {
-                            Button(action: showNowPlaying) {
-                                PlaybackArtworkView(
-                                    item: item,
-                                    jellyfin: jellyfin
-                                )
-                                .aspectRatio(1.55, contentMode: .fill)
-                                .contentShape(.rect(cornerRadius: 18))
-                            }
-                            .buttonStyle(.plain)
-                            .frame(maxWidth: 600)
+                        .buttonStyle(.plain)
+                        .frame(minWidth: 260, maxWidth: 600)
 
-                            NowPlayingSummary(
-                                playback: playback,
-                                showsTransportButton: true
+                        NowPlayingSummary(
+                            playback: playback,
+                            showsTransportButton: true
+                        )
+                        .frame(minWidth: 230, idealWidth: 290)
+                    }
+
+                    VStack(alignment: .leading, spacing: 16) {
+                        Button(action: showNowPlaying) {
+                            HomePlaybackArtwork(
+                                item: item,
+                                jellyfin: jellyfin
                             )
-                            .frame(minWidth: 230, idealWidth: 290)
                         }
+                        .buttonStyle(.plain)
+                        .frame(maxWidth: .infinity)
+
+                        NowPlayingSummary(
+                            playback: playback,
+                            showsTransportButton: true
+                        )
                     }
                 }
             } else {
@@ -380,11 +409,9 @@ private struct HomeView: View {
                         VStack(alignment: .leading, spacing: 4) {
                             Text("Your music, ready when you are")
                                 .font(.title3.weight(.semibold))
-                            Text(
-                                "Choose a local file or connect your Jellyfin library to begin."
-                            )
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
+                            Text(emptyStateDescription)
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
                         }
                     }
 
@@ -431,22 +458,19 @@ private struct HomeView: View {
                 .font(.title2.weight(.semibold))
 
             VStack(spacing: 0) {
-                NavigationLink {
-                    JellyfinAccessView(
-                        jellyfin: jellyfin,
-                        playback: playback
-                    )
-                } label: {
-                    SourceRow(
-                        title: "Jellyfin",
-                        subtitle: jellyfinSubtitle,
-                        symbolName: "server.rack"
-                    )
-                }
-                .buttonStyle(.plain)
+                if let session = jellyfin.session {
+                    Button(action: showLibrary) {
+                        SourceRow(
+                            title: "Jellyfin",
+                            subtitle: "Browse music on \(session.serverName)",
+                            symbolName: "server.rack"
+                        )
+                    }
+                    .buttonStyle(.plain)
 
-                Divider()
-                    .padding(.leading, 58)
+                    Divider()
+                        .padding(.leading, 58)
+                }
 
                 Button(action: openLocalFile) {
                     SourceRow(
@@ -464,14 +488,11 @@ private struct HomeView: View {
         }
     }
 
-    private var jellyfinSubtitle: String {
-        if let session = jellyfin.session {
-            return "Connected to \(session.serverName)"
+    private var emptyStateDescription: String {
+        if jellyfin.isSignedIn {
+            return "Choose music from your library or open a local audio file."
         }
-        if jellyfin.phase == .restoring {
-            return "Restoring your session"
-        }
-        return "Connect your personal music server"
+        return "Open a local audio file, or add a music server from your profile."
     }
 }
 
@@ -504,7 +525,7 @@ private struct SourceRow: View {
     }
 }
 
-private struct SourceIcon: View {
+struct SourceIcon: View {
     let symbolName: String
 
     var body: some View {
@@ -658,6 +679,21 @@ private struct PlaybackArtworkView: View {
                 ArtworkPlaceholder(cornerRadius: 18)
             }
         }
+    }
+}
+
+private struct HomePlaybackArtwork: View {
+    let item: PlaybackItem
+    @ObservedObject var jellyfin: JellyfinSessionController
+
+    var body: some View {
+        Color.clear
+            .aspectRatio(1.55, contentMode: .fit)
+            .overlay {
+                PlaybackArtworkView(item: item, jellyfin: jellyfin)
+            }
+            .clipShape(.rect(cornerRadius: 18))
+            .contentShape(.rect(cornerRadius: 18))
     }
 }
 
@@ -824,107 +860,49 @@ private struct NowPlayingView: View {
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: 24) {
-                if let item = playback.currentItem {
-                    PlaybackArtworkView(item: item, jellyfin: jellyfin)
-                        .aspectRatio(1, contentMode: .fill)
-                        .frame(maxWidth: 440, maxHeight: 440)
-                        .shadow(color: .black.opacity(0.16), radius: 28, y: 14)
+            GeometryReader { geometry in
+                ScrollView {
+                    Group {
+                        if let item = playback.currentItem {
+                            ViewThatFits(in: .horizontal) {
+                                HStack(spacing: 32) {
+                                    artwork(
+                                        for: item,
+                                        size: horizontalArtworkSize(in: geometry.size)
+                                    )
 
-                    VStack(spacing: 5) {
-                        Text(item.title)
-                            .font(.title2.weight(.semibold))
-                            .multilineTextAlignment(.center)
-                        Text(item.artist)
-                            .foregroundStyle(.secondary)
-                        if let albumTitle = item.albumTitle {
-                            Text(albumTitle)
-                                .font(.callout)
-                                .foregroundStyle(.tertiary)
-                        }
-                    }
+                                    playbackDetails(for: item)
+                                        .frame(minWidth: 260, maxWidth: 420)
+                                }
+                                .frame(maxWidth: 760)
 
-                    VStack(spacing: 7) {
-                        Slider(
-                            value: Binding(
-                                get: { playback.progress },
-                                set: { playback.seek(toProgress: $0) }
-                            ),
-                            in: 0...1
-                        )
-                        .disabled(playback.duration <= 0)
-                        .accessibilityLabel("Playback position")
+                                VStack(spacing: 24) {
+                                    artwork(
+                                        for: item,
+                                        size: verticalArtworkSize(in: geometry.size)
+                                    )
 
-                        HStack {
-                            Text(
-                                PlaybackTimeFormatter.format(
-                                    seconds: playback.elapsed
-                                )
-                            )
-                            Spacer()
-                            Text(
-                                PlaybackTimeFormatter.format(
-                                    seconds: playback.duration
+                                    playbackDetails(for: item)
+                                        .frame(maxWidth: 520)
+                                }
+                            }
+                        } else {
+                            ContentUnavailableView(
+                                "Nothing Playing",
+                                systemImage: "music.note",
+                                description: Text(
+                                    "Choose music from your library to begin."
                                 )
                             )
                         }
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
                     }
-
-                    HStack(spacing: 38) {
-                        Button(role: .destructive) {
-                            playback.stop()
-                            dismiss()
-                        } label: {
-                            Image(systemName: "stop.fill")
-                                .frame(width: 44, height: 44)
-                        }
-                        .buttonStyle(.borderless)
-                        .accessibilityLabel("Stop")
-
-                        Button {
-                            playback.togglePlayback()
-                        } label: {
-                            Image(
-                                systemName: playback.showsPauseControl
-                                    ? "pause.circle.fill"
-                                    : "play.circle.fill"
-                            )
-                            .font(.system(size: 64))
-                            .contentTransition(.symbolEffect(.replace))
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel(
-                            playback.showsPauseControl ? "Pause" : "Play"
-                        )
-
-                        Color.clear
-                            .frame(width: 44, height: 44)
-                            .accessibilityHidden(true)
-                    }
-
-                    if let errorMessage = playback.errorMessage {
-                        Label(
-                            errorMessage,
-                            systemImage: "exclamationmark.triangle.fill"
-                        )
-                        .font(.callout)
-                        .foregroundStyle(.red)
-                    }
-                } else {
-                    ContentUnavailableView(
-                        "Nothing Playing",
-                        systemImage: "music.note",
-                        description: Text(
-                            "Choose music from your library to begin."
-                        )
+                    .padding(24)
+                    .frame(
+                        maxWidth: .infinity,
+                        minHeight: geometry.size.height
                     )
                 }
             }
-            .frame(maxWidth: 520)
-            .padding(24)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
             .navigationTitle("Now Playing")
             #if os(iOS)
                 .navigationBarTitleDisplayMode(.inline)
@@ -938,9 +916,105 @@ private struct NowPlayingView: View {
             }
         }
     }
+
+    private func artwork(for item: PlaybackItem, size: CGFloat) -> some View {
+        PlaybackArtworkView(item: item, jellyfin: jellyfin)
+            .aspectRatio(1, contentMode: .fill)
+            .frame(width: size, height: size)
+            .shadow(color: .black.opacity(0.16), radius: 28, y: 14)
+    }
+
+    private func playbackDetails(for item: PlaybackItem) -> some View {
+        VStack(spacing: 22) {
+            VStack(spacing: 5) {
+                Text(item.title)
+                    .font(.title2.weight(.semibold))
+                    .multilineTextAlignment(.center)
+                Text(item.artist)
+                    .foregroundStyle(.secondary)
+                if let albumTitle = item.albumTitle {
+                    Text(albumTitle)
+                        .font(.callout)
+                        .foregroundStyle(.tertiary)
+                }
+            }
+
+            VStack(spacing: 7) {
+                Slider(
+                    value: Binding(
+                        get: { playback.progress },
+                        set: { playback.seek(toProgress: $0) }
+                    ),
+                    in: 0...1
+                )
+                .disabled(playback.duration <= 0)
+                .accessibilityLabel("Playback position")
+
+                HStack {
+                    Text(PlaybackTimeFormatter.format(seconds: playback.elapsed))
+                    Spacer()
+                    Text(PlaybackTimeFormatter.format(seconds: playback.duration))
+                }
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+            }
+
+            HStack(spacing: 38) {
+                Button(role: .destructive) {
+                    playback.stop()
+                    dismiss()
+                } label: {
+                    Image(systemName: "stop.fill")
+                        .frame(width: 44, height: 44)
+                }
+                .buttonStyle(.borderless)
+                .accessibilityLabel("Stop")
+
+                Button {
+                    playback.togglePlayback()
+                } label: {
+                    Image(
+                        systemName: playback.showsPauseControl
+                            ? "pause.circle.fill"
+                            : "play.circle.fill"
+                    )
+                    .font(.system(size: 64))
+                    .contentTransition(.symbolEffect(.replace))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(
+                    playback.showsPauseControl ? "Pause" : "Play"
+                )
+
+                Color.clear
+                    .frame(width: 44, height: 44)
+                    .accessibilityHidden(true)
+            }
+
+            if let errorMessage = playback.errorMessage {
+                Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
+                    .font(.callout)
+                    .foregroundStyle(.red)
+            }
+        }
+    }
+
+    private func verticalArtworkSize(in availableSize: CGSize) -> CGFloat {
+        min(
+            440,
+            max(
+                160,
+                min(availableSize.width - 48, availableSize.height * 0.48)
+            )
+        )
+    }
+
+    private func horizontalArtworkSize(in availableSize: CGSize) -> CGFloat {
+        min(280, max(140, availableSize.height - 48))
+    }
 }
 
-private struct AccountAvatar: View {
+struct AccountAvatar: View {
     let username: String?
 
     var body: some View {
@@ -961,40 +1035,6 @@ private struct AccountAvatar: View {
         let characters = words.prefix(2).compactMap(\.first)
         let value = String(characters)
         return value.isEmpty ? "VC" : value.uppercased()
-    }
-}
-
-struct VelacantoSettingsView: View {
-    @ObservedObject var jellyfin: JellyfinSessionController
-
-    var body: some View {
-        Form {
-            Section("Jellyfin") {
-                if let session = jellyfin.session {
-                    LabeledContent("Server", value: session.serverName)
-                    LabeledContent("Account", value: session.username)
-                    Button("Log Out", role: .destructive) {
-                        Task {
-                            await jellyfin.logout()
-                        }
-                    }
-                } else {
-                    Text("No Jellyfin account is connected.")
-                        .foregroundStyle(.secondary)
-                }
-            }
-
-            Section("About") {
-                LabeledContent("Velacanto", value: "0.1.0")
-                Text("Native music playback for your personal library.")
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .formStyle(.grouped)
-        .padding()
-        #if os(macOS)
-            .frame(width: 460, height: 290)
-        #endif
     }
 }
 
