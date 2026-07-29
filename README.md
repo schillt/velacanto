@@ -1,2 +1,49 @@
-# velacanto
-Private Library Server Streaming Music App for Apple Platforms
+# Velacanto
+
+Velacanto is an early-stage native music player for Apple platforms. It streams
+music from a user's personal Jellyfin library.
+
+> **Status:** Pre-alpha. The project is preparing its first functional
+> prototype and is not ready for general use.
+
+## Goal for 0.1.0
+
+The first milestone will let a user:
+
+- Connect securely to a Jellyfin server.
+- Sign in to an existing Jellyfin account.
+- Browse the account's music library.
+- Select and stream a track.
+- Use basic playback and system media controls.
+
+Velacanto is initially planned for iOS and macOS. CarPlay support will follow
+after the core playback experience is proven.
+
+See the [0.1.0 project plan](docs/0.1-plan.md) for scope, technical direction,
+delivery slices, and acceptance criteria.
+
+## Development
+
+Run the pre-build check without Xcode:
+
+```sh
+./scripts/preflight.sh --skip-xcode
+```
+
+Run the complete check after Xcode is installed:
+
+```sh
+./scripts/preflight.sh
+```
+
+The Xcode project and application source will be added during the project
+foundation milestone.
+
+## Project identity
+
+- Publisher: Chameleon Enterprise Ltd
+- Bundle identifier: `com.chameleonenterprise.velacanto`
+- Primary language: English
+
+Velacanto is an independent project and is not affiliated with or endorsed by
+Jellyfin.
