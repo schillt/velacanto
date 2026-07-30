@@ -1,6 +1,6 @@
 # Velacanto known issues
 
-This list describes the current pre-alpha limitations after the first Jellyfin
+This list describes the current alpha limitations after the first Jellyfin
 vertical slice. It is not a release-readiness statement.
 
 - The Slice 1 connect, authenticate, relaunch, restore, and logout journey has
