@@ -37,7 +37,7 @@ flowchart TB
 
     subgraph Apple["Apple platform services"]
         Networking["URLSession and local-network policy<br/>(implemented)"]
-        Keychain["Keychain<br/>(implemented)"]
+        TokenFile["Private session file<br/>(implemented)"]
         Engine["Audio player engine<br/>(implemented)"]
         AV["AVFoundation and AVAudioSession<br/>(implemented)"]
         Media["Now Playing and remote commands<br/>(implemented)"]
@@ -62,7 +62,7 @@ flowchart TB
     Coordinator -. "after 0.1" .-> NavidromeAdapter
 
     Session --> API
-    Session --> Keychain
+    Session --> TokenFile
     Library --> API
     Library --> Models
     Playback --> Models
@@ -140,7 +140,7 @@ sequenceDiagram
     participant App as App coordinator
     participant Adapter as Jellyfin adapter
     participant API as Jellyfin API client
-    participant Keys as Keychain
+    participant SessionFile as Private session file
     participant JF as Jellyfin server
     participant Player as Playback coordinator
     participant OS as Apple media surfaces
@@ -157,7 +157,7 @@ sequenceDiagram
     API->>JF: Username and password
     JF-->>API: User and access token
     API-->>App: Authenticated session
-    App->>Keys: Store access token
+    App->>SessionFile: Store access token
 
     User->>UI: Browse music
     App->>API: Request libraries, albums, and tracks
@@ -210,19 +210,21 @@ sequenceDiagram
 | Component | Owns | Must not own |
 | --- | --- | --- |
 | SwiftUI surfaces | Presentation, navigation intent, accessible controls | Endpoint construction, token persistence, audio-session policy |
-| App coordinator | Session state, loading state, navigation state, service coordination | Raw Keychain, URLSession, or AVFoundation calls |
+| App coordinator | Session state, loading state, navigation state, service coordination | Raw file persistence, URLSession, or AVFoundation calls |
 | Session service | Authentication, restoration, logout, stable device identity | Password persistence or library browsing |
 | Jellyfin API client | Authenticated requests, endpoint details, response decoding | UI state or playback controls |
 | Library repository | Music views, albums, tracks, artwork, browse errors | Credential storage or audio routing |
 | Playback source adapters | Asynchronous source-specific asset resolution and the shortest required access lifetime | Transport controls, audio-session policy, or unrelated source APIs |
 | Playback coordinator | Observed player state, opaque resource leases, audio-session policy, interruptions, routes, and system controls | User authentication, source-specific resolution, or library presentation |
 | AVFoundation playback engine | Player-item readiness, timing, waiting, completion, stalls, and failures | Source identity, navigation, or authentication |
-| Platform adapters | Keychain, networking policy, audio, now-playing integration | Product navigation or domain rules |
+| Platform adapters | Private token persistence, networking policy, audio, now-playing integration | Product navigation or domain rules |
 
 ## Security and privacy boundaries
 
 - The password is transient and is not persisted by Velacanto.
-- The access token is stored in Keychain and removed on logout.
+- The access token is stored in a permission-restricted file inside Velacanto’s
+  private Application Support directory and removed on logout. iOS also applies
+  data protection to the file.
 - Real tokens and passwords must not appear in logs, fixtures, screenshots, or
   Git. Tests use clearly synthetic credential values.
 - Remote servers use HTTPS by default.
@@ -265,7 +267,7 @@ VelacantoTests/
 └── JellyfinFoundationTests.swift
 ```
 
-Keychain persistence currently lives beside the session boundary, and
+Token-file persistence currently lives beside the session boundary, and
 networking policy lives in the Jellyfin API actor. They remain isolated behind
 protocols even though the codebase is not yet large enough to justify separate
 platform directories for each adapter.

@@ -17,7 +17,8 @@ export DEVELOPER_DIR
 
 xcodebuild_path="$DEVELOPER_DIR/usr/bin/xcodebuild"
 project_path="$project_root/Velacanto.xcodeproj"
-derived_data_path=${VELACANTO_DERIVED_DATA_PATH:-"$project_root/DerivedData"}
+temporary_build_root=${TMPDIR:-/private/tmp}
+derived_data_path=${VELACANTO_DERIVED_DATA_PATH:-"${temporary_build_root%/}/VelacantoDerivedData"}
 
 if [ ! -x "$xcodebuild_path" ]; then
   printf 'Xcode is not ready at %s\n' "$DEVELOPER_DIR" >&2

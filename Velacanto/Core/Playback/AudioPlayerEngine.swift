@@ -11,9 +11,23 @@ enum PlaybackState: Equatable, Sendable {
     case failed(String)
 }
 
+struct PlaybackBufferState: Equatable, Sendable {
+    let loadedThrough: TimeInterval
+    let isEmpty: Bool
+    let isLikelyToKeepUp: Bool
+
+    static let empty = PlaybackBufferState(
+        loadedThrough: 0,
+        isEmpty: true,
+        isLikelyToKeepUp: false
+    )
+}
+
 enum AudioPlayerEngineEvent: Equatable, Sendable {
     case timeChanged(elapsed: TimeInterval, duration: TimeInterval)
     case stateChanged(PlaybackState)
+    case advancedToNextItem
+    case bufferStateChanged(PlaybackBufferState)
 }
 
 @MainActor
@@ -22,6 +36,8 @@ protocol AudioPlayerEngine: AnyObject {
     var hasCurrentItem: Bool { get }
 
     func load(_ item: AVPlayerItem)
+    func preload(_ item: AVPlayerItem?)
+    func advanceToNextItem()
     func play()
     func pause()
     func seek(to time: TimeInterval)
@@ -36,16 +52,20 @@ final class AVFoundationAudioPlayerEngine: AudioPlayerEngine {
         player.currentItem != nil
     }
 
-    private let player: AVPlayer
+    private let player: AVQueuePlayer
     private var timeObserver: Any?
     private var timeControlObservation: NSKeyValueObservation?
     private var itemStatusObservation: NSKeyValueObservation?
+    private var bufferEmptyObservation: NSKeyValueObservation?
+    private var bufferLikelyObservation: NSKeyValueObservation?
+    private var loadedRangesObservation: NSKeyValueObservation?
     private var notificationObservers: [NSObjectProtocol] = []
     private var currentItemDidEnd = false
     private var terminalFailureMessage: String?
 
-    init(player: AVPlayer = AVPlayer()) {
+    init(player: AVQueuePlayer = AVQueuePlayer()) {
         self.player = player
+        player.automaticallyWaitsToMinimizeStalling = true
         installTimeObserver()
         installTimeControlObservation()
     }
@@ -55,10 +75,31 @@ final class AVFoundationAudioPlayerEngine: AudioPlayerEngine {
         terminalFailureMessage = nil
         removeCurrentItemObservers()
         player.pause()
-        player.replaceCurrentItem(with: item)
+        player.removeAllItems()
+        player.insert(item, after: nil)
         eventHandler?(.timeChanged(elapsed: 0, duration: 0))
         eventHandler?(.stateChanged(.loading))
         observe(item)
+    }
+
+    func preload(_ item: AVPlayerItem?) {
+        guard let currentItem = player.currentItem else { return }
+        for queuedItem in player.items().dropFirst().reversed() {
+            player.remove(queuedItem)
+        }
+        guard
+            let item,
+            player.canInsert(item, after: currentItem)
+        else {
+            return
+        }
+        player.insert(item, after: currentItem)
+    }
+
+    func advanceToNextItem() {
+        guard player.items().count > 1 else { return }
+        player.advanceToNextItem()
+        beginObservingAdvancedItem()
     }
 
     func play() {
@@ -94,7 +135,7 @@ final class AVFoundationAudioPlayerEngine: AudioPlayerEngine {
         terminalFailureMessage = nil
         player.pause()
         removeCurrentItemObservers()
-        player.replaceCurrentItem(with: nil)
+        player.removeAllItems()
         eventHandler?(.timeChanged(elapsed: 0, duration: 0))
         eventHandler?(.stateChanged(.idle))
     }
@@ -132,6 +173,30 @@ final class AVFoundationAudioPlayerEngine: AudioPlayerEngine {
                 self?.handleStatusChange(for: item)
             }
         }
+        bufferEmptyObservation = item.observe(
+            \.isPlaybackBufferEmpty,
+            options: [.initial, .new]
+        ) { [weak self] item, _ in
+            Task { @MainActor [weak self] in
+                self?.publishBufferState(for: item)
+            }
+        }
+        bufferLikelyObservation = item.observe(
+            \.isPlaybackLikelyToKeepUp,
+            options: [.initial, .new]
+        ) { [weak self] item, _ in
+            Task { @MainActor [weak self] in
+                self?.publishBufferState(for: item)
+            }
+        }
+        loadedRangesObservation = item.observe(
+            \.loadedTimeRanges,
+            options: [.initial, .new]
+        ) { [weak self] item, _ in
+            Task { @MainActor [weak self] in
+                self?.publishBufferState(for: item)
+            }
+        }
 
         let center = NotificationCenter.default
         notificationObservers = [
@@ -141,7 +206,7 @@ final class AVFoundationAudioPlayerEngine: AudioPlayerEngine {
                 queue: .main
             ) { [weak self] _ in
                 MainActor.assumeIsolated {
-                    self?.handlePlaybackEnded()
+                    self?.handlePlaybackEnded(item)
                 }
             },
             center.addObserver(
@@ -232,7 +297,29 @@ final class AVFoundationAudioPlayerEngine: AudioPlayerEngine {
         eventHandler?(.timeChanged(elapsed: elapsed, duration: duration))
     }
 
-    private func handlePlaybackEnded() {
+    private func publishBufferState(for item: AVPlayerItem) {
+        guard item === player.currentItem else { return }
+        let loadedThrough =
+            item.loadedTimeRanges
+            .compactMap { $0.timeRangeValue.end.seconds }
+            .filter(\.isFinite)
+            .max() ?? 0
+        eventHandler?(
+            .bufferStateChanged(
+                PlaybackBufferState(
+                    loadedThrough: max(loadedThrough, 0),
+                    isEmpty: item.isPlaybackBufferEmpty,
+                    isLikelyToKeepUp: item.isPlaybackLikelyToKeepUp
+                )
+            )
+        )
+    }
+
+    private func handlePlaybackEnded(_ endedItem: AVPlayerItem) {
+        if player.currentItem !== endedItem {
+            beginObservingAdvancedItem()
+            return
+        }
         currentItemDidEnd = true
         terminalFailureMessage = nil
 
@@ -241,6 +328,20 @@ final class AVFoundationAudioPlayerEngine: AudioPlayerEngine {
             eventHandler?(.timeChanged(elapsed: duration, duration: duration))
         }
         eventHandler?(.stateChanged(.ended))
+    }
+
+    private func beginObservingAdvancedItem() {
+        guard let currentItem = player.currentItem else {
+            eventHandler?(.stateChanged(.ended))
+            return
+        }
+        currentItemDidEnd = false
+        terminalFailureMessage = nil
+        removeCurrentItemObservers()
+        observe(currentItem)
+        eventHandler?(.timeChanged(elapsed: 0, duration: 0))
+        eventHandler?(.advancedToNextItem)
+        publishState(for: player.timeControlStatus)
     }
 
     private func publishFailure(_ error: Error?) {
@@ -252,6 +353,9 @@ final class AVFoundationAudioPlayerEngine: AudioPlayerEngine {
 
     private func removeCurrentItemObservers() {
         itemStatusObservation = nil
+        bufferEmptyObservation = nil
+        bufferLikelyObservation = nil
+        loadedRangesObservation = nil
         for observer in notificationObservers {
             NotificationCenter.default.removeObserver(observer)
         }
@@ -261,6 +365,9 @@ final class AVFoundationAudioPlayerEngine: AudioPlayerEngine {
     isolated deinit {
         timeControlObservation = nil
         itemStatusObservation = nil
+        bufferEmptyObservation = nil
+        bufferLikelyObservation = nil
+        loadedRangesObservation = nil
         for observer in notificationObservers {
             NotificationCenter.default.removeObserver(observer)
         }

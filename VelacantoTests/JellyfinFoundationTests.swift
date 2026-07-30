@@ -57,18 +57,24 @@ final class JellyfinFoundationTests: XCTestCase {
         }
     }
 
-    func testJellyfinTokenStoreMigratesLegacyPreferenceIntoKeychain() throws {
+    func testJellyfinTokenStorePersistsWithoutKeychainAndMigratesLegacyPreference()
+        throws
+    {
         let suiteName = "VelacantoTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        let service = "com.chameleonenterprise.velacanto.tests.\(UUID().uuidString)"
+        let directory = FileManager.default.temporaryDirectory.appending(
+            path: "VelacantoTokenStoreTests-\(UUID().uuidString)",
+            directoryHint: .isDirectory
+        )
         let account = "jellyfin.access-token"
-        let store = KeychainJellyfinTokenStore(
-            service: service,
+        let store = FileJellyfinTokenStore(
+            directory: directory,
             account: account,
             migratingFrom: defaults
         )
         defer {
             try? store.deleteToken()
+            try? FileManager.default.removeItem(at: directory)
             defaults.removePersistentDomain(forName: suiteName)
         }
 
@@ -78,12 +84,22 @@ final class JellyfinFoundationTests: XCTestCase {
         XCTAssertEqual(try store.loadToken(), "legacy-token")
         XCTAssertNil(defaults.string(forKey: account))
         XCTAssertEqual(
-            try KeychainJellyfinTokenStore(
-                service: service,
+            try FileJellyfinTokenStore(
+                directory: directory,
                 account: account
             ).loadToken(),
             "legacy-token"
         )
+
+        let tokenFile = directory.appending(
+            path: "jellyfin-access-token-v1",
+            directoryHint: .notDirectory
+        )
+        let permissions =
+            try FileManager.default.attributesOfItem(atPath: tokenFile.path)[
+                .posixPermissions
+            ] as? NSNumber
+        XCTAssertEqual(permissions?.intValue, 0o600)
 
         try store.saveToken("replacement-token")
         XCTAssertEqual(try store.loadToken(), "replacement-token")
@@ -240,6 +256,40 @@ final class JellyfinFoundationTests: XCTestCase {
         XCTAssertEqual(query["api_key"], "access-token")
     }
 
+    func testAuthenticatedArtworkRequestKeepsTokenOutOfURL() throws {
+        let server = try JellyfinServerURL("https://example.com/jellyfin")
+        let builder = JellyfinRequestBuilder(
+            server: server,
+            deviceID: "stable-device",
+            accessToken: "access-token"
+        )
+
+        let request = try builder.artworkRequest(
+            itemID: "album-id",
+            imageTag: "image-tag",
+            maxWidth: 512
+        )
+        let components = try XCTUnwrap(
+            URLComponents(url: XCTUnwrap(request.url), resolvingAgainstBaseURL: false)
+        )
+        let queryNames = Set((components.queryItems ?? []).map(\.name))
+
+        XCTAssertFalse(queryNames.contains("api_key"))
+        XCTAssertTrue(
+            try XCTUnwrap(
+                request.value(forHTTPHeaderField: "Authorization")
+            ).contains("Token=\"access-token\"")
+        )
+    }
+
+    func testArtworkSizeBucketingIsStable() {
+        XCTAssertEqual(ArtworkKey.sizeBucket(for: 44), 128)
+        XCTAssertEqual(ArtworkKey.sizeBucket(for: 129), 256)
+        XCTAssertEqual(ArtworkKey.sizeBucket(for: 480), 512)
+        XCTAssertEqual(ArtworkKey.sizeBucket(for: 720), 1_024)
+        XCTAssertEqual(ArtworkKey.sizeBucket(for: 1_200), 1_024)
+    }
+
     func testUserImageURLUsesJellyfinProfileImageEndpoint() throws {
         let server = try JellyfinServerURL("https://example.com/jellyfin")
         let builder = JellyfinRequestBuilder(
@@ -353,6 +403,165 @@ final class JellyfinFoundationTests: XCTestCase {
         )
     }
 
+    func testPagedCatalogMergesLibrariesInOrderWithoutDuplicates() async throws {
+        let decoder = JSONDecoder()
+        let firstLibrary = try decoder.decode(
+            JellyfinItem.self,
+            from: Data(#"{"Id":"library-a","Name":"Main Music"}"#.utf8)
+        )
+        let secondLibrary = try decoder.decode(
+            JellyfinItem.self,
+            from: Data(#"{"Id":"library-b","Name":"Archive"}"#.utf8)
+        )
+        func album(_ id: String, _ name: String) throws -> JellyfinItem {
+            try decoder.decode(
+                JellyfinItem.self,
+                from: Data(
+                    #"{"Id":"\#(id)","Name":"\#(name)","Type":"MusicAlbum"}"#.utf8
+                )
+            )
+        }
+        let shared = try album("shared", "Delta")
+        let api = FakeJellyfinAPI(
+            availableLibraries: [firstLibrary, secondLibrary],
+            albumsByLibrary: [
+                firstLibrary.id: [
+                    try album("alpha", "Alpha"),
+                    shared,
+                ],
+                secondLibrary.id: [
+                    try album("bravo", "Bravo"),
+                    try album("charlie", "Charlie"),
+                    shared,
+                ],
+            ]
+        )
+        let controller = JellyfinSessionController(
+            tokenStore: RecordingTokenStore(),
+            sessionStore: RecordingSessionStore(),
+            autoRestore: false,
+            makeClient: { _, _, _ in api }
+        )
+        await controller.connect(to: "https://example.com")
+        await controller.signIn(username: "Tyler", password: "correct")
+
+        let first = try await controller.musicAlbumsPage(
+            cursor: nil,
+            limit: 2
+        )
+        let second = try await controller.musicAlbumsPage(
+            cursor: first.cursor,
+            limit: 2
+        )
+        let exhausted = try await controller.musicAlbumsPage(
+            cursor: second.cursor,
+            limit: 2
+        )
+
+        XCTAssertEqual(first.items.map(\.name), ["Alpha", "Bravo"])
+        XCTAssertEqual(second.items.map(\.name), ["Charlie", "Delta"])
+        XCTAssertTrue(second.hasMore)
+        XCTAssertTrue(exhausted.items.isEmpty)
+        XCTAssertFalse(exhausted.hasMore)
+    }
+
+    func testFastScrollPaginationSurvivesViewTaskCancellationAndRetries() async throws {
+        let decoder = JSONDecoder()
+        let library = try decoder.decode(
+            JellyfinItem.self,
+            from: Data(#"{"Id":"library","Name":"Music"}"#.utf8)
+        )
+        let albums = try (0..<60).map { index in
+            let name = "Album \(String(format: "%03d", index))"
+            return try decoder.decode(
+                JellyfinItem.self,
+                from: Data(
+                    #"{"Id":"album-\#(index)","Name":"\#(name)","Type":"MusicAlbum"}"#.utf8
+                )
+            )
+        }
+        let api = FakeJellyfinAPI(
+            availableLibraries: [library],
+            albumsByLibrary: [library.id: albums],
+            albumPageDelay: .milliseconds(50),
+            transientAlbumPageFailures: 1
+        )
+        let controller = JellyfinSessionController(
+            tokenStore: RecordingTokenStore(),
+            sessionStore: RecordingSessionStore(),
+            autoRestore: false,
+            makeClient: { _, _, _ in api }
+        )
+        await controller.connect(to: "https://example.com")
+        await controller.signIn(username: "Tyler", password: "correct")
+        let model = PagedJellyfinItemsModel()
+        let loader: PagedJellyfinItemsModel.Loader = { cursor in
+            try await controller.musicAlbumsPage(cursor: cursor)
+        }
+
+        await model.reset(loader: loader)
+        XCTAssertEqual(model.items.count, 50)
+
+        let paginationTask = try XCTUnwrap(
+            model.loadMoreIfNeeded(
+                itemID: try XCTUnwrap(model.items.last?.id),
+                loader: loader
+            )
+        )
+        let viewTask = Task {
+            await paginationTask.value
+        }
+        viewTask.cancel()
+        await paginationTask.value
+
+        XCTAssertEqual(model.items.count, 60)
+        XCTAssertNil(model.errorMessage)
+        let requestCount = await api.albumPageRequestCount()
+        XCTAssertGreaterThanOrEqual(requestCount, 3)
+    }
+
+    func testCatalogCacheIsClearedOnLogout() async throws {
+        let api = FakeJellyfinAPI()
+        let controller = JellyfinSessionController(
+            tokenStore: RecordingTokenStore(),
+            sessionStore: RecordingSessionStore(),
+            autoRestore: false,
+            makeClient: { _, _, _ in api }
+        )
+        let contextID = UUID().uuidString
+        let item = try JSONDecoder().decode(
+            JellyfinItem.self,
+            from: Data(
+                #"{"Id":"cached-item","Name":"Cached","Type":"Audio"}"#.utf8
+            )
+        )
+        await controller.connect(to: "https://example.com")
+        await controller.signIn(username: "Tyler", password: "correct")
+        await controller.cacheCatalogItems(
+            [item],
+            kind: .albumTracks,
+            contextID: contextID
+        )
+        let cachedItems = await controller.cachedCatalogItems(
+            kind: .albumTracks,
+            contextID: contextID
+        )
+        XCTAssertEqual(
+            cachedItems.map(\.id),
+            [item.id]
+        )
+
+        await controller.logout()
+        await controller.connect(to: "https://example.com")
+        await controller.signIn(username: "Tyler", password: "correct")
+        let itemsAfterLogout = await controller.cachedCatalogItems(
+            kind: .albumTracks,
+            contextID: contextID
+        )
+
+        XCTAssertTrue(itemsAfterLogout.isEmpty)
+    }
+
     func testSessionSignInPersistsTokenButNeverPasswordThenLogoutDeletesIt() async throws {
         let tokenStore = RecordingTokenStore()
         let sessionStore = RecordingSessionStore()
@@ -393,6 +602,47 @@ final class JellyfinFoundationTests: XCTestCase {
         XCTAssertNil(tokenStore.token)
         XCTAssertNil(sessionStore.session)
         XCTAssertEqual(tokenStore.deleteCount, 1)
+    }
+
+    func testFileBackedSessionRestoresAcrossControllerRelaunch() async throws {
+        let suiteName = "VelacantoTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        let directory = FileManager.default.temporaryDirectory.appending(
+            path: "VelacantoSessionRestoreTests-\(UUID().uuidString)",
+            directoryHint: .isDirectory
+        )
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+        let tokenStore = FileJellyfinTokenStore(directory: directory)
+        let sessionStore = UserDefaultsJellyfinSessionStore(defaults: defaults)
+        let api = FakeJellyfinAPI()
+        var firstController: JellyfinSessionController? =
+            JellyfinSessionController(
+                tokenStore: tokenStore,
+                sessionStore: sessionStore,
+                autoRestore: false,
+                makeClient: { _, _, _ in api }
+            )
+
+        await firstController?.connect(to: "https://example.com")
+        await firstController?.signIn(username: "Tyler", password: "correct")
+        XCTAssertEqual(firstController?.phase, .signedIn)
+        firstController = nil
+
+        let restoredController = JellyfinSessionController(
+            tokenStore: FileJellyfinTokenStore(directory: directory),
+            sessionStore: UserDefaultsJellyfinSessionStore(defaults: defaults),
+            makeClient: { _, _, _ in api }
+        )
+        for _ in 0..<100 where restoredController.phase == .restoring {
+            await Task.yield()
+        }
+
+        XCTAssertEqual(restoredController.phase, .signedIn)
+        XCTAssertEqual(restoredController.session?.username, "Tyler")
+        XCTAssertEqual(try tokenStore.loadToken(), "access-token")
     }
 
     func testExpiredRestoredSessionDeletesSavedToken() async throws {
@@ -591,6 +841,9 @@ private actor FakeJellyfinAPI: JellyfinAPIService {
     private let albumsError: JellyfinAPIError?
     private let availableLibraries: [JellyfinItem]
     private let albumsByLibrary: [String: [JellyfinItem]]
+    private let albumPageDelay: Duration?
+    private var transientAlbumPageFailures: Int
+    private var albumPageRequests = 0
 
     init(
         publicServerInfoError: JellyfinAPIError? = nil,
@@ -598,7 +851,9 @@ private actor FakeJellyfinAPI: JellyfinAPIService {
         currentUserError: JellyfinAPIError? = nil,
         albumsError: JellyfinAPIError? = nil,
         availableLibraries: [JellyfinItem] = [],
-        albumsByLibrary: [String: [JellyfinItem]] = [:]
+        albumsByLibrary: [String: [JellyfinItem]] = [:],
+        albumPageDelay: Duration? = nil,
+        transientAlbumPageFailures: Int = 0
     ) {
         self.publicServerInfoError = publicServerInfoError
         self.authenticationError = authenticationError
@@ -606,6 +861,8 @@ private actor FakeJellyfinAPI: JellyfinAPIService {
         self.albumsError = albumsError
         self.availableLibraries = availableLibraries
         self.albumsByLibrary = albumsByLibrary
+        self.albumPageDelay = albumPageDelay
+        self.transientAlbumPageFailures = transientAlbumPageFailures
     }
 
     func publicServerInfo() async throws -> JellyfinServerInfo {
@@ -668,6 +925,44 @@ private actor FakeJellyfinAPI: JellyfinAPIService {
             throw albumsError
         }
         return []
+    }
+
+    func albumsPage(
+        userID: String,
+        libraryID: String,
+        artistID: String?,
+        startIndex: Int,
+        limit: Int,
+        searchTerm: String?
+    ) async throws -> JellyfinItemPage {
+        albumPageRequests += 1
+        if startIndex > 0, let albumPageDelay {
+            try await Task.sleep(for: albumPageDelay)
+        }
+        if startIndex > 0, transientAlbumPageFailures > 0 {
+            transientAlbumPageFailures -= 1
+            throw JellyfinAPIError.unreachable
+        }
+        if let albumsError {
+            throw albumsError
+        }
+        var albums = albumsByLibrary[libraryID] ?? []
+        if let searchTerm, !searchTerm.isEmpty {
+            albums = albums.filter {
+                $0.name.localizedCaseInsensitiveContains(searchTerm)
+            }
+        }
+        let safeStart = min(max(startIndex, 0), albums.count)
+        let safeEnd = min(safeStart + max(limit, 1), albums.count)
+        return JellyfinItemPage(
+            items: Array(albums[safeStart..<safeEnd]),
+            startIndex: safeStart,
+            totalRecordCount: albums.count
+        )
+    }
+
+    func albumPageRequestCount() -> Int {
+        albumPageRequests
     }
 
     func artists(userID: String, libraryID: String) async throws -> [JellyfinItem] {

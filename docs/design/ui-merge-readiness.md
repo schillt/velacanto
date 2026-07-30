@@ -48,8 +48,8 @@ Jellyfin foundations.
 - Source-neutral playback requests and app-level player ownership.
 - Play, pause, stop, seek, elapsed time, duration, Now Playing metadata, and
   system media commands.
-- Jellyfin URL validation, connection, authentication, Keychain token storage,
-  session restoration, and logout.
+- Jellyfin URL validation, connection, authentication, prompt-free private token
+  storage, session restoration, and logout.
 - Jellyfin library, album, and track browsing with loading, empty, retry, and
   error states.
 - Jellyfin stream resolution and handoff to the shared playback coordinator.

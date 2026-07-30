@@ -6,6 +6,8 @@ technical planning.
 ## Planning
 
 - [0.1.0 plan](0.1-plan.md) — scope, delivery slices, and acceptance criteria.
+- [0.1 stability acceptance](0.1-stability-acceptance.md) — final automated
+  evidence and physical-device/server verification matrix.
 - [Roadmap](roadmap.md) — ordered work, checkpoints, and later opportunities.
 - [Known issues](known-issues.md) — current alpha limitations and live-test
   gaps.

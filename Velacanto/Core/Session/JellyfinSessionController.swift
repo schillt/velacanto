@@ -1,6 +1,6 @@
 import Combine
 import Foundation
-import Security
+import os
 
 struct JellyfinSession: Codable, Equatable, Sendable {
     let serverURL: URL
@@ -36,6 +36,169 @@ enum JellyfinSessionPhase: Equatable, Sendable {
     case signedIn
 }
 
+enum JellyfinCatalogKind: String, Codable, Sendable {
+    case albums
+    case artists
+    case songs
+    case playlists
+    case search
+    case albumTracks
+    case playlistTracks
+}
+
+struct JellyfinCatalogCursor: Sendable {
+    fileprivate let identity: String
+    fileprivate var offsets: [String: Int]
+    fileprivate var totals: [String: Int]
+    fileprivate var buffers: [String: [JellyfinItem]]
+    fileprivate var exhaustedSources: Set<String>
+    fileprivate var seenItemIDs: Set<String>
+}
+
+struct JellyfinCatalogPage: Sendable {
+    let items: [JellyfinItem]
+    let totalRecordCount: Int
+    let cursor: JellyfinCatalogCursor?
+
+    var hasMore: Bool {
+        cursor != nil
+    }
+}
+
+private actor JellyfinCatalogCache {
+    private struct Record: Codable {
+        var items: [JellyfinItem]
+        var updatedAt: Date
+        var lastAccessedAt: Date
+        let isDetail: Bool
+    }
+
+    private struct Envelope: Codable {
+        let version: Int
+        var records: [String: Record]
+    }
+
+    private let directory: URL
+    private let maxBytes = 10 * 1_024 * 1_024
+    private let maxAge: TimeInterval = 7 * 24 * 60 * 60
+    private let encoder = JSONEncoder()
+    private let decoder = JSONDecoder()
+
+    init(fileManager: FileManager = .default) {
+        let baseDirectory =
+            fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first
+            ?? fileManager.temporaryDirectory
+        directory = baseDirectory.appending(
+            path: "VelacantoCatalog",
+            directoryHint: .isDirectory
+        )
+    }
+
+    func load(
+        serverID: String,
+        userID: String,
+        key: String
+    ) -> [JellyfinItem] {
+        var envelope = readEnvelope(serverID: serverID, userID: userID)
+        guard var record = envelope.records[key] else { return [] }
+        guard Date().timeIntervalSince(record.updatedAt) <= maxAge else {
+            envelope.records.removeValue(forKey: key)
+            writeEnvelope(envelope, serverID: serverID, userID: userID)
+            return []
+        }
+        record.lastAccessedAt = Date()
+        envelope.records[key] = record
+        writeEnvelope(envelope, serverID: serverID, userID: userID)
+        return record.items
+    }
+
+    func save(
+        _ items: [JellyfinItem],
+        serverID: String,
+        userID: String,
+        key: String,
+        isDetail: Bool
+    ) {
+        var envelope = readEnvelope(serverID: serverID, userID: userID)
+        let now = Date()
+        envelope.records[key] = Record(
+            items: Array(items.prefix(200)),
+            updatedAt: now,
+            lastAccessedAt: now,
+            isDetail: isDetail
+        )
+
+        let detailKeys =
+            envelope.records
+            .filter(\.value.isDetail)
+            .sorted { $0.value.lastAccessedAt > $1.value.lastAccessedAt }
+            .dropFirst(20)
+            .map(\.key)
+        for detailKey in detailKeys {
+            envelope.records.removeValue(forKey: detailKey)
+        }
+
+        var sortedKeys = envelope.records.keys.sorted {
+            let lhs = envelope.records[$0]?.lastAccessedAt ?? .distantPast
+            let rhs = envelope.records[$1]?.lastAccessedAt ?? .distantPast
+            return lhs < rhs
+        }
+        while let data = try? encoder.encode(envelope),
+            data.count > maxBytes,
+            let oldestKey = sortedKeys.first
+        {
+            envelope.records.removeValue(forKey: oldestKey)
+            sortedKeys.removeFirst()
+        }
+        writeEnvelope(envelope, serverID: serverID, userID: userID)
+    }
+
+    func clear(serverID: String, userID: String) {
+        try? FileManager.default.removeItem(
+            at: fileURL(serverID: serverID, userID: userID)
+        )
+    }
+
+    private func readEnvelope(
+        serverID: String,
+        userID: String
+    ) -> Envelope {
+        guard
+            let data = try? Data(
+                contentsOf: fileURL(serverID: serverID, userID: userID)
+            ),
+            let envelope = try? decoder.decode(Envelope.self, from: data),
+            envelope.version == 1
+        else {
+            return Envelope(version: 1, records: [:])
+        }
+        return envelope
+    }
+
+    private func writeEnvelope(
+        _ envelope: Envelope,
+        serverID: String,
+        userID: String
+    ) {
+        guard let data = try? encoder.encode(envelope) else { return }
+        try? FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        try? data.write(
+            to: fileURL(serverID: serverID, userID: userID),
+            options: .atomic
+        )
+    }
+
+    private func fileURL(serverID: String, userID: String) -> URL {
+        let safeID = "\(serverID)-\(userID)".map {
+            $0.isLetter || $0.isNumber || $0 == "-" ? $0 : "-"
+        }
+        return directory.appending(path: "\(String(safeID)).json")
+    }
+}
+
 protocol JellyfinTokenStoring {
     func loadToken() throws -> String?
     func saveToken(_ token: String) throws
@@ -50,26 +213,56 @@ protocol JellyfinSessionPersisting {
     func saveDeviceID(_ deviceID: String)
 }
 
-struct KeychainJellyfinTokenStore: JellyfinTokenStoring {
-    private static let defaultService = "com.chameleonenterprise.velacanto"
+struct FileJellyfinTokenStore: JellyfinTokenStoring {
     private static let defaultAccount = "jellyfin.access-token"
 
-    private let service: String
+    private let fileManager: FileManager
+    private let directory: URL
+    private let fileURL: URL
     private let account: String
     private let legacyDefaults: UserDefaults?
 
     init(
-        service: String = defaultService,
+        fileManager: FileManager = .default,
+        directory: URL? = nil,
         account: String = defaultAccount,
         migratingFrom legacyDefaults: UserDefaults? = nil
     ) {
-        self.service = service
+        let applicationSupport =
+            fileManager.urls(
+                for: .applicationSupportDirectory,
+                in: .userDomainMask
+            ).first ?? fileManager.temporaryDirectory
+        let resolvedDirectory =
+            directory
+            ?? applicationSupport.appending(
+                path: "Velacanto/Session",
+                directoryHint: .isDirectory
+            )
+        self.fileManager = fileManager
+        self.directory = resolvedDirectory
+        fileURL = resolvedDirectory.appending(
+            path: "jellyfin-access-token-v1",
+            directoryHint: .notDirectory
+        )
         self.account = account
         self.legacyDefaults = legacyDefaults
     }
 
     func loadToken() throws -> String? {
-        if let token = try keychainToken() {
+        if fileManager.fileExists(atPath: fileURL.path) {
+            let data: Data
+            do {
+                data = try Data(contentsOf: fileURL)
+            } catch {
+                throw JellyfinCredentialStoreError.storageUnavailable
+            }
+            guard
+                let token = String(data: data, encoding: .utf8),
+                !token.isEmpty
+            else {
+                throw JellyfinCredentialStoreError.invalidToken
+            }
             return token
         }
 
@@ -82,6 +275,7 @@ struct KeychainJellyfinTokenStore: JellyfinTokenStoring {
         }
 
         try saveToken(legacyToken)
+        legacyDefaults.removeObject(forKey: account)
         return legacyToken
     }
 
@@ -90,23 +284,30 @@ struct KeychainJellyfinTokenStore: JellyfinTokenStoring {
             throw JellyfinCredentialStoreError.invalidToken
         }
 
-        let value = Data(token.utf8)
-        let updateStatus = SecItemUpdate(
-            baseQuery as CFDictionary,
-            [kSecValueData as String: value] as CFDictionary
-        )
-
-        switch updateStatus {
-        case errSecSuccess:
-            break
-        case errSecItemNotFound:
-            var newItem = baseQuery
-            newItem[kSecValueData as String] = value
-            newItem[kSecAttrAccessible as String] =
-                kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-            try checkStatus(SecItemAdd(newItem as CFDictionary, nil))
-        default:
-            throw JellyfinCredentialStoreError.keychain(updateStatus)
+        do {
+            try fileManager.createDirectory(
+                at: directory,
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700]
+            )
+            try fileManager.setAttributes(
+                [.posixPermissions: 0o700],
+                ofItemAtPath: directory.path
+            )
+            try Data(token.utf8).write(to: fileURL, options: .atomic)
+            var attributes: [FileAttributeKey: Any] = [
+                .posixPermissions: 0o600
+            ]
+            #if os(iOS)
+                attributes[.protectionKey] =
+                    FileProtectionType.completeUntilFirstUserAuthentication
+            #endif
+            try fileManager.setAttributes(
+                attributes,
+                ofItemAtPath: fileURL.path
+            )
+        } catch {
+            throw JellyfinCredentialStoreError.storageUnavailable
         }
 
         legacyDefaults?.removeObject(forKey: account)
@@ -116,48 +317,11 @@ struct KeychainJellyfinTokenStore: JellyfinTokenStoring {
         defer {
             legacyDefaults?.removeObject(forKey: account)
         }
-
-        let status = SecItemDelete(baseQuery as CFDictionary)
-        guard status == errSecSuccess || status == errSecItemNotFound else {
-            throw JellyfinCredentialStoreError.keychain(status)
-        }
-    }
-
-    private var baseQuery: [String: Any] {
-        [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-        ]
-    }
-
-    private func keychainToken() throws -> String? {
-        var query = baseQuery
-        query[kSecMatchLimit as String] = kSecMatchLimitOne
-        query[kSecReturnData as String] = true
-
-        var result: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        switch status {
-        case errSecSuccess:
-            guard
-                let data = result as? Data,
-                let token = String(data: data, encoding: .utf8),
-                !token.isEmpty
-            else {
-                throw JellyfinCredentialStoreError.invalidToken
-            }
-            return token
-        case errSecItemNotFound:
-            return nil
-        default:
-            throw JellyfinCredentialStoreError.keychain(status)
-        }
-    }
-
-    private func checkStatus(_ status: OSStatus) throws {
-        guard status == errSecSuccess else {
-            throw JellyfinCredentialStoreError.keychain(status)
+        guard fileManager.fileExists(atPath: fileURL.path) else { return }
+        do {
+            try fileManager.removeItem(at: fileURL)
+        } catch {
+            throw JellyfinCredentialStoreError.storageUnavailable
         }
     }
 }
@@ -196,24 +360,24 @@ struct UserDefaultsJellyfinSessionStore: JellyfinSessionPersisting {
 
 enum JellyfinCredentialStoreError: LocalizedError, Equatable {
     case invalidToken
-    case keychain(OSStatus)
+    case storageUnavailable
 
     var errorDescription: String? {
         switch self {
         case .invalidToken:
             "Jellyfin returned an invalid access token."
-        case .keychain(let status):
-            if let message = SecCopyErrorMessageString(status, nil) as String? {
-                "The Jellyfin access token could not be stored securely: \(message)"
-            } else {
-                "The Jellyfin access token could not be stored securely."
-            }
+        case .storageUnavailable:
+            "The Jellyfin session could not be saved in Velacanto’s private app storage."
         }
     }
 }
 
 @MainActor
 final class JellyfinSessionController: ObservableObject {
+    private static let performanceLog = OSLog(
+        subsystem: "com.chameleonenterprise.velacanto",
+        category: "Performance"
+    )
     typealias ClientFactory =
         @Sendable (JellyfinServerURL, String, String?) -> any JellyfinAPIService
 
@@ -228,13 +392,14 @@ final class JellyfinSessionController: ObservableObject {
     private let sessionStore: any JellyfinSessionPersisting
     private let makeClient: ClientFactory
     private let playbackAdapter = JellyfinPlaybackAdapter()
+    private let catalogCache = JellyfinCatalogCache()
     private let deviceID: String
     private var candidateServer: JellyfinServerURL?
     private var client: (any JellyfinAPIService)?
 
     convenience init(autoRestore: Bool = true) {
         self.init(
-            tokenStore: KeychainJellyfinTokenStore(
+            tokenStore: FileJellyfinTokenStore(
                 migratingFrom: .standard
             ),
             sessionStore: UserDefaultsJellyfinSessionStore(),
@@ -289,6 +454,14 @@ final class JellyfinSessionController: ObservableObject {
 
     var usesInsecureLocalHTTP: Bool {
         (candidateServer?.url ?? session?.serverURL)?.scheme?.lowercased() == "http"
+    }
+
+    var playbackAccount: PlaybackAccount? {
+        guard let session else { return nil }
+        return PlaybackAccount(
+            serverID: session.serverID,
+            userID: session.userID
+        )
     }
 
     func connect(to userInput: String) async {
@@ -480,6 +653,214 @@ final class JellyfinSessionController: ObservableObject {
         }
     }
 
+    func musicAlbumsPage(
+        cursor: JellyfinCatalogCursor?,
+        limit: Int = 50,
+        searchTerm: String? = nil,
+        artist: JellyfinItem? = nil
+    ) async throws -> JellyfinCatalogPage {
+        try await multiLibraryPage(
+            kind: .albums,
+            contextID: artist?.id,
+            cursor: cursor,
+            limit: limit,
+            searchTerm: searchTerm
+        ) { client, userID, libraryID, offset, pageLimit, term in
+            try await client.albumsPage(
+                userID: userID,
+                libraryID: libraryID,
+                artistID: artist?.id,
+                startIndex: offset,
+                limit: pageLimit,
+                searchTerm: term
+            )
+        }
+    }
+
+    func musicArtistsPage(
+        cursor: JellyfinCatalogCursor?,
+        limit: Int = 50,
+        searchTerm: String? = nil
+    ) async throws -> JellyfinCatalogPage {
+        try await multiLibraryPage(
+            kind: .artists,
+            contextID: nil,
+            cursor: cursor,
+            limit: limit,
+            searchTerm: searchTerm
+        ) { client, userID, libraryID, offset, pageLimit, term in
+            try await client.artistsPage(
+                userID: userID,
+                libraryID: libraryID,
+                startIndex: offset,
+                limit: pageLimit,
+                searchTerm: term
+            )
+        }
+    }
+
+    func musicSongsPage(
+        cursor: JellyfinCatalogCursor?,
+        limit: Int = 50,
+        searchTerm: String? = nil
+    ) async throws -> JellyfinCatalogPage {
+        try await multiLibraryPage(
+            kind: .songs,
+            contextID: nil,
+            cursor: cursor,
+            limit: limit,
+            searchTerm: searchTerm
+        ) { client, userID, libraryID, offset, pageLimit, term in
+            try await client.songsPage(
+                userID: userID,
+                libraryID: libraryID,
+                startIndex: offset,
+                limit: pageLimit,
+                searchTerm: term
+            )
+        }
+    }
+
+    func musicPlaylistsPage(
+        cursor: JellyfinCatalogCursor?,
+        limit: Int = 50,
+        searchTerm: String? = nil
+    ) async throws -> JellyfinCatalogPage {
+        guard let session, let client else {
+            throw JellyfinSessionError.notSignedIn
+        }
+        return try await singleSourcePage(
+            kind: .playlists,
+            contextID: nil,
+            cursor: cursor,
+            limit: limit,
+            searchTerm: searchTerm
+        ) { offset, pageLimit in
+            try await client.playlistsPage(
+                userID: session.userID,
+                startIndex: offset,
+                limit: pageLimit,
+                searchTerm: searchTerm
+            )
+        }
+    }
+
+    func searchMusicPage(
+        query: String,
+        cursor: JellyfinCatalogCursor?,
+        limit: Int = 50
+    ) async throws -> JellyfinCatalogPage {
+        let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedQuery.isEmpty else {
+            return JellyfinCatalogPage(
+                items: [],
+                totalRecordCount: 0,
+                cursor: nil
+            )
+        }
+        guard let session, let client else {
+            throw JellyfinSessionError.notSignedIn
+        }
+        return try await singleSourcePage(
+            kind: .search,
+            contextID: trimmedQuery,
+            cursor: cursor,
+            limit: limit,
+            searchTerm: trimmedQuery
+        ) { offset, pageLimit in
+            try await client.searchMusicPage(
+                userID: session.userID,
+                query: trimmedQuery,
+                startIndex: offset,
+                limit: pageLimit
+            )
+        }
+    }
+
+    func tracksPage(
+        in album: JellyfinItem,
+        cursor: JellyfinCatalogCursor?,
+        limit: Int = 50
+    ) async throws -> JellyfinCatalogPage {
+        guard let session, let client else {
+            throw JellyfinSessionError.notSignedIn
+        }
+        return try await singleSourcePage(
+            kind: .albumTracks,
+            contextID: album.id,
+            cursor: cursor,
+            limit: limit,
+            searchTerm: nil
+        ) { offset, pageLimit in
+            try await client.tracksPage(
+                userID: session.userID,
+                albumID: album.id,
+                startIndex: offset,
+                limit: pageLimit
+            )
+        }
+    }
+
+    func tracksPage(
+        inPlaylist playlist: JellyfinItem,
+        cursor: JellyfinCatalogCursor?,
+        limit: Int = 50
+    ) async throws -> JellyfinCatalogPage {
+        guard let session, let client else {
+            throw JellyfinSessionError.notSignedIn
+        }
+        return try await singleSourcePage(
+            kind: .playlistTracks,
+            contextID: playlist.id,
+            cursor: cursor,
+            limit: limit,
+            searchTerm: nil
+        ) { offset, pageLimit in
+            try await client.playlistItemsPage(
+                userID: session.userID,
+                playlistID: playlist.id,
+                startIndex: offset,
+                limit: pageLimit
+            )
+        }
+    }
+
+    func cachedCatalogItems(
+        kind: JellyfinCatalogKind,
+        contextID: String? = nil
+    ) async -> [JellyfinItem] {
+        guard kind != .search, let session else { return [] }
+        let items = await catalogCache.load(
+            serverID: session.serverID,
+            userID: session.userID,
+            key: catalogCacheKey(kind: kind, contextID: contextID)
+        )
+        if !items.isEmpty {
+            os_signpost(
+                .event,
+                log: Self.performanceLog,
+                name: "Catalog Cache Hit"
+            )
+        }
+        return items
+    }
+
+    func cacheCatalogItems(
+        _ items: [JellyfinItem],
+        kind: JellyfinCatalogKind,
+        contextID: String? = nil
+    ) async {
+        guard kind != .search, let session else { return }
+        await catalogCache.save(
+            items,
+            serverID: session.serverID,
+            userID: session.userID,
+            key: catalogCacheKey(kind: kind, contextID: contextID),
+            isDetail: kind == .albumTracks || kind == .playlistTracks
+                || contextID != nil
+        )
+    }
+
     func searchMusic(query: String) async throws -> [JellyfinItem] {
         let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedQuery.isEmpty else { return [] }
@@ -538,10 +919,16 @@ final class JellyfinSessionController: ObservableObject {
                 itemID: track.id,
                 userID: session.userID
             )
+            let reporter = playbackReporter(
+                itemID: track.id,
+                streamURL: streamURL,
+                client: client
+            )
             return try await playbackAdapter.playbackRequest(
                 for: JellyfinTrackSelection(
                     track: track,
-                    streamURL: streamURL
+                    streamURL: streamURL,
+                    reporter: reporter
                 )
             )
         } catch {
@@ -564,12 +951,40 @@ final class JellyfinSessionController: ObservableObject {
             )
             return PlaybackRequest(
                 item: item,
-                asset: PlaybackAsset(url: streamURL)
+                asset: PlaybackAsset(url: streamURL),
+                reporter: playbackReporter(
+                    itemID: item.id,
+                    streamURL: streamURL,
+                    client: client
+                )
             )
         } catch {
             handleExpiredSessionIfNeeded(error)
             throw error
         }
+    }
+
+    private func playbackReporter(
+        itemID: String,
+        streamURL: URL,
+        client: any JellyfinAPIService
+    ) -> (any PlaybackLifecycleReporting)? {
+        guard
+            let playSessionID = URLComponents(
+                url: streamURL,
+                resolvingAgainstBaseURL: false
+            )?.queryItems?.first(where: {
+                $0.name.caseInsensitiveCompare("PlaySessionId") == .orderedSame
+            })?.value,
+            !playSessionID.isEmpty
+        else {
+            return nil
+        }
+        return JellyfinPlaybackReporter(
+            api: client,
+            itemID: itemID,
+            playSessionID: playSessionID
+        )
     }
 
     func artworkURL(
@@ -585,9 +1000,31 @@ final class JellyfinSessionController: ObservableObject {
         )
     }
 
+    func artworkRequest(
+        itemID: String,
+        imageTag: String?,
+        maxWidth: Int
+    ) async -> URLRequest? {
+        guard let client else { return nil }
+        return try? await client.artworkRequest(
+            itemID: itemID,
+            imageTag: imageTag,
+            maxWidth: maxWidth
+        )
+    }
+
     func userImageURL(maxWidth: Int) async -> URL? {
         guard let session, let client else { return nil }
         return try? await client.userImageURL(
+            userID: session.userID,
+            imageTag: session.userPrimaryImageTag,
+            maxWidth: maxWidth
+        )
+    }
+
+    func userImageRequest(maxWidth: Int) async -> URLRequest? {
+        guard let session, let client else { return nil }
+        return try? await client.userImageRequest(
             userID: session.userID,
             imageTag: session.userPrimaryImageTag,
             maxWidth: maxWidth
@@ -604,6 +1041,7 @@ final class JellyfinSessionController: ObservableObject {
     }
 
     func logout() async {
+        let oldSession = session
         let oldClient = client
         do {
             try tokenStore.deleteToken()
@@ -614,7 +1052,232 @@ final class JellyfinSessionController: ObservableObject {
         }
 
         clearSession()
+        if let oldSession {
+            await catalogCache.clear(
+                serverID: oldSession.serverID,
+                userID: oldSession.userID
+            )
+        }
         try? await oldClient?.logout()
+    }
+
+    private typealias PageLoader =
+        @Sendable (
+            any JellyfinAPIService,
+            String,
+            String,
+            Int,
+            Int,
+            String?
+        ) async throws -> JellyfinItemPage
+
+    private func multiLibraryPage(
+        kind: JellyfinCatalogKind,
+        contextID: String?,
+        cursor: JellyfinCatalogCursor?,
+        limit: Int,
+        searchTerm: String?,
+        loader: @escaping PageLoader
+    ) async throws -> JellyfinCatalogPage {
+        guard let session, let client else {
+            throw JellyfinSessionError.notSignedIn
+        }
+        let sourceIDs = libraries.map(\.id)
+        do {
+            return try await pageFromSources(
+                kind: kind,
+                contextID: contextID,
+                sourceIDs: sourceIDs,
+                cursor: cursor,
+                limit: limit,
+                searchTerm: searchTerm
+            ) { sourceID, offset, pageLimit in
+                try await loader(
+                    client,
+                    session.userID,
+                    sourceID,
+                    offset,
+                    pageLimit,
+                    searchTerm
+                )
+            }
+        } catch {
+            handleExpiredSessionIfNeeded(error)
+            throw error
+        }
+    }
+
+    private func singleSourcePage(
+        kind: JellyfinCatalogKind,
+        contextID: String?,
+        cursor: JellyfinCatalogCursor?,
+        limit: Int,
+        searchTerm: String?,
+        loader: @escaping @Sendable (Int, Int) async throws -> JellyfinItemPage
+    ) async throws -> JellyfinCatalogPage {
+        do {
+            return try await pageFromSources(
+                kind: kind,
+                contextID: contextID,
+                sourceIDs: ["global"],
+                cursor: cursor,
+                limit: limit,
+                searchTerm: searchTerm
+            ) { _, offset, pageLimit in
+                try await loader(offset, pageLimit)
+            }
+        } catch {
+            handleExpiredSessionIfNeeded(error)
+            throw error
+        }
+    }
+
+    private func pageFromSources(
+        kind: JellyfinCatalogKind,
+        contextID: String?,
+        sourceIDs: [String],
+        cursor: JellyfinCatalogCursor?,
+        limit: Int,
+        searchTerm: String?,
+        loader:
+            @escaping @Sendable (
+                String,
+                Int,
+                Int
+            ) async throws -> JellyfinItemPage
+    ) async throws -> JellyfinCatalogPage {
+        let signpostID = OSSignpostID(log: Self.performanceLog)
+        os_signpost(
+            .begin,
+            log: Self.performanceLog,
+            name: "Catalog Page",
+            signpostID: signpostID
+        )
+        defer {
+            os_signpost(
+                .end,
+                log: Self.performanceLog,
+                name: "Catalog Page",
+                signpostID: signpostID
+            )
+        }
+        let safeLimit = max(limit, 1)
+        let identity = [
+            kind.rawValue,
+            contextID ?? "",
+            searchTerm ?? "",
+            sourceIDs.sorted().joined(separator: ","),
+        ].joined(separator: "|")
+
+        var state: JellyfinCatalogCursor
+        if let cursor, cursor.identity == identity {
+            state = cursor
+        } else {
+            state = JellyfinCatalogCursor(
+                identity: identity,
+                offsets: Dictionary(
+                    uniqueKeysWithValues: sourceIDs.map { ($0, 0) }
+                ),
+                totals: [:],
+                buffers: Dictionary(
+                    uniqueKeysWithValues: sourceIDs.map { ($0, []) }
+                ),
+                exhaustedSources: [],
+                seenItemIDs: []
+            )
+        }
+
+        var output: [JellyfinItem] = []
+        while output.count < safeLimit {
+            let sourcesToFill = sourceIDs.filter {
+                state.buffers[$0, default: []].isEmpty
+                    && !state.exhaustedSources.contains($0)
+            }
+
+            if !sourcesToFill.isEmpty {
+                let offsets = state.offsets
+                let responses = try await withThrowingTaskGroup(
+                    of: (String, JellyfinItemPage).self
+                ) { group in
+                    for sourceID in sourcesToFill {
+                        let offset = offsets[sourceID, default: 0]
+                        group.addTask {
+                            (
+                                sourceID,
+                                try await loader(
+                                    sourceID,
+                                    offset,
+                                    safeLimit
+                                )
+                            )
+                        }
+                    }
+
+                    var values: [(String, JellyfinItemPage)] = []
+                    for try await value in group {
+                        values.append(value)
+                    }
+                    return values
+                }
+
+                for (sourceID, page) in responses {
+                    state.buffers[sourceID, default: []].append(
+                        contentsOf: page.items
+                    )
+                    state.offsets[sourceID] = page.nextStartIndex
+                    state.totals[sourceID] = page.totalRecordCount
+                    if page.items.isEmpty
+                        || (page.totalRecordCount > 0
+                            && page.nextStartIndex >= page.totalRecordCount)
+                    {
+                        state.exhaustedSources.insert(sourceID)
+                    }
+                }
+            }
+
+            let nextSourceID =
+                sourceIDs
+                .filter { !state.buffers[$0, default: []].isEmpty }
+                .min { lhs, rhs in
+                    guard
+                        let left = state.buffers[lhs]?.first,
+                        let right = state.buffers[rhs]?.first
+                    else {
+                        return lhs < rhs
+                    }
+                    let comparison = left.name.localizedStandardCompare(
+                        right.name
+                    )
+                    if comparison == .orderedSame {
+                        return left.id < right.id
+                    }
+                    return comparison == .orderedAscending
+                }
+
+            guard let nextSourceID else { break }
+            let candidate = state.buffers[nextSourceID, default: []].removeFirst()
+            if state.seenItemIDs.insert(candidate.id).inserted {
+                output.append(candidate)
+            }
+        }
+
+        let hasMore =
+            sourceIDs.contains {
+                !state.exhaustedSources.contains($0)
+                    || !state.buffers[$0, default: []].isEmpty
+            }
+        return JellyfinCatalogPage(
+            items: output,
+            totalRecordCount: state.totals.values.reduce(0, +),
+            cursor: hasMore ? state : nil
+        )
+    }
+
+    private func catalogCacheKey(
+        kind: JellyfinCatalogKind,
+        contextID: String?
+    ) -> String {
+        "\(kind.rawValue)|\(contextID ?? "root")"
     }
 
     private func restore() async {

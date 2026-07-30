@@ -4,6 +4,20 @@ import XCTest
 
 @testable import Velacanto
 
+#if os(iOS)
+    import UIKit
+#elseif os(macOS)
+    import AppKit
+#endif
+
+private final class SendableArtworkBox: @unchecked Sendable {
+    let artwork: MPMediaItemArtwork
+
+    init(_ artwork: MPMediaItemArtwork) {
+        self.artwork = artwork
+    }
+}
+
 @MainActor
 final class PlaybackFoundationTests: XCTestCase {
     func testDurationFormattingHandlesInvalidValues() {
@@ -108,7 +122,7 @@ final class PlaybackFoundationTests: XCTestCase {
         XCTAssertEqual(coordinator.playbackState, .ended)
         XCTAssertFalse(coordinator.isPlaying)
 
-        systemMediaController.stop?()
+        coordinator.stop()
         XCTAssertEqual(engine.stopCallCount, 1)
         XCTAssertNil(coordinator.currentItem)
         XCTAssertEqual(systemMediaController.latestSnapshot, .empty)
@@ -237,6 +251,321 @@ final class PlaybackFoundationTests: XCTestCase {
         )
     }
 
+    func testNowPlayingMetadataContainsResolvedArtwork() {
+        let item = PlaybackItem(
+            title: "Artwork",
+            artist: "Velacanto",
+            source: .jellyfin
+        )
+        #if os(macOS)
+            let image = NSImage(size: NSSize(width: 32, height: 32))
+        #else
+            let image = UIImage()
+        #endif
+        let snapshot = NowPlayingSnapshot(
+            item: item,
+            elapsed: 0,
+            duration: 60,
+            isPlaying: false,
+            artworkIdentifier: "artwork-key",
+            artwork: image
+        )
+
+        let info = MediaPlayerSystemMediaController.makeNowPlayingInfo(
+            snapshot: snapshot,
+            item: item
+        )
+
+        XCTAssertNotNil(info[MPMediaItemPropertyArtwork] as? MPMediaItemArtwork)
+    }
+
+    func testNowPlayingArtworkHandlerCanRunOutsideMainActor() async {
+        let item = PlaybackItem(
+            title: "Artwork",
+            artist: "Velacanto",
+            source: .jellyfin
+        )
+        #if os(macOS)
+            let image = NSImage(size: NSSize(width: 32, height: 32))
+        #else
+            let image = UIImage()
+        #endif
+        let snapshot = NowPlayingSnapshot(
+            item: item,
+            elapsed: 0,
+            duration: 60,
+            isPlaying: false,
+            artworkIdentifier: "artwork-key",
+            artwork: image
+        )
+        let info = MediaPlayerSystemMediaController.makeNowPlayingInfo(
+            snapshot: snapshot,
+            item: item
+        )
+        guard
+            let artwork =
+                info[MPMediaItemPropertyArtwork] as? MPMediaItemArtwork
+        else {
+            XCTFail("Expected resolved system artwork.")
+            return
+        }
+        let artworkBox = SendableArtworkBox(artwork)
+
+        let renderedImageExists = await Task.detached {
+            artworkBox.artwork.image(at: CGSize(width: 16, height: 16)) != nil
+        }.value
+
+        XCTAssertTrue(renderedImageExists)
+    }
+
+    func testPlaybackCoordinatorPublishesResolvedSystemArtwork() async {
+        let engine = RecordingAudioPlayerEngine()
+        let systemMediaController = RecordingSystemMediaController()
+        let coordinator = AudioPlaybackCoordinator(
+            engine: engine,
+            systemMediaController: systemMediaController
+        )
+        let item = PlaybackItem(
+            id: "artwork-track",
+            title: "Artwork",
+            artist: "Velacanto",
+            source: .jellyfin,
+            artworkItemID: "artwork-album",
+            artworkTag: "image-tag"
+        )
+        #if os(macOS)
+            let image = NSImage(size: NSSize(width: 32, height: 32))
+        #else
+            let image = UIImage()
+        #endif
+        coordinator.configureArtworkResolver { resolvedItem in
+            XCTAssertEqual(resolvedItem, item)
+            return ResolvedNowPlayingArtwork(
+                identifier: "resolved-artwork",
+                image: image
+            )
+        }
+
+        coordinator.play(
+            PlaybackRequest(
+                item: item,
+                asset: PlaybackAsset(
+                    url: URL(fileURLWithPath: "/tmp/artwork-track.caf")
+                )
+            )
+        )
+        await waitUntil {
+            systemMediaController.latestSnapshot?.artworkIdentifier
+                == "resolved-artwork"
+        }
+
+        XCTAssertEqual(
+            systemMediaController.latestSnapshot?.artworkIdentifier,
+            "resolved-artwork"
+        )
+        XCTAssertTrue(systemMediaController.latestSnapshot?.artwork === image)
+    }
+
+    func testDelayedArtworkCannotReplaceCurrentTrackArtwork() async {
+        let engine = RecordingAudioPlayerEngine()
+        let systemMediaController = RecordingSystemMediaController()
+        let coordinator = AudioPlaybackCoordinator(
+            engine: engine,
+            systemMediaController: systemMediaController
+        )
+        let firstItem = PlaybackItem(
+            id: "first-track",
+            title: "First",
+            artist: "Velacanto",
+            source: .jellyfin,
+            artworkItemID: "first-album"
+        )
+        let secondItem = PlaybackItem(
+            id: "second-track",
+            title: "Second",
+            artist: "Velacanto",
+            source: .jellyfin,
+            artworkItemID: "second-album"
+        )
+        #if os(macOS)
+            let firstImage = NSImage(size: NSSize(width: 32, height: 32))
+            let secondImage = NSImage(size: NSSize(width: 32, height: 32))
+        #else
+            let firstImage = UIImage()
+            let secondImage = UIImage()
+        #endif
+        var firstContinuation:
+            CheckedContinuation<
+                ResolvedNowPlayingArtwork?, Never
+            >?
+        coordinator.configureArtworkResolver { item in
+            if item == firstItem {
+                return await withCheckedContinuation { continuation in
+                    firstContinuation = continuation
+                }
+            }
+            return ResolvedNowPlayingArtwork(
+                identifier: "second-artwork",
+                image: secondImage
+            )
+        }
+
+        coordinator.play(
+            PlaybackRequest(
+                item: firstItem,
+                asset: PlaybackAsset(
+                    url: URL(fileURLWithPath: "/tmp/first-track.caf")
+                )
+            )
+        )
+        await waitUntil { firstContinuation != nil }
+        coordinator.play(
+            PlaybackRequest(
+                item: secondItem,
+                asset: PlaybackAsset(
+                    url: URL(fileURLWithPath: "/tmp/second-track.caf")
+                )
+            )
+        )
+        await waitUntil {
+            systemMediaController.latestSnapshot?.artworkIdentifier
+                == "second-artwork"
+        }
+
+        firstContinuation?.resume(
+            returning: ResolvedNowPlayingArtwork(
+                identifier: "first-artwork",
+                image: firstImage
+            )
+        )
+        await Task.yield()
+
+        XCTAssertEqual(
+            systemMediaController.latestSnapshot?.artworkIdentifier,
+            "second-artwork"
+        )
+        XCTAssertTrue(
+            systemMediaController.latestSnapshot?.artwork === secondImage
+        )
+    }
+
+    func testPlaybackQueuePreservesOrderAndBoundsSavedWindow() {
+        let items = (0..<100).map {
+            PlaybackItem(
+                id: "track-\($0)",
+                title: "Track \($0)",
+                artist: "Velacanto",
+                source: .jellyfin
+            )
+        }
+        var queue = PlaybackQueue(
+            items: items,
+            currentItemID: "track-40",
+            context: .album(id: "album")
+        )
+
+        XCTAssertEqual(queue.previousItem?.id, "track-39")
+        XCTAssertEqual(queue.nextItem?.id, "track-41")
+        queue.moveNext()
+        XCTAssertEqual(queue.currentItem?.id, "track-41")
+
+        let saved = queue.persistenceWindow()
+        XCTAssertEqual(saved.currentItem?.id, "track-41")
+        XCTAssertLessThanOrEqual(saved.currentIndex, 25)
+        XCTAssertLessThanOrEqual(saved.items.count, 76)
+    }
+
+    func testSavedNowPlayingRestoresPausedWithoutLoadingStream() {
+        let stateStore = RecordingNowPlayingStateStore()
+        let account = PlaybackAccount(serverID: "server", userID: "user")
+        let item = PlaybackItem(
+            id: "track",
+            title: "Restore",
+            artist: "Velacanto",
+            source: .jellyfin
+        )
+        stateStore.state = SavedNowPlayingState(
+            queue: PlaybackQueue(
+                items: [item],
+                currentItemID: item.id,
+                context: .single
+            ),
+            elapsed: 42,
+            account: account,
+            savedAt: Date()
+        )
+        let engine = RecordingAudioPlayerEngine()
+        let coordinator = AudioPlaybackCoordinator(
+            engine: engine,
+            systemMediaController: RecordingSystemMediaController(),
+            nowPlayingStateStore: stateStore
+        )
+
+        coordinator.restoreSavedState(
+            serverID: account.serverID,
+            userID: account.userID
+        )
+
+        XCTAssertEqual(coordinator.currentItem, item)
+        XCTAssertEqual(coordinator.elapsed, 42)
+        XCTAssertEqual(coordinator.playbackState, .paused)
+        XCTAssertFalse(engine.hasCurrentItem)
+    }
+
+    func testBufferStateIsPublishedByCoordinator() {
+        let engine = RecordingAudioPlayerEngine()
+        let coordinator = AudioPlaybackCoordinator(
+            engine: engine,
+            systemMediaController: RecordingSystemMediaController()
+        )
+        let state = PlaybackBufferState(
+            loadedThrough: 20,
+            isEmpty: false,
+            isLikelyToKeepUp: true
+        )
+
+        engine.send(.bufferStateChanged(state))
+
+        XCTAssertEqual(coordinator.bufferState, state)
+    }
+
+    func testArtworkRepositoryCoalescesAndCachesRequests() async throws {
+        MockArtworkURLProtocol.requestCount = 0
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MockArtworkURLProtocol.self]
+        let repository = ArtworkRepository(
+            session: URLSession(configuration: configuration)
+        )
+        let key = ArtworkKey(
+            serverID: UUID().uuidString,
+            userID: "user",
+            itemID: "item",
+            imageTag: "tag",
+            sizeBucket: 512
+        )
+        let url = try XCTUnwrap(URL(string: "https://artwork.test/image"))
+        let first = Task { @MainActor in
+            await repository.image(for: key) {
+                URLRequest(url: url)
+            }
+        }
+        let second = Task { @MainActor in
+            await repository.image(for: key) {
+                URLRequest(url: url)
+            }
+        }
+
+        let firstImage = await first.value
+        let secondImage = await second.value
+        let cachedImage = await repository.image(for: key) {
+            URLRequest(url: url)
+        }
+        XCTAssertNotNil(firstImage)
+        XCTAssertNotNil(secondImage)
+        XCTAssertNotNil(cachedImage)
+        XCTAssertEqual(MockArtworkURLProtocol.requestCount, 1)
+    }
+
     private func makePlaybackRequest() async throws -> PlaybackRequest {
         let url = try await DemoToneFactory.makeURL()
         return try await LocalFilePlaybackAdapter().playbackRequest(
@@ -253,6 +582,19 @@ final class PlaybackFoundationTests: XCTestCase {
         on coordinator: AudioPlaybackCoordinator
     ) throws {
         coordinator.play(try XCTUnwrap(request))
+    }
+}
+
+@MainActor
+private func waitUntil(
+    attempts: Int = 100,
+    condition: () -> Bool
+) async {
+    for _ in 0..<attempts {
+        if condition() {
+            return
+        }
+        await Task.yield()
     }
 }
 
@@ -281,6 +623,12 @@ private final class RecordingAudioPlayerEngine: AudioPlayerEngine {
 
     func load(_ item: AVPlayerItem) {
         hasCurrentItem = true
+    }
+
+    func preload(_ item: AVPlayerItem?) {}
+
+    func advanceToNextItem() {
+        eventHandler?(.advancedToNextItem)
     }
 
     func play() {
@@ -313,7 +661,8 @@ private final class RecordingSystemMediaController: SystemMediaControlling {
     private(set) var snapshots: [NowPlayingSnapshot] = []
     private(set) var play: (@MainActor () -> Void)?
     private(set) var pause: (@MainActor () -> Void)?
-    private(set) var stop: (@MainActor () -> Void)?
+    private(set) var previous: (@MainActor () -> Void)?
+    private(set) var next: (@MainActor () -> Void)?
     private(set) var togglePlayPause: (@MainActor () -> Void)?
     private(set) var seek: (@MainActor (TimeInterval) -> Void)?
 
@@ -324,13 +673,15 @@ private final class RecordingSystemMediaController: SystemMediaControlling {
     func registerCommands(
         play: @escaping @MainActor () -> Void,
         pause: @escaping @MainActor () -> Void,
-        stop: @escaping @MainActor () -> Void,
+        previous: @escaping @MainActor () -> Void,
+        next: @escaping @MainActor () -> Void,
         togglePlayPause: @escaping @MainActor () -> Void,
         seek: @escaping @MainActor (TimeInterval) -> Void
     ) {
         self.play = play
         self.pause = pause
-        self.stop = stop
+        self.previous = previous
+        self.next = next
         self.togglePlayPause = togglePlayPause
         self.seek = seek
     }
@@ -352,4 +703,56 @@ private final class RecordingPlaybackHistoryStore: PlaybackHistoryStoring {
     func saveItems(_ items: [PlaybackItem]) {
         savedItems = items
     }
+}
+
+private final class RecordingNowPlayingStateStore: NowPlayingStateStoring {
+    var state: SavedNowPlayingState?
+
+    func loadState() -> SavedNowPlayingState? {
+        state
+    }
+
+    func saveState(_ state: SavedNowPlayingState) {
+        self.state = state
+    }
+
+    func clearState() {
+        state = nil
+    }
+}
+
+private final class MockArtworkURLProtocol: URLProtocol, @unchecked Sendable {
+    nonisolated(unsafe) static var requestCount = 0
+
+    override class func canInit(with request: URLRequest) -> Bool {
+        true
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        Self.requestCount += 1
+        let data =
+            Data(
+                base64Encoded:
+                    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+            ) ?? Data()
+        let response = HTTPURLResponse(
+            url: request.url!,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: ["Content-Type": "image/png"]
+        )!
+        client?.urlProtocol(
+            self,
+            didReceive: response,
+            cacheStoragePolicy: .notAllowed
+        )
+        client?.urlProtocol(self, didLoad: data)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
 }
