@@ -14,6 +14,137 @@ private enum AudioSessionError: LocalizedError {
     }
 }
 
+private enum PendingPlaybackLifecycleReport: Sendable {
+    case started(any PlaybackLifecycleReporting, TimeInterval)
+    case progress(any PlaybackLifecycleReporting, TimeInterval, isPaused: Bool)
+    case stopped(any PlaybackLifecycleReporting, TimeInterval)
+
+    func send() async throws {
+        switch self {
+        case .started(let reporter, let position):
+            try await reporter.reportStarted(at: position)
+        case .progress(let reporter, let position, let isPaused):
+            try await reporter.reportProgress(at: position, isPaused: isPaused)
+        case .stopped(let reporter, let position):
+            try await reporter.reportStopped(at: position)
+        }
+    }
+}
+
+enum PlaybackAudioInterruption: Equatable, Sendable {
+    case began
+    case ended(shouldResume: Bool)
+}
+
+enum PlaybackAudioRouteChange: Equatable, Sendable {
+    case oldDeviceUnavailable
+    case other
+}
+
+@MainActor
+protocol PlaybackPlatformEventObserving: AnyObject {
+    func start(
+        interruption: @escaping @MainActor (PlaybackAudioInterruption) -> Void,
+        routeChange: @escaping @MainActor (PlaybackAudioRouteChange) -> Void,
+        didEnterBackground: @escaping @MainActor () -> Void
+    )
+}
+
+#if os(iOS)
+    @MainActor
+    private final class IOSPlaybackPlatformEventObserver:
+        PlaybackPlatformEventObserving
+    {
+        private var observers: [NSObjectProtocol] = []
+
+        func start(
+            interruption:
+                @escaping @MainActor (PlaybackAudioInterruption) -> Void,
+            routeChange:
+                @escaping @MainActor (PlaybackAudioRouteChange) -> Void,
+            didEnterBackground: @escaping @MainActor () -> Void
+        ) {
+            guard observers.isEmpty else { return }
+            let center = NotificationCenter.default
+            observers = [
+                center.addObserver(
+                    forName: AVAudioSession.interruptionNotification,
+                    object: nil,
+                    queue: .main
+                ) { notification in
+                    let rawType =
+                        notification.userInfo?[
+                            AVAudioSessionInterruptionTypeKey
+                        ] as? UInt
+                    let rawOptions =
+                        notification.userInfo?[
+                            AVAudioSessionInterruptionOptionKey
+                        ] as? UInt
+                    guard
+                        let rawType,
+                        let type = AVAudioSession.InterruptionType(
+                            rawValue: rawType
+                        )
+                    else {
+                        return
+                    }
+                    let event: PlaybackAudioInterruption
+                    switch type {
+                    case .began:
+                        event = .began
+                    case .ended:
+                        let options = AVAudioSession.InterruptionOptions(
+                            rawValue: rawOptions ?? 0
+                        )
+                        event = .ended(
+                            shouldResume: options.contains(.shouldResume)
+                        )
+                    @unknown default:
+                        return
+                    }
+                    MainActor.assumeIsolated {
+                        interruption(event)
+                    }
+                },
+                center.addObserver(
+                    forName: AVAudioSession.routeChangeNotification,
+                    object: nil,
+                    queue: .main
+                ) { notification in
+                    let rawReason =
+                        notification.userInfo?[
+                            AVAudioSessionRouteChangeReasonKey
+                        ] as? UInt
+                    let event: PlaybackAudioRouteChange =
+                        rawReason.flatMap(
+                            AVAudioSession.RouteChangeReason.init(rawValue:)
+                        ) == .oldDeviceUnavailable
+                        ? .oldDeviceUnavailable
+                        : .other
+                    MainActor.assumeIsolated {
+                        routeChange(event)
+                    }
+                },
+                center.addObserver(
+                    forName: UIApplication.didEnterBackgroundNotification,
+                    object: nil,
+                    queue: .main
+                ) { _ in
+                    MainActor.assumeIsolated {
+                        didEnterBackground()
+                    }
+                },
+            ]
+        }
+
+        isolated deinit {
+            for observer in observers {
+                NotificationCenter.default.removeObserver(observer)
+            }
+        }
+    }
+#endif
+
 @MainActor
 final class AudioPlaybackCoordinator: ObservableObject {
     @Published private(set) var currentItem: PlaybackItem?
@@ -44,11 +175,20 @@ final class AudioPlaybackCoordinator: ObservableObject {
     private var nowPlayingArtworkIdentifier: String?
     private var nowPlayingArtwork: PlatformImage?
     private var wasPlayingBeforeInterruption = false
-    private var audioSessionObservers: [NSObjectProtocol] = []
+    private var isAudioSessionInterrupted = false
+    // Keep delayed AVPlayer state observations from undoing an intentional pause
+    // while an output route or audio session is reconfiguring.
+    private var hasExplicitPlaybackPause = false
+    private var requiresRouteRecovery = false
+    private var playbackActivationTask: Task<Void, Never>?
+    private var playbackActivationID: UUID?
+    private let platformEventObserver: (any PlaybackPlatformEventObserving)?
     private var hasRetriedCurrentItem = false
     private var lifecycleReporter: (any PlaybackLifecycleReporting)?
     private var didReportPlaybackStart = false
+    private var didReportPlaybackStop = false
     private var lastProgressReportBucket = -1
+    private var lifecycleReportTask: Task<Void, Never>?
     private var playbackStartupSignpostID: OSSignpostID?
 
     private static let logger = Logger(
@@ -64,12 +204,19 @@ final class AudioPlaybackCoordinator: ObservableObject {
         engine: any AudioPlayerEngine = AVFoundationAudioPlayerEngine(),
         systemMediaController: (any SystemMediaControlling)? = nil,
         historyStore: (any PlaybackHistoryStoring)? = nil,
-        nowPlayingStateStore: (any NowPlayingStateStoring)? = nil
+        nowPlayingStateStore: (any NowPlayingStateStoring)? = nil,
+        platformEventObserver: (any PlaybackPlatformEventObserving)? = nil
     ) {
         self.engine = engine
         self.systemMediaController = systemMediaController
         self.historyStore = historyStore
         self.nowPlayingStateStore = nowPlayingStateStore
+        #if os(iOS)
+            self.platformEventObserver =
+                platformEventObserver ?? IOSPlaybackPlatformEventObserver()
+        #else
+            self.platformEventObserver = platformEventObserver
+        #endif
         recentItems = historyStore?.loadItems() ?? []
         engine.eventHandler = { [weak self] event in
             self?.handle(event)
@@ -77,7 +224,7 @@ final class AudioPlaybackCoordinator: ObservableObject {
         if systemMediaController != nil {
             registerSystemMediaCommands()
         }
-        installAudioSessionObservers()
+        installPlatformEventObserver()
     }
 
     var progress: Double {
@@ -94,12 +241,7 @@ final class AudioPlaybackCoordinator: ObservableObject {
     }
 
     var showsPauseControl: Bool {
-        switch playbackState {
-        case .loading, .waiting, .playing:
-            true
-        case .idle, .paused, .ended, .failed:
-            false
-        }
+        isPlaying
     }
 
     var canGoPrevious: Bool {
@@ -150,24 +292,23 @@ final class AudioPlaybackCoordinator: ObservableObject {
         _ request: PlaybackRequest,
         recordsQueueState: Bool
     ) {
+        cancelPendingPlaybackActivation()
+        hasExplicitPlaybackPause = false
+        requiresRouteRecovery = false
         beginPlaybackStartupSignpost()
         prepareSystemMediaController()
         let playerItem = request.asset.makePlayerItem()
 
-        if currentItem?.id != request.item.id {
-            reportPlaybackStopped()
-        }
+        reportPlaybackStopped()
         queueTransitionTask?.cancel()
         preloadTask?.cancel()
         preloadedRequest = nil
         nowPlayingArtworkIdentifier = nil
         nowPlayingArtwork = nil
         currentItem = request.item
-        lifecycleReporter = request.reporter
-        didReportPlaybackStart = false
-        lastProgressReportBucket = -1
+        replaceLifecycleReporter(with: request.reporter)
         elapsed = 0
-        duration = 0
+        duration = validatedDuration(request.item.duration)
         bufferState = .empty
         errorMessage = nil
         playbackState = .loading
@@ -189,7 +330,7 @@ final class AudioPlaybackCoordinator: ObservableObject {
     func togglePlayback() {
         guard currentItem != nil else { return }
 
-        if showsPauseControl {
+        if isPlaying && !requiresRouteRecovery {
             pausePlayback()
         } else {
             resumePlayback()
@@ -216,7 +357,13 @@ final class AudioPlaybackCoordinator: ObservableObject {
 
     func pausePlayback() {
         guard engine.hasCurrentItem else { return }
+        hasExplicitPlaybackPause = true
+        cancelPendingPlaybackActivation()
+        if isAudioSessionInterrupted {
+            wasPlayingBeforeInterruption = false
+        }
         engine.pause()
+        apply(.paused)
         saveNowPlayingState(force: true)
         reportPlaybackProgress(isPaused: true)
     }
@@ -224,21 +371,59 @@ final class AudioPlaybackCoordinator: ObservableObject {
     func resumePlayback() {
         guard currentItem != nil else { return }
 
+        // An explicit Play is user intent. Some competing audio apps and route
+        // changes never deliver their matching interruption-ended event, so do
+        // not leave the app permanently blocked waiting for that notification.
+        // Automatic resumption remains governed by `shouldResume` below.
+        if isAudioSessionInterrupted {
+            isAudioSessionInterrupted = false
+            wasPlayingBeforeInterruption = false
+        }
+
+        // The single automatic retry may have happened while the server was
+        // still unreachable. A later explicit Play is a new user-requested
+        // recovery attempt, so negotiate a fresh stream instead of asking the
+        // terminally failed AVPlayerItem to play again.
+        if case .failed = playbackState,
+            currentItem?.source == .jellyfin
+        {
+            resolveFailedJellyfinItemAndPlay()
+            return
+        }
+
         guard engine.hasCurrentItem else {
+            hasExplicitPlaybackPause = false
             resolveRestoredItemAndPlay()
             return
+        }
+
+        let isRecoveringRoute = requiresRouteRecovery
+        hasExplicitPlaybackPause = false
+
+        // Reproduce the hardware Pause -> Play sequence that resets AVPlayer
+        // after the old output route disappears without discarding its buffer.
+        if isRecoveringRoute {
+            engine.pause()
         }
 
         if playbackState == .ended || (duration > 0 && elapsed >= duration) {
             engine.seek(to: 0)
             elapsed = 0
+            didReportPlaybackStart = false
+            didReportPlaybackStop = false
+            lastProgressReportBucket = -1
         }
 
         errorMessage = nil
+        if playbackState == .paused || isRecoveringRoute {
+            playbackState = .waiting
+            publishNowPlaying()
+        }
         startPlaybackAfterAudioSessionActivation()
     }
 
     func stop() {
+        cancelPendingPlaybackActivation()
         queueTransitionTask?.cancel()
         preloadTask?.cancel()
         artworkTask?.cancel()
@@ -258,6 +443,10 @@ final class AudioPlaybackCoordinator: ObservableObject {
         queueExpansionHandler = nil
         playbackAccount = nil
         restoredElapsed = nil
+        wasPlayingBeforeInterruption = false
+        isAudioSessionInterrupted = false
+        hasExplicitPlaybackPause = false
+        requiresRouteRecovery = false
         nowPlayingArtworkIdentifier = nil
         nowPlayingArtwork = nil
         lifecycleReporter = nil
@@ -311,7 +500,23 @@ final class AudioPlaybackCoordinator: ObservableObject {
         historyStore?.saveItems(recentItems)
     }
 
-    private func apply(_ state: PlaybackState) {
+    private func apply(_ incomingState: PlaybackState) {
+        let state: PlaybackState
+        if case .failed(let message) = incomingState {
+            state = .failed(userSafeFailureMessage(message))
+        } else {
+            state = incomingState
+        }
+
+        if hasExplicitPlaybackPause || isAudioSessionInterrupted {
+            switch state {
+            case .waiting, .playing:
+                return
+            case .idle, .loading, .paused, .ended, .failed:
+                break
+            }
+        }
+
         if case .failed = playbackState, errorMessage != nil {
             switch state {
             case .failed:
@@ -324,9 +529,13 @@ final class AudioPlaybackCoordinator: ObservableObject {
         guard state != playbackState else { return }
 
         playbackState = state
+        if state == .playing {
+            requiresRouteRecovery = false
+        }
         if case .failed(let message) = state {
             errorMessage = message
             endPlaybackStartupSignpost()
+            reportPlaybackStopped()
             retryCurrentItemOnceIfPossible()
         }
         if state == .playing, !didReportPlaybackStart {
@@ -338,10 +547,9 @@ final class AudioPlaybackCoordinator: ObservableObject {
             )
             didReportPlaybackStart = true
             if let lifecycleReporter {
-                let elapsed = elapsed
-                Task {
-                    await lifecycleReporter.reportStarted(at: elapsed)
-                }
+                enqueueLifecycleReport(
+                    .started(lifecycleReporter, elapsed)
+                )
             }
         }
         publishNowPlaying()
@@ -351,10 +559,11 @@ final class AudioPlaybackCoordinator: ObservableObject {
         case .idle, .loading, .waiting, .playing:
             break
         }
-        if state == .ended, canGoNext {
-            nextTrack()
-        } else if state == .ended {
+        if state == .ended {
             reportPlaybackStopped()
+            if canGoNext {
+                nextTrack()
+            }
         }
     }
 
@@ -503,7 +712,7 @@ final class AudioPlaybackCoordinator: ObservableObject {
         currentItem = item
         playbackAccount = account
         elapsed = max(state.elapsed, 0)
-        duration = 0
+        duration = max(state.duration ?? 0, 0)
         bufferState = .empty
         playbackState = .paused
         restoredElapsed = elapsed
@@ -606,6 +815,49 @@ final class AudioPlaybackCoordinator: ObservableObject {
         }
     }
 
+    private func resolveFailedJellyfinItemAndPlay() {
+        guard
+            let item = currentItem,
+            let requestResolver,
+            queueTransitionTask == nil
+        else {
+            return
+        }
+
+        let seekTime = elapsed
+        playbackState = .loading
+        errorMessage = nil
+        publishNowPlaying()
+
+        queueTransitionTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                queueTransitionTask = nil
+            }
+            do {
+                let request = try await requestResolver(item)
+                try Task.checkCancellation()
+                guard currentItem?.id == item.id else { return }
+                playResolvedRequest(request, recordsQueueState: false)
+                if seekTime > 0 {
+                    engine.seek(to: seekTime)
+                    elapsed = seekTime
+                }
+                publishNowPlaying()
+            } catch is CancellationError {
+                return
+            } catch {
+                let message = userSafeFailureMessage(
+                    error.localizedDescription
+                )
+                playbackState = .failed(message)
+                errorMessage = message
+                saveNowPlayingState(force: true)
+                publishNowPlaying()
+            }
+        }
+    }
+
     private func saveNowPlayingState(force: Bool) {
         guard
             let nowPlayingStateStore,
@@ -623,10 +875,16 @@ final class AudioPlaybackCoordinator: ObservableObject {
             SavedNowPlayingState(
                 queue: queue.persistenceWindow(),
                 elapsed: elapsed,
+                duration: duration.isFinite && duration > 0 ? duration : nil,
                 account: playbackAccount,
                 savedAt: now
             )
         )
+    }
+
+    private func validatedDuration(_ value: TimeInterval?) -> TimeInterval {
+        guard let value, value.isFinite, value > 0 else { return 0 }
+        return value
     }
 
     private func preloadNextItem() {
@@ -693,13 +951,11 @@ final class AudioPlaybackCoordinator: ObservableObject {
         queue?.moveNext()
         reportPlaybackStopped()
         currentItem = request.item
-        lifecycleReporter = request.reporter
-        didReportPlaybackStart = false
-        lastProgressReportBucket = -1
+        replaceLifecycleReporter(with: request.reporter)
         resourceLease = request.asset.resourceLease
         preloadedRequest = nil
         elapsed = 0
-        duration = 0
+        duration = validatedDuration(request.item.duration)
         errorMessage = nil
         nowPlayingArtworkIdentifier = nil
         nowPlayingArtwork = nil
@@ -714,21 +970,54 @@ final class AudioPlaybackCoordinator: ObservableObject {
     }
 
     private func reportPlaybackProgress(isPaused: Bool) {
-        guard let lifecycleReporter else { return }
-        let elapsed = elapsed
-        Task {
-            await lifecycleReporter.reportProgress(
-                at: elapsed,
-                isPaused: isPaused
-            )
+        guard
+            let lifecycleReporter,
+            didReportPlaybackStart,
+            !didReportPlaybackStop
+        else {
+            return
         }
+        enqueueLifecycleReport(
+            .progress(lifecycleReporter, elapsed, isPaused: isPaused)
+        )
     }
 
     private func reportPlaybackStopped() {
-        guard let lifecycleReporter else { return }
-        let elapsed = elapsed
-        Task {
-            await lifecycleReporter.reportStopped(at: elapsed)
+        guard
+            let lifecycleReporter,
+            didReportPlaybackStart,
+            !didReportPlaybackStop
+        else {
+            return
+        }
+        didReportPlaybackStop = true
+        enqueueLifecycleReport(
+            .stopped(lifecycleReporter, elapsed)
+        )
+    }
+
+    private func replaceLifecycleReporter(
+        with reporter: (any PlaybackLifecycleReporting)?
+    ) {
+        lifecycleReporter = reporter
+        didReportPlaybackStart = false
+        didReportPlaybackStop = false
+        lastProgressReportBucket = -1
+    }
+
+    private func enqueueLifecycleReport(
+        _ report: PendingPlaybackLifecycleReport
+    ) {
+        let previousTask = lifecycleReportTask
+        lifecycleReportTask = Task {
+            await previousTask?.value
+            do {
+                try await report.send()
+            } catch is CancellationError {
+                return
+            } catch {
+                Self.logger.error("Playback lifecycle report failed")
+            }
         }
     }
 
@@ -742,6 +1031,8 @@ final class AudioPlaybackCoordinator: ObservableObject {
             return
         }
         hasRetriedCurrentItem = true
+        hasExplicitPlaybackPause = false
+        cancelPendingPlaybackActivation()
         let resumeTime = elapsed
         queueTransitionTask?.cancel()
         queueTransitionTask = Task { [weak self] in
@@ -755,6 +1046,7 @@ final class AudioPlaybackCoordinator: ObservableObject {
                 guard currentItem?.id == item.id else { return }
                 playbackState = .loading
                 errorMessage = nil
+                replaceLifecycleReporter(with: request.reporter)
                 resourceLease = request.asset.resourceLease
                 engine.load(request.asset.makePlayerItem())
                 if resumeTime > 0 {
@@ -764,10 +1056,21 @@ final class AudioPlaybackCoordinator: ObservableObject {
                 startPlaybackAfterAudioSessionActivation()
                 preloadNextItem()
             } catch {
-                errorMessage = error.localizedDescription
+                let message = userSafeFailureMessage(
+                    error.localizedDescription
+                )
+                playbackState = .failed(message)
+                errorMessage = message
+                saveNowPlayingState(force: true)
                 publishNowPlaying()
             }
         }
+    }
+
+    private func userSafeFailureMessage(_ fallback: String) -> String {
+        guard currentItem?.source == .jellyfin else { return fallback }
+        return
+            "The Jellyfin stream stopped unexpectedly. Try playing the track again."
     }
 
     private func prepareSystemMediaController() {
@@ -779,19 +1082,44 @@ final class AudioPlaybackCoordinator: ObservableObject {
     private func startPlaybackAfterAudioSessionActivation() {
         #if os(iOS)
             let itemID = currentItem?.id
-            Task { [weak self] in
+            cancelPendingPlaybackActivation()
+            let activationID = UUID()
+            playbackActivationID = activationID
+            playbackActivationTask = Task { [weak self] in
                 guard let self else { return }
+                defer {
+                    if playbackActivationID == activationID {
+                        playbackActivationTask = nil
+                    }
+                }
                 do {
                     try await configureAudioSession()
-                    guard currentItem?.id == itemID else { return }
+                    try Task.checkCancellation()
+                    guard
+                        currentItem?.id == itemID,
+                        playbackActivationID == activationID,
+                        !hasExplicitPlaybackPause,
+                        !isAudioSessionInterrupted || requiresRouteRecovery
+                    else {
+                        return
+                    }
                     engine.play()
+                } catch is CancellationError {
+                    return
                 } catch {
+                    guard playbackActivationID == activationID else { return }
                     apply(.failed(error.localizedDescription))
                 }
             }
         #else
             engine.play()
         #endif
+    }
+
+    private func cancelPendingPlaybackActivation() {
+        playbackActivationTask?.cancel()
+        playbackActivationTask = nil
+        playbackActivationID = nil
     }
 
     private func configureAudioSession() async throws {
@@ -826,107 +1154,48 @@ final class AudioPlaybackCoordinator: ObservableObject {
         #endif
     }
 
-    private func installAudioSessionObservers() {
-        #if os(iOS)
-            let center = NotificationCenter.default
-            audioSessionObservers = [
-                center.addObserver(
-                    forName: AVAudioSession.interruptionNotification,
-                    object: nil,
-                    queue: .main
-                ) { [weak self] notification in
-                    let rawType =
-                        notification.userInfo?[
-                            AVAudioSessionInterruptionTypeKey
-                        ] as? UInt
-                    let rawOptions =
-                        notification.userInfo?[
-                            AVAudioSessionInterruptionOptionKey
-                        ] as? UInt
-                    MainActor.assumeIsolated {
-                        self?.handleAudioSessionInterruption(
-                            rawType: rawType,
-                            rawOptions: rawOptions
-                        )
-                    }
-                },
-                center.addObserver(
-                    forName: AVAudioSession.routeChangeNotification,
-                    object: nil,
-                    queue: .main
-                ) { [weak self] notification in
-                    let rawReason =
-                        notification.userInfo?[
-                            AVAudioSessionRouteChangeReasonKey
-                        ] as? UInt
-                    MainActor.assumeIsolated {
-                        self?.handleRouteChange(rawReason: rawReason)
-                    }
-                },
-                center.addObserver(
-                    forName: UIApplication.didEnterBackgroundNotification,
-                    object: nil,
-                    queue: .main
-                ) { [weak self] _ in
-                    MainActor.assumeIsolated {
-                        self?.saveNowPlayingState(force: true)
-                    }
-                },
-            ]
-        #endif
+    private func installPlatformEventObserver() {
+        platformEventObserver?.start(
+            interruption: { [weak self] event in
+                self?.handleAudioSessionInterruption(event)
+            },
+            routeChange: { [weak self] event in
+                self?.handleRouteChange(event)
+            },
+            didEnterBackground: { [weak self] in
+                self?.saveNowPlayingState(force: true)
+            }
+        )
     }
 
     private func handleAudioSessionInterruption(
-        rawType: UInt?,
-        rawOptions: UInt?
+        _ interruption: PlaybackAudioInterruption
     ) {
-        #if os(iOS)
-            guard
-                let rawType,
-                let type = AVAudioSession.InterruptionType(rawValue: rawType)
-            else {
-                return
+        switch interruption {
+        case .began:
+            isAudioSessionInterrupted = true
+            wasPlayingBeforeInterruption = isPlaying
+            cancelPendingPlaybackActivation()
+            if engine.hasCurrentItem {
+                engine.pause()
             }
-
-            switch type {
-            case .began:
-                wasPlayingBeforeInterruption = isPlaying
-                if engine.hasCurrentItem {
-                    engine.pause()
-                }
-                saveNowPlayingState(force: true)
-            case .ended:
-                let options = AVAudioSession.InterruptionOptions(
-                    rawValue: rawOptions ?? 0
-                )
-                if wasPlayingBeforeInterruption,
-                    options.contains(.shouldResume)
-                {
-                    resumePlayback()
-                }
-                wasPlayingBeforeInterruption = false
-            @unknown default:
-                break
+            apply(.paused)
+            saveNowPlayingState(force: true)
+        case .ended(let shouldResume):
+            isAudioSessionInterrupted = false
+            let shouldRestartPlayback =
+                wasPlayingBeforeInterruption && shouldResume
+            wasPlayingBeforeInterruption = false
+            if shouldRestartPlayback {
+                resumePlayback()
             }
-        #endif
+        }
     }
 
-    private func handleRouteChange(rawReason: UInt?) {
-        #if os(iOS)
-            guard
-                let rawReason,
-                AVAudioSession.RouteChangeReason(rawValue: rawReason)
-                    == .oldDeviceUnavailable
-            else {
-                return
-            }
+    private func handleRouteChange(_ routeChange: PlaybackAudioRouteChange) {
+        if routeChange == .oldDeviceUnavailable {
+            requiresRouteRecovery = true
             pausePlayback()
-        #endif
-    }
-
-    isolated deinit {
-        for observer in audioSessionObservers {
-            NotificationCenter.default.removeObserver(observer)
         }
     }
 }

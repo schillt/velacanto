@@ -27,7 +27,8 @@ struct JellyfinPlaybackAdapter: PlaybackSourceAdapter {
             albumTitle: track.album,
             source: .jellyfin,
             artworkItemID: track.artworkItemID,
-            artworkTag: track.primaryImageTag
+            artworkTag: track.primaryImageTag,
+            duration: track.duration
         )
     }
 
@@ -48,32 +49,36 @@ struct JellyfinPlaybackReporter: PlaybackLifecycleReporting {
     let api: any JellyfinAPIService
     let itemID: String
     let playSessionID: String
+    let playMethod: JellyfinPlaybackMethod
 
-    func reportStarted(at position: TimeInterval) async {
-        try? await api.reportPlaybackStarted(
+    func reportStarted(at position: TimeInterval) async throws {
+        try await api.reportPlaybackStarted(
             itemID: itemID,
             playSessionID: playSessionID,
-            positionTicks: ticks(for: position)
+            positionTicks: ticks(for: position),
+            playMethod: playMethod
         )
     }
 
     func reportProgress(
         at position: TimeInterval,
         isPaused: Bool
-    ) async {
-        try? await api.reportPlaybackProgress(
+    ) async throws {
+        try await api.reportPlaybackProgress(
             itemID: itemID,
             playSessionID: playSessionID,
             positionTicks: ticks(for: position),
-            isPaused: isPaused
+            isPaused: isPaused,
+            playMethod: playMethod
         )
     }
 
-    func reportStopped(at position: TimeInterval) async {
-        try? await api.reportPlaybackStopped(
+    func reportStopped(at position: TimeInterval) async throws {
+        try await api.reportPlaybackStopped(
             itemID: itemID,
             playSessionID: playSessionID,
-            positionTicks: ticks(for: position)
+            positionTicks: ticks(for: position),
+            playMethod: playMethod
         )
     }
 

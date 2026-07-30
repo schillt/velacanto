@@ -90,7 +90,7 @@ final class PlaybackFoundationTests: XCTestCase {
 
         engine.send(.stateChanged(.waiting))
         XCTAssertEqual(coordinator.playbackState, .waiting)
-        XCTAssertTrue(coordinator.showsPauseControl)
+        XCTAssertFalse(coordinator.showsPauseControl)
 
         engine.send(.stateChanged(.playing))
         XCTAssertTrue(coordinator.isPlaying)
@@ -146,6 +146,441 @@ final class PlaybackFoundationTests: XCTestCase {
 
         engine.send(.stateChanged(.paused))
         XCTAssertEqual(coordinator.playbackState, .failed("Stream unavailable"))
+    }
+
+    func testPlaybackUsesItemDurationUntilTheEnginePublishesOne()
+        async throws
+    {
+        let engine = RecordingAudioPlayerEngine()
+        let coordinator = AudioPlaybackCoordinator(
+            engine: engine,
+            systemMediaController: RecordingSystemMediaController()
+        )
+        let request = PlaybackRequest(
+            item: PlaybackItem(
+                title: "Known Duration",
+                artist: "Velacanto",
+                source: .jellyfin,
+                duration: 120
+            ),
+            asset: PlaybackAsset(
+                url: URL(fileURLWithPath: "/tmp/known-duration.caf")
+            )
+        )
+
+        coordinator.play(request)
+
+        XCTAssertEqual(coordinator.duration, 120)
+        engine.send(.timeChanged(elapsed: 10, duration: 90))
+        XCTAssertEqual(coordinator.duration, 90)
+    }
+
+    func testPlaybackLifecycleReportsRemainSerializedAndSuppressDuplicates()
+        async throws
+    {
+        let engine = RecordingAudioPlayerEngine()
+        let recorder = PlaybackLifecycleEventRecorder()
+        let reporter = RecordingPlaybackLifecycleReporter(
+            id: "session",
+            recorder: recorder,
+            startDelay: .milliseconds(50)
+        )
+        let coordinator = AudioPlaybackCoordinator(
+            engine: engine,
+            systemMediaController: RecordingSystemMediaController()
+        )
+
+        coordinator.play(
+            try makeJellyfinPlaybackRequest(reporter: reporter)
+        )
+        engine.send(.stateChanged(.playing))
+        engine.send(.stateChanged(.playing))
+        engine.send(.timeChanged(elapsed: 10, duration: 60))
+        engine.send(.timeChanged(elapsed: 15, duration: 60))
+        coordinator.pausePlayback()
+        coordinator.stop()
+        coordinator.stop()
+
+        await waitUntilAsync {
+            await recorder.snapshot().count == 4
+        }
+        let events = await recorder.snapshot()
+
+        XCTAssertEqual(
+            events,
+            [
+                .started(session: "session", position: 0),
+                .progress(session: "session", position: 10, isPaused: false),
+                .progress(session: "session", position: 15, isPaused: true),
+                .stopped(session: "session", position: 15),
+            ]
+        )
+    }
+
+    func testPlaybackLifecyclePipelineContinuesAfterReporterFailure() async throws {
+        let engine = RecordingAudioPlayerEngine()
+        let recorder = PlaybackLifecycleEventRecorder()
+        let reporter = RecordingPlaybackLifecycleReporter(
+            id: "session",
+            recorder: recorder,
+            failingEvent: .started
+        )
+        let coordinator = AudioPlaybackCoordinator(
+            engine: engine,
+            systemMediaController: RecordingSystemMediaController()
+        )
+
+        coordinator.play(
+            try makeJellyfinPlaybackRequest(reporter: reporter)
+        )
+        engine.send(.stateChanged(.playing))
+        engine.send(.timeChanged(elapsed: 10, duration: 60))
+        coordinator.stop()
+
+        await waitUntilAsync {
+            await recorder.snapshot().count == 2
+        }
+        let events = await recorder.snapshot()
+
+        XCTAssertEqual(
+            events,
+            [
+                .progress(session: "session", position: 10, isPaused: false),
+                .stopped(session: "session", position: 10),
+            ]
+        )
+    }
+
+    func testFailedJellyfinStreamUsesFreshReporterAndRetriesOnlyOnce()
+        async throws
+    {
+        let engine = RecordingAudioPlayerEngine()
+        let recorder = PlaybackLifecycleEventRecorder()
+        let firstReporter = RecordingPlaybackLifecycleReporter(
+            id: "first-session",
+            recorder: recorder
+        )
+        let retryReporter = RecordingPlaybackLifecycleReporter(
+            id: "retry-session",
+            recorder: recorder
+        )
+        let retryRequest = try makeJellyfinPlaybackRequest(
+            reporter: retryReporter
+        )
+        let coordinator = AudioPlaybackCoordinator(
+            engine: engine,
+            systemMediaController: RecordingSystemMediaController()
+        )
+        var resolverCallCount = 0
+        coordinator.configureRequestResolver { item in
+            XCTAssertEqual(item.id, "jellyfin-track")
+            resolverCallCount += 1
+            return retryRequest
+        }
+
+        coordinator.play(
+            try makeJellyfinPlaybackRequest(reporter: firstReporter)
+        )
+        engine.send(.stateChanged(.playing))
+        engine.send(.timeChanged(elapsed: 12, duration: 60))
+        engine.send(.stateChanged(.failed("Connection lost")))
+
+        await waitUntil {
+            engine.loadCallCount == 2
+        }
+        XCTAssertEqual(resolverCallCount, 1)
+        XCTAssertEqual(coordinator.playbackState, .loading)
+        XCTAssertEqual(engine.seekTimes.last, 12)
+
+        engine.send(.stateChanged(.playing))
+        engine.send(.timeChanged(elapsed: 20, duration: 60))
+        engine.send(.stateChanged(.failed("Connection lost again")))
+        coordinator.stop()
+
+        await waitUntilAsync {
+            await recorder.snapshot().count == 6
+        }
+        let events = await recorder.snapshot()
+
+        XCTAssertEqual(engine.loadCallCount, 2)
+        XCTAssertEqual(resolverCallCount, 1)
+        XCTAssertEqual(
+            events,
+            [
+                .started(session: "first-session", position: 0),
+                .progress(
+                    session: "first-session",
+                    position: 12,
+                    isPaused: false
+                ),
+                .stopped(session: "first-session", position: 12),
+                .started(session: "retry-session", position: 12),
+                .progress(
+                    session: "retry-session",
+                    position: 20,
+                    isPaused: false
+                ),
+                .stopped(session: "retry-session", position: 20),
+            ]
+        )
+    }
+
+    func testExplicitResumeAfterFailedJellyfinRetryNegotiatesAnotherStream()
+        async throws
+    {
+        let engine = RecordingAudioPlayerEngine()
+        let retryRequest = try makeJellyfinPlaybackRequest()
+        let coordinator = AudioPlaybackCoordinator(
+            engine: engine,
+            systemMediaController: RecordingSystemMediaController()
+        )
+        var resolverCallCount = 0
+        coordinator.configureRequestResolver { _ in
+            resolverCallCount += 1
+            return retryRequest
+        }
+
+        coordinator.play(try makeJellyfinPlaybackRequest())
+        engine.send(.stateChanged(.playing))
+        engine.send(.timeChanged(elapsed: 12, duration: 60))
+        engine.send(.stateChanged(.failed("Connection lost")))
+
+        await waitUntil {
+            engine.loadCallCount == 2
+        }
+        engine.send(.stateChanged(.failed("Still unavailable")))
+        XCTAssertEqual(
+            coordinator.playbackState,
+            .failed(
+                "The Jellyfin stream stopped unexpectedly. Try playing the track again."
+            )
+        )
+
+        coordinator.resumePlayback()
+
+        await waitUntil {
+            engine.loadCallCount == 3
+        }
+        XCTAssertEqual(resolverCallCount, 2)
+        XCTAssertEqual(engine.seekTimes.last, 12)
+        XCTAssertEqual(coordinator.playbackState, .loading)
+    }
+
+    func testAudioInterruptionResumesOnlyWhenSystemPermitsIt() async throws {
+        let engine = RecordingAudioPlayerEngine()
+        let platformEvents = RecordingPlaybackPlatformEventObserver()
+        let stateStore = RecordingNowPlayingStateStore()
+        let coordinator = AudioPlaybackCoordinator(
+            engine: engine,
+            systemMediaController: RecordingSystemMediaController(),
+            nowPlayingStateStore: stateStore,
+            platformEventObserver: platformEvents
+        )
+
+        coordinator.play(try await makePlaybackRequest())
+        engine.send(.stateChanged(.playing))
+        platformEvents.sendInterruption(.began)
+        engine.send(.stateChanged(.paused))
+
+        XCTAssertEqual(engine.pauseCallCount, 1)
+        XCTAssertNotNil(stateStore.state)
+
+        platformEvents.sendInterruption(.ended(shouldResume: false))
+        XCTAssertEqual(engine.playCallCount, 1)
+
+        coordinator.resumePlayback()
+        engine.send(.stateChanged(.playing))
+        platformEvents.sendInterruption(.began)
+        engine.send(.stateChanged(.paused))
+        platformEvents.sendInterruption(.ended(shouldResume: true))
+
+        XCTAssertEqual(engine.pauseCallCount, 2)
+        XCTAssertEqual(engine.playCallCount, 3)
+    }
+
+    func testUserPauseDuringInterruptionPreventsAutomaticResume() async throws {
+        let engine = RecordingAudioPlayerEngine()
+        let platformEvents = RecordingPlaybackPlatformEventObserver()
+        let coordinator = AudioPlaybackCoordinator(
+            engine: engine,
+            systemMediaController: RecordingSystemMediaController(),
+            platformEventObserver: platformEvents
+        )
+
+        coordinator.play(try await makePlaybackRequest())
+        engine.send(.stateChanged(.playing))
+        platformEvents.sendInterruption(.began)
+        engine.send(.stateChanged(.paused))
+        coordinator.pausePlayback()
+        platformEvents.sendInterruption(.ended(shouldResume: true))
+
+        XCTAssertEqual(engine.playCallCount, 1)
+        XCTAssertEqual(engine.pauseCallCount, 2)
+        XCTAssertEqual(coordinator.playbackState, .paused)
+    }
+
+    func testExplicitResumeRecoversFromAnInterruptionWithoutAnEndEvent()
+        async throws
+    {
+        let engine = RecordingAudioPlayerEngine()
+        let platformEvents = RecordingPlaybackPlatformEventObserver()
+        let coordinator = AudioPlaybackCoordinator(
+            engine: engine,
+            systemMediaController: RecordingSystemMediaController(),
+            platformEventObserver: platformEvents
+        )
+
+        coordinator.play(try await makePlaybackRequest())
+        engine.send(.stateChanged(.playing))
+        platformEvents.sendInterruption(.began)
+        engine.send(.stateChanged(.paused))
+
+        coordinator.resumePlayback()
+
+        XCTAssertEqual(coordinator.playbackState, .waiting)
+        XCTAssertEqual(engine.playCallCount, 2)
+    }
+
+    func testRemovedOutputRoutePausesAndSynchronizesNowPlaying() async throws {
+        let engine = RecordingAudioPlayerEngine()
+        let platformEvents = RecordingPlaybackPlatformEventObserver()
+        let systemMediaController = RecordingSystemMediaController()
+        let coordinator = AudioPlaybackCoordinator(
+            engine: engine,
+            systemMediaController: systemMediaController,
+            platformEventObserver: platformEvents
+        )
+
+        coordinator.play(try await makePlaybackRequest())
+        engine.send(.stateChanged(.playing))
+        platformEvents.sendRouteChange(.other)
+        XCTAssertEqual(engine.pauseCallCount, 0)
+
+        platformEvents.sendRouteChange(.oldDeviceUnavailable)
+        engine.send(.stateChanged(.paused))
+
+        XCTAssertEqual(engine.pauseCallCount, 1)
+        XCTAssertEqual(coordinator.playbackState, .paused)
+        XCTAssertEqual(systemMediaController.latestSnapshot?.isPlaying, false)
+    }
+
+    func testRouteRemovalKeepsLatePlayerEventsPausedUntilUserResumes()
+        async throws
+    {
+        let engine = RecordingAudioPlayerEngine()
+        let platformEvents = RecordingPlaybackPlatformEventObserver()
+        let coordinator = AudioPlaybackCoordinator(
+            engine: engine,
+            systemMediaController: RecordingSystemMediaController(),
+            platformEventObserver: platformEvents
+        )
+
+        coordinator.play(try await makePlaybackRequest())
+        engine.send(.stateChanged(.playing))
+
+        platformEvents.sendRouteChange(.oldDeviceUnavailable)
+        XCTAssertEqual(coordinator.playbackState, .paused)
+        XCTAssertFalse(coordinator.showsPauseControl)
+
+        // AVPlayer can emit a late waiting/playing observation while the route
+        // changes. It must not turn a route-policy pause back into playback.
+        engine.send(.stateChanged(.waiting))
+        engine.send(.stateChanged(.playing))
+        XCTAssertEqual(coordinator.playbackState, .paused)
+
+        coordinator.togglePlayback()
+        XCTAssertEqual(coordinator.playbackState, .waiting)
+        XCTAssertEqual(engine.pauseCallCount, 2)
+        XCTAssertEqual(engine.playCallCount, 2)
+
+        engine.send(.stateChanged(.playing))
+        XCTAssertEqual(coordinator.playbackState, .playing)
+    }
+
+    func testRouteRecoveryAllowsAnExplicitResumeDuringLingeringInterruption()
+        async throws
+    {
+        let engine = RecordingAudioPlayerEngine()
+        let platformEvents = RecordingPlaybackPlatformEventObserver()
+        let coordinator = AudioPlaybackCoordinator(
+            engine: engine,
+            systemMediaController: RecordingSystemMediaController(),
+            platformEventObserver: platformEvents
+        )
+
+        coordinator.play(try await makePlaybackRequest())
+        engine.send(.stateChanged(.playing))
+        platformEvents.sendRouteChange(.oldDeviceUnavailable)
+        platformEvents.sendInterruption(.began)
+
+        coordinator.togglePlayback()
+
+        XCTAssertEqual(coordinator.playbackState, .waiting)
+        XCTAssertEqual(engine.playCallCount, 2)
+        XCTAssertEqual(engine.pauseCallCount, 3)
+    }
+
+    func testToggleResumesInsteadOfPausingWhenThePlayerIsWaiting()
+        async throws
+    {
+        let engine = RecordingAudioPlayerEngine()
+        let coordinator = AudioPlaybackCoordinator(
+            engine: engine,
+            systemMediaController: RecordingSystemMediaController()
+        )
+
+        coordinator.play(try await makePlaybackRequest())
+        engine.send(.stateChanged(.waiting))
+
+        coordinator.togglePlayback()
+
+        XCTAssertEqual(engine.pauseCallCount, 0)
+        XCTAssertEqual(engine.playCallCount, 2)
+    }
+
+    func testFailedStreamResolutionIsSafeAndReplayable() async throws {
+        let engine = RecordingAudioPlayerEngine()
+        let coordinator = AudioPlaybackCoordinator(
+            engine: engine,
+            systemMediaController: RecordingSystemMediaController()
+        )
+        var resolverCallCount = 0
+        var resolverFinished = false
+        coordinator.configureRequestResolver { _ in
+            resolverCallCount += 1
+            defer { resolverFinished = true }
+            throw JellyfinAPIError.unreachable
+        }
+
+        coordinator.play(try makeJellyfinPlaybackRequest())
+        engine.send(.stateChanged(.playing))
+        engine.send(
+            .stateChanged(
+                .failed(
+                    "Failed https://example.com/audio?api_key=secret-token"
+                )
+            )
+        )
+
+        await waitUntil {
+            resolverFinished
+        }
+        XCTAssertEqual(resolverCallCount, 1)
+        XCTAssertEqual(
+            coordinator.playbackState,
+            .failed(
+                "The Jellyfin stream stopped unexpectedly. Try playing the track again."
+            )
+        )
+        XCTAssertFalse(coordinator.errorMessage?.contains("secret-token") == true)
+        XCTAssertFalse(coordinator.errorMessage?.contains("https://") == true)
+
+        coordinator.play(try makeJellyfinPlaybackRequest())
+        engine.send(.stateChanged(.playing))
+
+        XCTAssertEqual(engine.loadCallCount, 2)
+        XCTAssertEqual(coordinator.playbackState, .playing)
+        XCTAssertNil(coordinator.errorMessage)
     }
 
     func testPlaybackCoordinatorRetainsResourceLeaseUntilStop() throws {
@@ -491,6 +926,7 @@ final class PlaybackFoundationTests: XCTestCase {
                 context: .single
             ),
             elapsed: 42,
+            duration: 180,
             account: account,
             savedAt: Date()
         )
@@ -508,8 +944,44 @@ final class PlaybackFoundationTests: XCTestCase {
 
         XCTAssertEqual(coordinator.currentItem, item)
         XCTAssertEqual(coordinator.elapsed, 42)
+        XCTAssertEqual(coordinator.duration, 180)
         XCTAssertEqual(coordinator.playbackState, .paused)
         XCTAssertFalse(engine.hasCurrentItem)
+    }
+
+    func testSavedNowPlayingDecodesLegacyStateWithoutDuration() throws {
+        struct LegacyState: Codable {
+            let queue: PlaybackQueue
+            let elapsed: TimeInterval
+            let account: PlaybackAccount?
+            let savedAt: Date
+        }
+
+        let item = PlaybackItem(
+            id: "track",
+            title: "Restore",
+            artist: "Velacanto",
+            source: .jellyfin
+        )
+        let legacyState = LegacyState(
+            queue: PlaybackQueue(
+                items: [item],
+                currentItemID: item.id,
+                context: .single
+            ),
+            elapsed: 42,
+            account: PlaybackAccount(serverID: "server", userID: "user"),
+            savedAt: Date()
+        )
+
+        let data = try JSONEncoder().encode(legacyState)
+        let decoded = try JSONDecoder().decode(
+            SavedNowPlayingState.self,
+            from: data
+        )
+
+        XCTAssertEqual(decoded.elapsed, 42)
+        XCTAssertNil(decoded.duration)
     }
 
     func testBufferStateIsPublishedByCoordinator() {
@@ -577,6 +1049,25 @@ final class PlaybackFoundationTests: XCTestCase {
         )
     }
 
+    private func makeJellyfinPlaybackRequest(
+        reporter: (any PlaybackLifecycleReporting)? = nil
+    ) throws -> PlaybackRequest {
+        PlaybackRequest(
+            item: PlaybackItem(
+                id: "jellyfin-track",
+                title: "Network Track",
+                artist: "Velacanto",
+                source: .jellyfin
+            ),
+            asset: PlaybackAsset(
+                url: try XCTUnwrap(
+                    URL(string: "https://example.com/audio.mp3")
+                )
+            ),
+            reporter: reporter
+        )
+    }
+
     private func play(
         _ request: PlaybackRequest?,
         on coordinator: AudioPlaybackCoordinator
@@ -599,6 +1090,19 @@ private func waitUntil(
 }
 
 @MainActor
+private func waitUntilAsync(
+    attempts: Int = 1_000,
+    condition: () async -> Bool
+) async {
+    for _ in 0..<attempts {
+        if await condition() {
+            return
+        }
+        try? await Task.sleep(for: .milliseconds(1))
+    }
+}
+
+@MainActor
 private func assertThrowsErrorAsync(
     _ expression: () async throws -> Void,
     file: StaticString = #filePath,
@@ -616,6 +1120,7 @@ private func assertThrowsErrorAsync(
 private final class RecordingAudioPlayerEngine: AudioPlayerEngine {
     var eventHandler: (@MainActor (AudioPlayerEngineEvent) -> Void)?
     private(set) var hasCurrentItem = false
+    private(set) var loadCallCount = 0
     private(set) var playCallCount = 0
     private(set) var pauseCallCount = 0
     private(set) var stopCallCount = 0
@@ -623,6 +1128,7 @@ private final class RecordingAudioPlayerEngine: AudioPlayerEngine {
 
     func load(_ item: AVPlayerItem) {
         hasCurrentItem = true
+        loadCallCount += 1
     }
 
     func preload(_ item: AVPlayerItem?) {}
@@ -653,6 +1159,90 @@ private final class RecordingAudioPlayerEngine: AudioPlayerEngine {
 
     func send(_ event: AudioPlayerEngineEvent) {
         eventHandler?(event)
+    }
+}
+
+private enum PlaybackLifecycleEvent: Equatable, Sendable {
+    case started(session: String, position: TimeInterval)
+    case progress(
+        session: String,
+        position: TimeInterval,
+        isPaused: Bool
+    )
+    case stopped(session: String, position: TimeInterval)
+}
+
+private enum PlaybackLifecycleEventKind: Equatable, Sendable {
+    case started
+    case progress
+    case stopped
+}
+
+private enum RecordingPlaybackLifecycleError: Error {
+    case intentionalFailure
+}
+
+private actor PlaybackLifecycleEventRecorder {
+    private var events: [PlaybackLifecycleEvent] = []
+
+    func record(_ event: PlaybackLifecycleEvent) {
+        events.append(event)
+    }
+
+    func snapshot() -> [PlaybackLifecycleEvent] {
+        events
+    }
+}
+
+private struct RecordingPlaybackLifecycleReporter: PlaybackLifecycleReporting {
+    let id: String
+    let recorder: PlaybackLifecycleEventRecorder
+    var startDelay: Duration?
+    var failingEvent: PlaybackLifecycleEventKind?
+
+    init(
+        id: String,
+        recorder: PlaybackLifecycleEventRecorder,
+        startDelay: Duration? = nil,
+        failingEvent: PlaybackLifecycleEventKind? = nil
+    ) {
+        self.id = id
+        self.recorder = recorder
+        self.startDelay = startDelay
+        self.failingEvent = failingEvent
+    }
+
+    func reportStarted(at position: TimeInterval) async throws {
+        if let startDelay {
+            try await Task.sleep(for: startDelay)
+        }
+        if failingEvent == .started {
+            throw RecordingPlaybackLifecycleError.intentionalFailure
+        }
+        await recorder.record(.started(session: id, position: position))
+    }
+
+    func reportProgress(
+        at position: TimeInterval,
+        isPaused: Bool
+    ) async throws {
+        if failingEvent == .progress {
+            throw RecordingPlaybackLifecycleError.intentionalFailure
+        }
+        await recorder.record(
+            .progress(
+                session: id,
+                position: position,
+                isPaused: isPaused
+            )
+        )
+    }
+
+    func reportStopped(at position: TimeInterval) async throws {
+        if failingEvent == .stopped {
+            throw RecordingPlaybackLifecycleError.intentionalFailure
+        }
+        await recorder.record(.stopped(session: id, position: position))
     }
 }
 
@@ -688,6 +1278,33 @@ private final class RecordingSystemMediaController: SystemMediaControlling {
 
     func update(_ snapshot: NowPlayingSnapshot) {
         snapshots.append(snapshot)
+    }
+}
+
+@MainActor
+private final class RecordingPlaybackPlatformEventObserver:
+    PlaybackPlatformEventObserving
+{
+    private var interruptionHandler: (@MainActor (PlaybackAudioInterruption) -> Void)?
+    private var routeChangeHandler: (@MainActor (PlaybackAudioRouteChange) -> Void)?
+    private var backgroundHandler: (@MainActor () -> Void)?
+
+    func start(
+        interruption: @escaping @MainActor (PlaybackAudioInterruption) -> Void,
+        routeChange: @escaping @MainActor (PlaybackAudioRouteChange) -> Void,
+        didEnterBackground: @escaping @MainActor () -> Void
+    ) {
+        interruptionHandler = interruption
+        routeChangeHandler = routeChange
+        backgroundHandler = didEnterBackground
+    }
+
+    func sendInterruption(_ event: PlaybackAudioInterruption) {
+        interruptionHandler?(event)
+    }
+
+    func sendRouteChange(_ event: PlaybackAudioRouteChange) {
+        routeChangeHandler?(event)
     }
 }
 

@@ -22,6 +22,7 @@ struct PlaybackItem: Identifiable, Equatable, Codable, Sendable {
     let source: MusicSourceID
     let artworkItemID: String?
     let artworkTag: String?
+    let duration: TimeInterval?
 
     init(
         id: String = UUID().uuidString,
@@ -30,7 +31,8 @@ struct PlaybackItem: Identifiable, Equatable, Codable, Sendable {
         albumTitle: String? = nil,
         source: MusicSourceID,
         artworkItemID: String? = nil,
-        artworkTag: String? = nil
+        artworkTag: String? = nil,
+        duration: TimeInterval? = nil
     ) {
         self.id = id
         self.title = title
@@ -39,6 +41,7 @@ struct PlaybackItem: Identifiable, Equatable, Codable, Sendable {
         self.source = source
         self.artworkItemID = artworkItemID
         self.artworkTag = artworkTag
+        self.duration = duration
     }
 }
 
@@ -133,8 +136,23 @@ struct PlaybackAccount: Equatable, Codable, Sendable {
 struct SavedNowPlayingState: Equatable, Codable, Sendable {
     let queue: PlaybackQueue
     let elapsed: TimeInterval
+    let duration: TimeInterval?
     let account: PlaybackAccount?
     let savedAt: Date
+
+    init(
+        queue: PlaybackQueue,
+        elapsed: TimeInterval,
+        duration: TimeInterval? = nil,
+        account: PlaybackAccount?,
+        savedAt: Date
+    ) {
+        self.queue = queue
+        self.elapsed = elapsed
+        self.duration = duration
+        self.account = account
+        self.savedAt = savedAt
+    }
 }
 
 protocol NowPlayingStateStoring {
@@ -248,9 +266,9 @@ struct PlaybackAsset: Sendable {
 }
 
 protocol PlaybackLifecycleReporting: Sendable {
-    func reportStarted(at position: TimeInterval) async
-    func reportProgress(at position: TimeInterval, isPaused: Bool) async
-    func reportStopped(at position: TimeInterval) async
+    func reportStarted(at position: TimeInterval) async throws
+    func reportProgress(at position: TimeInterval, isPaused: Bool) async throws
+    func reportStopped(at position: TimeInterval) async throws
 }
 
 struct PlaybackRequest: Sendable {

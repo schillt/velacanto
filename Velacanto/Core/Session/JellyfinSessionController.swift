@@ -915,19 +915,19 @@ final class JellyfinSessionController: ObservableObject {
             throw JellyfinSessionError.notSignedIn
         }
         do {
-            let streamURL = try await client.streamURL(
+            let resolution = try await client.playbackResolution(
                 itemID: track.id,
                 userID: session.userID
             )
             let reporter = playbackReporter(
                 itemID: track.id,
-                streamURL: streamURL,
+                resolution: resolution,
                 client: client
             )
             return try await playbackAdapter.playbackRequest(
                 for: JellyfinTrackSelection(
                     track: track,
-                    streamURL: streamURL,
+                    streamURL: resolution.streamURL,
                     reporter: reporter
                 )
             )
@@ -945,16 +945,16 @@ final class JellyfinSessionController: ObservableObject {
             throw JellyfinSessionError.notSignedIn
         }
         do {
-            let streamURL = try await client.streamURL(
+            let resolution = try await client.playbackResolution(
                 itemID: item.id,
                 userID: session.userID
             )
             return PlaybackRequest(
                 item: item,
-                asset: PlaybackAsset(url: streamURL),
+                asset: PlaybackAsset(url: resolution.streamURL),
                 reporter: playbackReporter(
                     itemID: item.id,
-                    streamURL: streamURL,
+                    resolution: resolution,
                     client: client
                 )
             )
@@ -966,24 +966,14 @@ final class JellyfinSessionController: ObservableObject {
 
     private func playbackReporter(
         itemID: String,
-        streamURL: URL,
+        resolution: JellyfinPlaybackResolution,
         client: any JellyfinAPIService
     ) -> (any PlaybackLifecycleReporting)? {
-        guard
-            let playSessionID = URLComponents(
-                url: streamURL,
-                resolvingAgainstBaseURL: false
-            )?.queryItems?.first(where: {
-                $0.name.caseInsensitiveCompare("PlaySessionId") == .orderedSame
-            })?.value,
-            !playSessionID.isEmpty
-        else {
-            return nil
-        }
         return JellyfinPlaybackReporter(
             api: client,
             itemID: itemID,
-            playSessionID: playSessionID
+            playSessionID: resolution.playSessionID,
+            playMethod: resolution.playMethod
         )
     }
 

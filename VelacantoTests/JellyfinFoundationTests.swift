@@ -25,8 +25,10 @@ final class JellyfinFoundationTests: XCTestCase {
             "http://jellyfin:8096",
             "http://media.local:8096",
             "http://[::1]:8096",
+            "http://[fc00::1]:8096",
             "http://[fd12::5]:8096",
             "http://[fe80::5]:8096",
+            "http://[febf::5]:8096",
         ]
 
         for address in allowedAddresses {
@@ -40,8 +42,12 @@ final class JellyfinFoundationTests: XCTestCase {
     func testServerURLRejectsInsecureRemoteAndMalformedAddresses() {
         let rejectedAddresses = [
             "http://example.com",
+            "http://fc.example.com:8096",
+            "http://fd.example.com:8096",
+            "http://fe8.example.com:8096",
             "http://8.8.8.8:8096",
             "http://[2001:4860:4860::8888]:8096",
+            "http://[fec0::1]:8096",
             "ftp://192.168.1.20/music",
             "jellyfin.example.com",
             "https://user:password@example.com",
@@ -136,7 +142,7 @@ final class JellyfinFoundationTests: XCTestCase {
         )
     }
 
-    func testAuthenticatedStreamURLContainsPlaybackParameters() throws {
+    func testPlaybackNegotiationRequestMatchesUniversalAudioProfile() throws {
         let server = try JellyfinServerURL("https://example.com")
         let builder = JellyfinRequestBuilder(
             server: server,
@@ -144,9 +150,64 @@ final class JellyfinFoundationTests: XCTestCase {
             accessToken: "access-token"
         )
 
-        let url = try builder.streamURL(itemID: "track-id", userID: "user-id")
+        let request = try builder.playbackInfoRequest(
+            itemID: "track-id",
+            userID: "user-id"
+        )
+        let body = try XCTUnwrap(request.httpBody)
+        let payload = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: body) as? [String: Any]
+        )
+        let profile = try XCTUnwrap(payload["DeviceProfile"] as? [String: Any])
+        let directProfiles = try XCTUnwrap(
+            profile["DirectPlayProfiles"] as? [[String: Any]]
+        )
+        let transcodeProfiles = try XCTUnwrap(
+            profile["TranscodingProfiles"] as? [[String: Any]]
+        )
+
+        XCTAssertEqual(request.httpMethod, "POST")
+        XCTAssertEqual(request.url?.path, "/Items/track-id/PlaybackInfo")
+        XCTAssertEqual(payload["UserId"] as? String, "user-id")
+        XCTAssertEqual(payload["MaxStreamingBitrate"] as? Int, 320_000)
+        XCTAssertEqual(directProfiles.count, 9)
+        XCTAssertEqual(directProfiles.first?["Container"] as? String, "mp3")
+        XCTAssertTrue(
+            directProfiles.allSatisfy { $0["Type"] as? String == "Audio" }
+        )
+        XCTAssertEqual(transcodeProfiles.first?["Container"] as? String, "mp3")
+        XCTAssertEqual(transcodeProfiles.first?["AudioCodec"] as? String, "mp3")
+        XCTAssertEqual(transcodeProfiles.first?["Protocol"] as? String, "http")
+    }
+
+    func testPlaybackResolutionUsesNegotiatedDirectPlaySession() throws {
+        let builder = JellyfinRequestBuilder(
+            server: try JellyfinServerURL("https://example.com/jellyfin"),
+            deviceID: "stable-device",
+            accessToken: "access-token"
+        )
+        let response = JellyfinPlaybackInfoResponse(
+            mediaSources: [
+                JellyfinPlaybackMediaSource(
+                    id: "source-id",
+                    supportsDirectStream: true,
+                    supportsTranscoding: true,
+                    transcodingURL: "/jellyfin/Audio/track-id/stream.mp3"
+                )
+            ],
+            playSessionID: "negotiated-session",
+            errorCode: nil
+        )
+
+        let resolution = try builder.playbackResolution(
+            itemID: "track-id",
+            response: response
+        )
         let components = try XCTUnwrap(
-            URLComponents(url: url, resolvingAgainstBaseURL: false)
+            URLComponents(
+                url: resolution.streamURL,
+                resolvingAgainstBaseURL: false
+            )
         )
         let query = Dictionary(
             uniqueKeysWithValues: (components.queryItems ?? []).compactMap { item in
@@ -154,12 +215,119 @@ final class JellyfinFoundationTests: XCTestCase {
             }
         )
 
-        XCTAssertEqual(components.path, "/Audio/track-id/universal")
-        XCTAssertEqual(query["UserId"], "user-id")
+        XCTAssertEqual(resolution.playMethod, .directPlay)
+        XCTAssertEqual(resolution.playSessionID, "negotiated-session")
+        XCTAssertEqual(components.path, "/jellyfin/Audio/track-id/stream")
+        XCTAssertEqual(query["Static"], "true")
+        XCTAssertEqual(query["MediaSourceId"], "source-id")
+        XCTAssertEqual(query["DeviceId"], "stable-device")
+        XCTAssertEqual(query["PlaySessionId"], "negotiated-session")
+        XCTAssertEqual(query["api_key"], "access-token")
+    }
+
+    func testPlaybackResolutionUsesAuthenticatedServerTranscodeURL() throws {
+        let builder = JellyfinRequestBuilder(
+            server: try JellyfinServerURL("https://example.com/jellyfin"),
+            deviceID: "stable-device",
+            accessToken: "access-token"
+        )
+        let response = JellyfinPlaybackInfoResponse(
+            mediaSources: [
+                JellyfinPlaybackMediaSource(
+                    id: "source-id",
+                    supportsDirectStream: false,
+                    supportsTranscoding: true,
+                    transcodingURL:
+                        "/jellyfin/Audio/track-id/stream.mp3?PlaySessionId=server-value"
+                )
+            ],
+            playSessionID: "negotiated-session",
+            errorCode: nil
+        )
+
+        let resolution = try builder.playbackResolution(
+            itemID: "track-id",
+            response: response
+        )
+        let components = try XCTUnwrap(
+            URLComponents(
+                url: resolution.streamURL,
+                resolvingAgainstBaseURL: false
+            )
+        )
+        let query = Dictionary(
+            uniqueKeysWithValues: (components.queryItems ?? []).compactMap { item in
+                item.value.map { (item.name, $0) }
+            }
+        )
+
+        XCTAssertEqual(resolution.playMethod, .transcode)
+        XCTAssertEqual(components.path, "/jellyfin/Audio/track-id/stream.mp3")
+        XCTAssertEqual(query["PlaySessionId"], "negotiated-session")
         XCTAssertEqual(query["DeviceId"], "stable-device")
         XCTAssertEqual(query["api_key"], "access-token")
-        XCTAssertEqual(query["TranscodingContainer"], "mp3")
-        XCTAssertNotNil(query["PlaySessionId"])
+    }
+
+    func testPlaybackResolutionRejectsCrossOriginTranscodeURL() throws {
+        let builder = JellyfinRequestBuilder(
+            server: try JellyfinServerURL("https://example.com"),
+            deviceID: "stable-device",
+            accessToken: "access-token"
+        )
+        let response = JellyfinPlaybackInfoResponse(
+            mediaSources: [
+                JellyfinPlaybackMediaSource(
+                    id: "source-id",
+                    supportsDirectStream: false,
+                    supportsTranscoding: true,
+                    transcodingURL: "https://attacker.example/Audio/track-id/stream.mp3"
+                )
+            ],
+            playSessionID: "negotiated-session",
+            errorCode: nil
+        )
+
+        XCTAssertThrowsError(
+            try builder.playbackResolution(
+                itemID: "track-id",
+                response: response
+            )
+        ) { error in
+            XCTAssertEqual(error as? JellyfinAPIError, .invalidResponse)
+        }
+    }
+
+    func testPlaybackReportRequestUsesResolvedMethodAndSession() throws {
+        let server = try JellyfinServerURL("https://example.com/jellyfin")
+        let builder = JellyfinRequestBuilder(
+            server: server,
+            deviceID: "stable-device",
+            accessToken: "access-token"
+        )
+        let request = try builder.playbackReportRequest(
+            pathComponents: ["Sessions", "Playing", "Progress"],
+            itemID: "track-id",
+            playSessionID: "play-session",
+            positionTicks: 125_000_000,
+            isPaused: true,
+            playMethod: .transcode
+        )
+        let body = try XCTUnwrap(request.httpBody)
+        let payload = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: body) as? [String: Any]
+        )
+
+        XCTAssertEqual(request.httpMethod, "POST")
+        XCTAssertEqual(
+            request.url?.path,
+            "/jellyfin/Sessions/Playing/Progress"
+        )
+        XCTAssertEqual(payload["ItemId"] as? String, "track-id")
+        XCTAssertEqual(payload["PlaySessionId"] as? String, "play-session")
+        XCTAssertEqual(payload["PositionTicks"] as? Int64, 125_000_000)
+        XCTAssertEqual(payload["IsPaused"] as? Bool, true)
+        XCTAssertEqual(payload["CanSeek"] as? Bool, true)
+        XCTAssertEqual(payload["PlayMethod"] as? String, "Transcode")
     }
 
     func testJellyfinModelsDecodeCurrentServerShapes() throws {
@@ -996,11 +1164,18 @@ private actor FakeJellyfinAPI: JellyfinAPIService {
         []
     }
 
-    func streamURL(itemID: String, userID: String) async throws -> URL {
-        guard let url = URL(string: "https://example.com/Audio/\(itemID)/universal") else {
+    func playbackResolution(
+        itemID: String,
+        userID: String
+    ) async throws -> JellyfinPlaybackResolution {
+        guard let url = URL(string: "https://example.com/Audio/\(itemID)/stream") else {
             throw JellyfinAPIError.invalidResponse
         }
-        return url
+        return JellyfinPlaybackResolution(
+            streamURL: url,
+            playSessionID: "fake-session",
+            playMethod: .directPlay
+        )
     }
 
     func artworkURL(

@@ -123,10 +123,15 @@ final class AVFoundationAudioPlayerEngine: AudioPlayerEngine {
             eventHandler?(.stateChanged(.paused))
         }
 
+        // A packet-exact seek is not available for every remote audio stream.
+        // In particular, servers can expose audio with sparse byte-range
+        // boundaries. Let AVFoundation select a nearby decodable boundary so a
+        // manual scrub completes instead of remaining stalled at its old time.
+        let tolerance = CMTime(seconds: 0.5, preferredTimescale: 600)
         player.seek(
             to: CMTime(seconds: max(time, 0), preferredTimescale: 600),
-            toleranceBefore: .zero,
-            toleranceAfter: .zero
+            toleranceBefore: tolerance,
+            toleranceAfter: tolerance
         )
     }
 

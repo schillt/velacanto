@@ -1,4 +1,5 @@
 import Foundation
+import Network
 
 struct JellyfinServerURL: Equatable, Sendable {
     let url: URL
@@ -58,10 +59,7 @@ struct JellyfinServerURL: Equatable, Sendable {
                 || (octets[0] == 192 && octets[1] == 168)
         }
 
-        return host == "::1"
-            || host.hasPrefix("fc")
-            || host.hasPrefix("fd")
-            || Self.isIPv6LinkLocal(host)
+        return isLocalIPv6Address(host)
     }
 
     private static func ipv4Octets(_ host: String) -> [Int]? {
@@ -80,14 +78,15 @@ struct JellyfinServerURL: Equatable, Sendable {
         return octets
     }
 
-    private static func isIPv6LinkLocal(_ host: String) -> Bool {
-        guard host.hasPrefix("fe"), host.count >= 3 else { return false }
-        switch host[host.index(host.startIndex, offsetBy: 2)] {
-        case "8", "9", "a", "b":
-            return true
-        default:
-            return false
-        }
+    private static func isLocalIPv6Address(_ host: String) -> Bool {
+        guard let address = IPv6Address(host) else { return false }
+        let bytes = [UInt8](address.rawValue)
+        guard bytes.count == 16 else { return false }
+
+        let isLoopback = bytes.dropLast().allSatisfy { $0 == 0 } && bytes.last == 1
+        let isUniqueLocal = bytes[0] & 0xFE == 0xFC
+        let isLinkLocal = bytes[0] == 0xFE && bytes[1] & 0xC0 == 0x80
+        return isLoopback || isUniqueLocal || isLinkLocal
     }
 }
 
@@ -102,6 +101,44 @@ enum JellyfinServerURLError: LocalizedError, Equatable {
         case .insecureRemoteAddress:
             "Plain HTTP is allowed only for local-network Jellyfin servers. Use HTTPS for remote servers."
         }
+    }
+}
+
+enum JellyfinPlaybackMethod: String, Equatable, Sendable {
+    case directPlay = "DirectPlay"
+    case directStream = "DirectStream"
+    case transcode = "Transcode"
+}
+
+struct JellyfinPlaybackResolution: Equatable, Sendable {
+    let streamURL: URL
+    let playSessionID: String
+    let playMethod: JellyfinPlaybackMethod
+}
+
+struct JellyfinPlaybackInfoResponse: Decodable, Equatable, Sendable {
+    let mediaSources: [JellyfinPlaybackMediaSource]
+    let playSessionID: String?
+    let errorCode: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case mediaSources = "MediaSources"
+        case playSessionID = "PlaySessionId"
+        case errorCode = "ErrorCode"
+    }
+}
+
+struct JellyfinPlaybackMediaSource: Decodable, Equatable, Sendable {
+    let id: String?
+    let supportsDirectStream: Bool
+    let supportsTranscoding: Bool
+    let transcodingURL: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case id = "Id"
+        case supportsDirectStream = "SupportsDirectStream"
+        case supportsTranscoding = "SupportsTranscoding"
+        case transcodingURL = "TranscodingUrl"
     }
 }
 
@@ -382,31 +419,224 @@ struct JellyfinRequestBuilder: Sendable {
         return request
     }
 
-    func streamURL(itemID: String, userID: String) throws -> URL {
-        let playSessionID = UUID().uuidString
-        let queryItems = [
-            URLQueryItem(name: "UserId", value: userID),
+    func playbackInfoRequest(itemID: String, userID: String) throws -> URLRequest {
+        struct DirectPlayProfile: Encodable {
+            let container: String
+            let type = "Audio"
+
+            private enum CodingKeys: String, CodingKey {
+                case container = "Container"
+                case type = "Type"
+            }
+        }
+
+        struct TranscodingProfile: Encodable {
+            let container = "mp3"
+            let type = "Audio"
+            let audioCodec = "mp3"
+            let `protocol` = "http"
+            let context = "Streaming"
+
+            private enum CodingKeys: String, CodingKey {
+                case container = "Container"
+                case type = "Type"
+                case audioCodec = "AudioCodec"
+                case `protocol` = "Protocol"
+                case context = "Context"
+            }
+        }
+
+        struct DeviceProfile: Encodable {
+            let maxStreamingBitrate = 320_000
+            let directPlayProfiles: [DirectPlayProfile]
+            let transcodingProfiles = [TranscodingProfile()]
+
+            private enum CodingKeys: String, CodingKey {
+                case maxStreamingBitrate = "MaxStreamingBitrate"
+                case directPlayProfiles = "DirectPlayProfiles"
+                case transcodingProfiles = "TranscodingProfiles"
+            }
+        }
+
+        struct Payload: Encodable {
+            let userID: String
+            let maxStreamingBitrate = 320_000
+            let deviceProfile: DeviceProfile
+            let enableDirectPlay = true
+            let enableDirectStream = true
+            let enableTranscoding = true
+            let allowAudioStreamCopy = true
+
+            private enum CodingKeys: String, CodingKey {
+                case userID = "UserId"
+                case maxStreamingBitrate = "MaxStreamingBitrate"
+                case deviceProfile = "DeviceProfile"
+                case enableDirectPlay = "EnableDirectPlay"
+                case enableDirectStream = "EnableDirectStream"
+                case enableTranscoding = "EnableTranscoding"
+                case allowAudioStreamCopy = "AllowAudioStreamCopy"
+            }
+        }
+
+        let containers = [
+            "mp3", "aac", "m4a", "m4b", "flac", "webma", "webm", "wav", "ogg",
+        ]
+        let payload = Payload(
+            userID: userID,
+            deviceProfile: DeviceProfile(
+                directPlayProfiles: containers.map(DirectPlayProfile.init)
+            )
+        )
+        return try request(
+            pathComponents: ["Items", itemID, "PlaybackInfo"],
+            method: "POST",
+            body: JSONEncoder().encode(payload)
+        )
+    }
+
+    func playbackResolution(
+        itemID: String,
+        response: JellyfinPlaybackInfoResponse
+    ) throws -> JellyfinPlaybackResolution {
+        guard
+            response.errorCode == nil,
+            let playSessionID = response.playSessionID,
+            !playSessionID.isEmpty,
+            let source = response.mediaSources.first
+        else {
+            throw JellyfinAPIError.invalidResponse
+        }
+
+        // Jellyfin's UniversalAudioController uses SupportsDirectStream as its
+        // "can serve the original file statically" decision for audio.
+        if source.supportsDirectStream {
+            return JellyfinPlaybackResolution(
+                streamURL: try directPlayURL(
+                    itemID: itemID,
+                    mediaSourceID: source.id,
+                    playSessionID: playSessionID
+                ),
+                playSessionID: playSessionID,
+                playMethod: .directPlay
+            )
+        }
+
+        guard
+            source.supportsTranscoding,
+            let transcodingURL = source.transcodingURL,
+            !transcodingURL.isEmpty
+        else {
+            throw JellyfinAPIError.invalidResponse
+        }
+        return JellyfinPlaybackResolution(
+            streamURL: try authenticatedStreamURL(
+                transcodingURL,
+                playSessionID: playSessionID
+            ),
+            playSessionID: playSessionID,
+            playMethod: .transcode
+        )
+    }
+
+    private func directPlayURL(
+        itemID: String,
+        mediaSourceID: String?,
+        playSessionID: String
+    ) throws -> URL {
+        var queryItems = [
+            URLQueryItem(name: "Static", value: "true"),
             URLQueryItem(name: "DeviceId", value: deviceID),
             URLQueryItem(name: "PlaySessionId", value: playSessionID),
-            URLQueryItem(name: "MaxStreamingBitrate", value: "320000"),
-            URLQueryItem(
-                name: "Container",
-                value: "mp3,aac,m4a,m4b,flac,webma,webm,wav,ogg"
-            ),
-            URLQueryItem(name: "TranscodingContainer", value: "mp3"),
-            URLQueryItem(name: "TranscodingProtocol", value: "http"),
-            URLQueryItem(name: "AudioCodec", value: "mp3"),
-            URLQueryItem(name: "EnableRedirection", value: "true"),
-            URLQueryItem(name: "EnableRemoteMedia", value: "true"),
             URLQueryItem(name: "api_key", value: accessToken),
         ]
+        if let mediaSourceID, !mediaSourceID.isEmpty {
+            queryItems.append(
+                URLQueryItem(name: "MediaSourceId", value: mediaSourceID)
+            )
+        }
         return try request(
-            pathComponents: ["Audio", itemID, "universal"],
+            pathComponents: ["Audio", itemID, "stream"],
             queryItems: queryItems
         ).url
             ?? {
                 throw JellyfinAPIError.invalidResponse
             }()
+    }
+
+    private func authenticatedStreamURL(
+        _ serverPath: String,
+        playSessionID: String
+    ) throws -> URL {
+        guard
+            let resolvedURL = URL(string: serverPath, relativeTo: server.url)?.absoluteURL,
+            resolvedURL.scheme?.caseInsensitiveCompare(server.url.scheme ?? "") == .orderedSame,
+            resolvedURL.host?.caseInsensitiveCompare(server.url.host ?? "") == .orderedSame,
+            resolvedURL.port == server.url.port,
+            var components = URLComponents(
+                url: resolvedURL,
+                resolvingAgainstBaseURL: false
+            )
+        else {
+            throw JellyfinAPIError.invalidResponse
+        }
+
+        var queryItems = components.queryItems ?? []
+        queryItems.removeAll {
+            $0.name.caseInsensitiveCompare("PlaySessionId") == .orderedSame
+                || $0.name.caseInsensitiveCompare("DeviceId") == .orderedSame
+                || $0.name.caseInsensitiveCompare("api_key") == .orderedSame
+        }
+        queryItems.append(URLQueryItem(name: "PlaySessionId", value: playSessionID))
+        queryItems.append(URLQueryItem(name: "DeviceId", value: deviceID))
+        queryItems.append(URLQueryItem(name: "api_key", value: accessToken))
+        components.queryItems = queryItems
+
+        guard let url = components.url else {
+            throw JellyfinAPIError.invalidResponse
+        }
+        return url
+    }
+
+    func playbackReportRequest(
+        pathComponents: [String],
+        itemID: String,
+        playSessionID: String,
+        positionTicks: Int64,
+        isPaused: Bool,
+        playMethod: JellyfinPlaybackMethod
+    ) throws -> URLRequest {
+        struct Payload: Encodable {
+            let itemID: String
+            let playSessionID: String
+            let positionTicks: Int64
+            let isPaused: Bool
+            let canSeek: Bool
+            let playMethod: String
+
+            enum CodingKeys: String, CodingKey {
+                case itemID = "ItemId"
+                case playSessionID = "PlaySessionId"
+                case positionTicks = "PositionTicks"
+                case isPaused = "IsPaused"
+                case canSeek = "CanSeek"
+                case playMethod = "PlayMethod"
+            }
+        }
+
+        return try request(
+            pathComponents: pathComponents,
+            method: "POST",
+            body: JSONEncoder().encode(
+                Payload(
+                    itemID: itemID,
+                    playSessionID: playSessionID,
+                    positionTicks: positionTicks,
+                    isPaused: isPaused,
+                    canSeek: true,
+                    playMethod: playMethod.rawValue
+                )
+            )
+        )
     }
 
     func artworkURL(
@@ -533,7 +763,10 @@ protocol JellyfinAPIService: Sendable {
         playlistID: String
     ) async throws -> [JellyfinItem]
     func tracks(userID: String, albumID: String) async throws -> [JellyfinItem]
-    func streamURL(itemID: String, userID: String) async throws -> URL
+    func playbackResolution(
+        itemID: String,
+        userID: String
+    ) async throws -> JellyfinPlaybackResolution
     func artworkURL(
         itemID: String,
         imageTag: String?,
@@ -603,18 +836,21 @@ protocol JellyfinAPIService: Sendable {
     func reportPlaybackStarted(
         itemID: String,
         playSessionID: String,
-        positionTicks: Int64
+        positionTicks: Int64,
+        playMethod: JellyfinPlaybackMethod
     ) async throws
     func reportPlaybackProgress(
         itemID: String,
         playSessionID: String,
         positionTicks: Int64,
-        isPaused: Bool
+        isPaused: Bool,
+        playMethod: JellyfinPlaybackMethod
     ) async throws
     func reportPlaybackStopped(
         itemID: String,
         playSessionID: String,
-        positionTicks: Int64
+        positionTicks: Int64,
+        playMethod: JellyfinPlaybackMethod
     ) async throws
     func logout() async throws
 }
@@ -623,20 +859,23 @@ extension JellyfinAPIService {
     func reportPlaybackStarted(
         itemID: String,
         playSessionID: String,
-        positionTicks: Int64
+        positionTicks: Int64,
+        playMethod: JellyfinPlaybackMethod
     ) async throws {}
 
     func reportPlaybackProgress(
         itemID: String,
         playSessionID: String,
         positionTicks: Int64,
-        isPaused: Bool
+        isPaused: Bool,
+        playMethod: JellyfinPlaybackMethod
     ) async throws {}
 
     func reportPlaybackStopped(
         itemID: String,
         playSessionID: String,
-        positionTicks: Int64
+        positionTicks: Int64,
+        playMethod: JellyfinPlaybackMethod
     ) async throws {}
 
     func albumsPage(
@@ -1239,8 +1478,18 @@ actor JellyfinAPIClient: JellyfinAPIService {
         )
     }
 
-    func streamURL(itemID: String, userID: String) throws -> URL {
-        try builder.streamURL(itemID: itemID, userID: userID)
+    func playbackResolution(
+        itemID: String,
+        userID: String
+    ) async throws -> JellyfinPlaybackResolution {
+        let response = try await execute(
+            builder.playbackInfoRequest(itemID: itemID, userID: userID),
+            as: JellyfinPlaybackInfoResponse.self
+        )
+        return try builder.playbackResolution(
+            itemID: itemID,
+            response: response
+        )
     }
 
     func artworkURL(
@@ -1270,14 +1519,16 @@ actor JellyfinAPIClient: JellyfinAPIService {
     func reportPlaybackStarted(
         itemID: String,
         playSessionID: String,
-        positionTicks: Int64
+        positionTicks: Int64,
+        playMethod: JellyfinPlaybackMethod
     ) async throws {
         try await sendPlaybackReport(
             path: ["Sessions", "Playing"],
             itemID: itemID,
             playSessionID: playSessionID,
             positionTicks: positionTicks,
-            isPaused: false
+            isPaused: false,
+            playMethod: playMethod
         )
     }
 
@@ -1285,28 +1536,32 @@ actor JellyfinAPIClient: JellyfinAPIService {
         itemID: String,
         playSessionID: String,
         positionTicks: Int64,
-        isPaused: Bool
+        isPaused: Bool,
+        playMethod: JellyfinPlaybackMethod
     ) async throws {
         try await sendPlaybackReport(
             path: ["Sessions", "Playing", "Progress"],
             itemID: itemID,
             playSessionID: playSessionID,
             positionTicks: positionTicks,
-            isPaused: isPaused
+            isPaused: isPaused,
+            playMethod: playMethod
         )
     }
 
     func reportPlaybackStopped(
         itemID: String,
         playSessionID: String,
-        positionTicks: Int64
+        positionTicks: Int64,
+        playMethod: JellyfinPlaybackMethod
     ) async throws {
         try await sendPlaybackReport(
             path: ["Sessions", "Playing", "Stopped"],
             itemID: itemID,
             playSessionID: playSessionID,
             positionTicks: positionTicks,
-            isPaused: true
+            isPaused: true,
+            playMethod: playMethod
         )
     }
 
@@ -1391,40 +1646,16 @@ actor JellyfinAPIClient: JellyfinAPIService {
         itemID: String,
         playSessionID: String,
         positionTicks: Int64,
-        isPaused: Bool
+        isPaused: Bool,
+        playMethod: JellyfinPlaybackMethod
     ) async throws {
-        struct Payload: Encodable {
-            let itemID: String
-            let playSessionID: String
-            let positionTicks: Int64
-            let isPaused: Bool
-            let canSeek: Bool
-            let playMethod: String
-
-            enum CodingKeys: String, CodingKey {
-                case itemID = "ItemId"
-                case playSessionID = "PlaySessionId"
-                case positionTicks = "PositionTicks"
-                case isPaused = "IsPaused"
-                case canSeek = "CanSeek"
-                case playMethod = "PlayMethod"
-            }
-        }
-
-        var request = try builder.request(
+        let request = try builder.playbackReportRequest(
             pathComponents: path,
-            method: "POST"
-        )
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONEncoder().encode(
-            Payload(
-                itemID: itemID,
-                playSessionID: playSessionID,
-                positionTicks: positionTicks,
-                isPaused: isPaused,
-                canSeek: true,
-                playMethod: "DirectStream"
-            )
+            itemID: itemID,
+            playSessionID: playSessionID,
+            positionTicks: positionTicks,
+            isPaused: isPaused,
+            playMethod: playMethod
         )
         _ = try await executeWithoutResponse(request)
     }
