@@ -122,10 +122,28 @@ struct JellyfinServerInfo: Decodable, Equatable, Sendable {
 struct JellyfinUser: Decodable, Equatable, Sendable {
     let id: String
     let name: String
+    let primaryImageTag: String?
 
     private enum CodingKeys: String, CodingKey {
         case id = "Id"
         case name = "Name"
+        case primaryImageTag = "PrimaryImageTag"
+    }
+
+    init(id: String, name: String, primaryImageTag: String? = nil) {
+        self.id = id
+        self.name = name
+        self.primaryImageTag = primaryImageTag
+    }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        primaryImageTag = try container.decodeIfPresent(
+            String.self,
+            forKey: .primaryImageTag
+        )
     }
 }
 
@@ -319,6 +337,28 @@ struct JellyfinRequestBuilder: Sendable {
             }()
     }
 
+    func userImageURL(
+        userID: String,
+        imageTag: String?,
+        maxWidth: Int
+    ) throws -> URL {
+        var queryItems = [
+            URLQueryItem(name: "maxWidth", value: String(max(maxWidth, 64))),
+            URLQueryItem(name: "quality", value: "90"),
+            URLQueryItem(name: "api_key", value: accessToken),
+        ]
+        if let imageTag, !imageTag.isEmpty {
+            queryItems.append(URLQueryItem(name: "tag", value: imageTag))
+        }
+        return try request(
+            pathComponents: ["Users", userID, "Images", "Primary"],
+            queryItems: queryItems
+        ).url
+            ?? {
+                throw JellyfinAPIError.invalidResponse
+            }()
+    }
+
     private var authorizationHeader: String {
         var value =
             "MediaBrowser Client=\"Velacanto\", Device=\"Apple device\", "
@@ -366,6 +406,11 @@ protocol JellyfinAPIService: Sendable {
     func streamURL(itemID: String, userID: String) async throws -> URL
     func artworkURL(
         itemID: String,
+        imageTag: String?,
+        maxWidth: Int
+    ) async throws -> URL
+    func userImageURL(
+        userID: String,
         imageTag: String?,
         maxWidth: Int
     ) async throws -> URL
@@ -611,6 +656,18 @@ actor JellyfinAPIClient: JellyfinAPIService {
     ) throws -> URL {
         try builder.artworkURL(
             itemID: itemID,
+            imageTag: imageTag,
+            maxWidth: maxWidth
+        )
+    }
+
+    func userImageURL(
+        userID: String,
+        imageTag: String?,
+        maxWidth: Int
+    ) throws -> URL {
+        try builder.userImageURL(
+            userID: userID,
             imageTag: imageTag,
             maxWidth: maxWidth
         )

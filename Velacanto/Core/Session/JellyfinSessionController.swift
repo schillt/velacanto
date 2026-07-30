@@ -7,6 +7,23 @@ struct JellyfinSession: Codable, Equatable, Sendable {
     let serverName: String
     let userID: String
     let username: String
+    let userPrimaryImageTag: String?
+
+    init(
+        serverURL: URL,
+        serverID: String,
+        serverName: String,
+        userID: String,
+        username: String,
+        userPrimaryImageTag: String? = nil
+    ) {
+        self.serverURL = serverURL
+        self.serverID = serverID
+        self.serverName = serverName
+        self.userID = userID
+        self.username = username
+        self.userPrimaryImageTag = userPrimaryImageTag
+    }
 }
 
 enum JellyfinSessionPhase: Equatable, Sendable {
@@ -227,7 +244,8 @@ final class JellyfinSessionController: ObservableObject {
                 serverID: info.id,
                 serverName: info.serverName,
                 userID: result.user.id,
-                username: result.user.name
+                username: result.user.name,
+                userPrimaryImageTag: result.user.primaryImageTag
             )
             sessionStore.saveSession(newSession)
 
@@ -469,6 +487,15 @@ final class JellyfinSessionController: ObservableObject {
         )
     }
 
+    func userImageURL(maxWidth: Int) async -> URL? {
+        guard let session, let client else { return nil }
+        return try? await client.userImageURL(
+            userID: session.userID,
+            imageTag: session.userPrimaryImageTag,
+            maxWidth: maxWidth
+        )
+    }
+
     func editServer() {
         guard session == nil else { return }
         candidateServer = nil
@@ -520,7 +547,8 @@ final class JellyfinSessionController: ObservableObject {
                     serverID: savedSession.serverID,
                     serverName: savedSession.serverName,
                     userID: user.id,
-                    username: user.name
+                    username: user.name,
+                    userPrimaryImageTag: user.primaryImageTag
                 )
                 session = restored
                 sessionStore.saveSession(restored)

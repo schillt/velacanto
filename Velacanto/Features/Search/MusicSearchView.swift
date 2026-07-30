@@ -76,8 +76,9 @@ struct MusicSearchView: View {
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button(action: showProfile) {
-                    AccountAvatar(username: jellyfin.session?.username)
+                    AccountAvatar(jellyfin: jellyfin)
                 }
+                .buttonStyle(.plain)
                 .accessibilityLabel("Profile and settings")
             }
         }

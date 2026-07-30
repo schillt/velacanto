@@ -141,7 +141,11 @@ final class JellyfinFoundationTests: XCTestCase {
         let authenticationData = Data(
             """
             {
-              "User": {"Id": "user-id", "Name": "Tyler"},
+              "User": {
+                "Id": "user-id",
+                "Name": "Tyler",
+                "PrimaryImageTag": "user-image-tag"
+              },
               "AccessToken": "token"
             }
             """.utf8
@@ -175,6 +179,7 @@ final class JellyfinFoundationTests: XCTestCase {
         XCTAssertEqual(server.serverName, "Home")
         XCTAssertEqual(server.startupWizardCompleted, true)
         XCTAssertEqual(authentication.user.name, "Tyler")
+        XCTAssertEqual(authentication.user.primaryImageTag, "user-image-tag")
         XCTAssertEqual(authentication.accessToken, "token")
         XCTAssertEqual(items.totalRecordCount, 1)
         XCTAssertEqual(items.items.first?.displayArtist, "Velacanto")
@@ -210,6 +215,38 @@ final class JellyfinFoundationTests: XCTestCase {
         )
         XCTAssertEqual(query["tag"], "image-tag")
         XCTAssertEqual(query["maxWidth"], "720")
+        XCTAssertEqual(query["quality"], "90")
+        XCTAssertEqual(query["api_key"], "access-token")
+    }
+
+    func testUserImageURLUsesJellyfinProfileImageEndpoint() throws {
+        let server = try JellyfinServerURL("https://example.com/jellyfin")
+        let builder = JellyfinRequestBuilder(
+            server: server,
+            deviceID: "stable-device",
+            accessToken: "access-token"
+        )
+
+        let url = try builder.userImageURL(
+            userID: "user-id",
+            imageTag: "profile-tag",
+            maxWidth: 128
+        )
+        let components = try XCTUnwrap(
+            URLComponents(url: url, resolvingAgainstBaseURL: false)
+        )
+        let query = Dictionary(
+            uniqueKeysWithValues: (components.queryItems ?? []).compactMap { item in
+                item.value.map { (item.name, $0) }
+            }
+        )
+
+        XCTAssertEqual(
+            components.path,
+            "/jellyfin/Users/user-id/Images/Primary"
+        )
+        XCTAssertEqual(query["tag"], "profile-tag")
+        XCTAssertEqual(query["maxWidth"], "128")
         XCTAssertEqual(query["quality"], "90")
         XCTAssertEqual(query["api_key"], "access-token")
     }
@@ -314,6 +351,10 @@ final class JellyfinFoundationTests: XCTestCase {
 
         XCTAssertEqual(controller.phase, .signedIn)
         XCTAssertEqual(controller.session?.username, "Tyler")
+        XCTAssertEqual(
+            controller.session?.userPrimaryImageTag,
+            "profile-image-tag"
+        )
         XCTAssertEqual(tokenStore.token, "access-token")
         let persistedData = try JSONEncoder().encode(
             XCTUnwrap(sessionStore.session)
@@ -566,7 +607,11 @@ private actor FakeJellyfinAPI: JellyfinAPIService {
             throw authenticationError
         }
         return JellyfinAuthenticationResult(
-            user: JellyfinUser(id: "user-id", name: username),
+            user: JellyfinUser(
+                id: "user-id",
+                name: username,
+                primaryImageTag: "profile-image-tag"
+            ),
             accessToken: "access-token"
         )
     }
@@ -575,7 +620,11 @@ private actor FakeJellyfinAPI: JellyfinAPIService {
         if let currentUserError {
             throw currentUserError
         }
-        return JellyfinUser(id: "user-id", name: "Tyler")
+        return JellyfinUser(
+            id: "user-id",
+            name: "Tyler",
+            primaryImageTag: "profile-image-tag"
+        )
     }
 
     func libraries(userID: String) async throws -> [JellyfinItem] {
@@ -646,6 +695,28 @@ private actor FakeJellyfinAPI: JellyfinAPIService {
         guard
             var components = URLComponents(
                 string: "https://example.com/Items/\(itemID)/Images/Primary"
+            )
+        else {
+            throw JellyfinAPIError.invalidResponse
+        }
+        components.queryItems = [
+            URLQueryItem(name: "tag", value: imageTag),
+            URLQueryItem(name: "maxWidth", value: String(maxWidth)),
+        ]
+        guard let url = components.url else {
+            throw JellyfinAPIError.invalidResponse
+        }
+        return url
+    }
+
+    func userImageURL(
+        userID: String,
+        imageTag: String?,
+        maxWidth: Int
+    ) async throws -> URL {
+        guard
+            var components = URLComponents(
+                string: "https://example.com/Users/\(userID)/Images/Primary"
             )
         else {
             throw JellyfinAPIError.invalidResponse

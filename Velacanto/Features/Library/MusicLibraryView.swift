@@ -70,8 +70,9 @@ struct MusicLibraryView: View {
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button(action: showProfile) {
-                    AccountAvatar(username: jellyfin.session?.username)
+                    AccountAvatar(jellyfin: jellyfin)
                 }
+                .buttonStyle(.plain)
                 .accessibilityLabel("Profile and settings")
             }
         }
@@ -93,7 +94,7 @@ struct MusicLibraryView: View {
 
 }
 
-private enum MusicLibraryCategory: String, CaseIterable, Identifiable {
+enum MusicLibraryCategory: String, CaseIterable, Identifiable {
     case albums
     case artists
     case songs
@@ -141,6 +142,26 @@ private enum MusicLibraryCategory: String, CaseIterable, Identifiable {
     }
 }
 
+struct MusicLibraryCategoryView: View {
+    let category: MusicLibraryCategory
+    @ObservedObject var playback: AudioPlaybackCoordinator
+    @ObservedObject var jellyfin: JellyfinSessionController
+
+    @ViewBuilder
+    var body: some View {
+        switch category {
+        case .albums:
+            MusicAlbumsView(jellyfin: jellyfin, playback: playback)
+        case .artists:
+            MusicArtistsView(jellyfin: jellyfin, playback: playback)
+        case .songs:
+            MusicSongsView(jellyfin: jellyfin, playback: playback)
+        case .playlists:
+            MusicPlaylistsView(jellyfin: jellyfin, playback: playback)
+        }
+    }
+}
+
 private struct MusicLibraryCategoryRow: View {
     let category: MusicLibraryCategory
 
@@ -171,45 +192,74 @@ struct MusicDetailHeader: View {
     let subtitle: String
     let detail: String?
 
+    @ViewBuilder
     var body: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(alignment: .top, spacing: 16) {
-                artwork
+        #if os(macOS)
+            HStack(alignment: .bottom, spacing: 26) {
+                artwork(size: 220, cornerRadius: 16)
+                    .shadow(color: .black.opacity(0.16), radius: 22, y: 10)
                 metadata
+                    .padding(.bottom, 8)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 8)
+        #else
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .top, spacing: 16) {
+                    artwork(size: 116, cornerRadius: 14)
+                    metadata
+                }
 
-            VStack(alignment: .leading, spacing: 12) {
-                artwork
-                metadata
+                VStack(alignment: .leading, spacing: 12) {
+                    artwork(size: 116, cornerRadius: 14)
+                    metadata
+                }
             }
-        }
-        .padding(.vertical, 6)
+            .padding(.vertical, 6)
+        #endif
     }
 
-    private var artwork: some View {
+    private func artwork(size: CGFloat, cornerRadius: CGFloat) -> some View {
         JellyfinArtworkView(
             item: item,
             jellyfin: jellyfin,
-            cornerRadius: 14,
+            cornerRadius: cornerRadius,
             maxWidth: 480
         )
-        .frame(width: 116, height: 116)
+        .frame(width: size, height: size)
     }
 
     private var metadata: some View {
-        VStack(alignment: .leading, spacing: 5) {
+        VStack(alignment: .leading, spacing: 7) {
             Text(item.name)
-                .font(.title2.weight(.semibold))
+                .font(titleFont)
             Text(subtitle)
+                .font(subtitleFont)
                 .foregroundStyle(.secondary)
             if let detail {
                 Text(detail)
-                    .font(.caption)
+                    .font(.callout)
                     .foregroundStyle(.tertiary)
             }
         }
         .padding(.top, 4)
         .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private var titleFont: Font {
+        #if os(macOS)
+            .largeTitle.weight(.bold)
+        #else
+            .title2.weight(.semibold)
+        #endif
+    }
+
+    private var subtitleFont: Font {
+        #if os(macOS)
+            .title3
+        #else
+            .body
+        #endif
     }
 }
 
@@ -823,7 +873,7 @@ struct MusicPlaylistView: View {
     }
 }
 
-private struct MusicSongRow: View {
+struct MusicSongRow: View {
     let song: JellyfinItem
     var leadingNumber: Int?
     @ObservedObject var jellyfin: JellyfinSessionController

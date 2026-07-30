@@ -31,11 +31,21 @@ enum AppDestination: String, Hashable, Identifiable, CaseIterable {
     }
 }
 
+#if os(macOS)
+    private enum MacDestination: Hashable {
+        case home
+        case library(MusicLibraryCategory)
+    }
+#endif
+
 struct VelacantoRootView: View {
     @ObservedObject var playback: AudioPlaybackCoordinator
     @ObservedObject var jellyfin: JellyfinSessionController
 
     @State private var selectedDestination = AppDestination.home
+    #if os(macOS)
+        @State private var selectedMacDestination = MacDestination.home
+    #endif
     @State private var isChoosingLocalFile = false
     @State private var isPreparingTestTone = false
     @State private var isShowingProfile = false
@@ -64,6 +74,14 @@ struct VelacantoRootView: View {
                 playback: playback,
                 jellyfin: jellyfin
             )
+            #if os(macOS)
+                .frame(
+                    minWidth: 680,
+                    idealWidth: 820,
+                    minHeight: 520,
+                    idealHeight: 620
+                )
+            #endif
         }
         .sheet(isPresented: $isShowingProfile) {
             NavigationStack {
@@ -180,38 +198,72 @@ struct VelacantoRootView: View {
     #if os(macOS)
         private var macOSRoot: some View {
             NavigationSplitView {
-                List([AppDestination.home, .library], selection: $selectedDestination) {
-                    destination in
-                    Label(destination.title, systemImage: destination.symbolName)
-                        .tag(destination)
+                List(selection: $selectedMacDestination) {
+                    Label("Home", systemImage: "house")
+                        .tag(MacDestination.home)
+
+                    Section("Library") {
+                        ForEach(MusicLibraryCategory.allCases) { category in
+                            Label(category.title, systemImage: category.symbolName)
+                                .tag(MacDestination.library(category))
+                        }
+                    }
                 }
                 .navigationTitle("Velacanto")
                 .navigationSplitViewColumnWidth(min: 180, ideal: 220)
                 .safeAreaInset(edge: .bottom, spacing: 0) {
-                    if playback.hasPlayableItem {
-                        PlaybackAccessory(
-                            playback: playback,
-                            jellyfin: jellyfin,
-                            showNowPlaying: {
-                                isShowingNowPlaying = true
-                            }
-                        )
-                        .padding(10)
+                    Button {
+                        isShowingProfile = true
+                    } label: {
+                        HStack(spacing: 10) {
+                            AccountAvatar(jellyfin: jellyfin)
+                            Text(jellyfin.session?.username ?? "Profile")
+                                .lineLimit(1)
+                            Spacer()
+                        }
+                        .contentShape(Rectangle())
                     }
+                    .buttonStyle(.plain)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+                    .accessibilityLabel("Profile and settings")
                 }
             } detail: {
                 NavigationStack {
-                    switch selectedDestination {
+                    switch selectedMacDestination {
                     case .home:
                         home
-                    case .library:
-                        library
-                    case .search:
-                        search
+                    case .library(let category):
+                        MusicLibraryCategoryView(
+                            category: category,
+                            playback: playback,
+                            jellyfin: jellyfin
+                        )
                     }
                 }
             }
             .frame(minWidth: 700, minHeight: 500)
+            .overlay(alignment: .bottom) {
+                if playback.hasPlayableItem {
+                    HStack(alignment: .bottom, spacing: 0) {
+                        Color.clear
+                            .frame(width: 220)
+                            .allowsHitTesting(false)
+                        PlaybackAccessory(
+                            playback: playback,
+                            jellyfin: jellyfin,
+                            appearance: .floating,
+                            showNowPlaying: {
+                                isShowingNowPlaying = true
+                            }
+                        )
+                        .frame(maxWidth: 620)
+                        .padding(.horizontal, 20)
+                        .padding(.bottom, 12)
+                        .frame(maxWidth: .infinity)
+                    }
+                }
+            }
         }
     #endif
 
@@ -230,7 +282,11 @@ struct VelacantoRootView: View {
                 isShowingNowPlaying = true
             },
             showLibrary: {
-                selectedDestination = .library
+                #if os(macOS)
+                    selectedMacDestination = .library(.albums)
+                #else
+                    selectedDestination = .library
+                #endif
             }
         )
     }
@@ -348,12 +404,15 @@ private struct HomeView: View {
         }
         .navigationTitle("Home")
         .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Button(action: showProfile) {
-                    AccountAvatar(username: jellyfin.session?.username)
+            #if os(iOS)
+                ToolbarItem(placement: .primaryAction) {
+                    Button(action: showProfile) {
+                        AccountAvatar(jellyfin: jellyfin)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Profile and settings")
                 }
-                .accessibilityLabel("Profile and settings")
-            }
+            #endif
         }
     }
 
@@ -662,6 +721,8 @@ struct JellyfinArtworkView: View {
 private struct PlaybackArtworkView: View {
     let item: PlaybackItem
     @ObservedObject var jellyfin: JellyfinSessionController
+    var cornerRadius: CGFloat = 18
+    var maxWidth = 1_200
 
     var body: some View {
         Group {
@@ -672,11 +733,11 @@ private struct PlaybackArtworkView: View {
                     itemID: artworkItemID,
                     imageTag: item.artworkTag,
                     jellyfin: jellyfin,
-                    cornerRadius: 18,
-                    maxWidth: 1_200
+                    cornerRadius: cornerRadius,
+                    maxWidth: maxWidth
                 )
             } else {
-                ArtworkPlaceholder(cornerRadius: 18)
+                ArtworkPlaceholder(cornerRadius: cornerRadius)
             }
         }
     }
@@ -777,9 +838,15 @@ private struct ArtworkPlaceholder: View {
     }
 }
 
+private enum PlaybackAccessoryAppearance {
+    case embedded
+    case floating
+}
+
 private struct PlaybackAccessory: View {
     @ObservedObject var playback: AudioPlaybackCoordinator
     @ObservedObject var jellyfin: JellyfinSessionController
+    var appearance = PlaybackAccessoryAppearance.floating
     let showNowPlaying: () -> Void
 
     var body: some View {
@@ -787,8 +854,13 @@ private struct PlaybackAccessory: View {
             Button(action: showNowPlaying) {
                 HStack(spacing: 10) {
                     if let item = playback.currentItem {
-                        PlaybackArtworkView(item: item, jellyfin: jellyfin)
-                            .frame(width: 44, height: 44)
+                        PlaybackArtworkView(
+                            item: item,
+                            jellyfin: jellyfin,
+                            cornerRadius: 7,
+                            maxWidth: 180
+                        )
+                        .frame(width: 44, height: 44)
                     }
 
                     VStack(alignment: .leading, spacing: 2) {
@@ -823,11 +895,34 @@ private struct PlaybackAccessory: View {
                 playback.showsPauseControl ? "Pause" : "Play"
             )
         }
-        .padding(8)
-        .background(.ultraThinMaterial, in: .rect(cornerRadius: 18))
-        .overlay {
-            RoundedRectangle(cornerRadius: 18)
-                .stroke(.separator.opacity(0.45), lineWidth: 0.5)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .modifier(PlaybackAccessorySurface(appearance: appearance))
+    }
+}
+
+private struct PlaybackAccessorySurface: ViewModifier {
+    let appearance: PlaybackAccessoryAppearance
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        switch appearance {
+        case .embedded:
+            content
+        case .floating:
+            if #available(iOS 26.0, macOS 26.0, *) {
+                content.glassEffect(
+                    .regular.interactive(),
+                    in: .rect(cornerRadius: 20)
+                )
+            } else {
+                content
+                    .background(.ultraThinMaterial, in: .rect(cornerRadius: 20))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 20)
+                            .stroke(.separator.opacity(0.42), lineWidth: 0.5)
+                    }
+            }
         }
     }
 }
@@ -845,9 +940,10 @@ private struct PlaybackAccessory: View {
             PlaybackAccessory(
                 playback: playback,
                 jellyfin: jellyfin,
+                appearance: .embedded,
                 showNowPlaying: showNowPlaying
             )
-            .padding(.horizontal, placement == .inline ? 2 : 8)
+            .padding(.horizontal, placement == .inline ? 0 : 6)
         }
     }
 #endif
@@ -1015,26 +1111,72 @@ private struct NowPlayingView: View {
 }
 
 struct AccountAvatar: View {
-    let username: String?
+    @ObservedObject var jellyfin: JellyfinSessionController
+    var size: CGFloat = 28
+
+    @State private var imageURL: URL?
 
     var body: some View {
-        Text(initials)
-            .font(.caption.weight(.semibold))
-            .foregroundStyle(.cyan)
-            .frame(width: 34, height: 34)
-            .background(.cyan.opacity(0.10), in: Circle())
-            .overlay {
-                Circle()
-                    .stroke(.cyan.opacity(0.18), lineWidth: 0.5)
+        Group {
+            if #available(iOS 26.0, macOS 26.0, *) {
+                avatar
+                    .padding(2)
+                    .glassEffect(.clear.interactive(), in: Circle())
+            } else {
+                avatar
+                    .padding(2)
+                    .background(.ultraThinMaterial, in: Circle())
+                    .overlay {
+                        Circle()
+                            .stroke(.separator.opacity(0.42), lineWidth: 0.5)
+                    }
             }
+        }
+        .task(id: taskID) {
+            imageURL = await jellyfin.userImageURL(maxWidth: 128)
+        }
+        .accessibilityHidden(true)
+    }
+
+    private var avatar: some View {
+        AsyncImage(url: imageURL) { phase in
+            if case .success(let image) = phase {
+                image
+                    .resizable()
+                    .scaledToFill()
+            } else {
+                Text(initials)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.cyan)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(.cyan.opacity(0.12))
+            }
+        }
+        .frame(width: size, height: size)
+        .clipShape(Circle())
+        .overlay {
+            Circle()
+                .stroke(.white.opacity(0.38), lineWidth: 0.75)
+        }
     }
 
     private var initials: String {
-        guard let username, !username.isEmpty else { return "VC" }
+        guard let username = jellyfin.session?.username, !username.isEmpty else {
+            return "VC"
+        }
         let words = username.split(separator: " ")
         let characters = words.prefix(2).compactMap(\.first)
         let value = String(characters)
         return value.isEmpty ? "VC" : value.uppercased()
+    }
+
+    private var taskID: String {
+        guard let session = jellyfin.session else { return "signed-out" }
+        return [
+            session.serverID,
+            session.userID,
+            session.userPrimaryImageTag ?? "no-tag",
+        ].joined(separator: "|")
     }
 }
 

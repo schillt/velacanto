@@ -180,17 +180,27 @@ struct JellyfinTracksView: View {
     @State private var errorMessage: String?
 
     var body: some View {
+        Group {
+            #if os(macOS)
+                macOSContent
+            #else
+                iOSContent
+            #endif
+        }
+        .navigationTitle(album.name)
+        .task(id: album.id) {
+            await load()
+        }
+        .refreshable {
+            await load()
+        }
+    }
+
+    private var iOSContent: some View {
         List {
             if !isLoading {
                 Section {
-                    MusicDetailHeader(
-                        item: album,
-                        jellyfin: jellyfin,
-                        subtitle: album.displayArtist,
-                        detail: album.childCount.map {
-                            "\($0) \($0 == 1 ? "track" : "tracks")"
-                        }
-                    )
+                    albumHeader
                 }
             }
 
@@ -211,43 +221,8 @@ struct JellyfinTracksView: View {
                     description: Text("This album did not return any audio tracks.")
                 )
             } else {
-                ForEach(tracks) { track in
-                    Button {
-                        play(track)
-                    } label: {
-                        HStack(spacing: 12) {
-                            Text(trackNumber(for: track))
-                                .font(.caption.monospacedDigit())
-                                .foregroundStyle(.secondary)
-                                .frame(width: 32, alignment: .trailing)
-
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text(track.name)
-                                    .foregroundStyle(.primary)
-                                Text(track.displayArtist)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-
-                            Spacer()
-
-                            if preparingTrackID == track.id {
-                                ProgressView()
-                            } else if playback.currentItem?.id == track.id {
-                                Image(
-                                    systemName: playback.showsPauseControl
-                                        ? "speaker.wave.2.fill"
-                                        : "pause.circle"
-                                )
-                                .foregroundStyle(.cyan)
-                            } else {
-                                Image(systemName: "play.circle")
-                                    .foregroundStyle(.cyan)
-                            }
-                        }
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(preparingTrackID != nil)
+                ForEach(Array(tracks.enumerated()), id: \.element.id) { index, track in
+                    trackButton(track, position: index)
                 }
             }
 
@@ -256,13 +231,100 @@ struct JellyfinTracksView: View {
             }
 
         }
-        .navigationTitle(album.name)
-        .task(id: album.id) {
-            await load()
+    }
+
+    #if os(macOS)
+        private var macOSContent: some View {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 24) {
+                    if !isLoading {
+                        albumHeader
+                    }
+
+                    Group {
+                        if isLoading {
+                            ProgressView("Loading tracks…")
+                                .frame(maxWidth: .infinity)
+                                .padding(.top, 80)
+                        } else if let errorMessage, tracks.isEmpty {
+                            VStack(spacing: 12) {
+                                ErrorMessageView(message: errorMessage)
+                                Button("Retry") {
+                                    Task {
+                                        await load()
+                                    }
+                                }
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.top, 40)
+                        } else if tracks.isEmpty {
+                            ContentUnavailableView(
+                                "No Tracks",
+                                systemImage: "music.note",
+                                description: Text(
+                                    "This album did not return any audio tracks."
+                                )
+                            )
+                            .frame(maxWidth: .infinity)
+                            .padding(.top, 40)
+                        } else {
+                            VStack(spacing: 0) {
+                                ForEach(
+                                    Array(tracks.enumerated()),
+                                    id: \.element.id
+                                ) { index, track in
+                                    trackButton(track, position: index)
+                                        .padding(.horizontal, 10)
+                                        .padding(.vertical, 7)
+
+                                    if index < tracks.count - 1 {
+                                        Divider()
+                                            .padding(.leading, 48)
+                                    }
+                                }
+                            }
+                            .background(
+                                Color(nsColor: .controlBackgroundColor),
+                                in: .rect(cornerRadius: 14)
+                            )
+                        }
+                    }
+
+                    if let errorMessage, !tracks.isEmpty {
+                        ErrorMessageView(message: errorMessage)
+                    }
+                }
+                .frame(maxWidth: 1_000, alignment: .leading)
+                .padding(28)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
         }
-        .refreshable {
-            await load()
+    #endif
+
+    private var albumHeader: some View {
+        MusicDetailHeader(
+            item: album,
+            jellyfin: jellyfin,
+            subtitle: album.displayArtist,
+            detail: "\(tracks.count) \(tracks.count == 1 ? "track" : "tracks")"
+        )
+    }
+
+    private func trackButton(_ track: JellyfinItem, position: Int) -> some View {
+        Button {
+            play(track)
+        } label: {
+            MusicSongRow(
+                song: track,
+                leadingNumber: track.indexNumber ?? position + 1,
+                jellyfin: jellyfin,
+                playback: playback,
+                isPreparing: preparingTrackID == track.id
+            )
+            .frame(minHeight: 38)
         }
+        .buttonStyle(.plain)
+        .disabled(preparingTrackID != nil)
     }
 
     private func load() async {
@@ -291,13 +353,6 @@ struct JellyfinTracksView: View {
         }
     }
 
-    private func trackNumber(for track: JellyfinItem) -> String {
-        guard let number = track.indexNumber else { return "–" }
-        if let disc = track.parentIndexNumber, disc > 1 {
-            return "\(disc).\(number)"
-        }
-        return "\(number)"
-    }
 }
 
 struct ErrorMessageView: View {
