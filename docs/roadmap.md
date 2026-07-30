@@ -1,16 +1,17 @@
 # Velacanto roadmap
 
-This roadmap orders the work needed to reach the first functional prototype.
+This roadmap orders the work needed to stabilize the first functional app.
 The detailed feature boundary and acceptance criteria remain in the
 [0.1.0 plan](0.1-plan.md).
 
 ## Current focus
 
-Slices 0 and 1 are complete. Manual URL entry, public server information,
-authentication, session restoration, and logout are implemented and the full
-Slice 1 happy path has been verified against a real Jellyfin server on a
-physical iPhone. Current work is album artwork, complete browse-and-play
-real-server validation, live failure testing, and playback lifecycle reporting.
+Slices 0 and 1 are complete. The native Home, Library, Search, profile, and
+playback surfaces are implemented across iOS and macOS, including authenticated
+Jellyfin artwork. The full Slice 1 happy path has been verified against a real
+Jellyfin server on a physical iPhone. Current work is complete browse-and-play
+real-server validation, live failure testing, accessibility validation, and
+playback lifecycle reporting.
 
 ## Foundation status
 
@@ -39,20 +40,21 @@ real-server validation, live failure testing, and playback lifecycle reporting.
   tests.
 - [x] Run the app and tests on a booted iOS Simulator.
 
-The macOS build, twenty-two foundation and Jellyfin tests, and generic iOS
+The macOS build, twenty-eight foundation and Jellyfin tests, and generic iOS
 Simulator build pass. Local playback, observed engine state, resource lifetime,
 system-media behavior, Jellyfin URL policy, request construction, decoding,
-session persistence, and stream handoff are covered. The app launches and all
-twenty-two tests pass on macOS and a booted iOS 27 Simulator.
+Keychain token migration, session persistence, artwork requests, catalog
+aggregation, and stream handoff are covered. The app launches and the foundation
+tests have passed on macOS and a booted iOS 27 Simulator.
 
-Xcode account sign-in is complete and the July 29 preflight recognizes one
-valid Personal Team development identity. The connected iPhone is registered,
-provisioned, and running a signed Velacanto build. A 60-second local diagnostic
-track continued after returning to the Home Screen, appeared with correct
-metadata and timing in Control Center, and responded to Control Center pause
-and resume. The team identifier remains a local build setting rather than a
-value committed to the project. Paid Apple Developer Program enrollment is
-deferred to 1.0.
+The physical-device path was verified with a Personal Team identity on July 29.
+The connected iPhone was registered, provisioned, and ran a signed Velacanto
+build. A 60-second local diagnostic track continued after returning to the Home
+Screen, appeared with correct metadata and timing in Control Center, and
+responded to Control Center pause and resume. Signing identities and profiles
+remain machine-local and may need to be renewed; the team identifier is not
+committed to the project. Paid Apple Developer Program enrollment is deferred
+to 1.0.
 
 **Exit gate:** A clean checkout builds and tests on the selected iOS and macOS
 destinations without secrets or machine-local configuration in Git.
@@ -85,7 +87,7 @@ log out without Velacanto persisting the password.
 
 - [x] Locate the signed-in user's music libraries.
 - [x] Load albums for the selected music library.
-- [ ] Load album artwork.
+- [x] Load album artwork.
 - [x] Open an album and show tracks in server order.
 - [x] Represent loading, empty, retryable, and terminal error states.
 - [x] Add decoding and view-model state tests.
@@ -133,7 +135,7 @@ These items remain intentionally outside 0.1.0:
 
 - CarPlay interface and entitlement work.
 - Offline downloads.
-- Search and favorites.
+- Favorites.
 - Playlist and queue editing.
 - Lyrics.
 - Casting and explicit transcoding controls.

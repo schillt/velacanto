@@ -84,11 +84,14 @@ sign in with an existing Jellyfin account. Remote servers require HTTPS.
 Explicit HTTP addresses are accepted only for loopback, private, link-local,
 `.local`, and unqualified local-network hosts.
 
-After sign-in, Velacanto lists accessible music libraries, albums, and tracks.
-Selecting a track requests Jellyfin's universal audio stream and sends it
-through the same app-level player used for local files. The access token is
-stored in Keychain, the password is never persisted, the device identifier
-remains stable across launches, and logout removes the saved token.
+After sign-in, Velacanto lists accessible music libraries, albums, artists,
+songs, playlists, and search results with Jellyfin artwork. Selecting a track
+requests Jellyfin's universal audio stream and sends it through the same
+app-level player used for local files. The access token is stored in Keychain,
+the password is never persisted, the device identifier remains stable across
+launches, and logout removes the saved token. Tokens saved by an early
+pre-alpha preferences-backed implementation are migrated into Keychain when
+the session is restored.
 
 The connection and session path is covered by unit tests and has been verified
 against a real Jellyfin server on a physical iPhone, including relaunch and

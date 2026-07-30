@@ -57,17 +57,36 @@ final class JellyfinFoundationTests: XCTestCase {
         }
     }
 
-    func testJellyfinTokenStoreUsesAppPreferences() throws {
+    func testJellyfinTokenStoreMigratesLegacyPreferenceIntoKeychain() throws {
         let suiteName = "VelacantoTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        let service = "com.chameleonenterprise.velacanto.tests.\(UUID().uuidString)"
+        let account = "jellyfin.access-token"
+        let store = KeychainJellyfinTokenStore(
+            service: service,
+            account: account,
+            migratingFrom: defaults
+        )
         defer {
+            try? store.deleteToken()
             defaults.removePersistentDomain(forName: suiteName)
         }
-        let store = UserDefaultsJellyfinTokenStore(defaults: defaults)
 
         XCTAssertNil(try store.loadToken())
-        try store.saveToken("access-token")
-        XCTAssertEqual(try store.loadToken(), "access-token")
+        defaults.set("legacy-token", forKey: account)
+
+        XCTAssertEqual(try store.loadToken(), "legacy-token")
+        XCTAssertNil(defaults.string(forKey: account))
+        XCTAssertEqual(
+            try KeychainJellyfinTokenStore(
+                service: service,
+                account: account
+            ).loadToken(),
+            "legacy-token"
+        )
+
+        try store.saveToken("replacement-token")
+        XCTAssertEqual(try store.loadToken(), "replacement-token")
 
         try store.deleteToken()
         XCTAssertNil(try store.loadToken())
@@ -185,6 +204,8 @@ final class JellyfinFoundationTests: XCTestCase {
         XCTAssertEqual(items.items.first?.displayArtist, "Velacanto")
         XCTAssertEqual(items.items.first?.childCount, 9)
         XCTAssertEqual(items.items.first?.primaryImageTag, "album-image-tag")
+        XCTAssertEqual(items.items.first?.kind, .album)
+        XCTAssertEqual(items.items.first?.isMusicLibrary, true)
     }
 
     func testArtworkURLUsesAuthenticatedJellyfinImageEndpoint() throws {

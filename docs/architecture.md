@@ -12,8 +12,8 @@ flowchart TB
     SystemUI["Lock Screen, Control Center, routes"]
 
     subgraph Presentation["Platform presentation"]
-        IOS["iOS SwiftUI<br/>(prototype implemented)"]
-        Mac["macOS SwiftUI<br/>(prototype implemented)"]
+        IOS["iOS SwiftUI<br/>(native shell implemented)"]
+        Mac["macOS SwiftUI<br/>(native shell implemented)"]
         CarPlay["CarPlay later"]
     end
 
@@ -104,10 +104,10 @@ authentication, relaunch, restoration, and logout. Automated tests cover URL
 policy, unreachable-server and rejected-credential states, persisted-session
 expiration, orphaned credential cleanup, request construction, and decoding.
 
-The remaining 0.1 work is not part of the authentication boundary: album
-artwork, complete real-server browse and playback validation, live negative
-network cases, and audio interruption and route handling remain tracked in the
-[roadmap](roadmap.md).
+The remaining 0.1 work is not part of the authentication boundary: complete
+real-server browse and playback validation, live negative network cases,
+accessibility validation, and audio interruption and route handling remain
+tracked in the [roadmap](roadmap.md).
 
 ## Local-file playback journey
 
@@ -235,16 +235,18 @@ sequenceDiagram
 
 ## Source layout
 
-The project now has the playback foundation and first Jellyfin vertical slice
-in place. The layout keeps endpoint, session, source-adapter, and presentation
-responsibilities out of the prototype view:
+The project now has the playback foundation, native app shell, and Jellyfin
+vertical slice in place. The layout keeps endpoint, session, source-adapter,
+and presentation responsibilities separated:
 
 ```text
 Velacanto/
 ├── App/                         # implemented: app-lifetime ownership
 ├── Features/
-│   ├── Prototype/               # implemented: source selection and player UI
-│   └── Jellyfin/                # implemented: connection, auth, and browse UI
+│   ├── Jellyfin/                # connection, auth, and album tracks
+│   ├── Library/                 # albums, artists, songs, and playlists
+│   ├── Profile/                 # account, settings, and diagnostics
+│   └── Search/                  # cross-library music search
 ├── Core/
 │   ├── Models/                  # implemented: source and playback contracts
 │   ├── Playback/                # implemented: coordinator and player engine
@@ -255,17 +257,18 @@ Velacanto/
 │   ├── Jellyfin/                # implemented: playback request adapter
 │   └── Navidrome/               # after 0.1
 ├── Platform/
-│   ├── Media/                   # implemented
-│   ├── Keychain/                # implemented in the session boundary
-│   └── Networking/              # implemented in the Jellyfin API actor
+│   └── Media/                   # Now Playing and remote commands
 └── Resources/
 
 VelacantoTests/
-├── Playback/                    # implemented in the foundation test target
-├── JellyfinAPI/                 # request, URL, and decoding coverage
-├── Session/                     # persistence and expiration coverage
-└── Features/                    # controller-state coverage
+├── PlaybackFoundationTests.swift
+└── JellyfinFoundationTests.swift
 ```
+
+Keychain persistence currently lives beside the session boundary, and
+networking policy lives in the Jellyfin API actor. They remain isolated behind
+protocols even though the codebase is not yet large enough to justify separate
+platform directories for each adapter.
 
 ## Related documents
 

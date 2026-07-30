@@ -1,5 +1,6 @@
 import Combine
 import Foundation
+import Security
 
 struct JellyfinSession: Codable, Equatable, Sendable {
     let serverURL: URL
@@ -49,27 +50,115 @@ protocol JellyfinSessionPersisting {
     func saveDeviceID(_ deviceID: String)
 }
 
-struct UserDefaultsJellyfinTokenStore: JellyfinTokenStoring {
-    private let defaults: UserDefaults
-    private let tokenKey = "jellyfin.access-token"
+struct KeychainJellyfinTokenStore: JellyfinTokenStoring {
+    private static let defaultService = "com.chameleonenterprise.velacanto"
+    private static let defaultAccount = "jellyfin.access-token"
 
-    init(defaults: UserDefaults = .standard) {
-        self.defaults = defaults
+    private let service: String
+    private let account: String
+    private let legacyDefaults: UserDefaults?
+
+    init(
+        service: String = defaultService,
+        account: String = defaultAccount,
+        migratingFrom legacyDefaults: UserDefaults? = nil
+    ) {
+        self.service = service
+        self.account = account
+        self.legacyDefaults = legacyDefaults
     }
 
     func loadToken() throws -> String? {
-        defaults.string(forKey: tokenKey)
+        if let token = try keychainToken() {
+            return token
+        }
+
+        guard
+            let legacyDefaults,
+            let legacyToken = legacyDefaults.string(forKey: account),
+            !legacyToken.isEmpty
+        else {
+            return nil
+        }
+
+        try saveToken(legacyToken)
+        return legacyToken
     }
 
     func saveToken(_ token: String) throws {
         guard !token.isEmpty else {
             throw JellyfinCredentialStoreError.invalidToken
         }
-        defaults.set(token, forKey: tokenKey)
+
+        let value = Data(token.utf8)
+        let updateStatus = SecItemUpdate(
+            baseQuery as CFDictionary,
+            [kSecValueData as String: value] as CFDictionary
+        )
+
+        switch updateStatus {
+        case errSecSuccess:
+            break
+        case errSecItemNotFound:
+            var newItem = baseQuery
+            newItem[kSecValueData as String] = value
+            newItem[kSecAttrAccessible as String] =
+                kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+            try checkStatus(SecItemAdd(newItem as CFDictionary, nil))
+        default:
+            throw JellyfinCredentialStoreError.keychain(updateStatus)
+        }
+
+        legacyDefaults?.removeObject(forKey: account)
     }
 
     func deleteToken() throws {
-        defaults.removeObject(forKey: tokenKey)
+        defer {
+            legacyDefaults?.removeObject(forKey: account)
+        }
+
+        let status = SecItemDelete(baseQuery as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw JellyfinCredentialStoreError.keychain(status)
+        }
+    }
+
+    private var baseQuery: [String: Any] {
+        [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+        ]
+    }
+
+    private func keychainToken() throws -> String? {
+        var query = baseQuery
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        query[kSecReturnData as String] = true
+
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        switch status {
+        case errSecSuccess:
+            guard
+                let data = result as? Data,
+                let token = String(data: data, encoding: .utf8),
+                !token.isEmpty
+            else {
+                throw JellyfinCredentialStoreError.invalidToken
+            }
+            return token
+        case errSecItemNotFound:
+            return nil
+        default:
+            throw JellyfinCredentialStoreError.keychain(status)
+        }
+    }
+
+    private func checkStatus(_ status: OSStatus) throws {
+        guard status == errSecSuccess else {
+            throw JellyfinCredentialStoreError.keychain(status)
+        }
     }
 }
 
@@ -107,11 +196,18 @@ struct UserDefaultsJellyfinSessionStore: JellyfinSessionPersisting {
 
 enum JellyfinCredentialStoreError: LocalizedError, Equatable {
     case invalidToken
+    case keychain(OSStatus)
 
     var errorDescription: String? {
         switch self {
         case .invalidToken:
             "Jellyfin returned an invalid access token."
+        case .keychain(let status):
+            if let message = SecCopyErrorMessageString(status, nil) as String? {
+                "The Jellyfin access token could not be stored securely: \(message)"
+            } else {
+                "The Jellyfin access token could not be stored securely."
+            }
         }
     }
 }
@@ -138,7 +234,9 @@ final class JellyfinSessionController: ObservableObject {
 
     convenience init(autoRestore: Bool = true) {
         self.init(
-            tokenStore: UserDefaultsJellyfinTokenStore(),
+            tokenStore: KeychainJellyfinTokenStore(
+                migratingFrom: .standard
+            ),
             sessionStore: UserDefaultsJellyfinSessionStore(),
             autoRestore: autoRestore
         )

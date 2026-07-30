@@ -1,25 +1,29 @@
-# Native UI merge readiness
+# Native UI merge record
 
 **Reviewed:** July 29, 2026
-**Status:** Ready to begin
+**Status:** Implemented; validation remains
 
-This note records the boundary between Velacanto's working playback and
-Jellyfin foundation and the approved Apple-platform interface direction. It is
-intended to seed the GitHub Project and milestone work for the UI merge.
+This note records the boundary between Velacanto's playback and Jellyfin
+foundation and the approved Apple-platform interface direction, followed by
+the result of implementing the first native UI merge.
 
 ## Outcome
 
-The UI merge can begin without rewriting the playback, session, or Jellyfin
-foundations.
+The native shell was implemented without rewriting the playback, session, or
+Jellyfin foundations.
 
 - The app builds against the iOS 27 Simulator SDK.
-- The app launches on an iOS 27 Simulator.
-- All 22 playback and Jellyfin foundation tests pass on macOS.
+- All 28 playback and Jellyfin foundation tests pass on macOS.
 - `AudioPlaybackCoordinator` and `JellyfinSessionController` already live at
   app scope, which is the correct ownership model for persistent navigation and
   a mini-player.
-- The current root interface remains the functional prototype. The approved
-  design has not yet been implemented in SwiftUI.
+- `VelacantoRootView` now provides native iOS tabs and a native macOS split
+  view, with real Home, Library, Search, profile, mini-player, and Now Playing
+  surfaces.
+- Authenticated artwork, source-neutral playback history, and current
+  Jellyfin data replaced the prototype's fictional content.
+- New and Radio were intentionally omitted because they did not yet have useful
+  production behavior.
 
 ## Native interface contract
 
@@ -57,12 +61,12 @@ rewritten as custom controls.
 
 ## Required work packages
 
-These packages are ordered so they can become GitHub issues under the UI merge
-milestone.
+The implementation followed these work packages. Platform quality validation
+and complete real-server smoke testing remain open.
 
 ### 1. Establish the platform app shell
 
-- Replace `PrototypeContentView` as the production root.
+- Establish `VelacantoRootView` as the production root.
 - Introduce shared app destinations and platform-specific containers.
 - Use native iPhone tab navigation and independent navigation stacks per tab.
 - Use a native macOS sidebar, toolbar, commands, and Settings scene.

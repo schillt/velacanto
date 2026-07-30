@@ -157,6 +157,18 @@ struct JellyfinAuthenticationResult: Decodable, Equatable, Sendable {
     }
 }
 
+enum JellyfinItemKind: String, Sendable {
+    case song = "audio"
+    case album = "musicalbum"
+    case artist = "musicartist"
+    case playlist
+
+    init?(apiValue: String?) {
+        guard let apiValue else { return nil }
+        self.init(rawValue: apiValue.lowercased())
+    }
+}
+
 struct JellyfinItem: Decodable, Equatable, Identifiable, Sendable {
     let id: String
     let name: String
@@ -194,6 +206,14 @@ struct JellyfinItem: Decodable, Equatable, Identifiable, Sendable {
     var duration: TimeInterval? {
         guard let runTimeTicks, runTimeTicks > 0 else { return nil }
         return TimeInterval(runTimeTicks) / 10_000_000
+    }
+
+    var kind: JellyfinItemKind? {
+        JellyfinItemKind(apiValue: type)
+    }
+
+    var isMusicLibrary: Bool {
+        collectionType?.caseInsensitiveCompare("music") == .orderedSame
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -481,17 +501,13 @@ actor JellyfinAPIClient: JellyfinAPIService {
                 builder.request(pathComponents: ["UserViews"], queryItems: query),
                 as: JellyfinItemsResponse.self
             )
-            return response.items.filter {
-                $0.collectionType?.lowercased() == "music"
-            }
+            return response.items.filter(\.isMusicLibrary)
         } catch JellyfinAPIError.httpStatus(404) {
             let response = try await execute(
                 builder.request(pathComponents: ["Users", userID, "Views"]),
                 as: JellyfinItemsResponse.self
             )
-            return response.items.filter {
-                $0.collectionType?.lowercased() == "music"
-            }
+            return response.items.filter(\.isMusicLibrary)
         }
     }
 
@@ -606,7 +622,7 @@ actor JellyfinAPIClient: JellyfinAPIService {
             ),
             as: JellyfinItemsResponse.self
         )
-        return response.items.filter { $0.type?.lowercased() == "audio" }
+        return response.items.filter { $0.kind == .song }
     }
 
     private func albums(

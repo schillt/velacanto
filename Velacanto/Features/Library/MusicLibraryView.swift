@@ -80,18 +80,12 @@ struct MusicLibraryView: View {
 
     @ViewBuilder
     private func destination(for category: MusicLibraryCategory) -> some View {
-        switch category {
-        case .albums:
-            MusicAlbumsView(jellyfin: jellyfin, playback: playback)
-        case .artists:
-            MusicArtistsView(jellyfin: jellyfin, playback: playback)
-        case .songs:
-            MusicSongsView(jellyfin: jellyfin, playback: playback)
-        case .playlists:
-            MusicPlaylistsView(jellyfin: jellyfin, playback: playback)
-        }
+        MusicLibraryCategoryView(
+            category: category,
+            playback: playback,
+            jellyfin: jellyfin
+        )
     }
-
 }
 
 enum MusicLibraryCategory: String, CaseIterable, Identifiable {

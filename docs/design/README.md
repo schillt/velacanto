@@ -11,10 +11,10 @@ The July 29, 2026 concept combines:
   Played**, and direct access to personal music sources.
 - A light, system-native content canvas.
 - Restrained Liquid Glass for navigation, account, and playback chrome.
-- Primary navigation in this order: **Home**, **New**, **Radio**, **Library**,
-  then **Search**.
-- A split iOS navigation treatment with Home, New, Radio, and Library in the
-  main glass capsule and Search in its own trailing control.
+- Working primary navigation for **Home**, **Library**, and **Search**. The
+  concept's **New** and **Radio** destinations remain future options rather than
+  empty production tabs.
+- Native iOS tab navigation with Search using the system search role.
 - A native macOS sidebar and toolbar rather than a stretched phone layout.
 - Account access from Home. Broader preferences belong in the iOS Settings app
   where appropriate and in Velacanto's macOS Settings menu.
@@ -24,10 +24,9 @@ but Velacanto retains its own cyan accent and personal-library focus.
 
 ## Implementation planning
 
-[Native UI merge readiness](ui-merge-readiness.md) records the verified
-functional baseline, native interface contract, issue-ready work packages,
-open scope decisions, and acceptance gate for tying this design to the working
-app.
+[Native UI merge record](ui-merge-readiness.md) records the verified
+functional baseline, native interface contract, implementation result, and
+remaining validation for tying this design to the working app.
 
 ## Interactive prototype
 

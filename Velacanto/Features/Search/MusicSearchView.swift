@@ -17,19 +17,19 @@ struct MusicSearchView: View {
     }
 
     private var albums: [JellyfinItem] {
-        results.filter { $0.type?.lowercased() == "musicalbum" }
+        results.filter { $0.kind == .album }
     }
 
     private var artists: [JellyfinItem] {
-        results.filter { $0.type?.lowercased() == "musicartist" }
+        results.filter { $0.kind == .artist }
     }
 
     private var songs: [JellyfinItem] {
-        results.filter { $0.type?.lowercased() == "audio" }
+        results.filter { $0.kind == .song }
     }
 
     private var playlists: [JellyfinItem] {
-        results.filter { $0.type?.lowercased() == "playlist" }
+        results.filter { $0.kind == .playlist }
     }
 
     var body: some View {
@@ -239,22 +239,22 @@ private struct SearchResultRow: View {
     }
 
     private var subtitle: String {
-        switch item.type?.lowercased() {
-        case "audio":
+        switch item.kind {
+        case .song:
             if let album = item.album, !album.isEmpty {
                 return "\(item.displayArtist) · \(album)"
             }
             return item.displayArtist
-        case "musicalbum":
+        case .album:
             return item.displayArtist
-        case "musicartist":
+        case .artist:
             return "Artist"
-        case "playlist":
+        case .playlist:
             if let childCount = item.childCount {
                 return "\(childCount) \(childCount == 1 ? "song" : "songs")"
             }
             return "Playlist"
-        default:
+        case nil:
             return "Music"
         }
     }

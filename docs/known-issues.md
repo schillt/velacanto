@@ -7,8 +7,9 @@ vertical slice. It is not a release-readiness statement.
   been verified against a real Jellyfin server on a physical iPhone. The
   complete connect → browse → play journey still needs end-to-end validation on
   iOS and macOS.
-- Album artwork is not loaded yet.
 - Album and track queries use generous fixed limits rather than pagination.
+- Artwork uses authenticated Jellyfin image URLs and the system image loader;
+  explicit cache policy and offline artwork are not implemented.
 - Jellyfin playback start, progress, and stop events are not reported to the
   server yet, so server-side recent-play and resume state may not update.
 - Universal audio streaming requests MP3 as the fallback transcode format.

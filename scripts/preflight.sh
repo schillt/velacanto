@@ -57,8 +57,11 @@ available_kb=$(df -Pk . | awk 'NR == 2 { print $4 }')
 if [ -n "$available_kb" ] && [ "$available_kb" -ge 41943040 ]; then
   available_gb=$((available_kb / 1024 / 1024))
   pass "At least 40 GiB is free (${available_gb} GiB available)"
+elif [ -n "$available_kb" ] && [ "$available_kb" -ge 10485760 ]; then
+  available_gb=$((available_kb / 1024 / 1024))
+  warn "Less than 40 GiB is free (${available_gb} GiB available)"
 else
-  fail "Less than 40 GiB is free for Xcode, simulators, and build products"
+  fail "Less than 10 GiB is free for Xcode, simulators, and build products"
 fi
 
 for required_command in git curl security plutil rg; do
