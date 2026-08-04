@@ -18,6 +18,8 @@ technical planning.
 
 - [Architecture decision records](decisions/README.md) — durable technical
   decisions and their consequences.
+- [Non-production Jellyfin validation policy](decisions/0006-non-production-jellyfin-validation.md)
+  — public-safe boundary and release prerequisites for the private test server.
 
 ## Product design
 

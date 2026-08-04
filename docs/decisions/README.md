@@ -12,6 +12,7 @@ their context, and their consequences.
 | [0003](0003-local-http-policy.md) | Accepted | Permit plain HTTP only for local Jellyfin destinations |
 | [0004](0004-source-adapters-and-local-file-playback.md) | Accepted | Share one player across source adapters and open local files in place |
 | [0005](0005-sideload-only-for-0-x.md) | Accepted | Sideload 0.x builds and defer paid Apple distribution to 1.0 |
+| [0006](0006-non-production-jellyfin-validation.md) | Accepted | Isolate non-production Jellyfin validation from personal media and production data |
 
 ## Adding a decision
 

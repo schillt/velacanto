@@ -148,7 +148,7 @@ These items remain intentionally outside 0.1.0:
 ## Decisions still required
 
 - Non-production Jellyfin test-server ownership.
-- Public source license and contribution policy.
+- Complete non-production Jellyfin server provisioning and validation evidence.
 
 Record durable technical choices in
 [architecture decision records](decisions/README.md), not only in issues or
