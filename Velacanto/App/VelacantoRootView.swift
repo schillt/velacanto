@@ -230,14 +230,13 @@ struct VelacantoRootView: View {
 
     #if os(macOS)
         private var macOSRoot: some View {
-            HStack(spacing: 0) {
+            NavigationSplitView {
                 macOSSidebar
-                    .frame(width: 220)
-
-                Divider()
-
+                    .navigationSplitViewColumnWidth(min: 180, ideal: 220)
+            } detail: {
                 macOSContent
             }
+            .toolbar(removing: .sidebarToggle)
             .frame(minWidth: 700, minHeight: 500)
         }
 
@@ -290,6 +289,7 @@ struct VelacantoRootView: View {
                     )
                 }
             }
+            .id(selectedMacDestination)
             .macOSPlaybackAccessoryInset(
                 playback: playback,
                 jellyfin: jellyfin,
