@@ -1,5 +1,6 @@
 import Foundation
 import Security
+import os
 
 /// Persistence boundary for an authenticated Jellyfin account. Passwords never
 /// cross this boundary; only the access token, session metadata, and device ID
@@ -38,6 +39,8 @@ protocol JellyfinTokenStoring {
     func deleteToken() throws
 }
 
+/// Stores non-secret session metadata separately from the Keychain token. A
+/// corrupt value is discarded, so restoration falls back to signed-out state.
 protocol JellyfinSessionPersisting {
     func loadSession() -> JellyfinSession?
     func saveSession(_ session: JellyfinSession)
@@ -240,6 +243,10 @@ struct KeychainJellyfinTokenStore: JellyfinTokenStoring {
 
 /// Stores non-secret session metadata and the stable device identifier.
 struct UserDefaultsJellyfinSessionStore: JellyfinSessionPersisting {
+    private static let logger = Logger(
+        subsystem: "com.chameleonenterprise.velacanto",
+        category: "SessionPersistence"
+    )
     private let defaults: UserDefaults
     private let sessionKey = "jellyfin.session"
     private let deviceIDKey = "jellyfin.device-id"
@@ -250,12 +257,21 @@ struct UserDefaultsJellyfinSessionStore: JellyfinSessionPersisting {
 
     func loadSession() -> JellyfinSession? {
         guard let data = defaults.data(forKey: sessionKey) else { return nil }
-        return try? JSONDecoder().decode(JellyfinSession.self, from: data)
+        do {
+            return try JSONDecoder().decode(JellyfinSession.self, from: data)
+        } catch {
+            defaults.removeObject(forKey: sessionKey)
+            Self.logger.error("Discarded corrupt saved session metadata")
+            return nil
+        }
     }
 
     func saveSession(_ session: JellyfinSession) {
-        guard let data = try? JSONEncoder().encode(session) else { return }
-        defaults.set(data, forKey: sessionKey)
+        do {
+            defaults.set(try JSONEncoder().encode(session), forKey: sessionKey)
+        } catch {
+            Self.logger.error("Could not encode saved session metadata")
+        }
     }
 
     func deleteSession() {

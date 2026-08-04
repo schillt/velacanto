@@ -967,6 +967,18 @@ final class JellyfinFoundationTests: XCTestCase {
         XCTAssertEqual(try tokenStore.loadToken(), "access-token")
     }
 
+    func testCorruptSavedSessionMetadataIsDiscarded() throws {
+        let suiteName = "VelacantoTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set(Data("not JSON".utf8), forKey: "jellyfin.session")
+
+        let store = UserDefaultsJellyfinSessionStore(defaults: defaults)
+
+        XCTAssertNil(store.loadSession())
+        XCTAssertNil(defaults.data(forKey: "jellyfin.session"))
+    }
+
     func testExpiredRestoredSessionDeletesSavedToken() async throws {
         let tokenStore = RecordingTokenStore(token: "expired-token")
         let serverURL = try XCTUnwrap(URL(string: "https://example.com"))
@@ -1121,6 +1133,12 @@ final class JellyfinFoundationTests: XCTestCase {
         )
 
         XCTAssertTrue(items.isEmpty)
+        let remainingFiles = try FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil
+        )
+        XCTAssertEqual(remainingFiles.count, 1)
+        XCTAssertTrue(remainingFiles[0].lastPathComponent.contains(".corrupt.json"))
     }
 
     func testCatalogCacheExpiresRecordsAfterSevenDays() async throws {

@@ -1,5 +1,6 @@
 import AVFoundation
 import Foundation
+import os
 
 struct MusicSourceID: RawRepresentable, Hashable, Identifiable, Codable, Sendable {
     let rawValue: String
@@ -155,6 +156,8 @@ struct SavedNowPlayingState: Equatable, Codable, Sendable {
     }
 }
 
+/// Persists the restorable playback snapshot. A missing or corrupt snapshot is
+/// intentionally treated as no restoration state; playback itself remains usable.
 protocol NowPlayingStateStoring {
     func loadState() -> SavedNowPlayingState?
     func saveState(_ state: SavedNowPlayingState)
@@ -162,6 +165,10 @@ protocol NowPlayingStateStoring {
 }
 
 struct UserDefaultsNowPlayingStateStore: NowPlayingStateStoring {
+    private static let logger = Logger(
+        subsystem: "com.chameleonenterprise.velacanto",
+        category: "PlaybackPersistence"
+    )
     private let defaults: UserDefaults
     private let key = "velacanto.now-playing-state-v1"
 
@@ -170,21 +177,25 @@ struct UserDefaultsNowPlayingStateStore: NowPlayingStateStoring {
     }
 
     func loadState() -> SavedNowPlayingState? {
-        guard
-            let data = defaults.data(forKey: key),
-            let state = try? JSONDecoder().decode(
-                SavedNowPlayingState.self,
-                from: data
-            )
-        else {
+        guard let data = defaults.data(forKey: key) else { return nil }
+        do {
+            return try JSONDecoder().decode(SavedNowPlayingState.self, from: data)
+        } catch {
+            // A snapshot cannot be trusted after a failed decode. Removing it
+            // prevents the same failure from obscuring later launches.
+            defaults.removeObject(forKey: key)
+            Self.logger.error("Discarded corrupt now-playing state")
             return nil
         }
-        return state
     }
 
     func saveState(_ state: SavedNowPlayingState) {
-        guard let data = try? JSONEncoder().encode(state) else { return }
-        defaults.set(data, forKey: key)
+        do {
+            defaults.set(try JSONEncoder().encode(state), forKey: key)
+        } catch {
+            // Restoration is best-effort and must not interrupt live playback.
+            Self.logger.error("Could not encode now-playing state")
+        }
     }
 
     func clearState() {
@@ -192,12 +203,18 @@ struct UserDefaultsNowPlayingStateStore: NowPlayingStateStoring {
     }
 }
 
+/// Stores a privacy-local recent-items list. A persistence failure never blocks
+/// playback, but is recorded without including media metadata.
 protocol PlaybackHistoryStoring {
     func loadItems() -> [PlaybackItem]
     func saveItems(_ items: [PlaybackItem])
 }
 
 struct UserDefaultsPlaybackHistoryStore: PlaybackHistoryStoring {
+    private static let logger = Logger(
+        subsystem: "com.chameleonenterprise.velacanto",
+        category: "PlaybackPersistence"
+    )
     private let defaults: UserDefaults
     private let key = "velacanto.playback-history"
 
@@ -206,10 +223,13 @@ struct UserDefaultsPlaybackHistoryStore: PlaybackHistoryStoring {
     }
 
     func loadItems() -> [PlaybackItem] {
-        guard
-            let data = defaults.data(forKey: key),
-            let items = try? JSONDecoder().decode([PlaybackItem].self, from: data)
-        else {
+        guard let data = defaults.data(forKey: key) else { return [] }
+        let items: [PlaybackItem]
+        do {
+            items = try JSONDecoder().decode([PlaybackItem].self, from: data)
+        } catch {
+            defaults.removeObject(forKey: key)
+            Self.logger.error("Discarded corrupt playback history")
             return []
         }
 
@@ -225,8 +245,11 @@ struct UserDefaultsPlaybackHistoryStore: PlaybackHistoryStoring {
     }
 
     func saveItems(_ items: [PlaybackItem]) {
-        guard let data = try? JSONEncoder().encode(items) else { return }
-        defaults.set(data, forKey: key)
+        do {
+            defaults.set(try JSONEncoder().encode(items), forKey: key)
+        } catch {
+            Self.logger.error("Could not encode playback history")
+        }
     }
 }
 
@@ -265,6 +288,9 @@ struct PlaybackAsset: Sendable {
     }
 }
 
+/// Reports one negotiated Jellyfin play session in call order. The coordinator
+/// serializes calls, suppresses duplicates, and keeps later reports flowing if
+/// an individual best-effort network report fails.
 protocol PlaybackLifecycleReporting: Sendable {
     func reportStarted(at position: TimeInterval) async throws
     func reportProgress(at position: TimeInterval, isPaused: Bool) async throws
@@ -290,6 +316,8 @@ struct PlaybackRequest: Sendable {
     }
 }
 
+/// Converts source-specific selections into provider-neutral playback requests.
+/// Implementations own source validation and may throw a user-presentable error.
 protocol PlaybackSourceAdapter: Sendable {
     associatedtype Selection: Sendable
 

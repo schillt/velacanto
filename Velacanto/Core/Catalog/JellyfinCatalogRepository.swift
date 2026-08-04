@@ -384,8 +384,14 @@ actor JellyfinCatalogRepository {
 ///
 /// The actor serializes each read-modify-write operation. Corrupt, obsolete,
 /// and version-mismatched files are cache misses rather than session failures.
-/// The injectable clock makes expiry behavior deterministic under test.
+/// Invalid files are quarantined before rebuilding. The injectable clock makes
+/// expiry behavior deterministic under test. See `docs/architecture.md` for
+/// the account-scoped cache policy.
 actor JellyfinCatalogCache {
+    private static let logger = Logger(
+        subsystem: "com.chameleonenterprise.velacanto",
+        category: "CatalogCache"
+    )
     private struct Record: Codable {
         var items: [JellyfinItem]
         var updatedAt: Date
@@ -452,9 +458,15 @@ actor JellyfinCatalogCache {
             (envelope.records[$0]?.lastAccessedAt ?? .distantPast)
                 < (envelope.records[$1]?.lastAccessedAt ?? .distantPast)
         }
-        while let data = try? encoder.encode(envelope), data.count > maxBytes,
-            let oldestKey = sortedKeys.first
-        {
+        while let oldestKey = sortedKeys.first {
+            let data: Data
+            do {
+                data = try encoder.encode(envelope)
+            } catch {
+                Self.logger.error("Could not encode catalog cache envelope")
+                return
+            }
+            guard data.count > maxBytes else { break }
             envelope.records.removeValue(forKey: oldestKey)
             sortedKeys.removeFirst()
         }
@@ -462,22 +474,61 @@ actor JellyfinCatalogCache {
     }
 
     func clear(serverID: String, userID: String) {
-        try? fileManager.removeItem(at: fileURL(serverID: serverID, userID: userID))
+        let url = fileURL(serverID: serverID, userID: userID)
+        guard fileManager.fileExists(atPath: url.path) else { return }
+        do {
+            try fileManager.removeItem(at: url)
+        } catch {
+            Self.logger.error("Could not clear catalog cache")
+        }
     }
 
     private func readEnvelope(serverID: String, userID: String) -> Envelope {
-        guard let data = try? Data(contentsOf: fileURL(serverID: serverID, userID: userID)),
-            let envelope = try? decoder.decode(Envelope.self, from: data), envelope.version == 1
-        else {
+        let url = fileURL(serverID: serverID, userID: userID)
+        guard fileManager.fileExists(atPath: url.path) else {
             return Envelope(version: 1, records: [:])
         }
-        return envelope
+        do {
+            let envelope = try decoder.decode(Envelope.self, from: Data(contentsOf: url))
+            guard envelope.version == 1 else {
+                quarantine(url, reason: "incompatible")
+                return Envelope(version: 1, records: [:])
+            }
+            return envelope
+        } catch {
+            quarantine(url, reason: "corrupt")
+            return Envelope(version: 1, records: [:])
+        }
     }
 
     private func writeEnvelope(_ envelope: Envelope, serverID: String, userID: String) {
-        guard let data = try? encoder.encode(envelope) else { return }
-        try? fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
-        try? data.write(to: fileURL(serverID: serverID, userID: userID), options: .atomic)
+        do {
+            let data = try encoder.encode(envelope)
+            try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+            try data.write(to: fileURL(serverID: serverID, userID: userID), options: .atomic)
+        } catch {
+            // The network result remains valid; only the offline cache is lost.
+            Self.logger.error("Could not write catalog cache")
+        }
+    }
+
+    private func quarantine(_ url: URL, reason: String) {
+        let quarantinedURL = url.deletingLastPathComponent().appending(
+            path: [
+                url.deletingPathExtension().lastPathComponent,
+                UUID().uuidString,
+                reason,
+                "json",
+            ].joined(separator: ".")
+        )
+        do {
+            try fileManager.moveItem(at: url, to: quarantinedURL)
+        } catch {
+            // A failed quarantine is still a cache miss; do not surface it as a
+            // session failure or log file paths that identify an account.
+            Self.logger.error("Could not quarantine invalid catalog cache")
+        }
+        Self.logger.error("Discarded invalid catalog cache")
     }
 
     private func fileURL(serverID: String, userID: String) -> URL {
