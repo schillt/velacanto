@@ -253,6 +253,14 @@ struct UserDefaultsPlaybackHistoryStore: PlaybackHistoryStoring {
     }
 }
 
+/// Keeps a source resource valid while its player item can still read it.
+///
+/// A request transfers lease ownership to `AudioPlaybackCoordinator`, which
+/// retains the active lease until replacement or stop and retains a preloaded
+/// request's lease until that request is consumed or discarded. Implementations
+/// release their resource on deinitialization; for example, local files stop
+/// security-scoped access there. The lease carries no playback controls or
+/// source metadata.
 protocol PlaybackResourceLease: AnyObject, Sendable {}
 
 struct PlaybackAsset: Sendable {

@@ -1,6 +1,19 @@
 import Foundation
 import Network
 
+/// Validates and normalizes a server root before any authenticated request.
+///
+/// HTTPS is required except for a user-selected local network server. The
+/// HTTP exception is deliberately limited to `localhost`, `.local` and
+/// unqualified host names; IPv4 loopback (`127.0.0.0/8`), private (`10/8`,
+/// `172.16/12`, `192.168/16`), and link-local (`169.254/16`) addresses; and
+/// IPv6 loopback (`::1`), unique-local (`fc00::/7`), and link-local
+/// (`fe80::/10`) addresses. All other destinations require HTTPS.
+///
+/// This is a LAN compatibility exception, not a trust bypass: certificate
+/// validation remains normal for HTTPS, and users must choose only trusted
+/// local networks. Credentials in user info, query strings, and fragments are
+/// rejected so configuration cannot carry or accidentally display secrets.
 struct JellyfinServerURL: Equatable, Sendable {
     let url: URL
 
@@ -744,6 +757,16 @@ struct JellyfinRequestBuilder: Sendable {
     }
 }
 
+/// Provider-facing, sendable Jellyfin endpoint contract for one configured
+/// server and optional authenticated account.
+///
+/// Callers supply opaque Jellyfin IDs and receive provider response models or
+/// negotiated playback/artwork requests; they must not construct endpoint URLs
+/// or serialize credentials themselves. Implementations may be actors and must
+/// be safe to call across concurrency domains. Failures are surfaced as
+/// `JellyfinAPIError` for the session or presentation owner to classify; no
+/// method logs authenticated URLs, tokens, or private media metadata. See
+/// `docs/architecture.md` for the provider and session boundaries.
 protocol JellyfinAPIService: Sendable {
     func publicServerInfo() async throws -> JellyfinServerInfo
     func authenticate(

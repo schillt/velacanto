@@ -1,5 +1,17 @@
 import SwiftUI
 
+/// Owns one paged catalog snapshot for a SwiftUI screen.
+///
+/// The model is main-actor isolated. Each reset advances the generation and
+/// cancels only its internally-owned pagination task, so a late loader, cache,
+/// or retry result can never update a newer query. A cursor belongs only to its
+/// generation and is passed unchanged to the next request. New pages preserve
+/// the existing server order, then append only first-seen item IDs in page order.
+///
+/// Transient failures retry twice with a short backoff; terminal failures become
+/// `errorMessage` for the view to present. Cancellation is expected during view
+/// changes and leaves no error state. See `docs/architecture.md` for the
+/// catalog snapshot and paging boundary.
 @MainActor
 final class PagedJellyfinItemsModel: ObservableObject {
     typealias Loader = (JellyfinCatalogCursor?) async throws -> JellyfinCatalogPage

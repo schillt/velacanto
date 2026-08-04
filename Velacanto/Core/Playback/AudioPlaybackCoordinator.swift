@@ -33,6 +33,13 @@ enum PlaybackAudioRouteChange: Equatable, Sendable {
     case other
 }
 
+/// Supplies platform lifecycle events to the playback coordinator.
+///
+/// `start` is called once for an observer instance. Implementations retain the
+/// registrations for their own lifetime and invoke every callback on the main
+/// actor without starting playback or performing network work themselves. This
+/// keeps interruption, route, and background policy in one coordinator-owned
+/// state machine.
 @MainActor
 protocol PlaybackPlatformEventObserving: AnyObject {
     func start(

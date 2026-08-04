@@ -38,7 +38,12 @@ struct ArtworkKey: Hashable, Sendable {
     }
 }
 
-private actor ArtworkDiskCache {
+actor ArtworkDiskCache {
+    private static let logger = Logger(
+        subsystem: "com.chameleonenterprise.velacanto",
+        category: "ArtworkCache"
+    )
+
     private struct Entry: Codable {
         let fileName: String
         let byteCount: Int
@@ -50,39 +55,63 @@ private actor ArtworkDiskCache {
     private let limit = 64 * 1_024 * 1_024
     private let directory: URL
     private let indexURL: URL
+    private let fileManager: FileManager
     private var entries: [String: Entry]
 
-    init(fileManager: FileManager = .default) {
+    init(
+        fileManager: FileManager = .default,
+        directory: URL? = nil
+    ) {
         let caches =
             fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first
             ?? fileManager.temporaryDirectory
-        directory = caches.appendingPathComponent(
+        let defaultDirectory = caches.appendingPathComponent(
             "VelacantoArtwork-v1",
             isDirectory: true
         )
-        indexURL = directory.appendingPathComponent("index.json")
-        try? fileManager.createDirectory(
-            at: directory,
-            withIntermediateDirectories: true
-        )
-        if let data = try? Data(contentsOf: indexURL),
-            let decoded = try? JSONDecoder().decode(
-                [String: Entry].self,
-                from: data
+        let resolvedDirectory = directory ?? defaultDirectory
+        self.directory = resolvedDirectory
+        indexURL = resolvedDirectory.appendingPathComponent("index.json")
+        self.fileManager = fileManager
+        do {
+            try fileManager.createDirectory(
+                at: resolvedDirectory,
+                withIntermediateDirectories: true
             )
-        {
-            entries = decoded
-        } else {
+        } catch {
+            Self.logger.error("Could not create artwork cache directory")
+        }
+
+        guard fileManager.fileExists(atPath: indexURL.path) else {
             entries = [:]
+            return
+        }
+        do {
+            entries = try JSONDecoder().decode(
+                [String: Entry].self,
+                from: Data(contentsOf: indexURL)
+            )
+        } catch {
+            entries = [:]
+            do {
+                try fileManager.removeItem(at: indexURL)
+            } catch {
+                Self.logger.error("Could not discard invalid artwork cache index")
+            }
+            Self.logger.error("Discarded invalid artwork cache index")
         }
     }
 
     func data(for key: ArtworkKey) -> Data? {
         guard var entry = entries[key.identifier] else { return nil }
         let fileURL = directory.appendingPathComponent(entry.fileName)
-        guard let data = try? Data(contentsOf: fileURL) else {
+        let data: Data
+        do {
+            data = try Data(contentsOf: fileURL)
+        } catch {
             entries[key.identifier] = nil
             persistIndex()
+            Self.logger.error("Could not read cached artwork")
             return nil
         }
         entry.lastAccess = Date()
@@ -106,6 +135,7 @@ private actor ArtworkDiskCache {
             evictIfNeeded()
             persistIndex()
         } catch {
+            Self.logger.error("Could not write cached artwork")
             return
         }
     }
@@ -115,9 +145,7 @@ private actor ArtworkDiskCache {
             $0.value.serverID == serverID && $0.value.userID == userID
         }
         for (identifier, entry) in matches {
-            try? FileManager.default.removeItem(
-                at: directory.appendingPathComponent(entry.fileName)
-            )
+            removeCachedFile(named: entry.fileName)
             entries[identifier] = nil
         }
         persistIndex()
@@ -129,9 +157,7 @@ private actor ArtworkDiskCache {
         for (identifier, entry) in entries.sorted(
             by: { $0.value.lastAccess < $1.value.lastAccess }
         ) {
-            try? FileManager.default.removeItem(
-                at: directory.appendingPathComponent(entry.fileName)
-            )
+            removeCachedFile(named: entry.fileName)
             entries[identifier] = nil
             total -= entry.byteCount
             if total <= limit {
@@ -150,8 +176,24 @@ private actor ArtworkDiskCache {
     }
 
     private func persistIndex() {
-        guard let data = try? JSONEncoder().encode(entries) else { return }
-        try? data.write(to: indexURL, options: .atomic)
+        do {
+            try JSONEncoder().encode(entries).write(
+                to: indexURL,
+                options: .atomic
+            )
+        } catch {
+            Self.logger.error("Could not write artwork cache index")
+        }
+    }
+
+    private func removeCachedFile(named fileName: String) {
+        let fileURL = directory.appendingPathComponent(fileName)
+        guard fileManager.fileExists(atPath: fileURL.path) else { return }
+        do {
+            try fileManager.removeItem(at: fileURL)
+        } catch {
+            Self.logger.error("Could not remove cached artwork")
+        }
     }
 }
 

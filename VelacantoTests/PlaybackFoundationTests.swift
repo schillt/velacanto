@@ -1038,6 +1038,56 @@ final class PlaybackFoundationTests: XCTestCase {
         XCTAssertEqual(MockArtworkURLProtocol.requestCount, 1)
     }
 
+    func testArtworkDiskCacheDiscardsCorruptIndex() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(
+            path: "VelacantoArtworkCacheTests-\(UUID().uuidString)",
+            directoryHint: .isDirectory
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        let indexURL = directory.appending(path: "index.json")
+        try Data("not JSON".utf8).write(to: indexURL)
+
+        let cache = ArtworkDiskCache(directory: directory)
+        let key = ArtworkKey(
+            serverID: "server",
+            userID: "user",
+            itemID: "item",
+            imageTag: "tag",
+            sizeBucket: 128
+        )
+
+        let cachedData = await cache.data(for: key)
+        XCTAssertNil(cachedData)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: indexURL.path))
+    }
+
+    func testArtworkDiskCacheTreatsBlockedWriteDirectoryAsACacheMiss()
+        async throws
+    {
+        let fileURL = FileManager.default.temporaryDirectory.appending(
+            path: "VelacantoArtworkCacheFile-\(UUID().uuidString)"
+        )
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        try Data().write(to: fileURL)
+        let cache = ArtworkDiskCache(directory: fileURL)
+        let key = ArtworkKey(
+            serverID: "server",
+            userID: "user",
+            itemID: "item",
+            imageTag: "tag",
+            sizeBucket: 128
+        )
+
+        await cache.store(Data([1, 2, 3]), for: key)
+
+        let cachedData = await cache.data(for: key)
+        XCTAssertNil(cachedData)
+    }
+
     private func makePlaybackRequest() async throws -> PlaybackRequest {
         let url = try await DemoToneFactory.makeURL()
         return try await LocalFilePlaybackAdapter().playbackRequest(
