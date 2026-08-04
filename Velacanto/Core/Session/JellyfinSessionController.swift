@@ -1,5 +1,6 @@
 import Combine
 import Foundation
+import Security
 import os
 
 struct JellyfinSession: Codable, Equatable, Sendable {
@@ -213,20 +214,99 @@ protocol JellyfinSessionPersisting {
     func saveDeviceID(_ deviceID: String)
 }
 
-struct FileJellyfinTokenStore: JellyfinTokenStoring {
+protocol JellyfinKeychainTokenPersisting {
+    func loadToken(service: String, account: String) throws -> String?
+    func saveToken(_ token: String, service: String, account: String) throws
+    func deleteToken(service: String, account: String) throws
+}
+
+struct SystemJellyfinKeychainTokenStore: JellyfinKeychainTokenPersisting {
+    func loadToken(service: String, account: String) throws -> String? {
+        var search = query(service: service, account: account)
+        search[kSecReturnData] = true
+        search[kSecMatchLimit] = kSecMatchLimitOne
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(search as CFDictionary, &result)
+        if status == errSecItemNotFound { return nil }
+        guard status == errSecSuccess, let data = result as? Data,
+            let token = String(data: data, encoding: .utf8), !token.isEmpty
+        else {
+            throw JellyfinCredentialStoreError.storageUnavailable
+        }
+        return token
+    }
+
+    func saveToken(
+        _ token: String,
+        service: String,
+        account: String
+    ) throws {
+        let data = Data(token.utf8)
+        let updateStatus = SecItemUpdate(
+            query(service: service, account: account) as CFDictionary,
+            [kSecValueData: data] as CFDictionary
+        )
+        if updateStatus == errSecSuccess { return }
+        guard updateStatus == errSecItemNotFound else {
+            throw JellyfinCredentialStoreError.storageUnavailable
+        }
+
+        var add = query(service: service, account: account)
+        add[kSecValueData] = data
+        #if os(iOS)
+            add[kSecAttrAccessible] =
+                kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        #endif
+        guard SecItemAdd(add as CFDictionary, nil) == errSecSuccess else {
+            throw JellyfinCredentialStoreError.storageUnavailable
+        }
+    }
+
+    func deleteToken(service: String, account: String) throws {
+        let status = SecItemDelete(
+            query(service: service, account: account) as CFDictionary
+        )
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw JellyfinCredentialStoreError.storageUnavailable
+        }
+    }
+
+    private func query(
+        service: String,
+        account: String
+    ) -> [CFString: Any] {
+        let query: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: service,
+            kSecAttrAccount: account,
+            kSecAttrSynchronizable: kCFBooleanFalse as Any,
+        ]
+        return query
+    }
+}
+
+struct KeychainJellyfinTokenStore: JellyfinTokenStoring {
     private static let defaultAccount = "jellyfin.access-token"
+    private static let defaultService =
+        "com.chameleonenterprise.velacanto.jellyfin"
 
     private let fileManager: FileManager
-    private let directory: URL
-    private let fileURL: URL
+    private let legacyFileURL: URL
+    private let service: String
     private let account: String
     private let legacyDefaults: UserDefaults?
+    private let keychain: any JellyfinKeychainTokenPersisting
+    private let removeLegacyFile: () throws -> Void
 
     init(
         fileManager: FileManager = .default,
-        directory: URL? = nil,
+        legacyDirectory: URL? = nil,
+        service: String = defaultService,
         account: String = defaultAccount,
-        migratingFrom legacyDefaults: UserDefaults? = nil
+        migratingFrom legacyDefaults: UserDefaults? = nil,
+        keychain: any JellyfinKeychainTokenPersisting =
+            SystemJellyfinKeychainTokenStore(),
+        removeLegacyFile: (() throws -> Void)? = nil
     ) {
         let applicationSupport =
             fileManager.urls(
@@ -234,49 +314,48 @@ struct FileJellyfinTokenStore: JellyfinTokenStoring {
                 in: .userDomainMask
             ).first ?? fileManager.temporaryDirectory
         let resolvedDirectory =
-            directory
+            legacyDirectory
             ?? applicationSupport.appending(
                 path: "Velacanto/Session",
                 directoryHint: .isDirectory
             )
         self.fileManager = fileManager
-        self.directory = resolvedDirectory
-        fileURL = resolvedDirectory.appending(
+        let tokenFileURL = resolvedDirectory.appending(
             path: "jellyfin-access-token-v1",
             directoryHint: .notDirectory
         )
+        legacyFileURL = tokenFileURL
+        self.service = service
         self.account = account
         self.legacyDefaults = legacyDefaults
+        self.keychain = keychain
+        self.removeLegacyFile =
+            removeLegacyFile
+            ?? { try fileManager.removeItem(at: tokenFileURL) }
     }
 
     func loadToken() throws -> String? {
-        if fileManager.fileExists(atPath: fileURL.path) {
-            let data: Data
-            do {
-                data = try Data(contentsOf: fileURL)
-            } catch {
-                throw JellyfinCredentialStoreError.storageUnavailable
-            }
-            guard
-                let token = String(data: data, encoding: .utf8),
-                !token.isEmpty
-            else {
-                throw JellyfinCredentialStoreError.invalidToken
-            }
+        if let token = try keychain.loadToken(
+            service: service,
+            account: account
+        ) {
+            try removeLegacyStorage()
+            return token
+        }
+
+        if let token = try legacyFileToken() {
+            try saveToken(token)
             return token
         }
 
         guard
             let legacyDefaults,
-            let legacyToken = legacyDefaults.string(forKey: account),
-            !legacyToken.isEmpty
-        else {
-            return nil
-        }
+            let token = legacyDefaults.string(forKey: account),
+            !token.isEmpty
+        else { return nil }
 
-        try saveToken(legacyToken)
-        legacyDefaults.removeObject(forKey: account)
-        return legacyToken
+        try saveToken(token)
+        return token
     }
 
     func saveToken(_ token: String) throws {
@@ -284,45 +363,44 @@ struct FileJellyfinTokenStore: JellyfinTokenStoring {
             throw JellyfinCredentialStoreError.invalidToken
         }
 
-        do {
-            try fileManager.createDirectory(
-                at: directory,
-                withIntermediateDirectories: true,
-                attributes: [.posixPermissions: 0o700]
-            )
-            try fileManager.setAttributes(
-                [.posixPermissions: 0o700],
-                ofItemAtPath: directory.path
-            )
-            try Data(token.utf8).write(to: fileURL, options: .atomic)
-            var attributes: [FileAttributeKey: Any] = [
-                .posixPermissions: 0o600
-            ]
-            #if os(iOS)
-                attributes[.protectionKey] =
-                    FileProtectionType.completeUntilFirstUserAuthentication
-            #endif
-            try fileManager.setAttributes(
-                attributes,
-                ofItemAtPath: fileURL.path
-            )
-        } catch {
-            throw JellyfinCredentialStoreError.storageUnavailable
-        }
-
-        legacyDefaults?.removeObject(forKey: account)
+        try saveKeychainToken(token)
+        try removeLegacyStorage()
     }
 
     func deleteToken() throws {
-        defer {
-            legacyDefaults?.removeObject(forKey: account)
+        try removeLegacyStorage()
+        try keychain.deleteToken(service: service, account: account)
+    }
+
+    private func legacyFileToken() throws -> String? {
+        guard fileManager.fileExists(atPath: legacyFileURL.path) else {
+            return nil
         }
-        guard fileManager.fileExists(atPath: fileURL.path) else { return }
+        guard
+            let data = try? Data(contentsOf: legacyFileURL),
+            let token = String(data: data, encoding: .utf8),
+            !token.isEmpty
+        else {
+            throw JellyfinCredentialStoreError.invalidToken
+        }
+        return token
+    }
+
+    private func saveKeychainToken(_ token: String) throws {
+        try keychain.saveToken(token, service: service, account: account)
+    }
+
+    private func removeLegacyStorage() throws {
+        guard fileManager.fileExists(atPath: legacyFileURL.path) else {
+            legacyDefaults?.removeObject(forKey: account)
+            return
+        }
         do {
-            try fileManager.removeItem(at: fileURL)
+            try removeLegacyFile()
         } catch {
             throw JellyfinCredentialStoreError.storageUnavailable
         }
+        legacyDefaults?.removeObject(forKey: account)
     }
 }
 
@@ -367,7 +445,7 @@ enum JellyfinCredentialStoreError: LocalizedError, Equatable {
         case .invalidToken:
             "Jellyfin returned an invalid access token."
         case .storageUnavailable:
-            "The Jellyfin session could not be saved in Velacanto’s private app storage."
+            "The Jellyfin session could not be saved in the system Keychain."
         }
     }
 }
@@ -399,7 +477,7 @@ final class JellyfinSessionController: ObservableObject {
 
     convenience init(autoRestore: Bool = true) {
         self.init(
-            tokenStore: FileJellyfinTokenStore(
+            tokenStore: KeychainJellyfinTokenStore(
                 migratingFrom: .standard
             ),
             sessionStore: UserDefaultsJellyfinSessionStore(),

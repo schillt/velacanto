@@ -63,7 +63,7 @@ final class JellyfinFoundationTests: XCTestCase {
         }
     }
 
-    func testJellyfinTokenStorePersistsWithoutKeychainAndMigratesLegacyPreference()
+    func testJellyfinTokenStoreMigratesLegacyStorageToKeychain()
         throws
     {
         let suiteName = "VelacantoTests.\(UUID().uuidString)"
@@ -73,10 +73,14 @@ final class JellyfinFoundationTests: XCTestCase {
             directoryHint: .isDirectory
         )
         let account = "jellyfin.access-token"
-        let store = FileJellyfinTokenStore(
-            directory: directory,
+        let service = "VelacantoTests.\(UUID().uuidString)"
+        let keychain = InMemoryKeychainTokenStore()
+        let store = KeychainJellyfinTokenStore(
+            legacyDirectory: directory,
+            service: service,
             account: account,
-            migratingFrom: defaults
+            migratingFrom: defaults,
+            keychain: keychain
         )
         defer {
             try? store.deleteToken()
@@ -84,34 +88,97 @@ final class JellyfinFoundationTests: XCTestCase {
             defaults.removePersistentDomain(forName: suiteName)
         }
 
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        let tokenFile = directory.appending(
+            path: "jellyfin-access-token-v1",
+            directoryHint: .notDirectory
+        )
+        try Data("legacy-file-token".utf8).write(to: tokenFile)
+
+        XCTAssertEqual(try store.loadToken(), "legacy-file-token")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: tokenFile.path))
+
+        try store.deleteToken()
         XCTAssertNil(try store.loadToken())
         defaults.set("legacy-token", forKey: account)
 
         XCTAssertEqual(try store.loadToken(), "legacy-token")
         XCTAssertNil(defaults.string(forKey: account))
         XCTAssertEqual(
-            try FileJellyfinTokenStore(
-                directory: directory,
-                account: account
+            try KeychainJellyfinTokenStore(
+                legacyDirectory: directory,
+                service: service,
+                account: account,
+                keychain: keychain
             ).loadToken(),
             "legacy-token"
         )
 
-        let tokenFile = directory.appending(
-            path: "jellyfin-access-token-v1",
-            directoryHint: .notDirectory
-        )
-        let permissions =
-            try FileManager.default.attributesOfItem(atPath: tokenFile.path)[
-                .posixPermissions
-            ] as? NSNumber
-        XCTAssertEqual(permissions?.intValue, 0o600)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: tokenFile.path))
 
         try store.saveToken("replacement-token")
         XCTAssertEqual(try store.loadToken(), "replacement-token")
 
         try store.deleteToken()
         XCTAssertNil(try store.loadToken())
+    }
+
+    func testJellyfinTokenStoreDoesNotIgnoreLegacyFileDeletionFailure()
+        throws
+    {
+        let directory = FileManager.default.temporaryDirectory.appending(
+            path: "VelacantoTokenStoreTests-\(UUID().uuidString)",
+            directoryHint: .isDirectory
+        )
+        let account = "jellyfin.access-token"
+        let service = "VelacantoTests.\(UUID().uuidString)"
+        let keychain = InMemoryKeychainTokenStore()
+        let tokenFile = directory.appending(
+            path: "jellyfin-access-token-v1",
+            directoryHint: .notDirectory
+        )
+        let store = KeychainJellyfinTokenStore(
+            legacyDirectory: directory,
+            service: service,
+            account: account,
+            keychain: keychain,
+            removeLegacyFile: { throw LegacyFileRemovalError.failed }
+        )
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        try Data("legacy-file-token".utf8).write(to: tokenFile)
+
+        XCTAssertThrowsError(try store.loadToken()) { error in
+            XCTAssertEqual(
+                error as? JellyfinCredentialStoreError,
+                .storageUnavailable
+            )
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: tokenFile.path))
+        XCTAssertEqual(
+            try keychain.loadToken(service: service, account: account),
+            "legacy-file-token"
+        )
+
+        XCTAssertThrowsError(try store.deleteToken()) { error in
+            XCTAssertEqual(
+                error as? JellyfinCredentialStoreError,
+                .storageUnavailable
+            )
+        }
+        XCTAssertEqual(
+            try keychain.loadToken(service: service, account: account),
+            "legacy-file-token"
+        )
     }
 
     func testRequestBuilderPreservesBasePathAndBuildsClientAuthorization() throws {
@@ -772,7 +839,7 @@ final class JellyfinFoundationTests: XCTestCase {
         XCTAssertEqual(tokenStore.deleteCount, 1)
     }
 
-    func testFileBackedSessionRestoresAcrossControllerRelaunch() async throws {
+    func testKeychainBackedSessionRestoresAcrossControllerRelaunch() async throws {
         let suiteName = "VelacantoTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         let directory = FileManager.default.temporaryDirectory.appending(
@@ -783,7 +850,13 @@ final class JellyfinFoundationTests: XCTestCase {
             try? FileManager.default.removeItem(at: directory)
             defaults.removePersistentDomain(forName: suiteName)
         }
-        let tokenStore = FileJellyfinTokenStore(directory: directory)
+        let service = "VelacantoTests.\(UUID().uuidString)"
+        let keychain = InMemoryKeychainTokenStore()
+        let tokenStore = KeychainJellyfinTokenStore(
+            legacyDirectory: directory,
+            service: service,
+            keychain: keychain
+        )
         let sessionStore = UserDefaultsJellyfinSessionStore(defaults: defaults)
         let api = FakeJellyfinAPI()
         var firstController: JellyfinSessionController? =
@@ -800,7 +873,11 @@ final class JellyfinFoundationTests: XCTestCase {
         firstController = nil
 
         let restoredController = JellyfinSessionController(
-            tokenStore: FileJellyfinTokenStore(directory: directory),
+            tokenStore: KeychainJellyfinTokenStore(
+                legacyDirectory: directory,
+                service: service,
+                keychain: keychain
+            ),
             sessionStore: UserDefaultsJellyfinSessionStore(defaults: defaults),
             makeClient: { _, _, _ in api }
         )
@@ -945,6 +1022,34 @@ final class JellyfinFoundationTests: XCTestCase {
             JellyfinSessionError.expiredSession.localizedDescription
         )
     }
+}
+
+private final class InMemoryKeychainTokenStore: JellyfinKeychainTokenPersisting {
+    private var tokens: [String: String] = [:]
+
+    func loadToken(service: String, account: String) throws -> String? {
+        tokens[key(service: service, account: account)]
+    }
+
+    func saveToken(
+        _ token: String,
+        service: String,
+        account: String
+    ) throws {
+        tokens[key(service: service, account: account)] = token
+    }
+
+    func deleteToken(service: String, account: String) throws {
+        tokens.removeValue(forKey: key(service: service, account: account))
+    }
+
+    private func key(service: String, account: String) -> String {
+        "\(service)|\(account)"
+    }
+}
+
+private enum LegacyFileRemovalError: Error {
+    case failed
 }
 
 private final class RecordingTokenStore: JellyfinTokenStoring {

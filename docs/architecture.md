@@ -37,7 +37,7 @@ flowchart TB
 
     subgraph Apple["Apple platform services"]
         Networking["URLSession and local-network policy<br/>(implemented)"]
-        TokenFile["Private session file<br/>(implemented)"]
+        Keychain["Device-local Keychain item<br/>(implemented)"]
         Engine["Audio player engine<br/>(implemented)"]
         AV["AVFoundation and AVAudioSession<br/>(implemented)"]
         Media["Now Playing and remote commands<br/>(implemented)"]
@@ -62,7 +62,7 @@ flowchart TB
     Coordinator -. "after 0.1" .-> NavidromeAdapter
 
     Session --> API
-    Session --> TokenFile
+    Session --> Keychain
     Library --> API
     Library --> Models
     Playback --> Models
@@ -222,9 +222,9 @@ sequenceDiagram
 ## Security and privacy boundaries
 
 - The password is transient and is not persisted by Velacanto.
-- The access token is stored in a permission-restricted file inside Velacanto’s
-  private Application Support directory and removed on logout. iOS also applies
-  data protection to the file.
+- The access token is stored in a non-synchronizing Keychain item and removed
+  on logout. On iOS it is device-local and available after first unlock, so
+  background playback can restore it without a user-presence prompt.
 - Real tokens and passwords must not appear in logs, fixtures, screenshots, or
   Git. Tests use clearly synthetic credential values.
 - Remote servers use HTTPS by default.
@@ -267,7 +267,7 @@ VelacantoTests/
 └── JellyfinFoundationTests.swift
 ```
 
-Token-file persistence currently lives beside the session boundary, and
+Keychain token persistence currently lives beside the session boundary, and
 networking policy lives in the Jellyfin API actor. They remain isolated behind
 protocols even though the codebase is not yet large enough to justify separate
 platform directories for each adapter.

@@ -60,7 +60,16 @@ with the selected Xcode beta:
 ```
 
 Use `lint`, `macos`, `test`, or `ios-simulator` instead of `all` to run one
-step. The current interface has working local-file playback and a generated
+step. To reproduce the pull-request quality gate (including iOS Simulator
+tests, a Release build, and static analysis), use:
+
+```sh
+./scripts/build.sh pr
+```
+
+The gate uses Xcode 16.4 and the iPhone 16 simulator running iOS 18.5. Set
+`VELACANTO_IOS_SIMULATOR_DESTINATION` to use another installed simulator
+locally. The current interface has working local-file playback and a generated
 diagnostic tone, plus an early Jellyfin integration. Playback state is owned at
 the app level, publishes Now Playing metadata and artwork, and accepts system
 play, pause, previous, next, toggle, and seek commands. The background path and
@@ -98,11 +107,10 @@ artwork. Selecting a track negotiates a source and play session with Jellyfin,
 uses direct play when the server confirms compatibility, and otherwise uses the
 server's transcoding fallback. The resolved stream goes through the same
 app-level player used for local files. The access token is stored in
-Velacanto’s private Application Support directory without using Keychain, the
-password is never persisted, the device identifier remains stable across
-launches, and logout removes the saved token. Tokens saved by an early
-pre-alpha preferences-backed implementation are migrated into the private
-session file when the session is restored.
+Velacanto’s non-synchronizing Keychain entry, the password is never persisted,
+the device identifier remains stable across launches, and logout removes the
+saved token. Tokens saved by early pre-alpha preferences and private-file
+implementations are migrated into Keychain when the session is restored.
 
 The connection and session path is covered by unit tests and has been verified
 against a real Jellyfin server on a physical iPhone, including relaunch and

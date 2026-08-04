@@ -43,7 +43,7 @@ playback lifecycle reporting.
 The macOS build, twenty-eight foundation and Jellyfin tests, and generic iOS
 Simulator build pass. Local playback, observed engine state, resource lifetime,
 system-media behavior, Jellyfin URL policy, request construction, decoding,
-Private token-file migration, session persistence, artwork requests, catalog
+Keychain token migration, session persistence, artwork requests, catalog
 aggregation, and stream handoff are covered. The app launches and the foundation
 tests have passed on macOS and a booted iOS 27 Simulator.
 
@@ -68,7 +68,8 @@ destinations without secrets or machine-local configuration in Git.
 - [x] Normalize and validate a user-entered server URL.
 - [x] Query public Jellyfin server information.
 - [x] Authenticate a username and password.
-- [x] Store the access token in private app storage without Keychain prompts.
+- [x] Store the access token in non-synchronizing Keychain storage without
+  user-presence prompts.
 - [x] Persist a stable app-generated Jellyfin device identifier.
 - [x] Restore a valid session at launch.
 - [x] Log out and delete the stored token.
