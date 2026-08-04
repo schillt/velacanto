@@ -261,26 +261,21 @@ struct VelacantoRootView: View {
                     .accessibilityLabel("Profile and settings")
                 }
             } detail: {
-                NavigationStack {
-                    switch selectedMacDestination {
-                    case .home:
-                        home
-                    case .library(let category):
-                        MusicLibraryCategoryView(
-                            category: category,
-                            playback: playback,
-                            jellyfin: jellyfin
-                        )
+                VStack(spacing: 0) {
+                    NavigationStack {
+                        switch selectedMacDestination {
+                        case .home:
+                            home
+                        case .library(let category):
+                            MusicLibraryCategoryView(
+                                category: category,
+                                playback: playback,
+                                jellyfin: jellyfin
+                            )
+                        }
                     }
-                }
-            }
-            .frame(minWidth: 700, minHeight: 500)
-            .safeAreaInset(edge: .bottom, spacing: 0) {
-                if playback.hasPlayableItem {
-                    HStack(alignment: .bottom, spacing: 0) {
-                        Color.clear
-                            .frame(width: 220)
-                            .allowsHitTesting(false)
+
+                    if playback.hasPlayableItem {
                         PlaybackAccessory(
                             playback: playback,
                             jellyfin: jellyfin,
@@ -296,6 +291,7 @@ struct VelacantoRootView: View {
                     }
                 }
             }
+            .frame(minWidth: 700, minHeight: 500)
         }
     #endif
 
