@@ -26,6 +26,9 @@ jobs:
       - name: Check out pull request
         uses: actions/checkout@v4
 
+      - name: Install preflight dependency
+        run: brew install ripgrep
+
       - name: Show toolchain and simulator destination
         run: |
           xcodebuild -version
