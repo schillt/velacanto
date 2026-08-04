@@ -5,6 +5,7 @@ struct MusicSearchView: View {
     @ObservedObject var jellyfin: JellyfinSessionController
 
     let showProfile: () -> Void
+    let showNowPlaying: () -> Void
 
     @State private var searchText = ""
     @StateObject private var model = PagedJellyfinItemsModel()
@@ -154,7 +155,8 @@ struct MusicSearchView: View {
                             MusicPlaylistView(
                                 playlist: playlist,
                                 jellyfin: jellyfin,
-                                playback: playback
+                                playback: playback,
+                                showNowPlaying: showNowPlaying
                             )
                         } label: {
                             SearchResultRow(item: playlist, jellyfin: jellyfin)

@@ -63,6 +63,40 @@ struct PlaybackAccessory: View {
     }
 }
 
+#if os(macOS)
+    enum PlaybackAccessoryOwnerPreferenceKey: PreferenceKey {
+        static let defaultValue = false
+
+        static func reduce(value: inout Bool, nextValue: () -> Bool) {
+            value = value || nextValue()
+        }
+    }
+
+    extension View {
+        func macOSPlaybackAccessoryInset(
+            playback: AudioPlaybackCoordinator,
+            jellyfin: JellyfinSessionController,
+            isVisible: Bool,
+            showNowPlaying: @escaping () -> Void
+        ) -> some View {
+            safeAreaInset(edge: .bottom, spacing: 0) {
+                if isVisible {
+                    PlaybackAccessory(
+                        playback: playback,
+                        jellyfin: jellyfin,
+                        appearance: .floating,
+                        showNowPlaying: showNowPlaying
+                    )
+                    .frame(maxWidth: 620)
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 12)
+                    .frame(maxWidth: .infinity)
+                }
+            }
+        }
+    }
+#endif
+
 private struct PlaybackAccessorySurface: ViewModifier {
     let appearance: PlaybackAccessoryAppearance
 

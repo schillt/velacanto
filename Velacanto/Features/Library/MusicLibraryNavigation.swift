@@ -140,6 +140,7 @@ struct MusicLibraryCategoryView: View {
     let category: MusicLibraryCategory
     @ObservedObject var playback: AudioPlaybackCoordinator
     @ObservedObject var jellyfin: JellyfinSessionController
+    var showNowPlaying: () -> Void = {}
 
     @ViewBuilder
     var body: some View {
@@ -151,7 +152,11 @@ struct MusicLibraryCategoryView: View {
         case .songs:
             MusicSongsView(jellyfin: jellyfin, playback: playback)
         case .playlists:
-            MusicPlaylistsView(jellyfin: jellyfin, playback: playback)
+            MusicPlaylistsView(
+                jellyfin: jellyfin,
+                playback: playback,
+                showNowPlaying: showNowPlaying
+            )
         }
     }
 }

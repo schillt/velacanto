@@ -9,6 +9,7 @@ struct VelacantoRootView: View {
     @State private var selectedDestination = AppDestination.home
     #if os(macOS)
         @State private var selectedMacDestination = MacDestination.home
+        @State private var playlistOwnsPlaybackAccessory = false
     #endif
     @State private var isChoosingLocalFile = false
     @State private var isPreparingTestTone = false
@@ -229,7 +230,19 @@ struct VelacantoRootView: View {
 
     #if os(macOS)
         private var macOSRoot: some View {
-            NavigationSplitView {
+            HStack(spacing: 0) {
+                macOSSidebar
+                    .frame(width: 220)
+
+                Divider()
+
+                macOSContent
+            }
+            .frame(minWidth: 700, minHeight: 500)
+        }
+
+        private var macOSSidebar: some View {
+            VStack(spacing: 0) {
                 List(selection: $selectedMacDestination) {
                     Label("Home", systemImage: "house")
                         .tag(MacDestination.home)
@@ -242,55 +255,53 @@ struct VelacantoRootView: View {
                     }
                 }
                 .navigationTitle("Velacanto")
-                .navigationSplitViewColumnWidth(min: 180, ideal: 220)
-                .safeAreaInset(edge: .bottom, spacing: 0) {
-                    Button {
-                        isShowingProfile = true
-                    } label: {
-                        HStack(spacing: 10) {
-                            AccountAvatar(jellyfin: jellyfin)
-                            Text(jellyfin.session?.username ?? "Profile")
-                                .lineLimit(1)
-                            Spacer()
+
+                Button {
+                    isShowingProfile = true
+                } label: {
+                    HStack(spacing: 10) {
+                        AccountAvatar(jellyfin: jellyfin)
+                        Text(jellyfin.session?.username ?? "Profile")
+                            .lineLimit(1)
+                        Spacer()
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .accessibilityLabel("Profile and settings")
+            }
+        }
+
+        private var macOSContent: some View {
+            NavigationStack {
+                switch selectedMacDestination {
+                case .home:
+                    home
+                case .library(let category):
+                    MusicLibraryCategoryView(
+                        category: category,
+                        playback: playback,
+                        jellyfin: jellyfin,
+                        showNowPlaying: {
+                            isShowingNowPlaying = true
                         }
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 10)
-                    .accessibilityLabel("Profile and settings")
-                }
-            } detail: {
-                NavigationStack {
-                    switch selectedMacDestination {
-                    case .home:
-                        home
-                    case .library(let category):
-                        MusicLibraryCategoryView(
-                            category: category,
-                            playback: playback,
-                            jellyfin: jellyfin
-                        )
-                    }
-                }
-                .safeAreaInset(edge: .bottom, spacing: 0) {
-                    if playback.hasPlayableItem {
-                        PlaybackAccessory(
-                            playback: playback,
-                            jellyfin: jellyfin,
-                            appearance: .floating,
-                            showNowPlaying: {
-                                isShowingNowPlaying = true
-                            }
-                        )
-                        .frame(maxWidth: 620)
-                        .padding(.horizontal, 20)
-                        .padding(.bottom, 12)
-                        .frame(maxWidth: .infinity)
-                    }
+                    )
                 }
             }
-            .frame(minWidth: 700, minHeight: 500)
+            .macOSPlaybackAccessoryInset(
+                playback: playback,
+                jellyfin: jellyfin,
+                isVisible: playback.hasPlayableItem
+                    && !playlistOwnsPlaybackAccessory,
+                showNowPlaying: {
+                    isShowingNowPlaying = true
+                }
+            )
+            .onPreferenceChange(PlaybackAccessoryOwnerPreferenceKey.self) {
+                playlistOwnsPlaybackAccessory = $0
+            }
         }
     #endif
 
@@ -337,6 +348,9 @@ struct VelacantoRootView: View {
             jellyfin: jellyfin,
             showProfile: {
                 isShowingProfile = true
+            },
+            showNowPlaying: {
+                isShowingNowPlaying = true
             }
         )
     }
