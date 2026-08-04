@@ -1,8 +1,10 @@
 # Velacanto architecture
 
-This document describes the intended 0.1.0 structure. It is a design target,
-not a claim that every component has already been implemented. The
-[roadmap](roadmap.md) is the source of truth for delivery status.
+This document describes the architecture that 0.1 established and 0.2 must
+preserve while reducing oversized UI and service change surfaces. It is a
+design target, not a claim that every boundary is already reflected one-to-one
+in the implementation. The [0.2 plan](0.2-plan.md) is the source of truth for
+current delivery status.
 
 ## Component map
 
@@ -98,16 +100,12 @@ duration, seek position, or playback state changes.
 
 ## Delivery status
 
-Slices 0 and 1 are complete. The Jellyfin connection and session boundary has
-been exercised against a real server on a physical iPhone through connect,
-authentication, relaunch, restoration, and logout. Automated tests cover URL
-policy, unreachable-server and rejected-credential states, persisted-session
-expiration, orphaned credential cleanup, request construction, and decoding.
-
-The remaining 0.1 work is not part of the authentication boundary: complete
-real-server browse and playback validation, live negative network cases,
-accessibility validation, and audio interruption and route handling remain
-tracked in the [roadmap](roadmap.md).
+The 0.1 listening path is complete. Version 0.2 does not replace its provider,
+session, playback, or platform boundaries; it separates the presentation and
+service responsibilities that accumulated while delivering that path. In
+particular, root composition, catalog presentation, artwork infrastructure,
+and playback presentation need smaller, explicit owners. See the
+[0.2 plan](0.2-plan.md) for the tracked work and guardrails.
 
 ## Local-file playback journey
 
@@ -274,7 +272,8 @@ platform directories for each adapter.
 
 ## Related documents
 
-- [0.1.0 plan](0.1-plan.md)
+- [0.2 plan](0.2-plan.md)
+- [0.1.0 plan](0.1-plan.md) (historical release record)
 - [Roadmap](roadmap.md)
 - [Architecture decisions](decisions/README.md)
 - [Interactive visualization](visualizations/README.md)

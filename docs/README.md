@@ -5,10 +5,13 @@ technical planning.
 
 ## Planning
 
+- [0.2 plan](0.2-plan.md) — current UI architecture release scope and exit
+  criteria.
 - [0.1.0 plan](0.1-plan.md) — scope, delivery slices, and acceptance criteria.
 - [0.1 stability acceptance](0.1-stability-acceptance.md) — final automated
   evidence and physical-device/server verification matrix.
-- [Roadmap](roadmap.md) — ordered work, checkpoints, and later opportunities.
+- [Roadmap](roadmap.md) — current priorities, release history, and later
+  direction.
 - [Known issues](known-issues.md) — current alpha limitations and live-test
   gaps.
 - [Architecture](architecture.md) — intended component boundaries and runtime

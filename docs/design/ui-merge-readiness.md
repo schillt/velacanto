@@ -1,11 +1,12 @@
 # Native UI merge record
 
-**Reviewed:** July 29, 2026
-**Status:** Implemented; validation remains
+**Reviewed:** August 4, 2026
+**Status:** Historical 0.1 merge record. Current UI architecture work is scoped
+in the [0.2 plan](../0.2-plan.md).
 
 This note records the boundary between Velacanto's playback and Jellyfin
-foundation and the approved Apple-platform interface direction, followed by
-the result of implementing the first native UI merge.
+foundation and the result of the first native UI merge. It preserves the
+decisions behind the 0.1 shell; it is not the current release plan.
 
 ## Outcome
 
