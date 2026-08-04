@@ -3,7 +3,8 @@ import SwiftUI
 @main
 struct VelacantoApp: App {
     @StateObject private var playback = AudioPlaybackCoordinator(
-        historyStore: UserDefaultsPlaybackHistoryStore()
+        historyStore: UserDefaultsPlaybackHistoryStore(),
+        nowPlayingStateStore: UserDefaultsNowPlayingStateStore()
     )
     @StateObject private var jellyfin = JellyfinSessionController()
 

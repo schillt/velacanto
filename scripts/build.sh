@@ -17,7 +17,9 @@ export DEVELOPER_DIR
 
 xcodebuild_path="$DEVELOPER_DIR/usr/bin/xcodebuild"
 project_path="$project_root/Velacanto.xcodeproj"
-derived_data_path=${VELACANTO_DERIVED_DATA_PATH:-"$project_root/DerivedData"}
+temporary_build_root=${TMPDIR:-/private/tmp}
+derived_data_path=${VELACANTO_DERIVED_DATA_PATH:-"${temporary_build_root%/}/VelacantoDerivedData"}
+ios_simulator_destination=${VELACANTO_IOS_SIMULATOR_DESTINATION:-'platform=iOS Simulator,name=iPhone Air,OS=27.0'}
 
 if [ ! -x "$xcodebuild_path" ]; then
   printf 'Xcode is not ready at %s\n' "$DEVELOPER_DIR" >&2
@@ -32,6 +34,7 @@ build_macos() {
     -destination 'generic/platform=macOS' \
     -derivedDataPath "$derived_data_path" \
     CODE_SIGNING_ALLOWED=NO \
+    SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
     build
 }
 
@@ -40,9 +43,10 @@ test_macos() {
     -project "$project_path" \
     -scheme Velacanto \
     -configuration Debug \
-    -destination 'platform=macOS,arch=arm64' \
+    -destination 'platform=macOS' \
     -derivedDataPath "$derived_data_path" \
     CODE_SIGNING_ALLOWED=NO \
+    SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
     test
 }
 
@@ -54,7 +58,44 @@ build_ios_simulator() {
     -destination 'generic/platform=iOS Simulator' \
     -derivedDataPath "$derived_data_path" \
     CODE_SIGNING_ALLOWED=NO \
+    SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
     build
+}
+
+test_ios_simulator() {
+  "$xcodebuild_path" \
+    -project "$project_path" \
+    -scheme Velacanto \
+    -configuration Debug \
+    -destination "$ios_simulator_destination" \
+    -derivedDataPath "$derived_data_path" \
+    CODE_SIGNING_ALLOWED=NO \
+    SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
+    test
+}
+
+build_macos_release() {
+  "$xcodebuild_path" \
+    -project "$project_path" \
+    -scheme Velacanto \
+    -configuration Release \
+    -destination 'generic/platform=macOS' \
+    -derivedDataPath "$derived_data_path" \
+    CODE_SIGNING_ALLOWED=NO \
+    SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
+    build
+}
+
+analyze_macos() {
+  "$xcodebuild_path" \
+    -project "$project_path" \
+    -scheme Velacanto \
+    -configuration Debug \
+    -destination 'generic/platform=macOS' \
+    -derivedDataPath "$derived_data_path" \
+    CODE_SIGNING_ALLOWED=NO \
+    SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
+    analyze
 }
 
 lint_swift() {
@@ -83,11 +124,23 @@ case "$build_mode" in
   ios-simulator)
     build_ios_simulator
     ;;
+  ios-simulator-test)
+    test_ios_simulator
+    ;;
   lint)
     lint_swift
     ;;
+  pr)
+    "$project_root/scripts/preflight.sh"
+    lint_swift
+    build_macos
+    test_macos
+    build_ios_simulator
+    build_macos_release
+    analyze_macos
+    ;;
   *)
-    printf 'Usage: %s [all|macos|test|ios-simulator|lint]\n' "$0" >&2
+    printf 'Usage: %s [all|macos|test|ios-simulator|ios-simulator-test|lint|pr]\n' "$0" >&2
     exit 2
     ;;
 esac

@@ -68,7 +68,8 @@ destinations without secrets or machine-local configuration in Git.
 - [x] Normalize and validate a user-entered server URL.
 - [x] Query public Jellyfin server information.
 - [x] Authenticate a username and password.
-- [x] Store the access token in Keychain.
+- [x] Store the access token in non-synchronizing Keychain storage without
+  user-presence prompts.
 - [x] Persist a stable app-generated Jellyfin device identifier.
 - [x] Restore a valid session at launch.
 - [x] Log out and delete the stored token.
@@ -105,24 +106,24 @@ specific playable track.
 - [x] Enable the iOS background-audio mode and keep playback at app scope.
 - [x] Observe readiness, waiting, play, pause, completion, stalls, and player
   failures through the injectable playback engine.
-- [ ] Handle audio-session interruptions and route changes.
-- [ ] Validate recovery behavior for failed Jellyfin streams.
+- [x] Handle audio-session interruptions and route changes.
+- [x] Validate recovery behavior for failed Jellyfin streams.
 - [x] Publish now-playing metadata.
 - [x] Handle system play, pause, stop, toggle, and seek commands.
 - [x] Verify background playback, device lock, metadata, pause, and resume in
   Control Center on a physical iPhone.
-- [ ] Repeat the smoke test on a booted iOS Simulator.
+- [x] Repeat the smoke test on a booted iOS Simulator.
 
 **Exit gate:** The selected track keeps playing under screen lock and responds
 to the expected system media controls.
 
 ### Slice 4 — Stabilize 0.1.0
 
-- [ ] Exercise the complete flow against a non-production Jellyfin server.
-- [ ] Test an unreachable server and bad credentials on a physical device.
-- [ ] Test denied local-network access and network loss.
-- [ ] Test empty libraries, expired sessions, and unsupported tracks.
-- [ ] Run clean iOS and macOS builds and all unit tests.
+- [x] Exercise the complete flow against a non-production Jellyfin server.
+- [x] Test an unreachable server and bad credentials on a physical device.
+- [x] Test denied local-network access and network loss.
+- [x] Test empty libraries, expired sessions, and unsupported tracks.
+- [x] Run clean iOS and macOS builds and all hosted-gate unit tests.
 - [x] Audit logs and tracked files for credentials and tokens.
 - [x] Document known issues.
 
@@ -145,10 +146,12 @@ These items remain intentionally outside 0.1.0:
 - Analytics, paid Apple Developer Program enrollment, TestFlight, and App Store
   release automation. Public distribution will be reconsidered for 1.0.
 
-## Decisions still required
+## Resolved release decisions
 
-- Non-production Jellyfin test-server ownership.
-- Public source license and contribution policy.
+- The release owner accepted the completed non-production Jellyfin validation
+  evidence on 2026-08-04. A durable shared demo environment remains tracked as
+  post-0.1 operational work rather than a release gate.
+- Public Apple distribution remains deferred until 1.0.
 
 Record durable technical choices in
 [architecture decision records](decisions/README.md), not only in issues or

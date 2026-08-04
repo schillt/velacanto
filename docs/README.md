@@ -6,8 +6,10 @@ technical planning.
 ## Planning
 
 - [0.1.0 plan](0.1-plan.md) — scope, delivery slices, and acceptance criteria.
+- [0.1 stability acceptance](0.1-stability-acceptance.md) — final automated
+  evidence and physical-device/server verification matrix.
 - [Roadmap](roadmap.md) — ordered work, checkpoints, and later opportunities.
-- [Known issues](known-issues.md) — current pre-alpha limitations and live-test
+- [Known issues](known-issues.md) — current alpha limitations and live-test
   gaps.
 - [Architecture](architecture.md) — intended component boundaries and runtime
   interactions.
@@ -16,6 +18,8 @@ technical planning.
 
 - [Architecture decision records](decisions/README.md) — durable technical
   decisions and their consequences.
+- [Non-production Jellyfin validation policy](decisions/0006-non-production-jellyfin-validation.md)
+  — public-safe boundary and release prerequisites for the private test server.
 
 ## Product design
 

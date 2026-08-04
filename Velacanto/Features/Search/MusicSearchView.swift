@@ -7,29 +7,28 @@ struct MusicSearchView: View {
     let showProfile: () -> Void
 
     @State private var searchText = ""
-    @State private var results: [JellyfinItem] = []
-    @State private var isLoading = false
+    @StateObject private var model = PagedJellyfinItemsModel()
     @State private var preparingTrackID: String?
-    @State private var errorMessage: String?
+    @State private var playbackErrorMessage: String?
 
     private var query: String {
         searchText.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private var albums: [JellyfinItem] {
-        results.filter { $0.kind == .album }
+        model.items.filter { $0.kind == .album }
     }
 
     private var artists: [JellyfinItem] {
-        results.filter { $0.kind == .artist }
+        model.items.filter { $0.kind == .artist }
     }
 
     private var songs: [JellyfinItem] {
-        results.filter { $0.kind == .song }
+        model.items.filter { $0.kind == .song }
     }
 
     private var playlists: [JellyfinItem] {
-        results.filter { $0.kind == .playlist }
+        model.items.filter { $0.kind == .playlist }
     }
 
     var body: some View {
@@ -49,10 +48,10 @@ struct MusicSearchView: View {
                     systemImage: "magnifyingglass",
                     description: Text("Enter at least two characters to find music.")
                 )
-            } else if isLoading {
+            } else if model.isInitialLoading {
                 ProgressView("Searching…")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if let errorMessage {
+            } else if let errorMessage = model.errorMessage, model.items.isEmpty {
                 ContentUnavailableView {
                     Label("Search Failed", systemImage: "exclamationmark.triangle")
                 } description: {
@@ -60,12 +59,12 @@ struct MusicSearchView: View {
                 } actions: {
                     Button("Try Again") {
                         Task {
-                            await search()
+                            await retry()
                         }
                     }
                     .buttonStyle(.borderedProminent)
                 }
-            } else if results.isEmpty {
+            } else if model.items.isEmpty {
                 ContentUnavailableView.search(text: query)
             } else {
                 resultsList
@@ -101,6 +100,9 @@ struct MusicSearchView: View {
                         } label: {
                             SearchResultRow(item: album, jellyfin: jellyfin)
                         }
+                        .onAppear {
+                            loadMoreIfNeeded(album.id)
+                        }
                     }
                 }
             }
@@ -116,6 +118,9 @@ struct MusicSearchView: View {
                             )
                         } label: {
                             SearchResultRow(item: artist, jellyfin: jellyfin)
+                        }
+                        .onAppear {
+                            loadMoreIfNeeded(artist.id)
                         }
                     }
                 }
@@ -135,6 +140,9 @@ struct MusicSearchView: View {
                         }
                         .buttonStyle(.plain)
                         .disabled(preparingTrackID != nil)
+                        .onAppear {
+                            loadMoreIfNeeded(song.id)
+                        }
                     }
                 }
             }
@@ -151,8 +159,29 @@ struct MusicSearchView: View {
                         } label: {
                             SearchResultRow(item: playlist, jellyfin: jellyfin)
                         }
+                        .onAppear {
+                            loadMoreIfNeeded(playlist.id)
+                        }
                     }
                 }
+            }
+
+            if model.isLoadingMore {
+                HStack {
+                    Spacer()
+                    ProgressView()
+                    Spacer()
+                }
+            } else if let errorMessage = model.errorMessage {
+                MusicPaginationErrorView(message: errorMessage) {
+                    Task {
+                        await retry()
+                    }
+                }
+            }
+
+            if let playbackErrorMessage {
+                ErrorMessageView(message: playbackErrorMessage)
             }
         }
     }
@@ -164,39 +193,66 @@ struct MusicSearchView: View {
     @MainActor
     private func search() async {
         guard jellyfin.isSignedIn, query.count >= 2 else {
-            results = []
-            errorMessage = nil
-            isLoading = false
+            await model.reset(
+                loader: { _ in
+                    JellyfinCatalogPage(
+                        items: [],
+                        totalRecordCount: 0,
+                        cursor: nil
+                    )
+                }
+            )
             return
         }
 
-        isLoading = true
-        errorMessage = nil
+        await model.reset(
+            debounce: .milliseconds(250),
+            loader: pageLoader
+        )
+    }
 
-        do {
-            try await Task.sleep(for: .milliseconds(250))
-            try Task.checkCancellation()
-            results = try await jellyfin.searchMusic(query: query)
-        } catch is CancellationError {
-            return
-        } catch {
-            results = []
-            errorMessage = error.localizedDescription
+    private func loadMoreIfNeeded(_ itemID: String) {
+        model.loadMoreIfNeeded(itemID: itemID, loader: pageLoader)
+    }
+
+    private func retry() async {
+        await model.retry(loader: pageLoader)
+    }
+
+    private var pageLoader: PagedJellyfinItemsModel.Loader {
+        { cursor in
+            try await jellyfin.searchMusicPage(
+                query: query,
+                cursor: cursor
+            )
         }
-
-        isLoading = false
     }
 
     private func play(_ song: JellyfinItem) {
         preparingTrackID = song.id
-        errorMessage = nil
+        playbackErrorMessage = nil
 
         Task {
             do {
                 let request = try await jellyfin.playbackRequest(for: song)
-                playback.play(request)
+                playback.play(
+                    request,
+                    queueItems: model.items.compactMap {
+                        guard $0.kind == .song else { return nil }
+                        return JellyfinPlaybackAdapter.playbackItem(for: $0)
+                    },
+                    context: .search,
+                    account: jellyfin.playbackAccount,
+                    queueExpansion: {
+                        await model.loadNextPage(loader: pageLoader)
+                        return model.items.compactMap {
+                            guard $0.kind == .song else { return nil }
+                            return JellyfinPlaybackAdapter.playbackItem(for: $0)
+                        }
+                    }
+                )
             } catch {
-                errorMessage = error.localizedDescription
+                playbackErrorMessage = error.localizedDescription
             }
             preparingTrackID = nil
         }

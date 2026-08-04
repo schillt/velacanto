@@ -1,4 +1,5 @@
 import Foundation
+import Network
 
 struct JellyfinServerURL: Equatable, Sendable {
     let url: URL
@@ -58,10 +59,7 @@ struct JellyfinServerURL: Equatable, Sendable {
                 || (octets[0] == 192 && octets[1] == 168)
         }
 
-        return host == "::1"
-            || host.hasPrefix("fc")
-            || host.hasPrefix("fd")
-            || Self.isIPv6LinkLocal(host)
+        return isLocalIPv6Address(host)
     }
 
     private static func ipv4Octets(_ host: String) -> [Int]? {
@@ -80,14 +78,15 @@ struct JellyfinServerURL: Equatable, Sendable {
         return octets
     }
 
-    private static func isIPv6LinkLocal(_ host: String) -> Bool {
-        guard host.hasPrefix("fe"), host.count >= 3 else { return false }
-        switch host[host.index(host.startIndex, offsetBy: 2)] {
-        case "8", "9", "a", "b":
-            return true
-        default:
-            return false
-        }
+    private static func isLocalIPv6Address(_ host: String) -> Bool {
+        guard let address = IPv6Address(host) else { return false }
+        let bytes = [UInt8](address.rawValue)
+        guard bytes.count == 16 else { return false }
+
+        let isLoopback = bytes.dropLast().allSatisfy { $0 == 0 } && bytes.last == 1
+        let isUniqueLocal = bytes[0] & 0xFE == 0xFC
+        let isLinkLocal = bytes[0] == 0xFE && bytes[1] & 0xC0 == 0x80
+        return isLoopback || isUniqueLocal || isLinkLocal
     }
 }
 
@@ -102,6 +101,44 @@ enum JellyfinServerURLError: LocalizedError, Equatable {
         case .insecureRemoteAddress:
             "Plain HTTP is allowed only for local-network Jellyfin servers. Use HTTPS for remote servers."
         }
+    }
+}
+
+enum JellyfinPlaybackMethod: String, Equatable, Sendable {
+    case directPlay = "DirectPlay"
+    case directStream = "DirectStream"
+    case transcode = "Transcode"
+}
+
+struct JellyfinPlaybackResolution: Equatable, Sendable {
+    let streamURL: URL
+    let playSessionID: String
+    let playMethod: JellyfinPlaybackMethod
+}
+
+struct JellyfinPlaybackInfoResponse: Decodable, Equatable, Sendable {
+    let mediaSources: [JellyfinPlaybackMediaSource]
+    let playSessionID: String?
+    let errorCode: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case mediaSources = "MediaSources"
+        case playSessionID = "PlaySessionId"
+        case errorCode = "ErrorCode"
+    }
+}
+
+struct JellyfinPlaybackMediaSource: Decodable, Equatable, Sendable {
+    let id: String?
+    let supportsDirectStream: Bool
+    let supportsTranscoding: Bool
+    let transcodingURL: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case id = "Id"
+        case supportsDirectStream = "SupportsDirectStream"
+        case supportsTranscoding = "SupportsTranscoding"
+        case transcodingURL = "TranscodingUrl"
     }
 }
 
@@ -169,12 +206,13 @@ enum JellyfinItemKind: String, Sendable {
     }
 }
 
-struct JellyfinItem: Decodable, Equatable, Identifiable, Sendable {
+struct JellyfinItem: Codable, Equatable, Identifiable, Sendable {
     let id: String
     let name: String
     let type: String?
     let collectionType: String?
     let albumArtist: String?
+    let sortName: String?
     let artists: [String]
     let album: String?
     let indexNumber: Int?
@@ -222,6 +260,7 @@ struct JellyfinItem: Decodable, Equatable, Identifiable, Sendable {
         case type = "Type"
         case collectionType = "CollectionType"
         case albumArtist = "AlbumArtist"
+        case sortName = "SortName"
         case artists = "Artists"
         case album = "Album"
         case indexNumber = "IndexNumber"
@@ -240,6 +279,7 @@ struct JellyfinItem: Decodable, Equatable, Identifiable, Sendable {
         type = try container.decodeIfPresent(String.self, forKey: .type)
         collectionType = try container.decodeIfPresent(String.self, forKey: .collectionType)
         albumArtist = try container.decodeIfPresent(String.self, forKey: .albumArtist)
+        sortName = try container.decodeIfPresent(String.self, forKey: .sortName)
         artists = try container.decodeIfPresent([String].self, forKey: .artists) ?? []
         album = try container.decodeIfPresent(String.self, forKey: .album)
         indexNumber = try container.decodeIfPresent(Int.self, forKey: .indexNumber)
@@ -255,15 +295,94 @@ struct JellyfinItem: Decodable, Equatable, Identifiable, Sendable {
             forKey: .albumPrimaryImageTag
         )
     }
+
+    func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(name, forKey: .name)
+        try container.encodeIfPresent(type, forKey: .type)
+        try container.encodeIfPresent(collectionType, forKey: .collectionType)
+        try container.encodeIfPresent(albumArtist, forKey: .albumArtist)
+        try container.encodeIfPresent(sortName, forKey: .sortName)
+        try container.encode(artists, forKey: .artists)
+        try container.encodeIfPresent(album, forKey: .album)
+        try container.encodeIfPresent(indexNumber, forKey: .indexNumber)
+        try container.encodeIfPresent(parentIndexNumber, forKey: .parentIndexNumber)
+        try container.encodeIfPresent(childCount, forKey: .childCount)
+        try container.encodeIfPresent(runTimeTicks, forKey: .runTimeTicks)
+        try container.encodeIfPresent(albumID, forKey: .albumID)
+        try container.encode(imageTags, forKey: .imageTags)
+        try container.encodeIfPresent(
+            albumPrimaryImageTag,
+            forKey: .albumPrimaryImageTag
+        )
+    }
 }
 
 struct JellyfinItemsResponse: Decodable, Equatable, Sendable {
     let items: [JellyfinItem]
     let totalRecordCount: Int
+    let startIndex: Int
 
     private enum CodingKeys: String, CodingKey {
         case items = "Items"
         case totalRecordCount = "TotalRecordCount"
+        case startIndex = "StartIndex"
+    }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        items =
+            try container.decodeIfPresent(
+                [JellyfinItem].self,
+                forKey: .items
+            ) ?? []
+        totalRecordCount =
+            try container.decodeIfPresent(
+                Int.self,
+                forKey: .totalRecordCount
+            ) ?? items.count
+        startIndex =
+            try container.decodeIfPresent(
+                Int.self,
+                forKey: .startIndex
+            ) ?? 0
+    }
+}
+
+struct JellyfinItemPage: Equatable, Sendable {
+    let items: [JellyfinItem]
+    let startIndex: Int
+    let totalRecordCount: Int
+    let consumedItemCount: Int
+
+    var nextStartIndex: Int {
+        startIndex + consumedItemCount
+    }
+
+    var hasMore: Bool {
+        nextStartIndex < totalRecordCount
+    }
+
+    init(
+        items: [JellyfinItem],
+        startIndex: Int,
+        totalRecordCount: Int,
+        consumedItemCount: Int? = nil
+    ) {
+        self.items = items
+        self.startIndex = startIndex
+        self.totalRecordCount = totalRecordCount
+        self.consumedItemCount = consumedItemCount ?? items.count
+    }
+
+    init(_ response: JellyfinItemsResponse) {
+        self.init(
+            items: response.items,
+            startIndex: response.startIndex,
+            totalRecordCount: response.totalRecordCount,
+            consumedItemCount: response.items.count
+        )
     }
 }
 
@@ -308,31 +427,224 @@ struct JellyfinRequestBuilder: Sendable {
         return request
     }
 
-    func streamURL(itemID: String, userID: String) throws -> URL {
-        let playSessionID = UUID().uuidString
-        let queryItems = [
-            URLQueryItem(name: "UserId", value: userID),
+    func playbackInfoRequest(itemID: String, userID: String) throws -> URLRequest {
+        struct DirectPlayProfile: Encodable {
+            let container: String
+            let type = "Audio"
+
+            private enum CodingKeys: String, CodingKey {
+                case container = "Container"
+                case type = "Type"
+            }
+        }
+
+        struct TranscodingProfile: Encodable {
+            let container = "mp3"
+            let type = "Audio"
+            let audioCodec = "mp3"
+            let `protocol` = "http"
+            let context = "Streaming"
+
+            private enum CodingKeys: String, CodingKey {
+                case container = "Container"
+                case type = "Type"
+                case audioCodec = "AudioCodec"
+                case `protocol` = "Protocol"
+                case context = "Context"
+            }
+        }
+
+        struct DeviceProfile: Encodable {
+            let maxStreamingBitrate = 320_000
+            let directPlayProfiles: [DirectPlayProfile]
+            let transcodingProfiles = [TranscodingProfile()]
+
+            private enum CodingKeys: String, CodingKey {
+                case maxStreamingBitrate = "MaxStreamingBitrate"
+                case directPlayProfiles = "DirectPlayProfiles"
+                case transcodingProfiles = "TranscodingProfiles"
+            }
+        }
+
+        struct Payload: Encodable {
+            let userID: String
+            let maxStreamingBitrate = 320_000
+            let deviceProfile: DeviceProfile
+            let enableDirectPlay = true
+            let enableDirectStream = true
+            let enableTranscoding = true
+            let allowAudioStreamCopy = true
+
+            private enum CodingKeys: String, CodingKey {
+                case userID = "UserId"
+                case maxStreamingBitrate = "MaxStreamingBitrate"
+                case deviceProfile = "DeviceProfile"
+                case enableDirectPlay = "EnableDirectPlay"
+                case enableDirectStream = "EnableDirectStream"
+                case enableTranscoding = "EnableTranscoding"
+                case allowAudioStreamCopy = "AllowAudioStreamCopy"
+            }
+        }
+
+        let containers = [
+            "mp3", "aac", "m4a", "m4b", "flac", "webma", "webm", "wav", "ogg",
+        ]
+        let payload = Payload(
+            userID: userID,
+            deviceProfile: DeviceProfile(
+                directPlayProfiles: containers.map(DirectPlayProfile.init)
+            )
+        )
+        return try request(
+            pathComponents: ["Items", itemID, "PlaybackInfo"],
+            method: "POST",
+            body: JSONEncoder().encode(payload)
+        )
+    }
+
+    func playbackResolution(
+        itemID: String,
+        response: JellyfinPlaybackInfoResponse
+    ) throws -> JellyfinPlaybackResolution {
+        guard
+            response.errorCode == nil,
+            let playSessionID = response.playSessionID,
+            !playSessionID.isEmpty,
+            let source = response.mediaSources.first
+        else {
+            throw JellyfinAPIError.invalidResponse
+        }
+
+        // Jellyfin's UniversalAudioController uses SupportsDirectStream as its
+        // "can serve the original file statically" decision for audio.
+        if source.supportsDirectStream {
+            return JellyfinPlaybackResolution(
+                streamURL: try directPlayURL(
+                    itemID: itemID,
+                    mediaSourceID: source.id,
+                    playSessionID: playSessionID
+                ),
+                playSessionID: playSessionID,
+                playMethod: .directPlay
+            )
+        }
+
+        guard
+            source.supportsTranscoding,
+            let transcodingURL = source.transcodingURL,
+            !transcodingURL.isEmpty
+        else {
+            throw JellyfinAPIError.invalidResponse
+        }
+        return JellyfinPlaybackResolution(
+            streamURL: try authenticatedStreamURL(
+                transcodingURL,
+                playSessionID: playSessionID
+            ),
+            playSessionID: playSessionID,
+            playMethod: .transcode
+        )
+    }
+
+    private func directPlayURL(
+        itemID: String,
+        mediaSourceID: String?,
+        playSessionID: String
+    ) throws -> URL {
+        var queryItems = [
+            URLQueryItem(name: "Static", value: "true"),
             URLQueryItem(name: "DeviceId", value: deviceID),
             URLQueryItem(name: "PlaySessionId", value: playSessionID),
-            URLQueryItem(name: "MaxStreamingBitrate", value: "320000"),
-            URLQueryItem(
-                name: "Container",
-                value: "mp3,aac,m4a,m4b,flac,webma,webm,wav,ogg"
-            ),
-            URLQueryItem(name: "TranscodingContainer", value: "mp3"),
-            URLQueryItem(name: "TranscodingProtocol", value: "http"),
-            URLQueryItem(name: "AudioCodec", value: "mp3"),
-            URLQueryItem(name: "EnableRedirection", value: "true"),
-            URLQueryItem(name: "EnableRemoteMedia", value: "true"),
             URLQueryItem(name: "api_key", value: accessToken),
         ]
+        if let mediaSourceID, !mediaSourceID.isEmpty {
+            queryItems.append(
+                URLQueryItem(name: "MediaSourceId", value: mediaSourceID)
+            )
+        }
         return try request(
-            pathComponents: ["Audio", itemID, "universal"],
+            pathComponents: ["Audio", itemID, "stream"],
             queryItems: queryItems
         ).url
             ?? {
                 throw JellyfinAPIError.invalidResponse
             }()
+    }
+
+    private func authenticatedStreamURL(
+        _ serverPath: String,
+        playSessionID: String
+    ) throws -> URL {
+        guard
+            let resolvedURL = URL(string: serverPath, relativeTo: server.url)?.absoluteURL,
+            resolvedURL.scheme?.caseInsensitiveCompare(server.url.scheme ?? "") == .orderedSame,
+            resolvedURL.host?.caseInsensitiveCompare(server.url.host ?? "") == .orderedSame,
+            resolvedURL.port == server.url.port,
+            var components = URLComponents(
+                url: resolvedURL,
+                resolvingAgainstBaseURL: false
+            )
+        else {
+            throw JellyfinAPIError.invalidResponse
+        }
+
+        var queryItems = components.queryItems ?? []
+        queryItems.removeAll {
+            $0.name.caseInsensitiveCompare("PlaySessionId") == .orderedSame
+                || $0.name.caseInsensitiveCompare("DeviceId") == .orderedSame
+                || $0.name.caseInsensitiveCompare("api_key") == .orderedSame
+        }
+        queryItems.append(URLQueryItem(name: "PlaySessionId", value: playSessionID))
+        queryItems.append(URLQueryItem(name: "DeviceId", value: deviceID))
+        queryItems.append(URLQueryItem(name: "api_key", value: accessToken))
+        components.queryItems = queryItems
+
+        guard let url = components.url else {
+            throw JellyfinAPIError.invalidResponse
+        }
+        return url
+    }
+
+    func playbackReportRequest(
+        pathComponents: [String],
+        itemID: String,
+        playSessionID: String,
+        positionTicks: Int64,
+        isPaused: Bool,
+        playMethod: JellyfinPlaybackMethod
+    ) throws -> URLRequest {
+        struct Payload: Encodable {
+            let itemID: String
+            let playSessionID: String
+            let positionTicks: Int64
+            let isPaused: Bool
+            let canSeek: Bool
+            let playMethod: String
+
+            enum CodingKeys: String, CodingKey {
+                case itemID = "ItemId"
+                case playSessionID = "PlaySessionId"
+                case positionTicks = "PositionTicks"
+                case isPaused = "IsPaused"
+                case canSeek = "CanSeek"
+                case playMethod = "PlayMethod"
+            }
+        }
+
+        return try request(
+            pathComponents: pathComponents,
+            method: "POST",
+            body: JSONEncoder().encode(
+                Payload(
+                    itemID: itemID,
+                    playSessionID: playSessionID,
+                    positionTicks: positionTicks,
+                    isPaused: isPaused,
+                    canSeek: true,
+                    playMethod: playMethod.rawValue
+                )
+            )
+        )
     }
 
     func artworkURL(
@@ -357,6 +669,24 @@ struct JellyfinRequestBuilder: Sendable {
             }()
     }
 
+    func artworkRequest(
+        itemID: String,
+        imageTag: String?,
+        maxWidth: Int
+    ) throws -> URLRequest {
+        var queryItems = [
+            URLQueryItem(name: "maxWidth", value: String(max(maxWidth, 64))),
+            URLQueryItem(name: "quality", value: "90"),
+        ]
+        if let imageTag, !imageTag.isEmpty {
+            queryItems.append(URLQueryItem(name: "tag", value: imageTag))
+        }
+        return try request(
+            pathComponents: ["Items", itemID, "Images", "Primary"],
+            queryItems: queryItems
+        )
+    }
+
     func userImageURL(
         userID: String,
         imageTag: String?,
@@ -377,6 +707,24 @@ struct JellyfinRequestBuilder: Sendable {
             ?? {
                 throw JellyfinAPIError.invalidResponse
             }()
+    }
+
+    func userImageRequest(
+        userID: String,
+        imageTag: String?,
+        maxWidth: Int
+    ) throws -> URLRequest {
+        var queryItems = [
+            URLQueryItem(name: "maxWidth", value: String(max(maxWidth, 64))),
+            URLQueryItem(name: "quality", value: "90"),
+        ]
+        if let imageTag, !imageTag.isEmpty {
+            queryItems.append(URLQueryItem(name: "tag", value: imageTag))
+        }
+        return try request(
+            pathComponents: ["Users", userID, "Images", "Primary"],
+            queryItems: queryItems
+        )
     }
 
     private var authorizationHeader: String {
@@ -423,7 +771,10 @@ protocol JellyfinAPIService: Sendable {
         playlistID: String
     ) async throws -> [JellyfinItem]
     func tracks(userID: String, albumID: String) async throws -> [JellyfinItem]
-    func streamURL(itemID: String, userID: String) async throws -> URL
+    func playbackResolution(
+        itemID: String,
+        userID: String
+    ) async throws -> JellyfinPlaybackResolution
     func artworkURL(
         itemID: String,
         imageTag: String?,
@@ -434,7 +785,276 @@ protocol JellyfinAPIService: Sendable {
         imageTag: String?,
         maxWidth: Int
     ) async throws -> URL
+    func albumsPage(
+        userID: String,
+        libraryID: String,
+        artistID: String?,
+        startIndex: Int,
+        limit: Int,
+        searchTerm: String?
+    ) async throws -> JellyfinItemPage
+    func artistsPage(
+        userID: String,
+        libraryID: String,
+        startIndex: Int,
+        limit: Int,
+        searchTerm: String?
+    ) async throws -> JellyfinItemPage
+    func songsPage(
+        userID: String,
+        libraryID: String,
+        startIndex: Int,
+        limit: Int,
+        searchTerm: String?
+    ) async throws -> JellyfinItemPage
+    func playlistsPage(
+        userID: String,
+        startIndex: Int,
+        limit: Int,
+        searchTerm: String?
+    ) async throws -> JellyfinItemPage
+    func searchMusicPage(
+        userID: String,
+        query: String,
+        startIndex: Int,
+        limit: Int
+    ) async throws -> JellyfinItemPage
+    func playlistItemsPage(
+        userID: String,
+        playlistID: String,
+        startIndex: Int,
+        limit: Int
+    ) async throws -> JellyfinItemPage
+    func tracksPage(
+        userID: String,
+        albumID: String,
+        startIndex: Int,
+        limit: Int
+    ) async throws -> JellyfinItemPage
+    func artworkRequest(
+        itemID: String,
+        imageTag: String?,
+        maxWidth: Int
+    ) async throws -> URLRequest
+    func userImageRequest(
+        userID: String,
+        imageTag: String?,
+        maxWidth: Int
+    ) async throws -> URLRequest
+    func reportPlaybackStarted(
+        itemID: String,
+        playSessionID: String,
+        positionTicks: Int64,
+        playMethod: JellyfinPlaybackMethod
+    ) async throws
+    func reportPlaybackProgress(
+        itemID: String,
+        playSessionID: String,
+        positionTicks: Int64,
+        isPaused: Bool,
+        playMethod: JellyfinPlaybackMethod
+    ) async throws
+    func reportPlaybackStopped(
+        itemID: String,
+        playSessionID: String,
+        positionTicks: Int64,
+        playMethod: JellyfinPlaybackMethod
+    ) async throws
     func logout() async throws
+}
+
+extension JellyfinAPIService {
+    func reportPlaybackStarted(
+        itemID: String,
+        playSessionID: String,
+        positionTicks: Int64,
+        playMethod: JellyfinPlaybackMethod
+    ) async throws {}
+
+    func reportPlaybackProgress(
+        itemID: String,
+        playSessionID: String,
+        positionTicks: Int64,
+        isPaused: Bool,
+        playMethod: JellyfinPlaybackMethod
+    ) async throws {}
+
+    func reportPlaybackStopped(
+        itemID: String,
+        playSessionID: String,
+        positionTicks: Int64,
+        playMethod: JellyfinPlaybackMethod
+    ) async throws {}
+
+    func albumsPage(
+        userID: String,
+        libraryID: String,
+        artistID: String?,
+        startIndex: Int,
+        limit: Int,
+        searchTerm: String?
+    ) async throws -> JellyfinItemPage {
+        let allItems: [JellyfinItem]
+        if let artistID {
+            allItems = try await albums(
+                userID: userID,
+                libraryID: libraryID,
+                artistID: artistID
+            )
+        } else {
+            allItems = try await albums(userID: userID, libraryID: libraryID)
+        }
+        return Self.localPage(
+            allItems,
+            startIndex: startIndex,
+            limit: limit,
+            searchTerm: searchTerm
+        )
+    }
+
+    func artistsPage(
+        userID: String,
+        libraryID: String,
+        startIndex: Int,
+        limit: Int,
+        searchTerm: String?
+    ) async throws -> JellyfinItemPage {
+        Self.localPage(
+            try await artists(userID: userID, libraryID: libraryID),
+            startIndex: startIndex,
+            limit: limit,
+            searchTerm: searchTerm
+        )
+    }
+
+    func songsPage(
+        userID: String,
+        libraryID: String,
+        startIndex: Int,
+        limit: Int,
+        searchTerm: String?
+    ) async throws -> JellyfinItemPage {
+        Self.localPage(
+            try await songs(userID: userID, libraryID: libraryID),
+            startIndex: startIndex,
+            limit: limit,
+            searchTerm: searchTerm
+        )
+    }
+
+    func playlistsPage(
+        userID: String,
+        startIndex: Int,
+        limit: Int,
+        searchTerm: String?
+    ) async throws -> JellyfinItemPage {
+        Self.localPage(
+            try await playlists(userID: userID),
+            startIndex: startIndex,
+            limit: limit,
+            searchTerm: searchTerm
+        )
+    }
+
+    func searchMusicPage(
+        userID: String,
+        query: String,
+        startIndex: Int,
+        limit: Int
+    ) async throws -> JellyfinItemPage {
+        let items = try await searchMusic(
+            userID: userID,
+            query: query,
+            limit: startIndex + limit
+        )
+        return Self.localPage(
+            items,
+            startIndex: startIndex,
+            limit: limit,
+            searchTerm: nil
+        )
+    }
+
+    func playlistItemsPage(
+        userID: String,
+        playlistID: String,
+        startIndex: Int,
+        limit: Int
+    ) async throws -> JellyfinItemPage {
+        Self.localPage(
+            try await playlistItems(userID: userID, playlistID: playlistID),
+            startIndex: startIndex,
+            limit: limit,
+            searchTerm: nil
+        )
+    }
+
+    func tracksPage(
+        userID: String,
+        albumID: String,
+        startIndex: Int,
+        limit: Int
+    ) async throws -> JellyfinItemPage {
+        Self.localPage(
+            try await tracks(userID: userID, albumID: albumID),
+            startIndex: startIndex,
+            limit: limit,
+            searchTerm: nil
+        )
+    }
+
+    func artworkRequest(
+        itemID: String,
+        imageTag: String?,
+        maxWidth: Int
+    ) async throws -> URLRequest {
+        URLRequest(
+            url: try await artworkURL(
+                itemID: itemID,
+                imageTag: imageTag,
+                maxWidth: maxWidth
+            )
+        )
+    }
+
+    func userImageRequest(
+        userID: String,
+        imageTag: String?,
+        maxWidth: Int
+    ) async throws -> URLRequest {
+        URLRequest(
+            url: try await userImageURL(
+                userID: userID,
+                imageTag: imageTag,
+                maxWidth: maxWidth
+            )
+        )
+    }
+
+    private static func localPage(
+        _ items: [JellyfinItem],
+        startIndex: Int,
+        limit: Int,
+        searchTerm: String?
+    ) -> JellyfinItemPage {
+        let filtered: [JellyfinItem]
+        if let searchTerm, !searchTerm.isEmpty {
+            filtered = items.filter {
+                $0.name.localizedCaseInsensitiveContains(searchTerm)
+                    || $0.displayArtist.localizedCaseInsensitiveContains(searchTerm)
+                    || ($0.album?.localizedCaseInsensitiveContains(searchTerm) ?? false)
+            }
+        } else {
+            filtered = items
+        }
+        let safeStart = min(max(startIndex, 0), filtered.count)
+        let safeEnd = min(safeStart + max(limit, 1), filtered.count)
+        return JellyfinItemPage(
+            items: Array(filtered[safeStart..<safeEnd]),
+            startIndex: safeStart,
+            totalRecordCount: filtered.count
+        )
+    }
 }
 
 actor JellyfinAPIClient: JellyfinAPIService {
@@ -549,6 +1169,34 @@ actor JellyfinAPIClient: JellyfinAPIService {
         return response.items
     }
 
+    func artistsPage(
+        userID: String,
+        libraryID: String,
+        startIndex: Int,
+        limit: Int,
+        searchTerm: String?
+    ) async throws -> JellyfinItemPage {
+        let query =
+            [
+                URLQueryItem(name: "UserId", value: userID),
+                URLQueryItem(name: "ParentId", value: libraryID),
+                URLQueryItem(name: "Recursive", value: "true"),
+                URLQueryItem(name: "SortBy", value: "SortName"),
+                URLQueryItem(name: "SortOrder", value: "Ascending"),
+                URLQueryItem(name: "Fields", value: "ChildCount,ImageTags"),
+            ]
+            + pageQueryItems(
+                startIndex: startIndex,
+                limit: limit,
+                searchTerm: searchTerm
+            )
+        let response = try await execute(
+            builder.request(pathComponents: ["Artists"], queryItems: query),
+            as: JellyfinItemsResponse.self
+        )
+        return JellyfinItemPage(response)
+    }
+
     func songs(userID: String, libraryID: String) async throws -> [JellyfinItem] {
         let query = [
             URLQueryItem(name: "ParentId", value: libraryID),
@@ -565,6 +1213,36 @@ actor JellyfinAPIClient: JellyfinAPIService {
         return try await items(userID: userID, query: query)
     }
 
+    func songsPage(
+        userID: String,
+        libraryID: String,
+        startIndex: Int,
+        limit: Int,
+        searchTerm: String?
+    ) async throws -> JellyfinItemPage {
+        let query =
+            [
+                URLQueryItem(name: "ParentId", value: libraryID),
+                URLQueryItem(name: "IncludeItemTypes", value: "Audio"),
+                URLQueryItem(name: "Recursive", value: "true"),
+                URLQueryItem(name: "SortBy", value: "SortName"),
+                URLQueryItem(name: "SortOrder", value: "Ascending"),
+                URLQueryItem(
+                    name: "Fields",
+                    value:
+                        "Album,AlbumArtist,Artists,AlbumId,AlbumPrimaryImageTag,ImageTags,RunTimeTicks"
+                ),
+            ]
+            + pageQueryItems(
+                startIndex: startIndex,
+                limit: limit,
+                searchTerm: searchTerm
+            )
+        return JellyfinItemPage(
+            try await itemsResponse(userID: userID, query: query)
+        )
+    }
+
     func playlists(userID: String) async throws -> [JellyfinItem] {
         let query = [
             URLQueryItem(name: "IncludeItemTypes", value: "Playlist"),
@@ -577,6 +1255,33 @@ actor JellyfinAPIClient: JellyfinAPIService {
             ),
         ]
         return try await items(userID: userID, query: query)
+    }
+
+    func playlistsPage(
+        userID: String,
+        startIndex: Int,
+        limit: Int,
+        searchTerm: String?
+    ) async throws -> JellyfinItemPage {
+        let query =
+            [
+                URLQueryItem(name: "IncludeItemTypes", value: "Playlist"),
+                URLQueryItem(name: "Recursive", value: "true"),
+                URLQueryItem(name: "SortBy", value: "SortName"),
+                URLQueryItem(name: "SortOrder", value: "Ascending"),
+                URLQueryItem(
+                    name: "Fields",
+                    value: "ChildCount,ImageTags,RunTimeTicks"
+                ),
+            ]
+            + pageQueryItems(
+                startIndex: startIndex,
+                limit: limit,
+                searchTerm: searchTerm
+            )
+        return JellyfinItemPage(
+            try await itemsResponse(userID: userID, query: query)
+        )
     }
 
     func searchMusic(
@@ -603,6 +1308,34 @@ actor JellyfinAPIClient: JellyfinAPIService {
         return try await items(userID: userID, query: queryItems)
     }
 
+    func searchMusicPage(
+        userID: String,
+        query: String,
+        startIndex: Int,
+        limit: Int
+    ) async throws -> JellyfinItemPage {
+        let queryItems = [
+            URLQueryItem(name: "SearchTerm", value: query),
+            URLQueryItem(
+                name: "IncludeItemTypes",
+                value: "Audio,MusicAlbum,MusicArtist,Playlist"
+            ),
+            URLQueryItem(name: "Recursive", value: "true"),
+            URLQueryItem(name: "StartIndex", value: String(max(startIndex, 0))),
+            URLQueryItem(name: "Limit", value: String(max(limit, 1))),
+            URLQueryItem(name: "SortBy", value: "SortName"),
+            URLQueryItem(name: "SortOrder", value: "Ascending"),
+            URLQueryItem(
+                name: "Fields",
+                value:
+                    "Album,AlbumArtist,Artists,AlbumId,AlbumPrimaryImageTag,ChildCount,ImageTags,RunTimeTicks"
+            ),
+        ]
+        return JellyfinItemPage(
+            try await itemsResponse(userID: userID, query: queryItems)
+        )
+    }
+
     func playlistItems(
         userID: String,
         playlistID: String
@@ -625,6 +1358,38 @@ actor JellyfinAPIClient: JellyfinAPIService {
         return response.items.filter { $0.kind == .song }
     }
 
+    func playlistItemsPage(
+        userID: String,
+        playlistID: String,
+        startIndex: Int,
+        limit: Int
+    ) async throws -> JellyfinItemPage {
+        let query = [
+            URLQueryItem(name: "UserId", value: userID),
+            URLQueryItem(name: "StartIndex", value: String(max(startIndex, 0))),
+            URLQueryItem(name: "Limit", value: String(max(limit, 1))),
+            URLQueryItem(
+                name: "Fields",
+                value:
+                    "Album,AlbumArtist,Artists,AlbumId,AlbumPrimaryImageTag,ImageTags,RunTimeTicks"
+            ),
+        ]
+        let response = try await execute(
+            builder.request(
+                pathComponents: ["Playlists", playlistID, "Items"],
+                queryItems: query
+            ),
+            as: JellyfinItemsResponse.self
+        )
+        let songs = response.items.filter { $0.kind == .song }
+        return JellyfinItemPage(
+            items: songs,
+            startIndex: response.startIndex,
+            totalRecordCount: response.totalRecordCount,
+            consumedItemCount: response.items.count
+        )
+    }
+
     private func albums(
         userID: String,
         libraryID: String,
@@ -639,10 +1404,46 @@ actor JellyfinAPIClient: JellyfinAPIService {
                 URLQueryItem(name: "SortOrder", value: "Ascending"),
                 URLQueryItem(
                     name: "Fields",
-                    value: "AlbumArtist,Artists,ChildCount,ImageTags"
+                    value: "AlbumArtist,Artists,ChildCount,ImageTags,SortName"
                 ),
             ] + additionalQueryItems
         return try await items(userID: userID, query: query)
+    }
+
+    func albumsPage(
+        userID: String,
+        libraryID: String,
+        artistID: String?,
+        startIndex: Int,
+        limit: Int,
+        searchTerm: String?
+    ) async throws -> JellyfinItemPage {
+        var additionalQueryItems: [URLQueryItem] = []
+        if let artistID {
+            additionalQueryItems.append(
+                URLQueryItem(name: "AlbumArtistIds", value: artistID)
+            )
+        }
+        let query =
+            [
+                URLQueryItem(name: "ParentId", value: libraryID),
+                URLQueryItem(name: "IncludeItemTypes", value: "MusicAlbum"),
+                URLQueryItem(name: "Recursive", value: "true"),
+                URLQueryItem(name: "SortBy", value: "AlbumArtist,SortName"),
+                URLQueryItem(name: "SortOrder", value: "Ascending"),
+                URLQueryItem(
+                    name: "Fields",
+                    value: "AlbumArtist,Artists,ChildCount,ImageTags,SortName"
+                ),
+            ] + additionalQueryItems
+            + pageQueryItems(
+                startIndex: startIndex,
+                limit: limit,
+                searchTerm: searchTerm
+            )
+        return JellyfinItemPage(
+            try await itemsResponse(userID: userID, query: query)
+        )
     }
 
     func tracks(userID: String, albumID: String) async throws -> [JellyfinItem] {
@@ -661,8 +1462,43 @@ actor JellyfinAPIClient: JellyfinAPIService {
         return try await items(userID: userID, query: query)
     }
 
-    func streamURL(itemID: String, userID: String) throws -> URL {
-        try builder.streamURL(itemID: itemID, userID: userID)
+    func tracksPage(
+        userID: String,
+        albumID: String,
+        startIndex: Int,
+        limit: Int
+    ) async throws -> JellyfinItemPage {
+        let query = [
+            URLQueryItem(name: "ParentId", value: albumID),
+            URLQueryItem(name: "IncludeItemTypes", value: "Audio"),
+            URLQueryItem(name: "Recursive", value: "true"),
+            URLQueryItem(name: "SortBy", value: "ParentIndexNumber,IndexNumber,SortName"),
+            URLQueryItem(name: "SortOrder", value: "Ascending"),
+            URLQueryItem(name: "StartIndex", value: String(max(startIndex, 0))),
+            URLQueryItem(name: "Limit", value: String(max(limit, 1))),
+            URLQueryItem(
+                name: "Fields",
+                value:
+                    "Album,AlbumArtist,Artists,AlbumId,AlbumPrimaryImageTag,ImageTags,RunTimeTicks"
+            ),
+        ]
+        return JellyfinItemPage(
+            try await itemsResponse(userID: userID, query: query)
+        )
+    }
+
+    func playbackResolution(
+        itemID: String,
+        userID: String
+    ) async throws -> JellyfinPlaybackResolution {
+        let response = try await execute(
+            builder.playbackInfoRequest(itemID: itemID, userID: userID),
+            as: JellyfinPlaybackInfoResponse.self
+        )
+        return try builder.playbackResolution(
+            itemID: itemID,
+            response: response
+        )
     }
 
     func artworkURL(
@@ -677,12 +1513,85 @@ actor JellyfinAPIClient: JellyfinAPIService {
         )
     }
 
+    func artworkRequest(
+        itemID: String,
+        imageTag: String?,
+        maxWidth: Int
+    ) throws -> URLRequest {
+        try builder.artworkRequest(
+            itemID: itemID,
+            imageTag: imageTag,
+            maxWidth: maxWidth
+        )
+    }
+
+    func reportPlaybackStarted(
+        itemID: String,
+        playSessionID: String,
+        positionTicks: Int64,
+        playMethod: JellyfinPlaybackMethod
+    ) async throws {
+        try await sendPlaybackReport(
+            path: ["Sessions", "Playing"],
+            itemID: itemID,
+            playSessionID: playSessionID,
+            positionTicks: positionTicks,
+            isPaused: false,
+            playMethod: playMethod
+        )
+    }
+
+    func reportPlaybackProgress(
+        itemID: String,
+        playSessionID: String,
+        positionTicks: Int64,
+        isPaused: Bool,
+        playMethod: JellyfinPlaybackMethod
+    ) async throws {
+        try await sendPlaybackReport(
+            path: ["Sessions", "Playing", "Progress"],
+            itemID: itemID,
+            playSessionID: playSessionID,
+            positionTicks: positionTicks,
+            isPaused: isPaused,
+            playMethod: playMethod
+        )
+    }
+
+    func reportPlaybackStopped(
+        itemID: String,
+        playSessionID: String,
+        positionTicks: Int64,
+        playMethod: JellyfinPlaybackMethod
+    ) async throws {
+        try await sendPlaybackReport(
+            path: ["Sessions", "Playing", "Stopped"],
+            itemID: itemID,
+            playSessionID: playSessionID,
+            positionTicks: positionTicks,
+            isPaused: true,
+            playMethod: playMethod
+        )
+    }
+
     func userImageURL(
         userID: String,
         imageTag: String?,
         maxWidth: Int
     ) throws -> URL {
         try builder.userImageURL(
+            userID: userID,
+            imageTag: imageTag,
+            maxWidth: maxWidth
+        )
+    }
+
+    func userImageRequest(
+        userID: String,
+        imageTag: String?,
+        maxWidth: Int
+    ) throws -> URLRequest {
+        try builder.userImageRequest(
             userID: userID,
             imageTag: imageTag,
             maxWidth: maxWidth
@@ -701,24 +1610,63 @@ actor JellyfinAPIClient: JellyfinAPIService {
         userID: String,
         query: [URLQueryItem]
     ) async throws -> [JellyfinItem] {
+        try await itemsResponse(userID: userID, query: query).items
+    }
+
+    private func itemsResponse(
+        userID: String,
+        query: [URLQueryItem]
+    ) async throws -> JellyfinItemsResponse {
         do {
-            let response = try await execute(
+            return try await execute(
                 builder.request(
                     pathComponents: ["Users", userID, "Items"],
                     queryItems: query
                 ),
                 as: JellyfinItemsResponse.self
             )
-            return response.items
         } catch JellyfinAPIError.httpStatus(404) {
             var currentQuery = query
             currentQuery.append(URLQueryItem(name: "UserId", value: userID))
-            let response = try await execute(
+            return try await execute(
                 builder.request(pathComponents: ["Items"], queryItems: currentQuery),
                 as: JellyfinItemsResponse.self
             )
-            return response.items
         }
+    }
+
+    private func pageQueryItems(
+        startIndex: Int,
+        limit: Int,
+        searchTerm: String?
+    ) -> [URLQueryItem] {
+        var items = [
+            URLQueryItem(name: "StartIndex", value: String(max(startIndex, 0))),
+            URLQueryItem(name: "Limit", value: String(max(limit, 1))),
+        ]
+        if let searchTerm, !searchTerm.isEmpty {
+            items.append(URLQueryItem(name: "SearchTerm", value: searchTerm))
+        }
+        return items
+    }
+
+    private func sendPlaybackReport(
+        path: [String],
+        itemID: String,
+        playSessionID: String,
+        positionTicks: Int64,
+        isPaused: Bool,
+        playMethod: JellyfinPlaybackMethod
+    ) async throws {
+        let request = try builder.playbackReportRequest(
+            pathComponents: path,
+            itemID: itemID,
+            playSessionID: playSessionID,
+            positionTicks: positionTicks,
+            isPaused: isPaused,
+            playMethod: playMethod
+        )
+        _ = try await executeWithoutResponse(request)
     }
 
     private func execute<Response: Decodable & Sendable>(
@@ -751,6 +1699,8 @@ actor JellyfinAPIClient: JellyfinAPIService {
             throw error
         } catch let error as URLError {
             switch error.code {
+            case .cancelled:
+                throw CancellationError()
             case .notConnectedToInternet, .networkConnectionLost:
                 throw JellyfinAPIError.offline
             case .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed, .timedOut:
