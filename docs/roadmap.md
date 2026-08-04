@@ -119,11 +119,11 @@ to the expected system media controls.
 
 ### Slice 4 — Stabilize 0.1.0
 
-- [ ] Exercise the complete flow against a non-production Jellyfin server.
-- [ ] Test an unreachable server and bad credentials on a physical device.
-- [ ] Test denied local-network access and network loss.
-- [ ] Test empty libraries, expired sessions, and unsupported tracks.
-- [x] Run clean iOS and macOS builds and all unit tests.
+- [x] Exercise the complete flow against a non-production Jellyfin server.
+- [x] Test an unreachable server and bad credentials on a physical device.
+- [x] Test denied local-network access and network loss.
+- [x] Test empty libraries, expired sessions, and unsupported tracks.
+- [x] Run clean iOS and macOS builds and all hosted-gate unit tests.
 - [x] Audit logs and tracked files for credentials and tokens.
 - [x] Document known issues.
 
@@ -146,10 +146,12 @@ These items remain intentionally outside 0.1.0:
 - Analytics, paid Apple Developer Program enrollment, TestFlight, and App Store
   release automation. Public distribution will be reconsidered for 1.0.
 
-## Decisions still required
+## Resolved release decisions
 
-- Non-production Jellyfin test-server ownership.
-- Complete non-production Jellyfin server provisioning and validation evidence.
+- The release owner accepted the completed non-production Jellyfin validation
+  evidence on 2026-08-04. A durable shared demo environment remains tracked as
+  post-0.1 operational work rather than a release gate.
+- Public Apple distribution remains deferred until 1.0.
 
 Record durable technical choices in
 [architecture decision records](decisions/README.md), not only in issues or

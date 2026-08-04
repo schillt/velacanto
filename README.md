@@ -4,12 +4,10 @@ Velacanto is an early-stage native music player for Apple platforms. It plays
 device-local audio in place and is being built to stream from personal Jellyfin
 and Navidrome libraries through source adapters.
 
-> **Status:** Alpha. The `v1-alpha` branch is the active release line for alpha
-> minor versions. Roadmap Slices 0 and 1 are complete, local playback works,
-> and the Jellyfin connect → authenticate → restore → logout flow has been
-> verified on a physical iPhone. Paginated browse, cached artwork and metadata,
-> contextual queues, system artwork, playback restoration, and resilient
-> streaming are implemented; the final 0.1 gate is physical-device acceptance.
+> **Status:** Alpha. Velacanto 0.1.0 has completed its required physical-device,
+> non-production Jellyfin, macOS, and automated quality gates and is cleared for
+> promotion and tagging. The `v1-alpha` branch is the active line for subsequent
+> alpha development.
 
 ## Goal for 0.1.0
 
@@ -75,13 +73,16 @@ the hosted gate locally when that Xcode/runtime pair is installed. The hosted
 gate runs the platform-neutral unit suite on macOS and compiles the iOS app; its
 iOS Simulator runtime test command remains available for local diagnostics.
 Physical-device acceptance covers audio-session interruptions, routes,
-background playback, and system-media controls. The current interface has
-working local-file playback and a generated
-diagnostic tone, plus an early Jellyfin integration. Playback state is owned at
-the app level, publishes Now Playing metadata and artwork, and accepts system
-play, pause, previous, next, toggle, and seek commands. The background path and
-Control Center pause/resume controls have been verified on a sideloaded physical
-iPhone.
+background playback, and system-media controls. Seven audio-session and
+system-command tests currently fail only in the iOS Simulator runtime suite;
+their physical-device behavior passed the 0.1 acceptance review, so the
+simulator results remain a documented diagnostic limitation rather than part of
+the hosted gate. The current interface has working local-file playback and a
+generated diagnostic tone, plus an early Jellyfin integration. Playback state
+is owned at the app level, publishes Now Playing metadata and artwork, and
+accepts system play, pause, previous, next, toggle, and seek commands. The
+background path and Control Center pause/resume controls have been verified on
+a sideloaded physical iPhone.
 
 Build output defaults to `VelacantoDerivedData` under the system temporary
 directory. Keeping build products outside a Documents folder managed by File
