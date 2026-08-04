@@ -1,5 +1,206 @@
 import SwiftUI
 
+@MainActor
+final class PagedJellyfinItemsModel: ObservableObject {
+    typealias Loader = (JellyfinCatalogCursor?) async throws -> JellyfinCatalogPage
+    typealias CacheLoader = () async -> [JellyfinItem]
+    typealias CacheWriter = ([JellyfinItem]) async -> Void
+
+    @Published private(set) var items: [JellyfinItem] = []
+    @Published private(set) var isInitialLoading = true
+    @Published private(set) var isLoadingMore = false
+    @Published private(set) var hasMore = true
+    @Published private(set) var totalRecordCount = 0
+    @Published private(set) var errorMessage: String?
+
+    private var cursor: JellyfinCatalogCursor?
+    private var generation = UUID()
+    private var paginationTask: Task<Void, Never>?
+    private var paginationTaskID: UUID?
+
+    func reset(
+        debounce: Duration? = nil,
+        cachedItems: CacheLoader? = nil,
+        loader: @escaping Loader,
+        cacheWriter: CacheWriter? = nil
+    ) async {
+        paginationTask?.cancel()
+        paginationTask = nil
+        paginationTaskID = nil
+        isLoadingMore = false
+        let currentGeneration = UUID()
+        generation = currentGeneration
+        cursor = nil
+        hasMore = true
+        totalRecordCount = 0
+        errorMessage = nil
+
+        if let cachedItems {
+            let cached = await cachedItems()
+            guard generation == currentGeneration else { return }
+            items = cached
+        } else {
+            items = []
+        }
+        isInitialLoading = items.isEmpty
+
+        if let debounce {
+            do {
+                try await Task.sleep(for: debounce)
+            } catch {
+                return
+            }
+        }
+        guard generation == currentGeneration else { return }
+        await loadNext(
+            generation: currentGeneration,
+            replacing: true,
+            loader: loader,
+            cacheWriter: cacheWriter
+        )
+    }
+
+    @discardableResult
+    func loadMoreIfNeeded(
+        itemID: String,
+        loader: @escaping Loader,
+        cacheWriter: CacheWriter? = nil
+    ) -> Task<Void, Never>? {
+        guard
+            hasMore,
+            let index = items.firstIndex(where: { $0.id == itemID }),
+            index >= max(items.count - 10, 0)
+        else {
+            return paginationTask
+        }
+        guard paginationTask == nil else { return paginationTask }
+
+        let currentGeneration = generation
+        let taskID = UUID()
+        paginationTaskID = taskID
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await loadNext(
+                generation: currentGeneration,
+                replacing: false,
+                loader: loader,
+                cacheWriter: cacheWriter
+            )
+            guard paginationTaskID == taskID else { return }
+            paginationTask = nil
+            paginationTaskID = nil
+        }
+        paginationTask = task
+        return task
+    }
+
+    func retry(
+        loader: @escaping Loader,
+        cacheWriter: CacheWriter? = nil
+    ) async {
+        await loadNext(
+            generation: generation,
+            replacing: items.isEmpty,
+            loader: loader,
+            cacheWriter: cacheWriter
+        )
+    }
+
+    func loadNextPage(
+        loader: @escaping Loader,
+        cacheWriter: CacheWriter? = nil
+    ) async {
+        await loadNext(
+            generation: generation,
+            replacing: false,
+            loader: loader,
+            cacheWriter: cacheWriter
+        )
+    }
+
+    private func loadNext(
+        generation currentGeneration: UUID,
+        replacing: Bool,
+        loader: @escaping Loader,
+        cacheWriter: CacheWriter?
+    ) async {
+        guard !isLoadingMore, replacing || hasMore else { return }
+        isLoadingMore = true
+        if replacing, items.isEmpty {
+            isInitialLoading = true
+        }
+        errorMessage = nil
+        defer {
+            if generation == currentGeneration {
+                isLoadingMore = false
+                isInitialLoading = false
+            }
+        }
+
+        var retryCount = 0
+        while true {
+            do {
+                let page = try await loader(replacing ? nil : cursor)
+                try Task.checkCancellation()
+                guard generation == currentGeneration else { return }
+
+                if replacing {
+                    items = page.items
+                } else {
+                    var seen = Set(items.map(\.id))
+                    items.append(
+                        contentsOf: page.items.filter {
+                            seen.insert($0.id).inserted
+                        }
+                    )
+                }
+                cursor = page.cursor
+                hasMore = page.hasMore
+                totalRecordCount = max(page.totalRecordCount, items.count)
+                if let cacheWriter {
+                    await cacheWriter(items)
+                }
+                return
+            } catch is CancellationError {
+                return
+            } catch {
+                guard generation == currentGeneration, !Task.isCancelled else {
+                    return
+                }
+                guard retryCount < 2, Self.isTransient(error) else {
+                    errorMessage = error.localizedDescription
+                    return
+                }
+                retryCount += 1
+                do {
+                    try await Task.sleep(
+                        for: .milliseconds(250 * retryCount)
+                    )
+                } catch {
+                    return
+                }
+            }
+        }
+    }
+
+    private static func isTransient(_ error: Error) -> Bool {
+        guard let error = error as? JellyfinAPIError else {
+            return error is URLError
+        }
+        switch error {
+        case .unreachable, .offline, .network:
+            return true
+        case .httpStatus(let status):
+            return status == 408
+                || status == 425
+                || status == 429
+                || (500...504).contains(status)
+        case .unauthorized, .transportSecurity, .invalidResponse:
+            return false
+        }
+    }
+}
+
 struct MusicLibraryView: View {
     @ObservedObject var playback: AudioPlaybackCoordinator
     @ObservedObject var jellyfin: JellyfinSessionController
@@ -261,32 +462,26 @@ private struct MusicAlbumsView: View {
     @ObservedObject var jellyfin: JellyfinSessionController
     @ObservedObject var playback: AudioPlaybackCoordinator
 
-    @State private var albums: [JellyfinItem] = []
-    @State private var isLoading = true
-    @State private var errorMessage: String?
+    @StateObject private var model = PagedJellyfinItemsModel()
     @State private var searchText = ""
 
-    private var filteredAlbums: [JellyfinItem] {
-        guard !searchText.isEmpty else { return albums }
-        return albums.filter {
-            $0.name.localizedCaseInsensitiveContains(searchText)
-                || $0.displayArtist.localizedCaseInsensitiveContains(searchText)
-        }
+    private var query: String {
+        searchText.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     var body: some View {
         ScrollView {
-            if isLoading {
+            if model.isInitialLoading {
                 ProgressView("Loading albums…")
                     .frame(maxWidth: .infinity)
                     .padding(.top, 80)
-            } else if let errorMessage {
+            } else if let errorMessage = model.errorMessage, model.items.isEmpty {
                 MusicCatalogErrorView(message: errorMessage) {
                     Task {
-                        await load()
+                        await retry()
                     }
                 }
-            } else if albums.isEmpty {
+            } else if model.items.isEmpty {
                 ContentUnavailableView(
                     "No Albums",
                     systemImage: "square.stack",
@@ -307,7 +502,7 @@ private struct MusicAlbumsView: View {
                     alignment: .leading,
                     spacing: 24
                 ) {
-                    ForEach(filteredAlbums) { album in
+                    ForEach(model.items) { album in
                         NavigationLink {
                             JellyfinTracksView(
                                 album: album,
@@ -318,31 +513,83 @@ private struct MusicAlbumsView: View {
                             MusicAlbumCard(album: album, jellyfin: jellyfin)
                         }
                         .buttonStyle(.plain)
+                        .onAppear {
+                            loadMoreIfNeeded(album.id)
+                        }
                     }
                 }
                 .padding(20)
+
+                if model.isLoadingMore {
+                    ProgressView()
+                        .frame(maxWidth: .infinity)
+                        .padding(.bottom, 24)
+                } else if let errorMessage = model.errorMessage {
+                    MusicPaginationErrorView(message: errorMessage) {
+                        Task {
+                            await retry()
+                        }
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 24)
+                }
             }
         }
         .navigationTitle("Albums")
         .searchable(text: $searchText, prompt: "Albums and artists")
-        .task {
-            await load()
+        .task(id: taskID) {
+            await reset()
         }
         .refreshable {
-            await load()
+            await reset()
         }
     }
 
-    private func load() async {
-        isLoading = true
-        errorMessage = nil
-        do {
-            albums = try await jellyfin.musicAlbums()
-        } catch {
-            albums = []
-            errorMessage = error.localizedDescription
+    private var taskID: String {
+        "\(jellyfin.session?.serverID ?? "signed-out")|\(query)"
+    }
+
+    private func reset() async {
+        await model.reset(
+            debounce: query.isEmpty ? nil : .milliseconds(250),
+            cachedItems: query.isEmpty
+                ? {
+                    await jellyfin.cachedCatalogItems(kind: .albums)
+                }
+                : nil,
+            loader: pageLoader,
+            cacheWriter: query.isEmpty ? cacheWriter : nil
+        )
+    }
+
+    private func loadMoreIfNeeded(_ itemID: String) {
+        model.loadMoreIfNeeded(
+            itemID: itemID,
+            loader: pageLoader,
+            cacheWriter: query.isEmpty ? cacheWriter : nil
+        )
+    }
+
+    private func retry() async {
+        await model.retry(
+            loader: pageLoader,
+            cacheWriter: query.isEmpty ? cacheWriter : nil
+        )
+    }
+
+    private var pageLoader: PagedJellyfinItemsModel.Loader {
+        { cursor in
+            try await jellyfin.musicAlbumsPage(
+                cursor: cursor,
+                searchTerm: query.isEmpty ? nil : query
+            )
         }
-        isLoading = false
+    }
+
+    private var cacheWriter: PagedJellyfinItemsModel.CacheWriter {
+        { items in
+            await jellyfin.cacheCatalogItems(items, kind: .albums)
+        }
     }
 }
 
@@ -379,31 +626,26 @@ private struct MusicArtistsView: View {
     @ObservedObject var jellyfin: JellyfinSessionController
     @ObservedObject var playback: AudioPlaybackCoordinator
 
-    @State private var artists: [JellyfinItem] = []
-    @State private var isLoading = true
-    @State private var errorMessage: String?
+    @StateObject private var model = PagedJellyfinItemsModel()
     @State private var searchText = ""
 
-    private var filteredArtists: [JellyfinItem] {
-        guard !searchText.isEmpty else { return artists }
-        return artists.filter {
-            $0.name.localizedCaseInsensitiveContains(searchText)
-        }
+    private var query: String {
+        searchText.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     var body: some View {
         List {
-            if isLoading {
+            if model.isInitialLoading {
                 ProgressView("Loading artists…")
                     .frame(maxWidth: .infinity)
-            } else if let errorMessage {
+            } else if let errorMessage = model.errorMessage, model.items.isEmpty {
                 ErrorMessageView(message: errorMessage)
                 Button("Retry") {
                     Task {
-                        await load()
+                        await retry()
                     }
                 }
-            } else if artists.isEmpty {
+            } else if model.items.isEmpty {
                 ContentUnavailableView(
                     "No Artists",
                     systemImage: "music.mic",
@@ -412,7 +654,7 @@ private struct MusicArtistsView: View {
                     )
                 )
             } else {
-                ForEach(filteredArtists) { artist in
+                ForEach(model.items) { artist in
                     NavigationLink {
                         MusicArtistView(
                             artist: artist,
@@ -434,29 +676,81 @@ private struct MusicArtistsView: View {
                                 .font(.body.weight(.medium))
                         }
                     }
+                    .onAppear {
+                        loadMoreIfNeeded(artist.id)
+                    }
+                }
+
+                if model.isLoadingMore {
+                    HStack {
+                        Spacer()
+                        ProgressView()
+                        Spacer()
+                    }
+                } else if let errorMessage = model.errorMessage {
+                    MusicPaginationErrorView(message: errorMessage) {
+                        Task {
+                            await retry()
+                        }
+                    }
                 }
             }
         }
         .navigationTitle("Artists")
         .searchable(text: $searchText, prompt: "Artists")
-        .task {
-            await load()
+        .task(id: taskID) {
+            await reset()
         }
         .refreshable {
-            await load()
+            await reset()
         }
     }
 
-    private func load() async {
-        isLoading = true
-        errorMessage = nil
-        do {
-            artists = try await jellyfin.musicArtists()
-        } catch {
-            artists = []
-            errorMessage = error.localizedDescription
+    private var taskID: String {
+        "\(jellyfin.session?.serverID ?? "signed-out")|\(query)"
+    }
+
+    private func reset() async {
+        await model.reset(
+            debounce: query.isEmpty ? nil : .milliseconds(250),
+            cachedItems: query.isEmpty
+                ? {
+                    await jellyfin.cachedCatalogItems(kind: .artists)
+                }
+                : nil,
+            loader: pageLoader,
+            cacheWriter: query.isEmpty ? cacheWriter : nil
+        )
+    }
+
+    private func loadMoreIfNeeded(_ itemID: String) {
+        model.loadMoreIfNeeded(
+            itemID: itemID,
+            loader: pageLoader,
+            cacheWriter: query.isEmpty ? cacheWriter : nil
+        )
+    }
+
+    private func retry() async {
+        await model.retry(
+            loader: pageLoader,
+            cacheWriter: query.isEmpty ? cacheWriter : nil
+        )
+    }
+
+    private var pageLoader: PagedJellyfinItemsModel.Loader {
+        { cursor in
+            try await jellyfin.musicArtistsPage(
+                cursor: cursor,
+                searchTerm: query.isEmpty ? nil : query
+            )
         }
-        isLoading = false
+    }
+
+    private var cacheWriter: PagedJellyfinItemsModel.CacheWriter {
+        { items in
+            await jellyfin.cacheCatalogItems(items, kind: .artists)
+        }
     }
 }
 
@@ -465,9 +759,7 @@ struct MusicArtistView: View {
     @ObservedObject var jellyfin: JellyfinSessionController
     @ObservedObject var playback: AudioPlaybackCoordinator
 
-    @State private var albums: [JellyfinItem] = []
-    @State private var isLoading = true
-    @State private var errorMessage: String?
+    @StateObject private var model = PagedJellyfinItemsModel()
 
     var body: some View {
         ScrollView {
@@ -489,16 +781,16 @@ struct MusicArtistView: View {
                 }
                 .frame(maxWidth: .infinity)
 
-                if isLoading {
+                if model.isInitialLoading {
                     ProgressView("Loading albums…")
                         .frame(maxWidth: .infinity)
-                } else if let errorMessage {
+                } else if let errorMessage = model.errorMessage, model.items.isEmpty {
                     MusicCatalogErrorView(message: errorMessage) {
                         Task {
-                            await load()
+                            await retry()
                         }
                     }
-                } else if albums.isEmpty {
+                } else if model.items.isEmpty {
                     ContentUnavailableView(
                         "No Albums",
                         systemImage: "square.stack",
@@ -522,7 +814,7 @@ struct MusicArtistView: View {
                             alignment: .leading,
                             spacing: 24
                         ) {
-                            ForEach(albums) { album in
+                            ForEach(model.items) { album in
                                 NavigationLink {
                                     JellyfinTracksView(
                                         album: album,
@@ -536,6 +828,20 @@ struct MusicArtistView: View {
                                     )
                                 }
                                 .buttonStyle(.plain)
+                                .onAppear {
+                                    loadMoreIfNeeded(album.id)
+                                }
+                            }
+                        }
+
+                        if model.isLoadingMore {
+                            ProgressView()
+                                .frame(maxWidth: .infinity)
+                        } else if let errorMessage = model.errorMessage {
+                            MusicPaginationErrorView(message: errorMessage) {
+                                Task {
+                                    await retry()
+                                }
                             }
                         }
                     }
@@ -550,23 +856,55 @@ struct MusicArtistView: View {
             .navigationBarTitleDisplayMode(.inline)
         #endif
         .task(id: artist.id) {
-            await load()
+            await reset()
         }
         .refreshable {
-            await load()
+            await reset()
         }
     }
 
-    private func load() async {
-        isLoading = true
-        errorMessage = nil
-        do {
-            albums = try await jellyfin.musicAlbums(for: artist)
-        } catch {
-            albums = []
-            errorMessage = error.localizedDescription
+    private func reset() async {
+        await model.reset(
+            cachedItems: {
+                await jellyfin.cachedCatalogItems(
+                    kind: .albums,
+                    contextID: artist.id
+                )
+            },
+            loader: pageLoader,
+            cacheWriter: cacheWriter
+        )
+    }
+
+    private func loadMoreIfNeeded(_ itemID: String) {
+        model.loadMoreIfNeeded(
+            itemID: itemID,
+            loader: pageLoader,
+            cacheWriter: cacheWriter
+        )
+    }
+
+    private func retry() async {
+        await model.retry(loader: pageLoader, cacheWriter: cacheWriter)
+    }
+
+    private var pageLoader: PagedJellyfinItemsModel.Loader {
+        { cursor in
+            try await jellyfin.musicAlbumsPage(
+                cursor: cursor,
+                artist: artist
+            )
         }
-        isLoading = false
+    }
+
+    private var cacheWriter: PagedJellyfinItemsModel.CacheWriter {
+        { items in
+            await jellyfin.cacheCatalogItems(
+                items,
+                kind: .albums,
+                contextID: artist.id
+            )
+        }
     }
 }
 
@@ -574,34 +912,28 @@ private struct MusicSongsView: View {
     @ObservedObject var jellyfin: JellyfinSessionController
     @ObservedObject var playback: AudioPlaybackCoordinator
 
-    @State private var songs: [JellyfinItem] = []
-    @State private var isLoading = true
+    @StateObject private var model = PagedJellyfinItemsModel()
     @State private var preparingTrackID: String?
-    @State private var errorMessage: String?
+    @State private var playbackErrorMessage: String?
     @State private var searchText = ""
 
-    private var filteredSongs: [JellyfinItem] {
-        guard !searchText.isEmpty else { return songs }
-        return songs.filter {
-            $0.name.localizedCaseInsensitiveContains(searchText)
-                || $0.displayArtist.localizedCaseInsensitiveContains(searchText)
-                || ($0.album?.localizedCaseInsensitiveContains(searchText) ?? false)
-        }
+    private var query: String {
+        searchText.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     var body: some View {
         List {
-            if isLoading {
+            if model.isInitialLoading {
                 ProgressView("Loading songs…")
                     .frame(maxWidth: .infinity)
-            } else if let errorMessage, songs.isEmpty {
+            } else if let errorMessage = model.errorMessage, model.items.isEmpty {
                 ErrorMessageView(message: errorMessage)
                 Button("Retry") {
                     Task {
-                        await load()
+                        await retry()
                     }
                 }
-            } else if songs.isEmpty {
+            } else if model.items.isEmpty {
                 ContentUnavailableView(
                     "No Songs",
                     systemImage: "music.note",
@@ -611,7 +943,7 @@ private struct MusicSongsView: View {
                 )
             } else {
                 Section {
-                    ForEach(filteredSongs) { song in
+                    ForEach(model.items) { song in
                         Button {
                             play(song)
                         } label: {
@@ -624,47 +956,115 @@ private struct MusicSongsView: View {
                         }
                         .buttonStyle(.plain)
                         .disabled(preparingTrackID != nil)
+                        .onAppear {
+                            loadMoreIfNeeded(song.id)
+                        }
                     }
                 } header: {
-                    Text("\(songs.count.formatted()) Songs")
+                    Text("\(model.totalRecordCount.formatted()) Songs")
+                }
+
+                if model.isLoadingMore {
+                    HStack {
+                        Spacer()
+                        ProgressView()
+                        Spacer()
+                    }
+                } else if let errorMessage = model.errorMessage {
+                    MusicPaginationErrorView(message: errorMessage) {
+                        Task {
+                            await retry()
+                        }
+                    }
                 }
             }
 
-            if let errorMessage, !songs.isEmpty {
-                ErrorMessageView(message: errorMessage)
+            if let playbackErrorMessage {
+                ErrorMessageView(message: playbackErrorMessage)
             }
         }
         .navigationTitle("Songs")
         .searchable(text: $searchText, prompt: "Songs, artists, and albums")
-        .task {
-            await load()
+        .task(id: taskID) {
+            await reset()
         }
         .refreshable {
-            await load()
+            await reset()
         }
     }
 
-    private func load() async {
-        isLoading = true
-        errorMessage = nil
-        do {
-            songs = try await jellyfin.musicSongs()
-        } catch {
-            songs = []
-            errorMessage = error.localizedDescription
+    private var taskID: String {
+        "\(jellyfin.session?.serverID ?? "signed-out")|\(query)"
+    }
+
+    private func reset() async {
+        await model.reset(
+            debounce: query.isEmpty ? nil : .milliseconds(250),
+            cachedItems: query.isEmpty
+                ? {
+                    await jellyfin.cachedCatalogItems(kind: .songs)
+                }
+                : nil,
+            loader: pageLoader,
+            cacheWriter: query.isEmpty ? cacheWriter : nil
+        )
+    }
+
+    private func loadMoreIfNeeded(_ itemID: String) {
+        model.loadMoreIfNeeded(
+            itemID: itemID,
+            loader: pageLoader,
+            cacheWriter: query.isEmpty ? cacheWriter : nil
+        )
+    }
+
+    private func retry() async {
+        await model.retry(
+            loader: pageLoader,
+            cacheWriter: query.isEmpty ? cacheWriter : nil
+        )
+    }
+
+    private var pageLoader: PagedJellyfinItemsModel.Loader {
+        { cursor in
+            try await jellyfin.musicSongsPage(
+                cursor: cursor,
+                searchTerm: query.isEmpty ? nil : query
+            )
         }
-        isLoading = false
+    }
+
+    private var cacheWriter: PagedJellyfinItemsModel.CacheWriter {
+        { items in
+            await jellyfin.cacheCatalogItems(items, kind: .songs)
+        }
     }
 
     private func play(_ song: JellyfinItem) {
         preparingTrackID = song.id
-        errorMessage = nil
+        playbackErrorMessage = nil
         Task {
             do {
                 let request = try await jellyfin.playbackRequest(for: song)
-                playback.play(request)
+                playback.play(
+                    request,
+                    queueItems: model.items.map(
+                        JellyfinPlaybackAdapter.playbackItem(for:)
+                    ),
+                    context: .songs,
+                    account: jellyfin.playbackAccount,
+                    queueExpansion: {
+                        await model.loadNextPage(
+                            loader: pageLoader,
+                            cacheWriter: query.isEmpty ? cacheWriter : nil
+                        )
+                        return model.items.map {
+                            JellyfinPlaybackAdapter.playbackItem(for: $0)
+                        }
+                    }
+                )
             } catch {
-                errorMessage = error.localizedDescription
+                playbackErrorMessage = error.localizedDescription
             }
             preparingTrackID = nil
         }
@@ -675,31 +1075,26 @@ private struct MusicPlaylistsView: View {
     @ObservedObject var jellyfin: JellyfinSessionController
     @ObservedObject var playback: AudioPlaybackCoordinator
 
-    @State private var playlists: [JellyfinItem] = []
-    @State private var isLoading = true
-    @State private var errorMessage: String?
+    @StateObject private var model = PagedJellyfinItemsModel()
     @State private var searchText = ""
 
-    private var filteredPlaylists: [JellyfinItem] {
-        guard !searchText.isEmpty else { return playlists }
-        return playlists.filter {
-            $0.name.localizedCaseInsensitiveContains(searchText)
-        }
+    private var query: String {
+        searchText.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     var body: some View {
         List {
-            if isLoading {
+            if model.isInitialLoading {
                 ProgressView("Loading playlists…")
                     .frame(maxWidth: .infinity)
-            } else if let errorMessage {
+            } else if let errorMessage = model.errorMessage, model.items.isEmpty {
                 ErrorMessageView(message: errorMessage)
                 Button("Retry") {
                     Task {
-                        await load()
+                        await retry()
                     }
                 }
-            } else if playlists.isEmpty {
+            } else if model.items.isEmpty {
                 ContentUnavailableView(
                     "No Playlists",
                     systemImage: "music.note.list",
@@ -708,7 +1103,7 @@ private struct MusicPlaylistsView: View {
                     )
                 )
             } else {
-                ForEach(filteredPlaylists) { playlist in
+                ForEach(model.items) { playlist in
                     NavigationLink {
                         MusicPlaylistView(
                             playlist: playlist,
@@ -742,29 +1137,81 @@ private struct MusicPlaylistsView: View {
                             }
                         }
                     }
+                    .onAppear {
+                        loadMoreIfNeeded(playlist.id)
+                    }
+                }
+
+                if model.isLoadingMore {
+                    HStack {
+                        Spacer()
+                        ProgressView()
+                        Spacer()
+                    }
+                } else if let errorMessage = model.errorMessage {
+                    MusicPaginationErrorView(message: errorMessage) {
+                        Task {
+                            await retry()
+                        }
+                    }
                 }
             }
         }
         .navigationTitle("Playlists")
         .searchable(text: $searchText, prompt: "Playlists")
-        .task {
-            await load()
+        .task(id: taskID) {
+            await reset()
         }
         .refreshable {
-            await load()
+            await reset()
         }
     }
 
-    private func load() async {
-        isLoading = true
-        errorMessage = nil
-        do {
-            playlists = try await jellyfin.musicPlaylists()
-        } catch {
-            playlists = []
-            errorMessage = error.localizedDescription
+    private var taskID: String {
+        "\(jellyfin.session?.serverID ?? "signed-out")|\(query)"
+    }
+
+    private func reset() async {
+        await model.reset(
+            debounce: query.isEmpty ? nil : .milliseconds(250),
+            cachedItems: query.isEmpty
+                ? {
+                    await jellyfin.cachedCatalogItems(kind: .playlists)
+                }
+                : nil,
+            loader: pageLoader,
+            cacheWriter: query.isEmpty ? cacheWriter : nil
+        )
+    }
+
+    private func loadMoreIfNeeded(_ itemID: String) {
+        model.loadMoreIfNeeded(
+            itemID: itemID,
+            loader: pageLoader,
+            cacheWriter: query.isEmpty ? cacheWriter : nil
+        )
+    }
+
+    private func retry() async {
+        await model.retry(
+            loader: pageLoader,
+            cacheWriter: query.isEmpty ? cacheWriter : nil
+        )
+    }
+
+    private var pageLoader: PagedJellyfinItemsModel.Loader {
+        { cursor in
+            try await jellyfin.musicPlaylistsPage(
+                cursor: cursor,
+                searchTerm: query.isEmpty ? nil : query
+            )
         }
-        isLoading = false
+    }
+
+    private var cacheWriter: PagedJellyfinItemsModel.CacheWriter {
+        { items in
+            await jellyfin.cacheCatalogItems(items, kind: .playlists)
+        }
     }
 }
 
@@ -773,44 +1220,43 @@ struct MusicPlaylistView: View {
     @ObservedObject var jellyfin: JellyfinSessionController
     @ObservedObject var playback: AudioPlaybackCoordinator
 
-    @State private var songs: [JellyfinItem] = []
-    @State private var isLoading = true
+    @StateObject private var model = PagedJellyfinItemsModel()
     @State private var preparingTrackID: String?
-    @State private var errorMessage: String?
+    @State private var playbackErrorMessage: String?
 
     var body: some View {
         List {
-            if !isLoading {
+            if !model.isInitialLoading {
                 Section {
                     MusicDetailHeader(
                         item: playlist,
                         jellyfin: jellyfin,
                         subtitle: "Playlist",
-                        detail: songs.isEmpty
+                        detail: model.items.isEmpty
                             ? nil
-                            : "\(songs.count) \(songs.count == 1 ? "song" : "songs")"
+                            : "\(model.totalRecordCount) \(model.totalRecordCount == 1 ? "song" : "songs")"
                     )
                 }
             }
 
-            if isLoading {
+            if model.isInitialLoading {
                 ProgressView("Loading playlist…")
                     .frame(maxWidth: .infinity)
-            } else if let errorMessage, songs.isEmpty {
+            } else if let errorMessage = model.errorMessage, model.items.isEmpty {
                 ErrorMessageView(message: errorMessage)
                 Button("Retry") {
                     Task {
-                        await load()
+                        await retry()
                     }
                 }
-            } else if songs.isEmpty {
+            } else if model.items.isEmpty {
                 ContentUnavailableView(
                     "Empty Playlist",
                     systemImage: "music.note.list",
                     description: Text("This playlist does not contain any songs.")
                 )
             } else {
-                ForEach(Array(songs.enumerated()), id: \.element.id) { index, song in
+                ForEach(Array(model.items.enumerated()), id: \.element.id) { index, song in
                     Button {
                         play(song)
                     } label: {
@@ -824,43 +1270,108 @@ struct MusicPlaylistView: View {
                     }
                     .buttonStyle(.plain)
                     .disabled(preparingTrackID != nil)
+                    .onAppear {
+                        loadMoreIfNeeded(song.id)
+                    }
+                }
+
+                if model.isLoadingMore {
+                    HStack {
+                        Spacer()
+                        ProgressView()
+                        Spacer()
+                    }
+                } else if let errorMessage = model.errorMessage {
+                    MusicPaginationErrorView(message: errorMessage) {
+                        Task {
+                            await retry()
+                        }
+                    }
                 }
             }
 
-            if let errorMessage, !songs.isEmpty {
-                ErrorMessageView(message: errorMessage)
+            if let playbackErrorMessage {
+                ErrorMessageView(message: playbackErrorMessage)
             }
         }
         .navigationTitle(playlist.name)
         .task(id: playlist.id) {
-            await load()
+            await reset()
         }
         .refreshable {
-            await load()
+            await reset()
         }
     }
 
-    private func load() async {
-        isLoading = true
-        errorMessage = nil
-        do {
-            songs = try await jellyfin.tracks(inPlaylist: playlist)
-        } catch {
-            songs = []
-            errorMessage = error.localizedDescription
+    private func reset() async {
+        await model.reset(
+            cachedItems: {
+                await jellyfin.cachedCatalogItems(
+                    kind: .playlistTracks,
+                    contextID: playlist.id
+                )
+            },
+            loader: pageLoader,
+            cacheWriter: cacheWriter
+        )
+    }
+
+    private func loadMoreIfNeeded(_ itemID: String) {
+        model.loadMoreIfNeeded(
+            itemID: itemID,
+            loader: pageLoader,
+            cacheWriter: cacheWriter
+        )
+    }
+
+    private func retry() async {
+        await model.retry(loader: pageLoader, cacheWriter: cacheWriter)
+    }
+
+    private var pageLoader: PagedJellyfinItemsModel.Loader {
+        { cursor in
+            try await jellyfin.tracksPage(
+                inPlaylist: playlist,
+                cursor: cursor
+            )
         }
-        isLoading = false
+    }
+
+    private var cacheWriter: PagedJellyfinItemsModel.CacheWriter {
+        { items in
+            await jellyfin.cacheCatalogItems(
+                items,
+                kind: .playlistTracks,
+                contextID: playlist.id
+            )
+        }
     }
 
     private func play(_ song: JellyfinItem) {
         preparingTrackID = song.id
-        errorMessage = nil
+        playbackErrorMessage = nil
         Task {
             do {
                 let request = try await jellyfin.playbackRequest(for: song)
-                playback.play(request)
+                playback.play(
+                    request,
+                    queueItems: model.items.map(
+                        JellyfinPlaybackAdapter.playbackItem(for:)
+                    ),
+                    context: .playlist(id: playlist.id),
+                    account: jellyfin.playbackAccount,
+                    queueExpansion: {
+                        await model.loadNextPage(
+                            loader: pageLoader,
+                            cacheWriter: cacheWriter
+                        )
+                        return model.items.map {
+                            JellyfinPlaybackAdapter.playbackItem(for: $0)
+                        }
+                    }
+                )
             } catch {
-                errorMessage = error.localizedDescription
+                playbackErrorMessage = error.localizedDescription
             }
             preparingTrackID = nil
         }
@@ -947,5 +1458,24 @@ private struct MusicCatalogErrorView: View {
                 .buttonStyle(.borderedProminent)
         }
         .padding(.top, 40)
+    }
+}
+
+struct MusicPaginationErrorView: View {
+    let message: String
+    let retry: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "exclamationmark.triangle")
+                .foregroundStyle(.orange)
+            Text(message)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+            Spacer()
+            Button("Retry", action: retry)
+        }
+        .padding(.vertical, 8)
     }
 }

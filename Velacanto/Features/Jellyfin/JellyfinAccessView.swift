@@ -174,10 +174,9 @@ struct JellyfinTracksView: View {
     let album: JellyfinItem
     @ObservedObject var jellyfin: JellyfinSessionController
     @ObservedObject var playback: AudioPlaybackCoordinator
-    @State private var tracks: [JellyfinItem] = []
-    @State private var isLoading = true
+    @StateObject private var model = PagedJellyfinItemsModel()
     @State private var preparingTrackID: String?
-    @State private var errorMessage: String?
+    @State private var playbackErrorMessage: String?
 
     var body: some View {
         Group {
@@ -189,45 +188,47 @@ struct JellyfinTracksView: View {
         }
         .navigationTitle(album.name)
         .task(id: album.id) {
-            await load()
+            await reset()
         }
         .refreshable {
-            await load()
+            await reset()
         }
     }
 
     private var iOSContent: some View {
         List {
-            if !isLoading {
+            if !model.isInitialLoading {
                 Section {
                     albumHeader
                 }
             }
 
-            if isLoading {
+            if model.isInitialLoading {
                 ProgressView("Loading tracks…")
                     .frame(maxWidth: .infinity)
-            } else if let errorMessage, tracks.isEmpty {
+            } else if let errorMessage = model.errorMessage, model.items.isEmpty {
                 ErrorMessageView(message: errorMessage)
                 Button("Retry") {
                     Task {
-                        await load()
+                        await retry()
                     }
                 }
-            } else if tracks.isEmpty {
+            } else if model.items.isEmpty {
                 ContentUnavailableView(
                     "No Tracks",
                     systemImage: "music.note",
                     description: Text("This album did not return any audio tracks.")
                 )
             } else {
-                ForEach(Array(tracks.enumerated()), id: \.element.id) { index, track in
+                ForEach(Array(model.items.enumerated()), id: \.element.id) { index, track in
                     trackButton(track, position: index)
                 }
+
+                paginationFooter
             }
 
-            if let errorMessage, !tracks.isEmpty {
-                ErrorMessageView(message: errorMessage)
+            if let playbackErrorMessage {
+                ErrorMessageView(message: playbackErrorMessage)
             }
 
         }
@@ -237,27 +238,27 @@ struct JellyfinTracksView: View {
         private var macOSContent: some View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
-                    if !isLoading {
+                    if !model.isInitialLoading {
                         albumHeader
                     }
 
                     Group {
-                        if isLoading {
+                        if model.isInitialLoading {
                             ProgressView("Loading tracks…")
                                 .frame(maxWidth: .infinity)
                                 .padding(.top, 80)
-                        } else if let errorMessage, tracks.isEmpty {
+                        } else if let errorMessage = model.errorMessage, model.items.isEmpty {
                             VStack(spacing: 12) {
                                 ErrorMessageView(message: errorMessage)
                                 Button("Retry") {
                                     Task {
-                                        await load()
+                                        await retry()
                                     }
                                 }
                             }
                             .frame(maxWidth: .infinity)
                             .padding(.top, 40)
-                        } else if tracks.isEmpty {
+                        } else if model.items.isEmpty {
                             ContentUnavailableView(
                                 "No Tracks",
                                 systemImage: "music.note",
@@ -270,14 +271,14 @@ struct JellyfinTracksView: View {
                         } else {
                             VStack(spacing: 0) {
                                 ForEach(
-                                    Array(tracks.enumerated()),
+                                    Array(model.items.enumerated()),
                                     id: \.element.id
                                 ) { index, track in
                                     trackButton(track, position: index)
                                         .padding(.horizontal, 10)
                                         .padding(.vertical, 7)
 
-                                    if index < tracks.count - 1 {
+                                    if index < model.items.count - 1 {
                                         Divider()
                                             .padding(.leading, 48)
                                     }
@@ -287,11 +288,13 @@ struct JellyfinTracksView: View {
                                 Color(nsColor: .controlBackgroundColor),
                                 in: .rect(cornerRadius: 14)
                             )
+
+                            paginationFooter
                         }
                     }
 
-                    if let errorMessage, !tracks.isEmpty {
-                        ErrorMessageView(message: errorMessage)
+                    if let playbackErrorMessage {
+                        ErrorMessageView(message: playbackErrorMessage)
                     }
                 }
                 .frame(maxWidth: 1_000, alignment: .leading)
@@ -306,7 +309,8 @@ struct JellyfinTracksView: View {
             item: album,
             jellyfin: jellyfin,
             subtitle: album.displayArtist,
-            detail: "\(tracks.count) \(tracks.count == 1 ? "track" : "tracks")"
+            detail:
+                "\(model.totalRecordCount) \(model.totalRecordCount == 1 ? "track" : "tracks")"
         )
     }
 
@@ -325,29 +329,95 @@ struct JellyfinTracksView: View {
         }
         .buttonStyle(.plain)
         .disabled(preparingTrackID != nil)
+        .onAppear {
+            loadMoreIfNeeded(track.id)
+        }
     }
 
-    private func load() async {
-        isLoading = true
-        errorMessage = nil
-        do {
-            tracks = try await jellyfin.tracks(in: album)
-        } catch {
-            tracks = []
-            errorMessage = error.localizedDescription
+    @ViewBuilder
+    private var paginationFooter: some View {
+        if model.isLoadingMore {
+            HStack {
+                Spacer()
+                ProgressView()
+                Spacer()
+            }
+            .padding(.vertical, 8)
+        } else if let errorMessage = model.errorMessage {
+            MusicPaginationErrorView(message: errorMessage) {
+                Task {
+                    await retry()
+                }
+            }
         }
-        isLoading = false
+    }
+
+    private func reset() async {
+        await model.reset(
+            cachedItems: {
+                await jellyfin.cachedCatalogItems(
+                    kind: .albumTracks,
+                    contextID: album.id
+                )
+            },
+            loader: pageLoader,
+            cacheWriter: cacheWriter
+        )
+    }
+
+    private func loadMoreIfNeeded(_ itemID: String) {
+        model.loadMoreIfNeeded(
+            itemID: itemID,
+            loader: pageLoader,
+            cacheWriter: cacheWriter
+        )
+    }
+
+    private func retry() async {
+        await model.retry(loader: pageLoader, cacheWriter: cacheWriter)
+    }
+
+    private var pageLoader: PagedJellyfinItemsModel.Loader {
+        { cursor in
+            try await jellyfin.tracksPage(in: album, cursor: cursor)
+        }
+    }
+
+    private var cacheWriter: PagedJellyfinItemsModel.CacheWriter {
+        { items in
+            await jellyfin.cacheCatalogItems(
+                items,
+                kind: .albumTracks,
+                contextID: album.id
+            )
+        }
     }
 
     private func play(_ track: JellyfinItem) {
         preparingTrackID = track.id
-        errorMessage = nil
+        playbackErrorMessage = nil
         Task {
             do {
                 let request = try await jellyfin.playbackRequest(for: track)
-                playback.play(request)
+                playback.play(
+                    request,
+                    queueItems: model.items.map {
+                        JellyfinPlaybackAdapter.playbackItem(for: $0)
+                    },
+                    context: .album(id: album.id),
+                    account: jellyfin.playbackAccount,
+                    queueExpansion: {
+                        await model.loadNextPage(
+                            loader: pageLoader,
+                            cacheWriter: cacheWriter
+                        )
+                        return model.items.map {
+                            JellyfinPlaybackAdapter.playbackItem(for: $0)
+                        }
+                    }
+                )
             } catch {
-                errorMessage = error.localizedDescription
+                playbackErrorMessage = error.localizedDescription
             }
             preparingTrackID = nil
         }

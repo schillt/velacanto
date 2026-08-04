@@ -1,13 +1,141 @@
 import AVFoundation
 import Combine
+import os
 
-private enum AudioSessionError: LocalizedError {
-    case activationFailed
+#if os(iOS)
+    import UIKit
+#endif
 
-    var errorDescription: String? {
-        "The audio session could not be activated."
+private enum PendingPlaybackLifecycleReport: Sendable {
+    case started(any PlaybackLifecycleReporting, TimeInterval)
+    case progress(any PlaybackLifecycleReporting, TimeInterval, isPaused: Bool)
+    case stopped(any PlaybackLifecycleReporting, TimeInterval)
+
+    func send() async throws {
+        switch self {
+        case .started(let reporter, let position):
+            try await reporter.reportStarted(at: position)
+        case .progress(let reporter, let position, let isPaused):
+            try await reporter.reportProgress(at: position, isPaused: isPaused)
+        case .stopped(let reporter, let position):
+            try await reporter.reportStopped(at: position)
+        }
     }
 }
+
+enum PlaybackAudioInterruption: Equatable, Sendable {
+    case began
+    case ended(shouldResume: Bool)
+}
+
+enum PlaybackAudioRouteChange: Equatable, Sendable {
+    case oldDeviceUnavailable
+    case other
+}
+
+@MainActor
+protocol PlaybackPlatformEventObserving: AnyObject {
+    func start(
+        interruption: @escaping @MainActor (PlaybackAudioInterruption) -> Void,
+        routeChange: @escaping @MainActor (PlaybackAudioRouteChange) -> Void,
+        didEnterBackground: @escaping @MainActor () -> Void
+    )
+}
+
+#if os(iOS)
+    @MainActor
+    private final class IOSPlaybackPlatformEventObserver:
+        PlaybackPlatformEventObserving
+    {
+        private var observers: [NSObjectProtocol] = []
+
+        func start(
+            interruption:
+                @escaping @MainActor (PlaybackAudioInterruption) -> Void,
+            routeChange:
+                @escaping @MainActor (PlaybackAudioRouteChange) -> Void,
+            didEnterBackground: @escaping @MainActor () -> Void
+        ) {
+            guard observers.isEmpty else { return }
+            let center = NotificationCenter.default
+            observers = [
+                center.addObserver(
+                    forName: AVAudioSession.interruptionNotification,
+                    object: nil,
+                    queue: .main
+                ) { notification in
+                    let rawType =
+                        notification.userInfo?[
+                            AVAudioSessionInterruptionTypeKey
+                        ] as? UInt
+                    let rawOptions =
+                        notification.userInfo?[
+                            AVAudioSessionInterruptionOptionKey
+                        ] as? UInt
+                    guard
+                        let rawType,
+                        let type = AVAudioSession.InterruptionType(
+                            rawValue: rawType
+                        )
+                    else {
+                        return
+                    }
+                    let event: PlaybackAudioInterruption
+                    switch type {
+                    case .began:
+                        event = .began
+                    case .ended:
+                        let options = AVAudioSession.InterruptionOptions(
+                            rawValue: rawOptions ?? 0
+                        )
+                        event = .ended(
+                            shouldResume: options.contains(.shouldResume)
+                        )
+                    @unknown default:
+                        return
+                    }
+                    MainActor.assumeIsolated {
+                        interruption(event)
+                    }
+                },
+                center.addObserver(
+                    forName: AVAudioSession.routeChangeNotification,
+                    object: nil,
+                    queue: .main
+                ) { notification in
+                    let rawReason =
+                        notification.userInfo?[
+                            AVAudioSessionRouteChangeReasonKey
+                        ] as? UInt
+                    let event: PlaybackAudioRouteChange =
+                        rawReason.flatMap(
+                            AVAudioSession.RouteChangeReason.init(rawValue:)
+                        ) == .oldDeviceUnavailable
+                        ? .oldDeviceUnavailable
+                        : .other
+                    MainActor.assumeIsolated {
+                        routeChange(event)
+                    }
+                },
+                center.addObserver(
+                    forName: UIApplication.didEnterBackgroundNotification,
+                    object: nil,
+                    queue: .main
+                ) { _ in
+                    MainActor.assumeIsolated {
+                        didEnterBackground()
+                    }
+                },
+            ]
+        }
+
+        isolated deinit {
+            for observer in observers {
+                NotificationCenter.default.removeObserver(observer)
+            }
+        }
+    }
+#endif
 
 @MainActor
 final class AudioPlaybackCoordinator: ObservableObject {
@@ -17,20 +145,70 @@ final class AudioPlaybackCoordinator: ObservableObject {
     @Published private(set) var duration: TimeInterval = 0
     @Published private(set) var errorMessage: String?
     @Published private(set) var recentItems: [PlaybackItem]
+    @Published private(set) var queue: PlaybackQueue?
+    @Published private(set) var bufferState = PlaybackBufferState.empty
 
     private let engine: any AudioPlayerEngine
     private var systemMediaController: (any SystemMediaControlling)?
     private let historyStore: (any PlaybackHistoryStoring)?
+    private let nowPlayingStateStore: (any NowPlayingStateStoring)?
     private var resourceLease: (any PlaybackResourceLease)?
+    private var requestResolver: (@MainActor (PlaybackItem) async throws -> PlaybackRequest)?
+    private var artworkResolver: (@MainActor (PlaybackItem) async -> ResolvedNowPlayingArtwork?)?
+    private var queueExpansionHandler: (@MainActor () async -> [PlaybackItem])?
+    private var playbackAccount: PlaybackAccount?
+    private var restoredElapsed: TimeInterval?
+    private var lastStateSaveTime = Date.distantPast
+    private var queueTransitionTask: Task<Void, Never>?
+    private var preloadTask: Task<Void, Never>?
+    private var preloadedRequest: PlaybackRequest?
+    private var artworkTask: Task<Void, Never>?
+    private var artworkRequestID: UUID?
+    private var nowPlayingArtworkIdentifier: String?
+    private var nowPlayingArtwork: PlatformImage?
+    private var wasPlayingBeforeInterruption = false
+    private var isAudioSessionInterrupted = false
+    // Keep delayed AVPlayer state observations from undoing an intentional pause
+    // while an output route or audio session is reconfiguring.
+    private var hasExplicitPlaybackPause = false
+    private var requiresRouteRecovery = false
+    private var playbackActivationTask: Task<Void, Never>?
+    private var playbackActivationID: UUID?
+    private let platformEventObserver: (any PlaybackPlatformEventObserving)?
+    private var hasRetriedCurrentItem = false
+    private var lifecycleReporter: (any PlaybackLifecycleReporting)?
+    private var didReportPlaybackStart = false
+    private var didReportPlaybackStop = false
+    private var lastProgressReportBucket = -1
+    private var lifecycleReportTask: Task<Void, Never>?
+    private var playbackStartupSignpostID: OSSignpostID?
+
+    private static let logger = Logger(
+        subsystem: "com.chameleonenterprise.velacanto",
+        category: "Playback"
+    )
+    private static let performanceLog = OSLog(
+        subsystem: "com.chameleonenterprise.velacanto",
+        category: "Performance"
+    )
 
     init(
         engine: any AudioPlayerEngine = AVFoundationAudioPlayerEngine(),
         systemMediaController: (any SystemMediaControlling)? = nil,
-        historyStore: (any PlaybackHistoryStoring)? = nil
+        historyStore: (any PlaybackHistoryStoring)? = nil,
+        nowPlayingStateStore: (any NowPlayingStateStoring)? = nil,
+        platformEventObserver: (any PlaybackPlatformEventObserving)? = nil
     ) {
         self.engine = engine
         self.systemMediaController = systemMediaController
         self.historyStore = historyStore
+        self.nowPlayingStateStore = nowPlayingStateStore
+        #if os(iOS)
+            self.platformEventObserver =
+                platformEventObserver ?? IOSPlaybackPlatformEventObserver()
+        #else
+            self.platformEventObserver = platformEventObserver
+        #endif
         recentItems = historyStore?.loadItems() ?? []
         engine.eventHandler = { [weak self] event in
             self?.handle(event)
@@ -38,6 +216,7 @@ final class AudioPlaybackCoordinator: ObservableObject {
         if systemMediaController != nil {
             registerSystemMediaCommands()
         }
+        installPlatformEventObserver()
     }
 
     var progress: Double {
@@ -54,21 +233,75 @@ final class AudioPlaybackCoordinator: ObservableObject {
     }
 
     var showsPauseControl: Bool {
-        switch playbackState {
-        case .loading, .waiting, .playing:
-            true
-        case .idle, .paused, .ended, .failed:
-            false
-        }
+        isPlaying
     }
 
-    func play(_ request: PlaybackRequest) {
+    var canGoPrevious: Bool {
+        elapsed > 3 || queue?.canGoPrevious == true
+    }
+
+    var canGoNext: Bool {
+        queue?.canGoNext == true
+    }
+
+    func configureRequestResolver(
+        _ resolver:
+            @escaping @MainActor (PlaybackItem) async throws -> PlaybackRequest
+    ) {
+        requestResolver = resolver
+    }
+
+    func configureArtworkResolver(
+        _ resolver:
+            @escaping @MainActor (PlaybackItem) async
+            -> ResolvedNowPlayingArtwork?
+    ) {
+        artworkResolver = resolver
+        loadNowPlayingArtwork()
+    }
+
+    func play(
+        _ request: PlaybackRequest,
+        queueItems: [PlaybackItem] = [],
+        context: PlaybackQueueContext = .single,
+        account: PlaybackAccount? = nil,
+        queueExpansion: (@MainActor () async -> [PlaybackItem])? = nil
+    ) {
+        let items = queueItems.isEmpty ? [request.item] : queueItems
+        queue = PlaybackQueue(
+            items: items,
+            currentItemID: request.item.id,
+            context: context
+        )
+        playbackAccount = account
+        queueExpansionHandler = queueExpansion
+        restoredElapsed = nil
+        hasRetriedCurrentItem = false
+        playResolvedRequest(request, recordsQueueState: true)
+    }
+
+    private func playResolvedRequest(
+        _ request: PlaybackRequest,
+        recordsQueueState: Bool
+    ) {
+        cancelPendingPlaybackActivation()
+        hasExplicitPlaybackPause = false
+        requiresRouteRecovery = false
+        beginPlaybackStartupSignpost()
         prepareSystemMediaController()
         let playerItem = request.asset.makePlayerItem()
 
+        reportPlaybackStopped()
+        queueTransitionTask?.cancel()
+        preloadTask?.cancel()
+        preloadedRequest = nil
+        nowPlayingArtworkIdentifier = nil
+        nowPlayingArtwork = nil
         currentItem = request.item
+        replaceLifecycleReporter(with: request.reporter)
         elapsed = 0
-        duration = 0
+        duration = validatedDuration(request.item.duration)
+        bufferState = .empty
         errorMessage = nil
         playbackState = .loading
         if request.recordsHistory {
@@ -77,14 +310,19 @@ final class AudioPlaybackCoordinator: ObservableObject {
         engine.load(playerItem)
         resourceLease = request.asset.resourceLease
         publishNowPlaying()
+        loadNowPlayingArtwork()
+        if recordsQueueState {
+            saveNowPlayingState(force: true)
+        }
 
         startPlaybackAfterAudioSessionActivation()
+        preloadNextItem()
     }
 
     func togglePlayback() {
-        guard engine.hasCurrentItem else { return }
+        guard currentItem != nil else { return }
 
-        if showsPauseControl {
+        if isPlaying && !requiresRouteRecovery {
             pausePlayback()
         } else {
             resumePlayback()
@@ -105,34 +343,106 @@ final class AudioPlaybackCoordinator: ObservableObject {
         let target = min(max(time, 0), upperBound)
         engine.seek(to: target)
         elapsed = target
+        reportPlaybackProgress(isPaused: !isPlaying)
         publishNowPlaying()
     }
 
     func pausePlayback() {
         guard engine.hasCurrentItem else { return }
+        hasExplicitPlaybackPause = true
+        cancelPendingPlaybackActivation()
+        if isAudioSessionInterrupted {
+            wasPlayingBeforeInterruption = false
+        }
         engine.pause()
+        apply(.paused)
+        saveNowPlayingState(force: true)
+        reportPlaybackProgress(isPaused: true)
     }
 
     func resumePlayback() {
-        guard engine.hasCurrentItem else { return }
+        guard currentItem != nil else { return }
+
+        // An explicit Play is user intent. Some competing audio apps and route
+        // changes never deliver their matching interruption-ended event, so do
+        // not leave the app permanently blocked waiting for that notification.
+        // Automatic resumption remains governed by `shouldResume` below.
+        if isAudioSessionInterrupted {
+            isAudioSessionInterrupted = false
+            wasPlayingBeforeInterruption = false
+        }
+
+        // The single automatic retry may have happened while the server was
+        // still unreachable. A later explicit Play is a new user-requested
+        // recovery attempt, so negotiate a fresh stream instead of asking the
+        // terminally failed AVPlayerItem to play again.
+        if case .failed = playbackState,
+            currentItem?.source == .jellyfin
+        {
+            resolveFailedJellyfinItemAndPlay()
+            return
+        }
+
+        guard engine.hasCurrentItem else {
+            hasExplicitPlaybackPause = false
+            resolveRestoredItemAndPlay()
+            return
+        }
+
+        let isRecoveringRoute = requiresRouteRecovery
+        hasExplicitPlaybackPause = false
+
+        // Reproduce the hardware Pause -> Play sequence that resets AVPlayer
+        // after the old output route disappears without discarding its buffer.
+        if isRecoveringRoute {
+            engine.pause()
+        }
 
         if playbackState == .ended || (duration > 0 && elapsed >= duration) {
             engine.seek(to: 0)
             elapsed = 0
+            didReportPlaybackStart = false
+            didReportPlaybackStop = false
+            lastProgressReportBucket = -1
         }
 
         errorMessage = nil
+        if playbackState == .paused || isRecoveringRoute {
+            playbackState = .waiting
+            publishNowPlaying()
+        }
         startPlaybackAfterAudioSessionActivation()
     }
 
     func stop() {
+        cancelPendingPlaybackActivation()
+        queueTransitionTask?.cancel()
+        preloadTask?.cancel()
+        artworkTask?.cancel()
+        artworkTask = nil
+        artworkRequestID = nil
+        preloadedRequest = nil
+        reportPlaybackStopped()
         engine.stop()
         resourceLease = nil
         currentItem = nil
         elapsed = 0
         duration = 0
+        bufferState = .empty
         playbackState = .idle
         errorMessage = nil
+        queue = nil
+        queueExpansionHandler = nil
+        playbackAccount = nil
+        restoredElapsed = nil
+        wasPlayingBeforeInterruption = false
+        isAudioSessionInterrupted = false
+        hasExplicitPlaybackPause = false
+        requiresRouteRecovery = false
+        nowPlayingArtworkIdentifier = nil
+        nowPlayingArtwork = nil
+        lifecycleReporter = nil
+        nowPlayingStateStore?.clearState()
         systemMediaController?.update(.empty)
         deactivateAudioSession()
     }
@@ -150,9 +460,28 @@ final class AudioPlaybackCoordinator: ObservableObject {
             if duration != previousDuration {
                 publishNowPlaying()
             }
+            saveNowPlayingState(force: false)
+            let reportBucket = Int(max(elapsed, 0) / 10)
+            if reportBucket > lastProgressReportBucket {
+                lastProgressReportBucket = reportBucket
+                reportPlaybackProgress(isPaused: !isPlaying)
+            }
 
         case .stateChanged(let state):
             apply(state)
+
+        case .advancedToNextItem:
+            commitPreloadedNextItem()
+
+        case .bufferStateChanged(let state):
+            bufferState = state
+            if state.isEmpty {
+                os_signpost(
+                    .event,
+                    log: Self.performanceLog,
+                    name: "Playback Stall"
+                )
+            }
         }
     }
 
@@ -163,7 +492,23 @@ final class AudioPlaybackCoordinator: ObservableObject {
         historyStore?.saveItems(recentItems)
     }
 
-    private func apply(_ state: PlaybackState) {
+    private func apply(_ incomingState: PlaybackState) {
+        let state: PlaybackState
+        if case .failed(let message) = incomingState {
+            state = .failed(userSafeFailureMessage(message))
+        } else {
+            state = incomingState
+        }
+
+        if hasExplicitPlaybackPause || isAudioSessionInterrupted {
+            switch state {
+            case .waiting, .playing:
+                return
+            case .idle, .loading, .paused, .ended, .failed:
+                break
+            }
+        }
+
         if case .failed = playbackState, errorMessage != nil {
             switch state {
             case .failed:
@@ -176,10 +521,65 @@ final class AudioPlaybackCoordinator: ObservableObject {
         guard state != playbackState else { return }
 
         playbackState = state
+        if state == .playing {
+            requiresRouteRecovery = false
+        }
         if case .failed(let message) = state {
             errorMessage = message
+            endPlaybackStartupSignpost()
+            reportPlaybackStopped()
+            retryCurrentItemOnceIfPossible()
+        }
+        if state == .playing, !didReportPlaybackStart {
+            endPlaybackStartupSignpost()
+            os_signpost(
+                .event,
+                log: Self.performanceLog,
+                name: "Playback Audible"
+            )
+            didReportPlaybackStart = true
+            if let lifecycleReporter {
+                enqueueLifecycleReport(
+                    .started(lifecycleReporter, elapsed)
+                )
+            }
         }
         publishNowPlaying()
+        switch state {
+        case .paused, .ended, .failed:
+            saveNowPlayingState(force: true)
+        case .idle, .loading, .waiting, .playing:
+            break
+        }
+        if state == .ended {
+            reportPlaybackStopped()
+            if canGoNext {
+                nextTrack()
+            }
+        }
+    }
+
+    private func beginPlaybackStartupSignpost() {
+        endPlaybackStartupSignpost()
+        let signpostID = OSSignpostID(log: Self.performanceLog)
+        playbackStartupSignpostID = signpostID
+        os_signpost(
+            .begin,
+            log: Self.performanceLog,
+            name: "Tap to Audio",
+            signpostID: signpostID
+        )
+    }
+
+    private func endPlaybackStartupSignpost() {
+        guard let signpostID = playbackStartupSignpostID else { return }
+        os_signpost(
+            .end,
+            log: Self.performanceLog,
+            name: "Tap to Audio",
+            signpostID: signpostID
+        )
+        playbackStartupSignpostID = nil
     }
 
     private func registerSystemMediaCommands() {
@@ -190,8 +590,11 @@ final class AudioPlaybackCoordinator: ObservableObject {
             pause: { [weak self] in
                 self?.pausePlayback()
             },
-            stop: { [weak self] in
-                self?.stop()
+            previous: { [weak self] in
+                self?.previousTrack()
+            },
+            next: { [weak self] in
+                self?.nextTrack()
             },
             togglePlayPause: { [weak self] in
                 self?.togglePlayback()
@@ -208,10 +611,458 @@ final class AudioPlaybackCoordinator: ObservableObject {
                 item: currentItem,
                 elapsed: elapsed,
                 duration: duration,
-
-                isPlaying: isPlaying
+                isPlaying: isPlaying,
+                artworkIdentifier: nowPlayingArtworkIdentifier,
+                artwork: nowPlayingArtwork,
+                canGoPrevious: canGoPrevious,
+                canGoNext: canGoNext
             )
         )
+    }
+
+    func setArtwork(
+        _ image: PlatformImage?,
+        identifier: String?,
+        forItemID itemID: String?
+    ) {
+        guard currentItem?.id == itemID else { return }
+        guard
+            nowPlayingArtworkIdentifier != identifier
+                || nowPlayingArtwork !== image
+        else {
+            return
+        }
+        nowPlayingArtworkIdentifier = identifier
+        nowPlayingArtwork = image
+        publishNowPlaying()
+    }
+
+    private func loadNowPlayingArtwork() {
+        artworkTask?.cancel()
+        artworkTask = nil
+        artworkRequestID = nil
+
+        guard let item = currentItem, let artworkResolver else { return }
+
+        let requestID = UUID()
+        artworkRequestID = requestID
+        artworkTask = Task { [weak self] in
+            guard let self else { return }
+            let resolved = await artworkResolver(item)
+            guard
+                !Task.isCancelled,
+                artworkRequestID == requestID,
+                currentItem == item
+            else {
+                return
+            }
+            artworkTask = nil
+            artworkRequestID = nil
+            setArtwork(
+                resolved?.image,
+                identifier: resolved?.identifier,
+                forItemID: item.id
+            )
+        }
+    }
+
+    func previousTrack() {
+        if elapsed > 3 {
+            seek(toTime: 0)
+            return
+        }
+        guard let previousItem = queue?.previousItem else {
+            seek(toTime: 0)
+            return
+        }
+        transition(to: previousItem, direction: .previous)
+    }
+
+    func nextTrack() {
+        guard let nextItem = queue?.nextItem else { return }
+        if preloadedRequest?.item.id == nextItem.id {
+            engine.advanceToNextItem()
+            return
+        }
+        transition(to: nextItem, direction: .next)
+    }
+
+    func restoreSavedState(serverID: String, userID: String) {
+        guard currentItem == nil, let state = nowPlayingStateStore?.loadState()
+        else {
+            return
+        }
+        let account = PlaybackAccount(serverID: serverID, userID: userID)
+        guard state.account == account, let item = state.queue.currentItem else {
+            if state.account != account {
+                nowPlayingStateStore?.clearState()
+            }
+            return
+        }
+
+        queue = state.queue
+        currentItem = item
+        playbackAccount = account
+        elapsed = max(state.elapsed, 0)
+        duration = max(state.duration ?? 0, 0)
+        bufferState = .empty
+        playbackState = .paused
+        restoredElapsed = elapsed
+        errorMessage = nil
+        nowPlayingArtworkIdentifier = nil
+        nowPlayingArtwork = nil
+        prepareSystemMediaController()
+        publishNowPlaying()
+        loadNowPlayingArtwork()
+    }
+
+    func clearSavedState(serverID: String, userID: String) {
+        let account = PlaybackAccount(serverID: serverID, userID: userID)
+        if nowPlayingStateStore?.loadState()?.account == account {
+            nowPlayingStateStore?.clearState()
+        }
+    }
+
+    private enum QueueDirection {
+        case previous
+        case next
+    }
+
+    private func transition(
+        to item: PlaybackItem,
+        direction: QueueDirection
+    ) {
+        guard let requestResolver else { return }
+        let expectedCurrentID = currentItem?.id
+        queueTransitionTask?.cancel()
+        playbackState = .loading
+        errorMessage = nil
+        publishNowPlaying()
+
+        queueTransitionTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                queueTransitionTask = nil
+            }
+            do {
+                let request = try await requestResolver(item)
+                try Task.checkCancellation()
+                guard currentItem?.id == expectedCurrentID else { return }
+                switch direction {
+                case .previous:
+                    queue?.movePrevious()
+                case .next:
+                    queue?.moveNext()
+                }
+                hasRetriedCurrentItem = false
+                Self.logger.debug("Queue transition")
+                os_signpost(
+                    .event,
+                    log: Self.performanceLog,
+                    name: "Queue Transition"
+                )
+                playResolvedRequest(request, recordsQueueState: true)
+            } catch is CancellationError {
+                return
+            } catch {
+                apply(.failed(error.localizedDescription))
+            }
+        }
+    }
+
+    private func resolveRestoredItemAndPlay() {
+        guard
+            let item = currentItem,
+            let requestResolver,
+            queueTransitionTask == nil
+        else {
+            return
+        }
+        playbackState = .loading
+        errorMessage = nil
+        publishNowPlaying()
+        let seekTime = restoredElapsed ?? elapsed
+
+        queueTransitionTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                queueTransitionTask = nil
+            }
+            do {
+                let request = try await requestResolver(item)
+                try Task.checkCancellation()
+                guard currentItem?.id == item.id else { return }
+                playResolvedRequest(request, recordsQueueState: false)
+                if seekTime > 0 {
+                    engine.seek(to: seekTime)
+                    elapsed = seekTime
+                }
+                restoredElapsed = nil
+                publishNowPlaying()
+            } catch is CancellationError {
+                return
+            } catch {
+                apply(.failed(error.localizedDescription))
+            }
+        }
+    }
+
+    private func resolveFailedJellyfinItemAndPlay() {
+        guard
+            let item = currentItem,
+            let requestResolver,
+            queueTransitionTask == nil
+        else {
+            return
+        }
+
+        let seekTime = elapsed
+        playbackState = .loading
+        errorMessage = nil
+        publishNowPlaying()
+
+        queueTransitionTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                queueTransitionTask = nil
+            }
+            do {
+                let request = try await requestResolver(item)
+                try Task.checkCancellation()
+                guard currentItem?.id == item.id else { return }
+                playResolvedRequest(request, recordsQueueState: false)
+                if seekTime > 0 {
+                    engine.seek(to: seekTime)
+                    elapsed = seekTime
+                }
+                publishNowPlaying()
+            } catch is CancellationError {
+                return
+            } catch {
+                let message = userSafeFailureMessage(
+                    error.localizedDescription
+                )
+                playbackState = .failed(message)
+                errorMessage = message
+                saveNowPlayingState(force: true)
+                publishNowPlaying()
+            }
+        }
+    }
+
+    private func saveNowPlayingState(force: Bool) {
+        guard
+            let nowPlayingStateStore,
+            let queue,
+            queue.currentItem != nil
+        else {
+            return
+        }
+        let now = Date()
+        guard force || now.timeIntervalSince(lastStateSaveTime) >= 5 else {
+            return
+        }
+        lastStateSaveTime = now
+        nowPlayingStateStore.saveState(
+            SavedNowPlayingState(
+                queue: queue.persistenceWindow(),
+                elapsed: elapsed,
+                duration: duration.isFinite && duration > 0 ? duration : nil,
+                account: playbackAccount,
+                savedAt: now
+            )
+        )
+    }
+
+    private func validatedDuration(_ value: TimeInterval?) -> TimeInterval {
+        guard let value, value.isFinite, value > 0 else { return 0 }
+        return value
+    }
+
+    private func preloadNextItem() {
+        preloadTask?.cancel()
+        preloadedRequest = nil
+        engine.preload(nil)
+        guard let nextItem = queue?.nextItem else {
+            expandQueueIfPossible()
+            return
+        }
+        guard let requestResolver else {
+            return
+        }
+        let currentItemID = currentItem?.id
+        preloadTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                preloadTask = nil
+            }
+            do {
+                let request = try await requestResolver(nextItem)
+                try Task.checkCancellation()
+                guard
+                    currentItem?.id == currentItemID,
+                    queue?.nextItem?.id == request.item.id
+                else {
+                    return
+                }
+                preloadedRequest = request
+                engine.preload(request.asset.makePlayerItem())
+            } catch {
+                return
+            }
+        }
+    }
+
+    private func expandQueueIfPossible() {
+        guard
+            let queueExpansionHandler,
+            preloadTask == nil
+        else {
+            return
+        }
+        let currentItemID = currentItem?.id
+        preloadTask = Task { [weak self] in
+            guard let self else { return }
+            let expandedItems = await queueExpansionHandler()
+            preloadTask = nil
+            guard currentItem?.id == currentItemID else { return }
+            queue?.append(expandedItems)
+            if queue?.nextItem != nil {
+                preloadNextItem()
+            }
+        }
+    }
+
+    private func commitPreloadedNextItem() {
+        guard
+            let request = preloadedRequest,
+            queue?.nextItem?.id == request.item.id
+        else {
+            return
+        }
+        queue?.moveNext()
+        reportPlaybackStopped()
+        currentItem = request.item
+        replaceLifecycleReporter(with: request.reporter)
+        resourceLease = request.asset.resourceLease
+        preloadedRequest = nil
+        elapsed = 0
+        duration = validatedDuration(request.item.duration)
+        errorMessage = nil
+        nowPlayingArtworkIdentifier = nil
+        nowPlayingArtwork = nil
+        hasRetriedCurrentItem = false
+        if request.recordsHistory {
+            recordInHistory(request.item)
+        }
+        saveNowPlayingState(force: true)
+        publishNowPlaying()
+        loadNowPlayingArtwork()
+        preloadNextItem()
+    }
+
+    private func reportPlaybackProgress(isPaused: Bool) {
+        guard
+            let lifecycleReporter,
+            didReportPlaybackStart,
+            !didReportPlaybackStop
+        else {
+            return
+        }
+        enqueueLifecycleReport(
+            .progress(lifecycleReporter, elapsed, isPaused: isPaused)
+        )
+    }
+
+    private func reportPlaybackStopped() {
+        guard
+            let lifecycleReporter,
+            didReportPlaybackStart,
+            !didReportPlaybackStop
+        else {
+            return
+        }
+        didReportPlaybackStop = true
+        enqueueLifecycleReport(
+            .stopped(lifecycleReporter, elapsed)
+        )
+    }
+
+    private func replaceLifecycleReporter(
+        with reporter: (any PlaybackLifecycleReporting)?
+    ) {
+        lifecycleReporter = reporter
+        didReportPlaybackStart = false
+        didReportPlaybackStop = false
+        lastProgressReportBucket = -1
+    }
+
+    private func enqueueLifecycleReport(
+        _ report: PendingPlaybackLifecycleReport
+    ) {
+        let previousTask = lifecycleReportTask
+        lifecycleReportTask = Task {
+            await previousTask?.value
+            do {
+                try await report.send()
+            } catch is CancellationError {
+                return
+            } catch {
+                Self.logger.error("Playback lifecycle report failed")
+            }
+        }
+    }
+
+    private func retryCurrentItemOnceIfPossible() {
+        guard
+            !hasRetriedCurrentItem,
+            currentItem?.source == .jellyfin,
+            let item = currentItem,
+            let requestResolver
+        else {
+            return
+        }
+        hasRetriedCurrentItem = true
+        hasExplicitPlaybackPause = false
+        cancelPendingPlaybackActivation()
+        let resumeTime = elapsed
+        queueTransitionTask?.cancel()
+        queueTransitionTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                queueTransitionTask = nil
+            }
+            do {
+                let request = try await requestResolver(item)
+                try Task.checkCancellation()
+                guard currentItem?.id == item.id else { return }
+                playbackState = .loading
+                errorMessage = nil
+                replaceLifecycleReporter(with: request.reporter)
+                resourceLease = request.asset.resourceLease
+                engine.load(request.asset.makePlayerItem())
+                if resumeTime > 0 {
+                    engine.seek(to: resumeTime)
+                    elapsed = resumeTime
+                }
+                startPlaybackAfterAudioSessionActivation()
+                preloadNextItem()
+            } catch {
+                let message = userSafeFailureMessage(
+                    error.localizedDescription
+                )
+                playbackState = .failed(message)
+                errorMessage = message
+                saveNowPlayingState(force: true)
+                publishNowPlaying()
+            }
+        }
+    }
+
+    private func userSafeFailureMessage(_ fallback: String) -> String {
+        guard currentItem?.source == .jellyfin else { return fallback }
+        return
+            "The Jellyfin stream stopped unexpectedly. Try playing the track again."
     }
 
     private func prepareSystemMediaController() {
@@ -223,13 +1074,32 @@ final class AudioPlaybackCoordinator: ObservableObject {
     private func startPlaybackAfterAudioSessionActivation() {
         #if os(iOS)
             let itemID = currentItem?.id
-            Task { [weak self] in
+            cancelPendingPlaybackActivation()
+            let activationID = UUID()
+            playbackActivationID = activationID
+            playbackActivationTask = Task { [weak self] in
                 guard let self else { return }
+                defer {
+                    if playbackActivationID == activationID {
+                        playbackActivationTask = nil
+                    }
+                }
                 do {
                     try await configureAudioSession()
-                    guard currentItem?.id == itemID else { return }
+                    try Task.checkCancellation()
+                    guard
+                        currentItem?.id == itemID,
+                        playbackActivationID == activationID,
+                        !hasExplicitPlaybackPause,
+                        !isAudioSessionInterrupted || requiresRouteRecovery
+                    else {
+                        return
+                    }
                     engine.play()
+                } catch is CancellationError {
+                    return
                 } catch {
+                    guard playbackActivationID == activationID else { return }
                     apply(.failed(error.localizedDescription))
                 }
             }
@@ -238,35 +1108,72 @@ final class AudioPlaybackCoordinator: ObservableObject {
         #endif
     }
 
+    private func cancelPendingPlaybackActivation() {
+        playbackActivationTask?.cancel()
+        playbackActivationTask = nil
+        playbackActivationID = nil
+    }
+
     private func configureAudioSession() async throws {
         #if os(iOS)
             let session = AVAudioSession.sharedInstance()
             try session.setCategory(.playback, mode: .default)
-            if #available(iOS 27.0, *) {
-                guard try await session.activate(options: []) else {
-                    throw AudioSessionError.activationFailed
-                }
-            } else {
-                try session.setActive(true)
-            }
+            try session.setActive(true)
         #endif
     }
 
     private func deactivateAudioSession() {
         #if os(iOS)
             let session = AVAudioSession.sharedInstance()
-            if #available(iOS 27.0, *) {
-                Task {
-                    _ = try? await session.deactivate(
-                        options: .notifyOthersOnDeactivation
-                    )
-                }
-            } else {
-                try? session.setActive(
-                    false,
-                    options: .notifyOthersOnDeactivation
-                )
-            }
+            try? session.setActive(
+                false,
+                options: .notifyOthersOnDeactivation
+            )
         #endif
+    }
+
+    private func installPlatformEventObserver() {
+        platformEventObserver?.start(
+            interruption: { [weak self] event in
+                self?.handleAudioSessionInterruption(event)
+            },
+            routeChange: { [weak self] event in
+                self?.handleRouteChange(event)
+            },
+            didEnterBackground: { [weak self] in
+                self?.saveNowPlayingState(force: true)
+            }
+        )
+    }
+
+    private func handleAudioSessionInterruption(
+        _ interruption: PlaybackAudioInterruption
+    ) {
+        switch interruption {
+        case .began:
+            isAudioSessionInterrupted = true
+            wasPlayingBeforeInterruption = isPlaying
+            cancelPendingPlaybackActivation()
+            if engine.hasCurrentItem {
+                engine.pause()
+            }
+            apply(.paused)
+            saveNowPlayingState(force: true)
+        case .ended(let shouldResume):
+            isAudioSessionInterrupted = false
+            let shouldRestartPlayback =
+                wasPlayingBeforeInterruption && shouldResume
+            wasPlayingBeforeInterruption = false
+            if shouldRestartPlayback {
+                resumePlayback()
+            }
+        }
+    }
+
+    private func handleRouteChange(_ routeChange: PlaybackAudioRouteChange) {
+        if routeChange == .oldDeviceUnavailable {
+            requiresRouteRecovery = true
+            pausePlayback()
+        }
     }
 }

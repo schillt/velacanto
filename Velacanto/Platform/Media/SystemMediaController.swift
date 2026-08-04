@@ -1,11 +1,53 @@
 import Foundation
 import MediaPlayer
 
+#if os(iOS)
+    import UIKit
+    typealias PlatformImage = UIImage
+#elseif os(macOS)
+    import AppKit
+    typealias PlatformImage = NSImage
+#endif
+
 struct NowPlayingSnapshot: Equatable {
     let item: PlaybackItem?
     let elapsed: TimeInterval
     let duration: TimeInterval
     let isPlaying: Bool
+    let artworkIdentifier: String?
+    let artwork: PlatformImage?
+    let canGoPrevious: Bool
+    let canGoNext: Bool
+
+    init(
+        item: PlaybackItem?,
+        elapsed: TimeInterval,
+        duration: TimeInterval,
+        isPlaying: Bool,
+        artworkIdentifier: String? = nil,
+        artwork: PlatformImage? = nil,
+        canGoPrevious: Bool = false,
+        canGoNext: Bool = false
+    ) {
+        self.item = item
+        self.elapsed = elapsed
+        self.duration = duration
+        self.isPlaying = isPlaying
+        self.artworkIdentifier = artworkIdentifier
+        self.artwork = artwork
+        self.canGoPrevious = canGoPrevious
+        self.canGoNext = canGoNext
+    }
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.item == rhs.item
+            && lhs.elapsed == rhs.elapsed
+            && lhs.duration == rhs.duration
+            && lhs.isPlaying == rhs.isPlaying
+            && lhs.artworkIdentifier == rhs.artworkIdentifier
+            && lhs.canGoPrevious == rhs.canGoPrevious
+            && lhs.canGoNext == rhs.canGoNext
+    }
 
     static let empty = NowPlayingSnapshot(
         item: nil,
@@ -15,12 +57,18 @@ struct NowPlayingSnapshot: Equatable {
     )
 }
 
+struct ResolvedNowPlayingArtwork {
+    let identifier: String
+    let image: PlatformImage
+}
+
 @MainActor
 protocol SystemMediaControlling: AnyObject {
     func registerCommands(
         play: @escaping @MainActor () -> Void,
         pause: @escaping @MainActor () -> Void,
-        stop: @escaping @MainActor () -> Void,
+        previous: @escaping @MainActor () -> Void,
+        next: @escaping @MainActor () -> Void,
         togglePlayPause: @escaping @MainActor () -> Void,
         seek: @escaping @MainActor (TimeInterval) -> Void
     )
@@ -47,7 +95,8 @@ final class MediaPlayerSystemMediaController: SystemMediaControlling {
     func registerCommands(
         play: @escaping @MainActor () -> Void,
         pause: @escaping @MainActor () -> Void,
-        stop: @escaping @MainActor () -> Void,
+        previous: @escaping @MainActor () -> Void,
+        next: @escaping @MainActor () -> Void,
         togglePlayPause: @escaping @MainActor () -> Void,
         seek: @escaping @MainActor (TimeInterval) -> Void
     ) {
@@ -59,8 +108,11 @@ final class MediaPlayerSystemMediaController: SystemMediaControlling {
         addTarget(to: commandCenter.pauseCommand) {
             Task { @MainActor in pause() }
         }
-        addTarget(to: commandCenter.stopCommand) {
-            Task { @MainActor in stop() }
+        addTarget(to: commandCenter.previousTrackCommand) {
+            Task { @MainActor in previous() }
+        }
+        addTarget(to: commandCenter.nextTrackCommand) {
+            Task { @MainActor in next() }
         }
         addTarget(to: commandCenter.togglePlayPauseCommand) {
             Task { @MainActor in togglePlayPause() }
@@ -93,7 +145,11 @@ final class MediaPlayerSystemMediaController: SystemMediaControlling {
             snapshot: snapshot,
             item: item
         )
-        setCommandsEnabled(true)
+        setCommandsEnabled(
+            true,
+            canGoPrevious: snapshot.canGoPrevious,
+            canGoNext: snapshot.canGoNext
+        )
 
         #if os(macOS)
             nowPlayingInfoCenter.playbackState = snapshot.isPlaying ? .playing : .paused
@@ -122,6 +178,14 @@ final class MediaPlayerSystemMediaController: SystemMediaControlling {
             info[MPMediaItemPropertyAlbumTitle] = albumTitle
         }
 
+        if let image = snapshot.artwork {
+            info[MPMediaItemPropertyArtwork] = MPMediaItemArtwork(
+                boundsSize: image.size
+            ) { @Sendable _ in
+                image
+            }
+        }
+
         return info
     }
 
@@ -136,18 +200,28 @@ final class MediaPlayerSystemMediaController: SystemMediaControlling {
         commandTargets.append((command, target))
     }
 
-    private func setCommandsEnabled(_ isEnabled: Bool) {
-        guard commandsAreEnabled != isEnabled else { return }
+    private func setCommandsEnabled(
+        _ isEnabled: Bool,
+        canGoPrevious: Bool = false,
+        canGoNext: Bool = false
+    ) {
+        guard
+            commandsAreEnabled != isEnabled
+                || commandCenter.previousTrackCommand.isEnabled != canGoPrevious
+                || commandCenter.nextTrackCommand.isEnabled != canGoNext
+        else {
+            return
+        }
         commandsAreEnabled = isEnabled
 
         commandCenter.playCommand.isEnabled = isEnabled
         commandCenter.pauseCommand.isEnabled = isEnabled
-        commandCenter.stopCommand.isEnabled = isEnabled
+        commandCenter.stopCommand.isEnabled = false
         commandCenter.togglePlayPauseCommand.isEnabled = isEnabled
         commandCenter.changePlaybackPositionCommand.isEnabled = isEnabled
 
-        commandCenter.nextTrackCommand.isEnabled = false
-        commandCenter.previousTrackCommand.isEnabled = false
+        commandCenter.nextTrackCommand.isEnabled = isEnabled && canGoNext
+        commandCenter.previousTrackCommand.isEnabled = isEnabled && canGoPrevious
         commandCenter.skipForwardCommand.isEnabled = false
         commandCenter.skipBackwardCommand.isEnabled = false
     }

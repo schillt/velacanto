@@ -4,10 +4,12 @@ Velacanto is an early-stage native music player for Apple platforms. It plays
 device-local audio in place and is being built to stream from personal Jellyfin
 and Navidrome libraries through source adapters.
 
-> **Status:** Pre-alpha. Roadmap Slices 0 and 1 are complete. Local playback
-> works, and the Jellyfin connect → authenticate → restore → logout flow has
-> been verified on a physical iPhone. Browse and stream support is implemented
-> but still needs complete real-server stabilization.
+> **Status:** Alpha. The `v1-alpha` branch is the active release line for alpha
+> minor versions. Roadmap Slices 0 and 1 are complete, local playback works,
+> and the Jellyfin connect → authenticate → restore → logout flow has been
+> verified on a physical iPhone. Paginated browse, cached artwork and metadata,
+> contextual queues, system artwork, playback restoration, and resilient
+> streaming are implemented; the final 0.1 gate is physical-device acceptance.
 
 ## Goal for 0.1.0
 
@@ -26,6 +28,8 @@ after the core playback experience is proven.
 ## Project documentation
 
 - [0.1.0 plan](docs/0.1-plan.md) — scope and acceptance criteria.
+- [0.1 stability acceptance](docs/0.1-stability-acceptance.md) — final
+  device/server verification matrix.
 - [Roadmap](docs/roadmap.md) — ordered work and exit gates.
 - [Architecture](docs/architecture.md) — component and runtime diagrams.
 - [Decision records](docs/decisions/README.md) — durable technical choices.
@@ -55,15 +59,35 @@ with the selected Xcode beta:
 ./scripts/build.sh all
 ```
 
-Use `lint`, `macos`, `test`, or `ios-simulator` instead of `all` to run one
-step. The current interface has working local-file playback and a generated
-diagnostic tone, plus an early Jellyfin integration. Playback state is owned at
-the app level, publishes Now Playing metadata, and accepts system play, pause,
-stop, toggle, and seek commands. The background path and Control Center
-pause/resume controls have been verified on a sideloaded physical iPhone.
+Use `lint`, `macos`, `test`, `ios-simulator`, or `ios-simulator-test` instead
+of `all` to run one step. To reproduce the pull-request quality gate (including
+an iOS Simulator build, a Release build, and static analysis), use:
 
-Build output defaults to the ignored `DerivedData` directory. To keep generated
-data outside the checkout, set `VELACANTO_DERIVED_DATA_PATH`:
+```sh
+./scripts/build.sh pr
+```
+
+Local runs default to the installed Xcode beta and the iPhone Air simulator
+running iOS 27.0. The GitHub Actions gate uses the hosted macOS 26 image,
+Xcode 26.6, and the iPhone Air simulator running iOS 26.5. Set
+`DEVELOPER_DIR` and `VELACANTO_IOS_SIMULATOR_DESTINATION` together to reproduce
+the hosted gate locally when that Xcode/runtime pair is installed. The hosted
+gate runs the platform-neutral unit suite on macOS and compiles the iOS app; its
+iOS Simulator runtime test command remains available for local diagnostics.
+Physical-device acceptance covers audio-session interruptions, routes,
+background playback, and system-media controls. The current interface has
+working local-file playback and a generated
+diagnostic tone, plus an early Jellyfin integration. Playback state is owned at
+the app level, publishes Now Playing metadata and artwork, and accepts system
+play, pause, previous, next, toggle, and seek commands. The background path and
+Control Center pause/resume controls have been verified on a sideloaded physical
+iPhone.
+
+Build output defaults to `VelacantoDerivedData` under the system temporary
+directory. Keeping build products outside a Documents folder managed by File
+Provider prevents Finder metadata from being copied onto the macOS app and
+rejected by code signing. To select another external location, set
+`VELACANTO_DERIVED_DATA_PATH`:
 
 ```sh
 VELACANTO_DERIVED_DATA_PATH=/private/tmp/velacanto-derived ./scripts/build.sh all
@@ -84,20 +108,23 @@ sign in with an existing Jellyfin account. Remote servers require HTTPS.
 Explicit HTTP addresses are accepted only for loopback, private, link-local,
 `.local`, and unqualified local-network hosts.
 
-After sign-in, Velacanto lists accessible music libraries, albums, artists,
-songs, playlists, and search results with Jellyfin artwork. Selecting a track
-requests Jellyfin's universal audio stream and sends it through the same
-app-level player used for local files. The access token is stored in Keychain,
-the password is never persisted, the device identifier remains stable across
-launches, and logout removes the saved token. Tokens saved by an early
-pre-alpha preferences-backed implementation are migrated into Keychain when
-the session is restored.
+After sign-in, Velacanto pages through accessible music libraries, albums,
+artists, songs, playlists, and server-backed search results with cached Jellyfin
+artwork. Selecting a track negotiates a source and play session with Jellyfin,
+uses direct play when the server confirms compatibility, and otherwise uses the
+server's transcoding fallback. The resolved stream goes through the same
+app-level player used for local files. The access token is stored in
+Velacanto’s non-synchronizing Keychain entry, the password is never persisted,
+the device identifier remains stable across launches, and logout removes the
+saved token. Tokens saved by early pre-alpha preferences and private-file
+implementations are migrated into Keychain when the session is restored.
 
 The connection and session path is covered by unit tests and has been verified
 against a real Jellyfin server on a physical iPhone, including relaunch and
-logout. Album browsing and streaming compile on both platforms, but the complete
-connect → browse → play journey and negative network cases still need the smoke
-tests listed in the [known issues](docs/known-issues.md).
+logout. The paginated browser, shared artwork cache, two-item playback queue,
+paused relaunch restoration, and system-media integration compile on both
+platforms. The remaining device/server checks are listed in the
+[0.1 stability acceptance matrix](docs/0.1-stability-acceptance.md).
 
 ### Local playback
 
