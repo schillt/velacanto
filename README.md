@@ -59,9 +59,9 @@ with the selected Xcode beta:
 ./scripts/build.sh all
 ```
 
-Use `lint`, `macos`, `test`, or `ios-simulator` instead of `all` to run one
-step. To reproduce the pull-request quality gate (including iOS Simulator
-tests, a Release build, and static analysis), use:
+Use `lint`, `macos`, `test`, `ios-simulator`, or `ios-simulator-test` instead
+of `all` to run one step. To reproduce the pull-request quality gate (including
+an iOS Simulator build, a Release build, and static analysis), use:
 
 ```sh
 ./scripts/build.sh pr
@@ -71,8 +71,12 @@ Local runs default to the installed Xcode beta and the iPhone Air simulator
 running iOS 27.0. The GitHub Actions gate uses the hosted macOS 26 image,
 Xcode 26.6, and the iPhone Air simulator running iOS 26.5. Set
 `DEVELOPER_DIR` and `VELACANTO_IOS_SIMULATOR_DESTINATION` together to reproduce
-the hosted gate locally when that Xcode/runtime pair is installed. The current
-interface has working local-file playback and a generated
+the hosted gate locally when that Xcode/runtime pair is installed. The hosted
+gate runs the platform-neutral unit suite on macOS and compiles the iOS app; its
+iOS Simulator runtime test command remains available for local diagnostics.
+Physical-device acceptance covers audio-session interruptions, routes,
+background playback, and system-media controls. The current interface has
+working local-file playback and a generated
 diagnostic tone, plus an early Jellyfin integration. Playback state is owned at
 the app level, publishes Now Playing metadata and artwork, and accepts system
 play, pause, previous, next, toggle, and seek commands. The background path and

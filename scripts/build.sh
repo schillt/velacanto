@@ -124,6 +124,9 @@ case "$build_mode" in
   ios-simulator)
     build_ios_simulator
     ;;
+  ios-simulator-test)
+    test_ios_simulator
+    ;;
   lint)
     lint_swift
     ;;
@@ -133,12 +136,11 @@ case "$build_mode" in
     build_macos
     test_macos
     build_ios_simulator
-    test_ios_simulator
     build_macos_release
     analyze_macos
     ;;
   *)
-    printf 'Usage: %s [all|macos|test|ios-simulator|lint|pr]\n' "$0" >&2
+    printf 'Usage: %s [all|macos|test|ios-simulator|ios-simulator-test|lint|pr]\n' "$0" >&2
     exit 2
     ;;
 esac

@@ -4,13 +4,13 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
   push:
-    branches: [beta]
+    branches: [preview]
 
 permissions:
   contents: read
 
 concurrency:
-  group: pull-request-quality-${{ github.event.pull_request.number }}
+  group: pull-request-quality-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
