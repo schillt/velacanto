@@ -261,20 +261,19 @@ struct VelacantoRootView: View {
                     .accessibilityLabel("Profile and settings")
                 }
             } detail: {
-                VStack(spacing: 0) {
-                    NavigationStack {
-                        switch selectedMacDestination {
-                        case .home:
-                            home
-                        case .library(let category):
-                            MusicLibraryCategoryView(
-                                category: category,
-                                playback: playback,
-                                jellyfin: jellyfin
-                            )
-                        }
+                NavigationStack {
+                    switch selectedMacDestination {
+                    case .home:
+                        home
+                    case .library(let category):
+                        MusicLibraryCategoryView(
+                            category: category,
+                            playback: playback,
+                            jellyfin: jellyfin
+                        )
                     }
-
+                }
+                .safeAreaInset(edge: .bottom, spacing: 0) {
                     if playback.hasPlayableItem {
                         PlaybackAccessory(
                             playback: playback,
