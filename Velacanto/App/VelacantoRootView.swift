@@ -238,20 +238,17 @@ struct VelacantoRootView: View {
                 macOSContent
             }
             .toolbar {
-                ToolbarItem(placement: .principal) {
-                    Text(macOSToolbarTitle)
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        isShowingProfile = true
+                    } label: {
+                        AccountAvatar(jellyfin: jellyfin)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Profile and settings")
                 }
             }
             .frame(minWidth: 700, minHeight: 500)
-        }
-
-        private var macOSToolbarTitle: String {
-            switch selectedMacDestination {
-            case .home:
-                "Home"
-            case .library(let category):
-                category.title
-            }
         }
 
         private var macOSSidebar: some View {
@@ -268,22 +265,6 @@ struct VelacantoRootView: View {
                     }
                 }
                 .navigationTitle("Velacanto")
-
-                Button {
-                    isShowingProfile = true
-                } label: {
-                    HStack(spacing: 10) {
-                        AccountAvatar(jellyfin: jellyfin)
-                        Text(jellyfin.session?.username ?? "Profile")
-                            .lineLimit(1)
-                        Spacer()
-                    }
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 10)
-                .accessibilityLabel("Profile and settings")
             }
         }
 
