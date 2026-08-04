@@ -410,6 +410,8 @@ private struct RemoteArtworkView: View {
                 Image(platformImage: image)
                     .resizable()
                     .scaledToFill()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .clipped()
             } else {
                 ArtworkPlaceholder(
                     cornerRadius: cornerRadius,
