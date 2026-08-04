@@ -237,7 +237,21 @@ struct VelacantoRootView: View {
             } detail: {
                 macOSContent
             }
+            .toolbar {
+                ToolbarItem(placement: .principal) {
+                    Text(macOSToolbarTitle)
+                }
+            }
             .frame(minWidth: 700, minHeight: 500)
+        }
+
+        private var macOSToolbarTitle: String {
+            switch selectedMacDestination {
+            case .home:
+                "Home"
+            case .library(let category):
+                category.title
+            }
         }
 
         private var macOSSidebar: some View {
