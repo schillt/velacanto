@@ -15,5 +15,8 @@ struct VelacantoApp: App {
                 jellyfin: jellyfin
             )
         }
+        #if os(macOS)
+            .windowToolbarStyle(.unified(showsTitle: true))
+        #endif
     }
 }
