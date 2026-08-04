@@ -1303,24 +1303,19 @@ final class JellyfinSessionController: ObservableObject {
                 }
             }
 
-            let nextSourceID =
-                sourceIDs
-                .filter { !state.buffers[$0, default: []].isEmpty }
-                .min { lhs, rhs in
-                    guard
-                        let left = state.buffers[lhs]?.first,
-                        let right = state.buffers[rhs]?.first
-                    else {
-                        return lhs < rhs
-                    }
-                    let comparison = left.name.localizedStandardCompare(
-                        right.name
-                    )
-                    if comparison == .orderedSame {
-                        return left.id < right.id
-                    }
-                    return comparison == .orderedAscending
+            let bufferedSourceIDs = sourceIDs.filter {
+                !state.buffers[$0, default: []].isEmpty
+            }
+            let nextSourceID = bufferedSourceIDs.min { lhs, rhs in
+                guard
+                    let left = state.buffers[lhs]?.first,
+                    let right = state.buffers[rhs]?.first
+                else {
+                    return lhs < rhs
                 }
+                let comparison = catalogSortComparison(left, right, kind: kind)
+                return comparison == .orderedAscending
+            }
 
             guard let nextSourceID else { break }
             let candidate = state.buffers[nextSourceID, default: []].removeFirst()
@@ -1339,6 +1334,29 @@ final class JellyfinSessionController: ObservableObject {
             totalRecordCount: state.totals.values.reduce(0, +),
             cursor: hasMore ? state : nil
         )
+    }
+
+    private func catalogSortComparison(
+        _ left: JellyfinItem,
+        _ right: JellyfinItem,
+        kind: JellyfinCatalogKind
+    ) -> ComparisonResult {
+        if kind == .albums {
+            let artistComparison = (left.albumArtist ?? "").localizedStandardCompare(
+                right.albumArtist ?? ""
+            )
+            if artistComparison != .orderedSame {
+                return artistComparison
+            }
+        }
+
+        let nameComparison = (left.sortName ?? left.name).localizedStandardCompare(
+            right.sortName ?? right.name
+        )
+        if nameComparison != .orderedSame {
+            return nameComparison
+        }
+        return left.id.localizedStandardCompare(right.id)
     }
 
     private func catalogCacheKey(

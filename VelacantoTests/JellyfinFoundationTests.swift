@@ -700,6 +700,83 @@ final class JellyfinFoundationTests: XCTestCase {
         XCTAssertFalse(exhausted.hasMore)
     }
 
+    func testPagedAlbumsMergeUsingTheServerAlbumArtistAndSortName() async throws {
+        let decoder = JSONDecoder()
+        let firstLibrary = try decoder.decode(
+            JellyfinItem.self,
+            from: Data(#"{"Id":"library-a","Name":"Main Music"}"#.utf8)
+        )
+        let secondLibrary = try decoder.decode(
+            JellyfinItem.self,
+            from: Data(#"{"Id":"library-b","Name":"Archive"}"#.utf8)
+        )
+        func album(
+            id: String,
+            name: String,
+            artist: String,
+            sortName: String
+        ) throws -> JellyfinItem {
+            try decoder.decode(
+                JellyfinItem.self,
+                from: Data(
+                    #"{"Id":"\#(id)","Name":"\#(name)","Type":"MusicAlbum","AlbumArtist":"\#(artist)","SortName":"\#(sortName)"}"#
+                        .utf8
+                )
+            )
+        }
+        let api = FakeJellyfinAPI(
+            availableLibraries: [firstLibrary, secondLibrary],
+            albumsByLibrary: [
+                firstLibrary.id: [
+                    try album(
+                        id: "zebra",
+                        name: "A display name",
+                        artist: "Zulu",
+                        sortName: "Alpha"
+                    )
+                ],
+                secondLibrary.id: [
+                    try album(
+                        id: "alpha",
+                        name: "Z display name",
+                        artist: "Alpha",
+                        sortName: "Zulu"
+                    )
+                ],
+            ]
+        )
+        let controller = JellyfinSessionController(
+            tokenStore: RecordingTokenStore(),
+            sessionStore: RecordingSessionStore(),
+            autoRestore: false,
+            makeClient: { _, _, _ in api }
+        )
+
+        await controller.connect(to: "https://example.com")
+        await controller.signIn(username: "Tyler", password: "correct")
+
+        let page = try await controller.musicAlbumsPage(cursor: nil, limit: 2)
+
+        XCTAssertEqual(page.items.map(\.id), ["alpha", "zebra"])
+    }
+
+    func testCatalogPageAdvancesByRawItemsConsumedWhenFilteringAPlaylist() throws {
+        let decoder = JSONDecoder()
+        let song = try decoder.decode(
+            JellyfinItem.self,
+            from: Data(#"{"Id":"song","Name":"Song","Type":"Audio"}"#.utf8)
+        )
+        let page = JellyfinItemPage(
+            items: [song],
+            startIndex: 50,
+            totalRecordCount: 52,
+            consumedItemCount: 2
+        )
+
+        XCTAssertEqual(page.nextStartIndex, 52)
+        XCTAssertFalse(page.hasMore)
+    }
+
     func testFastScrollPaginationSurvivesViewTaskCancellationAndRetries() async throws {
         let decoder = JSONDecoder()
         let library = try decoder.decode(

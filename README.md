@@ -67,9 +67,12 @@ tests, a Release build, and static analysis), use:
 ./scripts/build.sh pr
 ```
 
-The gate uses Xcode 16.4 and the iPhone 16 simulator running iOS 18.5. Set
-`VELACANTO_IOS_SIMULATOR_DESTINATION` to use another installed simulator
-locally. The current interface has working local-file playback and a generated
+Local runs default to the installed Xcode beta and the iPhone Air simulator
+running iOS 27.0. The GitHub Actions gate uses the hosted macOS 26 image,
+Xcode 26.6, and the iPhone Air simulator running iOS 26.5. Set
+`DEVELOPER_DIR` and `VELACANTO_IOS_SIMULATOR_DESTINATION` together to reproduce
+the hosted gate locally when that Xcode/runtime pair is installed. The current
+interface has working local-file playback and a generated
 diagnostic tone, plus an early Jellyfin integration. Playback state is owned at
 the app level, publishes Now Playing metadata and artwork, and accepts system
 play, pause, previous, next, toggle, and seek commands. The background path and

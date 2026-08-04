@@ -19,7 +19,7 @@ xcodebuild_path="$DEVELOPER_DIR/usr/bin/xcodebuild"
 project_path="$project_root/Velacanto.xcodeproj"
 temporary_build_root=${TMPDIR:-/private/tmp}
 derived_data_path=${VELACANTO_DERIVED_DATA_PATH:-"${temporary_build_root%/}/VelacantoDerivedData"}
-ios_simulator_destination=${VELACANTO_IOS_SIMULATOR_DESTINATION:-'platform=iOS Simulator,name=iPhone 16,OS=18.5'}
+ios_simulator_destination=${VELACANTO_IOS_SIMULATOR_DESTINATION:-'platform=iOS Simulator,name=iPhone Air,OS=27.0'}
 
 if [ ! -x "$xcodebuild_path" ]; then
   printf 'Xcode is not ready at %s\n' "$DEVELOPER_DIR" >&2

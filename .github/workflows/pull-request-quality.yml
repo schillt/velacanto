@@ -14,17 +14,15 @@ concurrency:
 jobs:
   quality:
     name: Quality Gate
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 45
     env:
-      VELACANTO_IOS_SIMULATOR_DESTINATION: platform=iOS Simulator,name=iPhone 16,OS=18.5
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+      VELACANTO_IOS_SIMULATOR_DESTINATION: platform=iOS Simulator,name=iPhone Air,OS=26.5
 
     steps:
       - name: Check out pull request
         uses: actions/checkout@v4
-
-      - name: Select Xcode 16.4
-        run: sudo xcode-select --switch /Applications/Xcode_16.4.app/Contents/Developer
 
       - name: Show toolchain and simulator destination
         run: |

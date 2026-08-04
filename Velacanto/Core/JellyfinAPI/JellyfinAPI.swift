@@ -212,6 +212,7 @@ struct JellyfinItem: Codable, Equatable, Identifiable, Sendable {
     let type: String?
     let collectionType: String?
     let albumArtist: String?
+    let sortName: String?
     let artists: [String]
     let album: String?
     let indexNumber: Int?
@@ -259,6 +260,7 @@ struct JellyfinItem: Codable, Equatable, Identifiable, Sendable {
         case type = "Type"
         case collectionType = "CollectionType"
         case albumArtist = "AlbumArtist"
+        case sortName = "SortName"
         case artists = "Artists"
         case album = "Album"
         case indexNumber = "IndexNumber"
@@ -277,6 +279,7 @@ struct JellyfinItem: Codable, Equatable, Identifiable, Sendable {
         type = try container.decodeIfPresent(String.self, forKey: .type)
         collectionType = try container.decodeIfPresent(String.self, forKey: .collectionType)
         albumArtist = try container.decodeIfPresent(String.self, forKey: .albumArtist)
+        sortName = try container.decodeIfPresent(String.self, forKey: .sortName)
         artists = try container.decodeIfPresent([String].self, forKey: .artists) ?? []
         album = try container.decodeIfPresent(String.self, forKey: .album)
         indexNumber = try container.decodeIfPresent(Int.self, forKey: .indexNumber)
@@ -300,6 +303,7 @@ struct JellyfinItem: Codable, Equatable, Identifiable, Sendable {
         try container.encodeIfPresent(type, forKey: .type)
         try container.encodeIfPresent(collectionType, forKey: .collectionType)
         try container.encodeIfPresent(albumArtist, forKey: .albumArtist)
+        try container.encodeIfPresent(sortName, forKey: .sortName)
         try container.encode(artists, forKey: .artists)
         try container.encodeIfPresent(album, forKey: .album)
         try container.encodeIfPresent(indexNumber, forKey: .indexNumber)
@@ -350,9 +354,10 @@ struct JellyfinItemPage: Equatable, Sendable {
     let items: [JellyfinItem]
     let startIndex: Int
     let totalRecordCount: Int
+    let consumedItemCount: Int
 
     var nextStartIndex: Int {
-        startIndex + items.count
+        startIndex + consumedItemCount
     }
 
     var hasMore: Bool {
@@ -362,18 +367,21 @@ struct JellyfinItemPage: Equatable, Sendable {
     init(
         items: [JellyfinItem],
         startIndex: Int,
-        totalRecordCount: Int
+        totalRecordCount: Int,
+        consumedItemCount: Int? = nil
     ) {
         self.items = items
         self.startIndex = startIndex
         self.totalRecordCount = totalRecordCount
+        self.consumedItemCount = consumedItemCount ?? items.count
     }
 
     init(_ response: JellyfinItemsResponse) {
         self.init(
             items: response.items,
             startIndex: response.startIndex,
-            totalRecordCount: response.totalRecordCount
+            totalRecordCount: response.totalRecordCount,
+            consumedItemCount: response.items.count
         )
     }
 }
@@ -1377,7 +1385,8 @@ actor JellyfinAPIClient: JellyfinAPIService {
         return JellyfinItemPage(
             items: songs,
             startIndex: response.startIndex,
-            totalRecordCount: response.totalRecordCount
+            totalRecordCount: response.totalRecordCount,
+            consumedItemCount: response.items.count
         )
     }
 
@@ -1395,7 +1404,7 @@ actor JellyfinAPIClient: JellyfinAPIService {
                 URLQueryItem(name: "SortOrder", value: "Ascending"),
                 URLQueryItem(
                     name: "Fields",
-                    value: "AlbumArtist,Artists,ChildCount,ImageTags"
+                    value: "AlbumArtist,Artists,ChildCount,ImageTags,SortName"
                 ),
             ] + additionalQueryItems
         return try await items(userID: userID, query: query)
@@ -1424,7 +1433,7 @@ actor JellyfinAPIClient: JellyfinAPIService {
                 URLQueryItem(name: "SortOrder", value: "Ascending"),
                 URLQueryItem(
                     name: "Fields",
-                    value: "AlbumArtist,Artists,ChildCount,ImageTags"
+                    value: "AlbumArtist,Artists,ChildCount,ImageTags,SortName"
                 ),
             ] + additionalQueryItems
             + pageQueryItems(
