@@ -233,10 +233,10 @@ struct VelacantoRootView: View {
             NavigationSplitView {
                 macOSSidebar
                     .navigationSplitViewColumnWidth(min: 180, ideal: 220)
+                    .toolbar(removing: .sidebarToggle)
             } detail: {
                 macOSContent
             }
-            .toolbar(removing: .sidebarToggle)
             .frame(minWidth: 700, minHeight: 500)
         }
 
