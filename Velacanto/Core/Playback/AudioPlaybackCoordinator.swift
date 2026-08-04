@@ -6,14 +6,6 @@ import os
     import UIKit
 #endif
 
-private enum AudioSessionError: LocalizedError {
-    case activationFailed
-
-    var errorDescription: String? {
-        "The audio session could not be activated."
-    }
-}
-
 private enum PendingPlaybackLifecycleReport: Sendable {
     case started(any PlaybackLifecycleReporting, TimeInterval)
     case progress(any PlaybackLifecycleReporting, TimeInterval, isPaused: Bool)
@@ -1126,31 +1118,17 @@ final class AudioPlaybackCoordinator: ObservableObject {
         #if os(iOS)
             let session = AVAudioSession.sharedInstance()
             try session.setCategory(.playback, mode: .default)
-            if #available(iOS 27.0, *) {
-                guard try await session.activate(options: []) else {
-                    throw AudioSessionError.activationFailed
-                }
-            } else {
-                try session.setActive(true)
-            }
+            try session.setActive(true)
         #endif
     }
 
     private func deactivateAudioSession() {
         #if os(iOS)
             let session = AVAudioSession.sharedInstance()
-            if #available(iOS 27.0, *) {
-                Task {
-                    _ = try? await session.deactivate(
-                        options: .notifyOthersOnDeactivation
-                    )
-                }
-            } else {
-                try? session.setActive(
-                    false,
-                    options: .notifyOthersOnDeactivation
-                )
-            }
+            try? session.setActive(
+                false,
+                options: .notifyOthersOnDeactivation
+            )
         #endif
     }
 
