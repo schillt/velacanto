@@ -1099,6 +1099,80 @@ final class JellyfinFoundationTests: XCTestCase {
             JellyfinSessionError.expiredSession.localizedDescription
         )
     }
+
+    func testCatalogCacheTreatsCorruptDiskDataAsACacheMiss() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(
+            path: "VelacantoCatalogCacheTests-\(UUID().uuidString)",
+            directoryHint: .isDirectory
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        let corruptFile = directory.appending(path: "server-user.json")
+        try Data("not JSON".utf8).write(to: corruptFile)
+
+        let cache = JellyfinCatalogCache(directory: directory)
+        let items = await cache.load(
+            serverID: "server",
+            userID: "user",
+            key: "albums|root"
+        )
+
+        XCTAssertTrue(items.isEmpty)
+    }
+
+    func testCatalogCacheExpiresRecordsAfterSevenDays() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(
+            path: "VelacantoCatalogCacheExpiryTests-\(UUID().uuidString)",
+            directoryHint: .isDirectory
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let item = try JSONDecoder().decode(
+            JellyfinItem.self,
+            from: Data(#"{"Id":"cached-item","Name":"Cached","Type":"Audio"}"#.utf8)
+        )
+        let savedAt = Date(timeIntervalSinceReferenceDate: 0)
+        let cache = JellyfinCatalogCache(directory: directory, now: { savedAt })
+        await cache.save(
+            [item],
+            serverID: "server",
+            userID: "user",
+            key: "albums|root",
+            isDetail: false
+        )
+
+        let expiredCache = JellyfinCatalogCache(
+            directory: directory,
+            now: { savedAt.addingTimeInterval(7 * 24 * 60 * 60 + 1) }
+        )
+        let items = await expiredCache.load(
+            serverID: "server",
+            userID: "user",
+            key: "albums|root"
+        )
+
+        XCTAssertTrue(items.isEmpty)
+    }
+
+    func testPlaybackResolverDoesNotRequireCatalogState() async throws {
+        let track = try JSONDecoder().decode(
+            JellyfinItem.self,
+            from: Data(
+                #"{"Id":"track-id","Name":"Night Drive","Type":"Audio"}"#.utf8
+            )
+        )
+
+        let request = try await JellyfinPlaybackRequestResolver(
+            api: FakeJellyfinAPI(),
+            userID: "user-id"
+        ).playbackRequest(for: track)
+
+        XCTAssertEqual(request.item.id, track.id)
+        XCTAssertEqual(request.item.source, .jellyfin)
+        XCTAssertNotNil(request.reporter)
+    }
 }
 
 private final class InMemoryKeychainTokenStore: JellyfinKeychainTokenPersisting {

@@ -217,6 +217,22 @@ sequenceDiagram
 | AVFoundation playback engine | Player-item readiness, timing, waiting, completion, stalls, and failures | Source identity, navigation, or authentication |
 | Platform adapters | Private token persistence, networking policy, audio, now-playing integration | Product navigation or domain rules |
 
+### Jellyfin collaboration invariants
+
+- `JellyfinSessionController` is the only owner of published authentication and
+  library-loading state. It snapshots that state before starting non-UI work;
+  stale results must not repopulate the UI after logout or a different sign-in.
+- `JellyfinCatalogRepository` owns catalog ordering, de-duplication, and
+  multi-library cursor state. A cursor belongs only to its query, context, and
+  library snapshot; views discard it when any of those inputs change.
+- `JellyfinCatalogCache` serializes each server/user cache independently.
+  Expired, version-mismatched, or corrupt data is a cache miss, not a session
+  error. Its clock is injected for expiry tests. Logout clears only that
+  account's cache.
+- `JellyfinPlaybackRequestResolver` owns stream negotiation and reports for the
+  duration of playback. It receives an authenticated client and item identity,
+  never a catalog view model or navigation state.
+
 ## Security and privacy boundaries
 
 - The password is transient and is not persisted by Velacanto.
