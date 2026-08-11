@@ -141,13 +141,17 @@ struct MusicAlbumCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            JellyfinArtworkView(
-                item: album,
-                jellyfin: jellyfin,
-                cornerRadius: 14,
-                maxWidth: 480
-            )
-            .aspectRatio(1, contentMode: .fit)
+            Color.clear
+                .aspectRatio(1, contentMode: .fit)
+                .overlay {
+                    JellyfinArtworkView(
+                        item: album,
+                        jellyfin: jellyfin,
+                        cornerRadius: 14,
+                        maxWidth: 480
+                    )
+                }
+                .clipShape(.rect(cornerRadius: 14))
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(album.name)

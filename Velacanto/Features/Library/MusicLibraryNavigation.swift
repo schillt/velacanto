@@ -219,13 +219,17 @@ struct MusicDetailHeader: View {
     }
 
     private func artwork(size: CGFloat, cornerRadius: CGFloat) -> some View {
-        JellyfinArtworkView(
-            item: item,
-            jellyfin: jellyfin,
-            cornerRadius: cornerRadius,
-            maxWidth: 480
-        )
-        .frame(width: size, height: size)
+        Color.clear
+            .frame(width: size, height: size)
+            .overlay {
+                JellyfinArtworkView(
+                    item: item,
+                    jellyfin: jellyfin,
+                    cornerRadius: cornerRadius,
+                    maxWidth: 480
+                )
+            }
+            .clipShape(.rect(cornerRadius: cornerRadius))
     }
 
     private var metadata: some View {
