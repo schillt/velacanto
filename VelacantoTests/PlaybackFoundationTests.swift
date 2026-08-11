@@ -1,4 +1,5 @@
 import AVFoundation
+import Foundation
 import MediaPlayer
 import XCTest
 
@@ -1064,6 +1065,69 @@ final class PlaybackFoundationTests: XCTestCase {
         XCTAssertNil(decoded.duration)
     }
 
+    func testCorruptNowPlayingStateIsDiscarded() throws {
+        let suiteName = "VelacantoTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set(Data("not JSON".utf8), forKey: "velacanto.now-playing-state-v1")
+
+        let store = UserDefaultsNowPlayingStateStore(defaults: defaults)
+
+        XCTAssertNil(store.loadState())
+        XCTAssertNil(defaults.data(forKey: "velacanto.now-playing-state-v1"))
+    }
+
+    func testCorruptPlaybackHistoryIsDiscarded() throws {
+        let suiteName = "VelacantoTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set(Data("not JSON".utf8), forKey: "velacanto.playback-history")
+
+        let store = UserDefaultsPlaybackHistoryStore(defaults: defaults)
+
+        XCTAssertTrue(store.loadItems().isEmpty)
+        XCTAssertNil(defaults.data(forKey: "velacanto.playback-history"))
+    }
+
+    func testNowPlayingWriteFailureDoesNotInterruptPlayback() async throws {
+        let recorder = PersistenceWriteAttemptRecorder()
+        let store = UserDefaultsNowPlayingStateStore(
+            writeData: recorder.failWrite
+        )
+        let engine = RecordingAudioPlayerEngine()
+        let coordinator = AudioPlaybackCoordinator(
+            engine: engine,
+            systemMediaController: RecordingSystemMediaController(),
+            nowPlayingStateStore: store
+        )
+
+        coordinator.play(try await makePlaybackRequest())
+
+        XCTAssertTrue(recorder.didAttemptWrite)
+        XCTAssertEqual(engine.loadCallCount, 1)
+        XCTAssertNotNil(coordinator.currentItem)
+    }
+
+    func testPlaybackHistoryWriteFailureDoesNotInterruptPlayback() async throws {
+        let recorder = PersistenceWriteAttemptRecorder()
+        let store = UserDefaultsPlaybackHistoryStore(
+            writeData: recorder.failWrite
+        )
+        let engine = RecordingAudioPlayerEngine()
+        let coordinator = AudioPlaybackCoordinator(
+            engine: engine,
+            systemMediaController: RecordingSystemMediaController(),
+            historyStore: store
+        )
+        let request = try await makePlaybackRequest()
+
+        coordinator.play(request)
+
+        XCTAssertTrue(recorder.didAttemptWrite)
+        XCTAssertEqual(coordinator.recentItems.first, request.item)
+        XCTAssertEqual(engine.loadCallCount, 1)
+    }
+
     func testBufferStateIsPublishedByCoordinator() {
         let engine = RecordingAudioPlayerEngine()
         let coordinator = AudioPlaybackCoordinator(
@@ -1469,6 +1533,19 @@ private actor ControlledAudioSessionController: PlaybackAudioSessionControlling 
 }
 
 private final class RecordingResourceLease: PlaybackResourceLease, @unchecked Sendable {}
+
+private enum PersistenceWriteFailure: Error {
+    case unavailable
+}
+
+private final class PersistenceWriteAttemptRecorder {
+    private(set) var didAttemptWrite = false
+
+    func failWrite(_: UserDefaults, _: Data, _: String) throws {
+        didAttemptWrite = true
+        throw PersistenceWriteFailure.unavailable
+    }
+}
 
 private final class RecordingPlaybackHistoryStore: PlaybackHistoryStoring {
     private(set) var savedItems: [PlaybackItem] = []

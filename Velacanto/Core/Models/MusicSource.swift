@@ -166,15 +166,27 @@ protocol NowPlayingStateStoring {
 }
 
 struct UserDefaultsNowPlayingStateStore: NowPlayingStateStoring {
+    typealias StateEncoder = (SavedNowPlayingState) throws -> Data
+    typealias DataWriter = (UserDefaults, Data, String) throws -> Void
     private static let logger = Logger(
         subsystem: "com.chameleonenterprise.velacanto",
         category: "PlaybackPersistence"
     )
     private let defaults: UserDefaults
     private let key = "velacanto.now-playing-state-v1"
+    private let encodeState: StateEncoder
+    private let writeData: DataWriter
 
-    init(defaults: UserDefaults = .standard) {
+    init(
+        defaults: UserDefaults = .standard,
+        encodeState: @escaping StateEncoder = { try JSONEncoder().encode($0) },
+        writeData: @escaping DataWriter = { defaults, data, key in
+            defaults.set(data, forKey: key)
+        }
+    ) {
         self.defaults = defaults
+        self.encodeState = encodeState
+        self.writeData = writeData
     }
 
     func loadState() -> SavedNowPlayingState? {
@@ -192,7 +204,7 @@ struct UserDefaultsNowPlayingStateStore: NowPlayingStateStoring {
 
     func saveState(_ state: SavedNowPlayingState) {
         do {
-            defaults.set(try JSONEncoder().encode(state), forKey: key)
+            try writeData(defaults, encodeState(state), key)
         } catch {
             // Restoration is best-effort and must not interrupt live playback.
             Self.logger.error("Could not encode now-playing state")
@@ -212,15 +224,27 @@ protocol PlaybackHistoryStoring {
 }
 
 struct UserDefaultsPlaybackHistoryStore: PlaybackHistoryStoring {
+    typealias HistoryEncoder = ([PlaybackItem]) throws -> Data
+    typealias DataWriter = (UserDefaults, Data, String) throws -> Void
     private static let logger = Logger(
         subsystem: "com.chameleonenterprise.velacanto",
         category: "PlaybackPersistence"
     )
     private let defaults: UserDefaults
     private let key = "velacanto.playback-history"
+    private let encodeItems: HistoryEncoder
+    private let writeData: DataWriter
 
-    init(defaults: UserDefaults = .standard) {
+    init(
+        defaults: UserDefaults = .standard,
+        encodeItems: @escaping HistoryEncoder = { try JSONEncoder().encode($0) },
+        writeData: @escaping DataWriter = { defaults, data, key in
+            defaults.set(data, forKey: key)
+        }
+    ) {
         self.defaults = defaults
+        self.encodeItems = encodeItems
+        self.writeData = writeData
     }
 
     func loadItems() -> [PlaybackItem] {
@@ -247,7 +271,7 @@ struct UserDefaultsPlaybackHistoryStore: PlaybackHistoryStoring {
 
     func saveItems(_ items: [PlaybackItem]) {
         do {
-            defaults.set(try JSONEncoder().encode(items), forKey: key)
+            try writeData(defaults, encodeItems(items), key)
         } catch {
             Self.logger.error("Could not encode playback history")
         }

@@ -213,8 +213,13 @@ struct KeychainJellyfinTokenStore: JellyfinTokenStoring {
         guard fileManager.fileExists(atPath: legacyFileURL.path) else {
             return nil
         }
+        let data: Data
+        do {
+            data = try Data(contentsOf: legacyFileURL)
+        } catch {
+            throw JellyfinCredentialStoreError.invalidToken
+        }
         guard
-            let data = try? Data(contentsOf: legacyFileURL),
             let token = String(data: data, encoding: .utf8),
             !token.isEmpty
         else {
@@ -243,6 +248,8 @@ struct KeychainJellyfinTokenStore: JellyfinTokenStoring {
 
 /// Stores non-secret session metadata and the stable device identifier.
 struct UserDefaultsJellyfinSessionStore: JellyfinSessionPersisting {
+    typealias SessionEncoder = (JellyfinSession) throws -> Data
+    typealias DataWriter = (UserDefaults, Data, String) throws -> Void
     private static let logger = Logger(
         subsystem: "com.chameleonenterprise.velacanto",
         category: "SessionPersistence"
@@ -250,9 +257,19 @@ struct UserDefaultsJellyfinSessionStore: JellyfinSessionPersisting {
     private let defaults: UserDefaults
     private let sessionKey = "jellyfin.session"
     private let deviceIDKey = "jellyfin.device-id"
+    private let encodeSession: SessionEncoder
+    private let writeData: DataWriter
 
-    init(defaults: UserDefaults = .standard) {
+    init(
+        defaults: UserDefaults = .standard,
+        encodeSession: @escaping SessionEncoder = { try JSONEncoder().encode($0) },
+        writeData: @escaping DataWriter = { defaults, data, key in
+            defaults.set(data, forKey: key)
+        }
+    ) {
         self.defaults = defaults
+        self.encodeSession = encodeSession
+        self.writeData = writeData
     }
 
     func loadSession() -> JellyfinSession? {
@@ -268,9 +285,11 @@ struct UserDefaultsJellyfinSessionStore: JellyfinSessionPersisting {
 
     func saveSession(_ session: JellyfinSession) {
         do {
-            defaults.set(try JSONEncoder().encode(session), forKey: sessionKey)
+            try writeData(defaults, encodeSession(session), sessionKey)
         } catch {
-            Self.logger.error("Could not encode saved session metadata")
+            // Session metadata is only for restoration; the active Keychain
+            // session remains usable and this diagnostic contains no account data.
+            Self.logger.error("Could not save session metadata for restoration")
         }
     }
 

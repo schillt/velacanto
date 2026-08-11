@@ -1006,6 +1006,32 @@ final class JellyfinFoundationTests: XCTestCase {
         XCTAssertNil(defaults.data(forKey: "jellyfin.session"))
     }
 
+    func testSavedSessionWriteFailureKeepsActiveSessionUsable() async throws {
+        let suiteName = "VelacantoTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let writer = SessionWriteAttemptRecorder()
+        let sessionStore = UserDefaultsJellyfinSessionStore(
+            defaults: defaults,
+            writeData: writer.failWrite
+        )
+        let api = FakeJellyfinAPI()
+        let controller = JellyfinSessionController(
+            tokenStore: RecordingTokenStore(),
+            sessionStore: sessionStore,
+            autoRestore: false,
+            makeClient: { _, _, _ in api }
+        )
+
+        await controller.connect(to: "https://example.com")
+        await controller.signIn(username: "Tyler", password: "correct")
+
+        XCTAssertTrue(writer.didAttemptWrite)
+        XCTAssertEqual(controller.phase, .signedIn)
+        XCTAssertEqual(controller.session?.username, "Tyler")
+        XCTAssertNil(sessionStore.loadSession())
+    }
+
     func testExpiredRestoredSessionDeletesSavedToken() async throws {
         let tokenStore = RecordingTokenStore(token: "expired-token")
         let serverURL = try XCTUnwrap(URL(string: "https://example.com"))
@@ -1141,6 +1167,48 @@ final class JellyfinFoundationTests: XCTestCase {
         )
     }
 
+    func testExpiredSessionReportsKeychainDeletionFailure() async throws {
+        let tokenStore = RecordingTokenStore(
+            token: "expired-token",
+            deleteError: SessionPersistenceFailure.unavailable
+        )
+        let sessionStore = RecordingSessionStore()
+        let library = try JSONDecoder().decode(
+            JellyfinItem.self,
+            from: Data(#"{"Id":"library","Name":"Music"}"#.utf8)
+        )
+        let controller = JellyfinSessionController(
+            tokenStore: tokenStore,
+            sessionStore: sessionStore,
+            autoRestore: false,
+            makeClient: { _, _, _ in
+                FakeJellyfinAPI(
+                    albumsError: .unauthorized,
+                    availableLibraries: [library]
+                )
+            }
+        )
+        await controller.connect(to: "https://example.com")
+        await controller.signIn(username: "Tyler", password: "correct")
+
+        do {
+            _ = try await controller.musicAlbumsPage(cursor: nil)
+            XCTFail("Expected the expired session to reject browsing.")
+        } catch {
+            XCTAssertEqual(error as? JellyfinAPIError, .unauthorized)
+        }
+
+        XCTAssertEqual(controller.phase, .signedOut)
+        XCTAssertNil(controller.session)
+        XCTAssertNil(sessionStore.session)
+        XCTAssertEqual(tokenStore.token, "access-token")
+        XCTAssertEqual(
+            controller.errorMessage,
+            JellyfinSessionError.expiredCredentialRemovalFailed
+                .localizedDescription
+        )
+    }
+
     func testCatalogCacheTreatsCorruptDiskDataAsACacheMiss() async throws {
         let directory = FileManager.default.temporaryDirectory.appending(
             path: "VelacantoCatalogCacheTests-\(UUID().uuidString)",
@@ -1253,9 +1321,11 @@ private enum LegacyFileRemovalError: Error {
 private final class RecordingTokenStore: JellyfinTokenStoring {
     var token: String?
     private(set) var deleteCount = 0
+    private let deleteError: Error?
 
-    init(token: String? = nil) {
+    init(token: String? = nil, deleteError: Error? = nil) {
         self.token = token
+        self.deleteError = deleteError
     }
 
     func loadToken() throws -> String? {
@@ -1267,9 +1337,25 @@ private final class RecordingTokenStore: JellyfinTokenStoring {
     }
 
     func deleteToken() throws {
+        if let deleteError {
+            throw deleteError
+        }
         token = nil
         deleteCount += 1
     }
+}
+
+private final class SessionWriteAttemptRecorder {
+    private(set) var didAttemptWrite = false
+
+    func failWrite(_: UserDefaults, _: Data, _: String) throws {
+        didAttemptWrite = true
+        throw SessionPersistenceFailure.unavailable
+    }
+}
+
+private enum SessionPersistenceFailure: Error {
+    case unavailable
 }
 
 private final class RecordingSessionStore: JellyfinSessionPersisting {

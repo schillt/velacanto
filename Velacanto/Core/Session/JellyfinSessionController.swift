@@ -1,6 +1,7 @@
 import Combine
 import Foundation
 import Security
+import os
 
 /// The UI-visible lifecycle of a Jellyfin connection attempt.
 enum JellyfinSessionPhase: Equatable, Sendable {
@@ -20,6 +21,10 @@ enum JellyfinSessionPhase: Equatable, Sendable {
 /// affect presentation. Each asynchronous operation snapshots the active
 /// session before awaiting so stale responses cannot repopulate the UI.
 final class JellyfinSessionController: ObservableObject {
+    private static let logger = Logger(
+        subsystem: "com.chameleonenterprise.velacanto",
+        category: "Session"
+    )
     typealias ClientFactory =
         @Sendable (JellyfinServerURL, String, String?) -> any JellyfinAPIService
 
@@ -350,19 +355,33 @@ final class JellyfinSessionController: ObservableObject {
         imageTag: String?,
         maxWidth: Int
     ) async -> URLRequest? {
-        return try? await catalogRepository().artworkRequest(
-            itemID: itemID,
-            imageTag: imageTag,
-            maxWidth: maxWidth
-        )
+        do {
+            return try await catalogRepository().artworkRequest(
+                itemID: itemID,
+                imageTag: imageTag,
+                maxWidth: maxWidth
+            )
+        } catch {
+            // Artwork is optional presentation. A failed request must not
+            // change signed-in or browse state, and diagnostics omit media IDs.
+            Self.logger.notice("Could not build artwork request; using placeholder")
+            return nil
+        }
     }
 
     func userImageRequest(maxWidth: Int) async -> URLRequest? {
         guard let session else { return nil }
-        return try? await catalogRepository().userImageRequest(
-            imageTag: session.userPrimaryImageTag,
-            maxWidth: maxWidth
-        )
+        do {
+            return try await catalogRepository().userImageRequest(
+                imageTag: session.userPrimaryImageTag,
+                maxWidth: maxWidth
+            )
+        } catch {
+            // A profile image is optional presentation and never changes the
+            // session or library state. Do not include user or image data here.
+            Self.logger.notice("Could not build user image request; using placeholder")
+            return nil
+        }
     }
 
     // MARK: - Session management
@@ -394,7 +413,13 @@ final class JellyfinSessionController: ObservableObject {
                 userID: oldSession.userID
             )
         }
-        try? await oldClient?.logout()
+        do {
+            try await oldClient?.logout()
+        } catch {
+            // Local credential and cache removal is the authoritative logout.
+            // The remote call is best-effort and must not expose account data.
+            Self.logger.notice("Remote logout did not complete after local sign-out")
+        }
     }
 
     // MARK: - Collaborator factories
@@ -457,7 +482,8 @@ final class JellyfinSessionController: ObservableObject {
                     sessionStore.deleteSession()
                 }
                 if token != nil {
-                    try tokenStore.deleteToken()
+                    discardExpiredCredentials()
+                    return
                 }
                 clearSession()
                 return
@@ -484,10 +510,7 @@ final class JellyfinSessionController: ObservableObject {
                 phase = .signedIn
                 await refreshLibraries()
             } catch JellyfinAPIError.unauthorized {
-                try tokenStore.deleteToken()
-                sessionStore.deleteSession()
-                clearSession()
-                errorMessage = JellyfinSessionError.expiredSession.localizedDescription
+                discardExpiredCredentials()
             } catch {
                 phase = .signedIn
                 errorMessage =
@@ -502,10 +525,24 @@ final class JellyfinSessionController: ObservableObject {
 
     private func handleExpiredSessionIfNeeded(_ error: Error) {
         guard error as? JellyfinAPIError == .unauthorized else { return }
-        try? tokenStore.deleteToken()
+        discardExpiredCredentials()
+    }
+
+    /// Removes locally stored expired credentials. If Keychain access fails,
+    /// the visible signed-out state owns that failure rather than leaving an
+    /// unusable credential silently available for a later restore attempt.
+    private func discardExpiredCredentials() {
         sessionStore.deleteSession()
         clearSession()
-        errorMessage = JellyfinSessionError.expiredSession.localizedDescription
+        do {
+            try tokenStore.deleteToken()
+            errorMessage = JellyfinSessionError.expiredSession.localizedDescription
+        } catch {
+            Self.logger.error("Could not remove expired Keychain credential")
+            errorMessage =
+                JellyfinSessionError.expiredCredentialRemovalFailed
+                .localizedDescription
+        }
     }
 
     private func clearSession() {
@@ -523,6 +560,7 @@ enum JellyfinSessionError: LocalizedError, Equatable {
     case missingCredentials
     case notSignedIn
     case expiredSession
+    case expiredCredentialRemovalFailed
     case serverSetupIncomplete
     case unsupportedHistoryItem
 
@@ -534,6 +572,8 @@ enum JellyfinSessionError: LocalizedError, Equatable {
             "Sign in to Jellyfin before browsing or playing music."
         case .expiredSession:
             "The saved Jellyfin session expired. Please sign in again."
+        case .expiredCredentialRemovalFailed:
+            "The saved Jellyfin session expired, but its stored credential could not be removed. Resolve Keychain access, then sign in again."
         case .serverSetupIncomplete:
             "That Jellyfin server has not completed its initial setup."
         case .unsupportedHistoryItem:
