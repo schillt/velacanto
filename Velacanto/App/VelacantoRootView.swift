@@ -7,6 +7,7 @@ struct VelacantoRootView: View {
     @ObservedObject var jellyfin: JellyfinSessionController
 
     @State private var selectedDestination = AppDestination.home
+    @State private var globalSearchText = ""
     #if os(macOS)
         @State private var selectedMacDestination = MacDestination.home
         @State private var playlistOwnsPlaybackAccessory = false
@@ -237,17 +238,7 @@ struct VelacantoRootView: View {
             } detail: {
                 macOSContent
             }
-            .toolbar {
-                ToolbarItem(placement: .primaryAction) {
-                    Button {
-                        isShowingProfile = true
-                    } label: {
-                        AccountAvatar(jellyfin: jellyfin)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Profile and settings")
-                }
-            }
+            .searchable(text: $globalSearchText, prompt: "Search your library")
             .frame(minWidth: 700, minHeight: 500)
         }
 
@@ -258,33 +249,74 @@ struct VelacantoRootView: View {
                         .tag(MacDestination.home)
 
                     Section("Library") {
-                        ForEach(MusicLibraryCategory.allCases) { category in
+                        ForEach(
+                            MusicLibraryCategory.allCases.filter {
+                                $0 != .playlists
+                            }
+                        ) { category in
                             Label(category.title, systemImage: category.symbolName)
                                 .tag(MacDestination.library(category))
                         }
                     }
+
+                    MacPlaylistSidebarSection(
+                        jellyfin: jellyfin,
+                        selection: $selectedMacDestination
+                    )
                 }
                 .navigationTitle("Velacanto")
+                .onChange(of: selectedMacDestination) { _, _ in
+                    globalSearchText = ""
+                }
+
+                Button {
+                    isShowingProfile = true
+                } label: {
+                    HStack(spacing: 10) {
+                        AccountAvatar(jellyfin: jellyfin)
+                        Text(jellyfin.session?.username ?? "Profile")
+                            .lineLimit(1)
+                        Spacer()
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .accessibilityLabel("Profile and settings")
             }
         }
 
         private var macOSContent: some View {
             NavigationStack {
-                switch selectedMacDestination {
-                case .home:
-                    home
-                case .library(let category):
-                    MusicLibraryCategoryView(
-                        category: category,
-                        playback: playback,
-                        jellyfin: jellyfin,
-                        showNowPlaying: {
-                            isShowingNowPlaying = true
-                        }
-                    )
+                if isSearchingLibrary {
+                    search
+                } else {
+                    switch selectedMacDestination {
+                    case .home:
+                        home
+                    case .library(let category):
+                        MusicLibraryCategoryView(
+                            category: category,
+                            playback: playback,
+                            jellyfin: jellyfin,
+                            showNowPlaying: {
+                                isShowingNowPlaying = true
+                            }
+                        )
+                    case .playlist(let playlist):
+                        MusicPlaylistView(
+                            playlist: playlist,
+                            jellyfin: jellyfin,
+                            playback: playback,
+                            showNowPlaying: {
+                                isShowingNowPlaying = true
+                            }
+                        )
+                    }
                 }
             }
-            .id(selectedMacDestination)
+            .id(macOSContentIdentity)
             .macOSPlaybackAccessoryInset(
                 playback: playback,
                 jellyfin: jellyfin,
@@ -296,6 +328,18 @@ struct VelacantoRootView: View {
             )
             .onPreferenceChange(PlaybackAccessoryOwnerPreferenceKey.self) {
                 playlistOwnsPlaybackAccessory = $0
+            }
+        }
+
+        private var isSearchingLibrary: Bool {
+            !globalSearchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+
+        private var macOSContentIdentity: AnyHashable {
+            if isSearchingLibrary {
+                AnyHashable("global-search")
+            } else {
+                AnyHashable(selectedMacDestination)
             }
         }
     #endif
@@ -341,6 +385,7 @@ struct VelacantoRootView: View {
         MusicSearchView(
             playback: playback,
             jellyfin: jellyfin,
+            searchText: $globalSearchText,
             showProfile: {
                 isShowingProfile = true
             },
@@ -428,6 +473,72 @@ struct VelacantoRootView: View {
     }
 
 }
+
+#if os(macOS)
+    private struct MacPlaylistSidebarSection: View {
+        @ObservedObject var jellyfin: JellyfinSessionController
+        @Binding var selection: MacDestination
+
+        @StateObject private var model = PagedJellyfinItemsModel()
+        @State private var isExpanded = true
+
+        var body: some View {
+            DisclosureGroup(isExpanded: $isExpanded) {
+                Label("All Playlists", systemImage: "music.note.list")
+                    .tag(MacDestination.library(.playlists))
+
+                ForEach(model.items) { playlist in
+                    Text(playlist.name)
+                        .lineLimit(1)
+                        .tag(MacDestination.playlist(playlist))
+                        .onAppear {
+                            loadMoreIfNeeded(playlist.id)
+                        }
+                }
+
+                if model.isInitialLoading || model.isLoadingMore {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+            } label: {
+                Label("Playlists", systemImage: "music.note.list")
+            }
+            .task(id: jellyfin.session?.serverID) {
+                await reset()
+            }
+        }
+
+        private func reset() async {
+            await model.reset(
+                cachedItems: {
+                    await jellyfin.cachedCatalogItems(kind: .playlists)
+                },
+                loader: pageLoader,
+                cacheWriter: cacheWriter
+            )
+        }
+
+        private func loadMoreIfNeeded(_ itemID: String) {
+            model.loadMoreIfNeeded(
+                itemID: itemID,
+                loader: pageLoader,
+                cacheWriter: cacheWriter
+            )
+        }
+
+        private var pageLoader: PagedJellyfinItemsModel.Loader {
+            { cursor in
+                try await jellyfin.musicPlaylistsPage(cursor: cursor)
+            }
+        }
+
+        private var cacheWriter: PagedJellyfinItemsModel.CacheWriter {
+            { items in
+                await jellyfin.cacheCatalogItems(items, kind: .playlists)
+            }
+        }
+    }
+#endif
 
 struct AccountAvatar: View {
     @ObservedObject var jellyfin: JellyfinSessionController

@@ -202,51 +202,6 @@ final class JellyfinSessionController: ObservableObject {
 
     // MARK: - Catalog façade
 
-    func albums(in library: JellyfinItem) async throws -> [JellyfinItem] {
-        do {
-            return try await catalogRepository().albums(in: library)
-        } catch {
-            handleExpiredSessionIfNeeded(error)
-            throw error
-        }
-    }
-
-    func musicAlbums(for artist: JellyfinItem? = nil) async throws -> [JellyfinItem] {
-        do {
-            return try await catalogRepository().musicAlbums(for: artist)
-        } catch {
-            handleExpiredSessionIfNeeded(error)
-            throw error
-        }
-    }
-
-    func musicArtists() async throws -> [JellyfinItem] {
-        do {
-            return try await catalogRepository().musicArtists()
-        } catch {
-            handleExpiredSessionIfNeeded(error)
-            throw error
-        }
-    }
-
-    func musicSongs() async throws -> [JellyfinItem] {
-        do {
-            return try await catalogRepository().musicSongs()
-        } catch {
-            handleExpiredSessionIfNeeded(error)
-            throw error
-        }
-    }
-
-    func musicPlaylists() async throws -> [JellyfinItem] {
-        do {
-            return try await catalogRepository().musicPlaylists()
-        } catch {
-            handleExpiredSessionIfNeeded(error)
-            throw error
-        }
-    }
-
     func musicAlbumsPage(
         cursor: JellyfinCatalogCursor?,
         limit: Int = 50,
@@ -273,10 +228,13 @@ final class JellyfinSessionController: ObservableObject {
     func musicSongsPage(
         cursor: JellyfinCatalogCursor?,
         limit: Int = 50,
-        searchTerm: String? = nil
+        searchTerm: String? = nil,
+        artist: JellyfinItem? = nil
     ) async throws -> JellyfinCatalogPage {
         try await catalogPage(
-            kind: .songs, cursor: cursor, limit: limit,
+            kind: artist == nil ? .songs : .artistTracks,
+            contextID: artist?.id,
+            cursor: cursor, limit: limit,
             searchTerm: searchTerm
         )
     }
@@ -364,35 +322,6 @@ final class JellyfinSessionController: ObservableObject {
 
     // MARK: - Playback façade
 
-    func searchMusic(query: String) async throws -> [JellyfinItem] {
-        let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedQuery.isEmpty else { return [] }
-        do {
-            return try await catalogRepository().searchMusic(query: trimmedQuery)
-        } catch {
-            handleExpiredSessionIfNeeded(error)
-            throw error
-        }
-    }
-
-    func tracks(inPlaylist playlist: JellyfinItem) async throws -> [JellyfinItem] {
-        do {
-            return try await catalogRepository().tracks(inPlaylist: playlist)
-        } catch {
-            handleExpiredSessionIfNeeded(error)
-            throw error
-        }
-    }
-
-    func tracks(in album: JellyfinItem) async throws -> [JellyfinItem] {
-        do {
-            return try await catalogRepository().tracks(in: album)
-        } catch {
-            handleExpiredSessionIfNeeded(error)
-            throw error
-        }
-    }
-
     func playbackRequest(for track: JellyfinItem) async throws -> PlaybackRequest {
         do {
             return try await playbackResolver().playbackRequest(for: track)
@@ -416,18 +345,6 @@ final class JellyfinSessionController: ObservableObject {
 
     // MARK: - Artwork façade
 
-    func artworkURL(
-        itemID: String,
-        imageTag: String?,
-        maxWidth: Int
-    ) async -> URL? {
-        return try? await catalogRepository().artworkURL(
-            itemID: itemID,
-            imageTag: imageTag,
-            maxWidth: maxWidth
-        )
-    }
-
     func artworkRequest(
         itemID: String,
         imageTag: String?,
@@ -436,14 +353,6 @@ final class JellyfinSessionController: ObservableObject {
         return try? await catalogRepository().artworkRequest(
             itemID: itemID,
             imageTag: imageTag,
-            maxWidth: maxWidth
-        )
-    }
-
-    func userImageURL(maxWidth: Int) async -> URL? {
-        guard let session else { return nil }
-        return try? await catalogRepository().userImageURL(
-            imageTag: session.userPrimaryImageTag,
             maxWidth: maxWidth
         )
     }

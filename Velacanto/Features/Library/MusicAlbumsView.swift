@@ -78,7 +78,9 @@ struct MusicAlbumsView: View {
             }
         }
         .navigationTitle("Albums")
-        .searchable(text: $searchText, prompt: "Albums and artists")
+        #if !os(macOS)
+            .searchable(text: $searchText, prompt: "Albums and artists")
+        #endif
         .task(id: taskID) {
             await reset()
         }

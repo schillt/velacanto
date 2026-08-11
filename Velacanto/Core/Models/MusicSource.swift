@@ -48,6 +48,7 @@ struct PlaybackItem: Identifiable, Equatable, Codable, Sendable {
 
 enum PlaybackQueueContext: Equatable, Codable, Sendable {
     case album(id: String)
+    case artist(id: String)
     case playlist(id: String)
     case songs
     case search

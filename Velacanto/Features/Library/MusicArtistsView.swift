@@ -75,7 +75,9 @@ struct MusicArtistsView: View {
             }
         }
         .navigationTitle("Artists")
-        .searchable(text: $searchText, prompt: "Artists")
+        #if !os(macOS)
+            .searchable(text: $searchText, prompt: "Artists")
+        #endif
         .task(id: taskID) {
             await reset()
         }
@@ -138,6 +140,8 @@ struct MusicArtistView: View {
     @ObservedObject var playback: AudioPlaybackCoordinator
 
     @StateObject private var model = PagedJellyfinItemsModel()
+    @State private var isPreparingQueue = false
+    @State private var playbackErrorMessage: String?
 
     var body: some View {
         ScrollView {
@@ -158,6 +162,16 @@ struct MusicArtistView: View {
                         .multilineTextAlignment(.center)
                 }
                 .frame(maxWidth: .infinity)
+
+                MusicQueuePlaybackControls(
+                    isPreparing: isPreparingQueue,
+                    play: { playQueue(shuffled: false) },
+                    shuffle: { playQueue(shuffled: true) }
+                )
+
+                if let playbackErrorMessage {
+                    ErrorMessageView(message: playbackErrorMessage)
+                }
 
                 if model.isInitialLoading {
                     ProgressView("Loading albums…")
@@ -283,5 +297,49 @@ struct MusicArtistView: View {
                 contextID: artist.id
             )
         }
+    }
+
+    private func playQueue(shuffled: Bool) {
+        isPreparingQueue = true
+        playbackErrorMessage = nil
+        Task {
+            do {
+                let tracks = try await artistTracks()
+                let queue = shuffled ? tracks.shuffled() : tracks
+                guard let track = queue.first else {
+                    playbackErrorMessage = "This artist does not have any playable tracks."
+                    isPreparingQueue = false
+                    return
+                }
+                let request = try await jellyfin.playbackRequest(for: track)
+                playback.play(
+                    request,
+                    queueItems: queue.map(JellyfinPlaybackAdapter.playbackItem(for:)),
+                    context: .artist(id: artist.id),
+                    account: jellyfin.playbackAccount
+                )
+            } catch {
+                playbackErrorMessage = error.localizedDescription
+            }
+            isPreparingQueue = false
+        }
+    }
+
+    private func artistTracks() async throws -> [JellyfinItem] {
+        var tracks: [JellyfinItem] = []
+        var cursor: JellyfinCatalogCursor?
+
+        repeat {
+            let page = try await jellyfin.musicSongsPage(
+                cursor: cursor,
+                limit: 100,
+                artist: artist
+            )
+            tracks += page.items
+            cursor = page.cursor
+        } while cursor != nil
+
+        var seen = Set<String>()
+        return tracks.filter { seen.insert($0.id).inserted }
     }
 }

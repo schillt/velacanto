@@ -89,7 +89,9 @@ struct MusicPlaylistsView: View {
             }
         }
         .navigationTitle("Playlists")
-        .searchable(text: $searchText, prompt: "Playlists")
+        #if !os(macOS)
+            .searchable(text: $searchText, prompt: "Playlists")
+        #endif
         .task(id: taskID) {
             await reset()
         }
@@ -167,6 +169,12 @@ struct MusicPlaylistView: View {
                         detail: model.items.isEmpty
                             ? nil
                             : "\(model.totalRecordCount) \(model.totalRecordCount == 1 ? "song" : "songs")"
+                    )
+
+                    MusicQueuePlaybackControls(
+                        isPreparing: preparingTrackID != nil,
+                        play: { playQueue(shuffled: false) },
+                        shuffle: { playQueue(shuffled: true) }
                     )
                 }
             }
@@ -311,6 +319,47 @@ struct MusicPlaylistView: View {
                         }
                     }
                 )
+            } catch {
+                playbackErrorMessage = error.localizedDescription
+            }
+            preparingTrackID = nil
+        }
+    }
+
+    private func playQueue(shuffled: Bool) {
+        guard !model.items.isEmpty else { return }
+        let songs = shuffled ? model.items.shuffled() : model.items
+        guard let song = songs.first else { return }
+
+        preparingTrackID = song.id
+        playbackErrorMessage = nil
+        Task {
+            do {
+                let request = try await jellyfin.playbackRequest(for: song)
+                if shuffled {
+                    playback.play(
+                        request,
+                        queueItems: songs.map(JellyfinPlaybackAdapter.playbackItem(for:)),
+                        context: .playlist(id: playlist.id),
+                        account: jellyfin.playbackAccount
+                    )
+                } else {
+                    playback.play(
+                        request,
+                        queueItems: songs.map(JellyfinPlaybackAdapter.playbackItem(for:)),
+                        context: .playlist(id: playlist.id),
+                        account: jellyfin.playbackAccount,
+                        queueExpansion: {
+                            await model.loadNextPage(
+                                loader: pageLoader,
+                                cacheWriter: cacheWriter
+                            )
+                            return model.items.map {
+                                JellyfinPlaybackAdapter.playbackItem(for: $0)
+                            }
+                        }
+                    )
+                }
             } catch {
                 playbackErrorMessage = error.localizedDescription
             }

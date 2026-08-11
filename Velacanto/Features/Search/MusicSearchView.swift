@@ -3,11 +3,11 @@ import SwiftUI
 struct MusicSearchView: View {
     @ObservedObject var playback: AudioPlaybackCoordinator
     @ObservedObject var jellyfin: JellyfinSessionController
+    @Binding var searchText: String
 
     let showProfile: () -> Void
     let showNowPlaying: () -> Void
 
-    @State private var searchText = ""
     @StateObject private var model = PagedJellyfinItemsModel()
     @State private var preparingTrackID: String?
     @State private var playbackErrorMessage: String?
@@ -72,16 +72,18 @@ struct MusicSearchView: View {
             }
         }
         .navigationTitle("Search")
-        .searchable(text: $searchText, prompt: "Albums, artists, songs, and playlists")
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Button(action: showProfile) {
-                    AccountAvatar(jellyfin: jellyfin)
+        #if os(iOS)
+            .searchable(text: $searchText, prompt: "Albums, artists, songs, and playlists")
+            .toolbar {
+                ToolbarItem(placement: .primaryAction) {
+                    Button(action: showProfile) {
+                        AccountAvatar(jellyfin: jellyfin)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Profile and settings")
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Profile and settings")
             }
-        }
+        #endif
         .task(id: searchTaskID) {
             await search()
         }

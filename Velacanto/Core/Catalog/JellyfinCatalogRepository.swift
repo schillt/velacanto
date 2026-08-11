@@ -8,6 +8,7 @@ enum JellyfinCatalogKind: String, Codable, Sendable {
     case playlists
     case search
     case albumTracks
+    case artistTracks
     case playlistTracks
 }
 
@@ -55,80 +56,11 @@ actor JellyfinCatalogRepository {
         self.libraryIDs = libraryIDs
     }
 
-    // MARK: - Catalog reads
-
-    func albums(in library: JellyfinItem) async throws -> [JellyfinItem] {
-        try await api.albums(userID: userID, libraryID: library.id)
-    }
-
     func libraries() async throws -> [JellyfinItem] {
         try await api.libraries(userID: userID)
     }
 
-    func musicAlbums(for artist: JellyfinItem?) async throws -> [JellyfinItem] {
-        var results: [JellyfinItem] = []
-        for libraryID in libraryIDs {
-            if let artist {
-                results += try await api.albums(
-                    userID: userID,
-                    libraryID: libraryID,
-                    artistID: artist.id
-                )
-            } else {
-                results += try await api.albums(
-                    userID: userID,
-                    libraryID: libraryID
-                )
-            }
-        }
-        return uniqueAndSorted(results)
-    }
-
-    func musicArtists() async throws -> [JellyfinItem] {
-        var results: [JellyfinItem] = []
-        for libraryID in libraryIDs {
-            results += try await api.artists(userID: userID, libraryID: libraryID)
-        }
-        return uniqueAndSorted(results)
-    }
-
-    func musicSongs() async throws -> [JellyfinItem] {
-        var results: [JellyfinItem] = []
-        for libraryID in libraryIDs {
-            results += try await api.songs(userID: userID, libraryID: libraryID)
-        }
-        return uniqueAndSorted(results)
-    }
-
-    func musicPlaylists() async throws -> [JellyfinItem] {
-        uniqueAndSorted(try await api.playlists(userID: userID))
-    }
-
-    func searchMusic(query: String) async throws -> [JellyfinItem] {
-        try await api.searchMusic(userID: userID, query: query, limit: 60)
-    }
-
-    func tracks(inPlaylist playlist: JellyfinItem) async throws -> [JellyfinItem] {
-        try await api.playlistItems(userID: userID, playlistID: playlist.id)
-    }
-
-    func tracks(in album: JellyfinItem) async throws -> [JellyfinItem] {
-        try await api.tracks(userID: userID, albumID: album.id)
-    }
-
     // MARK: - Artwork reads
-
-    func artworkURL(
-        itemID: String,
-        imageTag: String?,
-        maxWidth: Int
-    ) async throws -> URL {
-        try await api.artworkURL(
-            itemID: itemID,
-            imageTag: imageTag,
-            maxWidth: maxWidth
-        )
-    }
 
     func artworkRequest(
         itemID: String,
@@ -137,17 +69,6 @@ actor JellyfinCatalogRepository {
     ) async throws -> URLRequest {
         try await api.artworkRequest(
             itemID: itemID,
-            imageTag: imageTag,
-            maxWidth: maxWidth
-        )
-    }
-
-    func userImageURL(
-        imageTag: String?,
-        maxWidth: Int
-    ) async throws -> URL {
-        try await api.userImageURL(
-            userID: userID,
             imageTag: imageTag,
             maxWidth: maxWidth
         )
@@ -174,7 +95,7 @@ actor JellyfinCatalogRepository {
         searchTerm: String? = nil
     ) async throws -> JellyfinCatalogPage {
         switch kind {
-        case .albums, .artists, .songs:
+        case .albums, .artists, .songs, .artistTracks:
             return try await multiLibraryPage(
                 kind: kind,
                 contextID: contextID,
@@ -219,9 +140,10 @@ actor JellyfinCatalogRepository {
                     userID: userID, libraryID: libraryID, startIndex: offset,
                     limit: pageLimit, searchTerm: searchTerm
                 )
-            case .songs:
+            case .songs, .artistTracks:
                 return try await api.songsPage(
-                    userID: userID, libraryID: libraryID, startIndex: offset,
+                    userID: userID, libraryID: libraryID,
+                    artistID: kind == .artistTracks ? contextID : nil, startIndex: offset,
                     limit: pageLimit, searchTerm: searchTerm
                 )
             case .playlists, .search, .albumTracks, .playlistTracks:
@@ -266,7 +188,7 @@ actor JellyfinCatalogRepository {
                     userID: userID, playlistID: contextID ?? "", startIndex: offset,
                     limit: pageLimit
                 )
-            case .albums, .artists, .songs:
+            case .albums, .artists, .songs, .artistTracks:
                 preconditionFailure("Single-source paging only supports global views.")
             }
         }

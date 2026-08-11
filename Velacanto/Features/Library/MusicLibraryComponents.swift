@@ -1,5 +1,33 @@
 import SwiftUI
 
+struct MusicQueuePlaybackControls: View {
+    let isPreparing: Bool
+    let play: () -> Void
+    let shuffle: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Button(action: play) {
+                Label("Play", systemImage: "play.fill")
+            }
+            .buttonStyle(.borderedProminent)
+
+            Button(action: shuffle) {
+                Label("Shuffle", systemImage: "shuffle")
+            }
+            .buttonStyle(.bordered)
+        }
+        .disabled(isPreparing)
+        .overlay {
+            if isPreparing {
+                ProgressView()
+                    .controlSize(.small)
+            }
+        }
+        .accessibilityElement(children: .contain)
+    }
+}
+
 struct MusicSongRow: View {
     let song: JellyfinItem
     var leadingNumber: Int?

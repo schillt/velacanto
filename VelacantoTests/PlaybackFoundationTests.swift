@@ -366,6 +366,86 @@ final class PlaybackFoundationTests: XCTestCase {
         XCTAssertEqual(coordinator.playbackState, .loading)
     }
 
+    func testPlaybackStartsOnlyAfterAudioSessionActivation() async throws {
+        let engine = RecordingAudioPlayerEngine()
+        let audioSession = ControlledAudioSessionController()
+        let coordinator = AudioPlaybackCoordinator(
+            engine: engine,
+            systemMediaController: RecordingSystemMediaController(),
+            audioSessionController: audioSession
+        )
+
+        coordinator.play(try await makePlaybackRequest())
+
+        await waitUntilAsync {
+            await audioSession.activationCount() == 1
+        }
+        XCTAssertEqual(engine.playCallCount, 0)
+
+        await audioSession.completeNextActivation()
+        await waitUntil {
+            engine.playCallCount == 1
+        }
+    }
+
+    func testCanceledOrReplacedActivationCannotStartPlayback() async throws {
+        let engine = RecordingAudioPlayerEngine()
+        let audioSession = ControlledAudioSessionController()
+        let coordinator = AudioPlaybackCoordinator(
+            engine: engine,
+            systemMediaController: RecordingSystemMediaController(),
+            audioSessionController: audioSession
+        )
+
+        coordinator.play(try await makePlaybackRequest())
+        await waitUntilAsync {
+            await audioSession.activationCount() == 1
+        }
+
+        coordinator.pausePlayback()
+        await audioSession.completeNextActivation()
+        for _ in 0..<10 {
+            await Task.yield()
+        }
+        XCTAssertEqual(engine.playCallCount, 0)
+
+        coordinator.play(try await makePlaybackRequest())
+        await waitUntilAsync {
+            await audioSession.activationCount() == 2
+        }
+        await audioSession.completeNextActivation()
+        await waitUntil {
+            engine.playCallCount == 1
+        }
+    }
+
+    func testStoppingPlaybackDeactivatesAndNotifiesOtherAudio() async throws {
+        let engine = RecordingAudioPlayerEngine()
+        let audioSession = ControlledAudioSessionController()
+        let coordinator = AudioPlaybackCoordinator(
+            engine: engine,
+            systemMediaController: RecordingSystemMediaController(),
+            audioSessionController: audioSession
+        )
+
+        coordinator.play(try await makePlaybackRequest())
+        await waitUntilAsync {
+            await audioSession.activationCount() == 1
+        }
+        await audioSession.completeNextActivation()
+        await waitUntil {
+            engine.playCallCount == 1
+        }
+
+        coordinator.stop()
+        await waitUntilAsync {
+            let requests = await audioSession.deactivationRequests()
+            return requests.count == 1
+        }
+        let requests = await audioSession.deactivationRequests()
+        XCTAssertEqual(requests, [true])
+    }
+
     func testAudioInterruptionResumesOnlyWhenSystemPermitsIt() async throws {
         let engine = RecordingAudioPlayerEngine()
         let platformEvents = RecordingPlaybackPlatformEventObserver()
@@ -1355,6 +1435,36 @@ private final class RecordingPlaybackPlatformEventObserver:
 
     func sendRouteChange(_ event: PlaybackAudioRouteChange) {
         routeChangeHandler?(event)
+    }
+}
+
+private actor ControlledAudioSessionController: PlaybackAudioSessionControlling {
+    private var activationContinuations: [CheckedContinuation<Void, Error>] = []
+    private var recordedActivationCount = 0
+    private var recordedDeactivationRequests: [Bool] = []
+
+    func activate() async throws {
+        try await withCheckedThrowingContinuation { continuation in
+            recordedActivationCount += 1
+            activationContinuations.append(continuation)
+        }
+    }
+
+    func deactivate(notifyingOthers: Bool) async {
+        recordedDeactivationRequests.append(notifyingOthers)
+    }
+
+    func activationCount() -> Int {
+        recordedActivationCount
+    }
+
+    func completeNextActivation() {
+        guard !activationContinuations.isEmpty else { return }
+        activationContinuations.removeFirst().resume()
+    }
+
+    func deactivationRequests() -> [Bool] {
+        recordedDeactivationRequests
     }
 }
 

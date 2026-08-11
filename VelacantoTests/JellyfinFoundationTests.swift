@@ -630,7 +630,7 @@ final class JellyfinFoundationTests: XCTestCase {
 
         await controller.connect(to: "https://example.com")
         await controller.signIn(username: "Tyler", password: "correct")
-        let albums = try await controller.musicAlbums()
+        let albums = try await controller.musicAlbumsPage(cursor: nil).items
 
         XCTAssertEqual(
             albums.map(\.id),
@@ -779,10 +779,6 @@ final class JellyfinFoundationTests: XCTestCase {
 
     func testFastScrollPaginationSurvivesViewTaskCancellationAndRetries() async throws {
         let decoder = JSONDecoder()
-        let library = try decoder.decode(
-            JellyfinItem.self,
-            from: Data(#"{"Id":"library","Name":"Music"}"#.utf8)
-        )
         let albums = try (0..<60).map { index in
             let name = "Album \(String(format: "%03d", index))"
             return try decoder.decode(
@@ -1087,16 +1083,11 @@ final class JellyfinFoundationTests: XCTestCase {
             autoRestore: false,
             makeClient: { _, _, _ in api }
         )
-        let library = try JSONDecoder().decode(
-            JellyfinItem.self,
-            from: Data(#"{"Id":"library-id","Name":"Music"}"#.utf8)
-        )
-
         await controller.connect(to: "https://example.com")
         await controller.signIn(username: "Tyler", password: "correct")
 
         do {
-            _ = try await controller.albums(in: library)
+            _ = try await controller.musicAlbumsPage(cursor: nil)
             XCTFail("Expected the expired session to reject browsing.")
         } catch {
             XCTAssertEqual(error as? JellyfinAPIError, .unauthorized)
@@ -1407,36 +1398,30 @@ private actor FakeJellyfinAPI: JellyfinAPIService {
         albumPageRequests
     }
 
-    func artists(userID: String, libraryID: String) async throws -> [JellyfinItem] {
-        []
-    }
+    func artistsPage(
+        userID: String, libraryID: String, startIndex: Int, limit: Int, searchTerm: String?
+    ) async throws -> JellyfinItemPage { emptyPage(startIndex) }
 
-    func songs(userID: String, libraryID: String) async throws -> [JellyfinItem] {
-        []
-    }
+    func songsPage(
+        userID: String, libraryID: String, artistID: String?, startIndex: Int, limit: Int,
+        searchTerm: String?
+    ) async throws -> JellyfinItemPage { emptyPage(startIndex) }
 
-    func playlists(userID: String) async throws -> [JellyfinItem] {
-        []
-    }
+    func playlistsPage(
+        userID: String, startIndex: Int, limit: Int, searchTerm: String?
+    ) async throws -> JellyfinItemPage { emptyPage(startIndex) }
 
-    func searchMusic(
-        userID: String,
-        query: String,
-        limit: Int
-    ) async throws -> [JellyfinItem] {
-        []
-    }
+    func searchMusicPage(
+        userID: String, query: String, startIndex: Int, limit: Int
+    ) async throws -> JellyfinItemPage { emptyPage(startIndex) }
 
-    func playlistItems(
-        userID: String,
-        playlistID: String
-    ) async throws -> [JellyfinItem] {
-        []
-    }
+    func playlistItemsPage(
+        userID: String, playlistID: String, startIndex: Int, limit: Int
+    ) async throws -> JellyfinItemPage { emptyPage(startIndex) }
 
-    func tracks(userID: String, albumID: String) async throws -> [JellyfinItem] {
-        []
-    }
+    func tracksPage(
+        userID: String, albumID: String, startIndex: Int, limit: Int
+    ) async throws -> JellyfinItemPage { emptyPage(startIndex) }
 
     func playbackResolution(
         itemID: String,
@@ -1452,11 +1437,11 @@ private actor FakeJellyfinAPI: JellyfinAPIService {
         )
     }
 
-    func artworkURL(
+    func artworkRequest(
         itemID: String,
         imageTag: String?,
         maxWidth: Int
-    ) async throws -> URL {
+    ) async throws -> URLRequest {
         guard
             var components = URLComponents(
                 string: "https://example.com/Items/\(itemID)/Images/Primary"
@@ -1471,14 +1456,14 @@ private actor FakeJellyfinAPI: JellyfinAPIService {
         guard let url = components.url else {
             throw JellyfinAPIError.invalidResponse
         }
-        return url
+        return URLRequest(url: url)
     }
 
-    func userImageURL(
+    func userImageRequest(
         userID: String,
         imageTag: String?,
         maxWidth: Int
-    ) async throws -> URL {
+    ) async throws -> URLRequest {
         guard
             var components = URLComponents(
                 string: "https://example.com/Users/\(userID)/Images/Primary"
@@ -1493,7 +1478,11 @@ private actor FakeJellyfinAPI: JellyfinAPIService {
         guard let url = components.url else {
             throw JellyfinAPIError.invalidResponse
         }
-        return url
+        return URLRequest(url: url)
+    }
+
+    private func emptyPage(_ startIndex: Int) -> JellyfinItemPage {
+        JellyfinItemPage(items: [], startIndex: max(startIndex, 0), totalRecordCount: 0)
     }
 
     func logout() async throws {}
