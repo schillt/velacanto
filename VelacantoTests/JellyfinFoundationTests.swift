@@ -779,6 +779,10 @@ final class JellyfinFoundationTests: XCTestCase {
 
     func testFastScrollPaginationSurvivesViewTaskCancellationAndRetries() async throws {
         let decoder = JSONDecoder()
+        let library = try decoder.decode(
+            JellyfinItem.self,
+            from: Data(#"{"Id":"library","Name":"Music"}"#.utf8)
+        )
         let albums = try (0..<60).map { index in
             let name = "Album \(String(format: "%03d", index))"
             return try decoder.decode(
@@ -1076,7 +1080,14 @@ final class JellyfinFoundationTests: XCTestCase {
     func testExpiredSessionDuringBrowsingDeletesSavedCredentials() async throws {
         let tokenStore = RecordingTokenStore()
         let sessionStore = RecordingSessionStore()
-        let api = FakeJellyfinAPI(albumsError: .unauthorized)
+        let library = try JSONDecoder().decode(
+            JellyfinItem.self,
+            from: Data(#"{"Id":"library","Name":"Music"}"#.utf8)
+        )
+        let api = FakeJellyfinAPI(
+            albumsError: .unauthorized,
+            availableLibraries: [library]
+        )
         let controller = JellyfinSessionController(
             tokenStore: tokenStore,
             sessionStore: sessionStore,
