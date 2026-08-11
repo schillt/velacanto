@@ -953,20 +953,14 @@ actor JellyfinAPIClient: JellyfinAPIService {
         limit: Int,
         searchTerm: String?
     ) async throws -> JellyfinItemPage {
-        let query =
-            [
-                URLQueryItem(name: "UserId", value: userID),
-                URLQueryItem(name: "ParentId", value: libraryID),
-                URLQueryItem(name: "Recursive", value: "true"),
-                URLQueryItem(name: "SortBy", value: "SortName"),
-                URLQueryItem(name: "SortOrder", value: "Ascending"),
-                URLQueryItem(name: "Fields", value: "ChildCount,ImageTags"),
-            ]
-            + pageQueryItems(
-                startIndex: startIndex,
-                limit: limit,
-                searchTerm: searchTerm
-            )
+        let query = pagedItemQuery(
+            parentID: libraryID,
+            fields: "ChildCount,ImageTags",
+            startIndex: startIndex,
+            limit: limit,
+            searchTerm: searchTerm,
+            additional: [URLQueryItem(name: "UserId", value: userID)]
+        )
         let response = try await execute(
             builder.request(pathComponents: ["Artists"], queryItems: query),
             as: JellyfinItemsResponse.self
@@ -982,25 +976,15 @@ actor JellyfinAPIClient: JellyfinAPIService {
         limit: Int,
         searchTerm: String?
     ) async throws -> JellyfinItemPage {
-        let query =
-            [
-                URLQueryItem(name: "ParentId", value: libraryID),
-                URLQueryItem(name: "IncludeItemTypes", value: "Audio"),
-                URLQueryItem(name: "Recursive", value: "true"),
-                URLQueryItem(name: "SortBy", value: "SortName"),
-                URLQueryItem(name: "SortOrder", value: "Ascending"),
-                URLQueryItem(
-                    name: "Fields",
-                    value:
-                        "Album,AlbumArtist,Artists,AlbumId,AlbumPrimaryImageTag,ImageTags,RunTimeTicks"
-                ),
-            ]
-            + (artistID.map { [URLQueryItem(name: "ArtistIds", value: $0)] } ?? [])
-            + pageQueryItems(
-                startIndex: startIndex,
-                limit: limit,
-                searchTerm: searchTerm
-            )
+        let query = pagedItemQuery(
+            parentID: libraryID,
+            itemTypes: "Audio",
+            fields: Self.trackFields,
+            startIndex: startIndex,
+            limit: limit,
+            searchTerm: searchTerm,
+            additional: artistID.map { [URLQueryItem(name: "ArtistIds", value: $0)] } ?? []
+        )
         return JellyfinItemPage(
             try await itemsResponse(userID: userID, query: query)
         )
@@ -1012,22 +996,13 @@ actor JellyfinAPIClient: JellyfinAPIService {
         limit: Int,
         searchTerm: String?
     ) async throws -> JellyfinItemPage {
-        let query =
-            [
-                URLQueryItem(name: "IncludeItemTypes", value: "Playlist"),
-                URLQueryItem(name: "Recursive", value: "true"),
-                URLQueryItem(name: "SortBy", value: "SortName"),
-                URLQueryItem(name: "SortOrder", value: "Ascending"),
-                URLQueryItem(
-                    name: "Fields",
-                    value: "ChildCount,ImageTags,RunTimeTicks"
-                ),
-            ]
-            + pageQueryItems(
-                startIndex: startIndex,
-                limit: limit,
-                searchTerm: searchTerm
-            )
+        let query = pagedItemQuery(
+            itemTypes: "Playlist",
+            fields: "ChildCount,ImageTags,RunTimeTicks",
+            startIndex: startIndex,
+            limit: limit,
+            searchTerm: searchTerm
+        )
         return JellyfinItemPage(
             try await itemsResponse(userID: userID, query: query)
         )
@@ -1039,23 +1014,13 @@ actor JellyfinAPIClient: JellyfinAPIService {
         startIndex: Int,
         limit: Int
     ) async throws -> JellyfinItemPage {
-        let queryItems = [
-            URLQueryItem(name: "SearchTerm", value: query),
-            URLQueryItem(
-                name: "IncludeItemTypes",
-                value: "Audio,MusicAlbum,MusicArtist,Playlist"
-            ),
-            URLQueryItem(name: "Recursive", value: "true"),
-            URLQueryItem(name: "StartIndex", value: String(max(startIndex, 0))),
-            URLQueryItem(name: "Limit", value: String(max(limit, 1))),
-            URLQueryItem(name: "SortBy", value: "SortName"),
-            URLQueryItem(name: "SortOrder", value: "Ascending"),
-            URLQueryItem(
-                name: "Fields",
-                value:
-                    "Album,AlbumArtist,Artists,AlbumId,AlbumPrimaryImageTag,ChildCount,ImageTags,RunTimeTicks"
-            ),
-        ]
+        let queryItems = pagedItemQuery(
+            itemTypes: "Audio,MusicAlbum,MusicArtist,Playlist",
+            fields: Self.searchFields,
+            startIndex: startIndex,
+            limit: limit,
+            searchTerm: query
+        )
         return JellyfinItemPage(
             try await itemsResponse(userID: userID, query: queryItems)
         )
@@ -1067,16 +1032,14 @@ actor JellyfinAPIClient: JellyfinAPIService {
         startIndex: Int,
         limit: Int
     ) async throws -> JellyfinItemPage {
-        let query = [
-            URLQueryItem(name: "UserId", value: userID),
-            URLQueryItem(name: "StartIndex", value: String(max(startIndex, 0))),
-            URLQueryItem(name: "Limit", value: String(max(limit, 1))),
-            URLQueryItem(
-                name: "Fields",
-                value:
-                    "Album,AlbumArtist,Artists,AlbumId,AlbumPrimaryImageTag,ImageTags,RunTimeTicks"
-            ),
-        ]
+        let query = pagedItemQuery(
+            fields: Self.trackFields,
+            sortBy: nil,
+            startIndex: startIndex,
+            limit: limit,
+            recursively: false,
+            additional: [URLQueryItem(name: "UserId", value: userID)]
+        )
         let response = try await execute(
             builder.request(
                 pathComponents: ["Playlists", playlistID, "Items"],
@@ -1101,29 +1064,16 @@ actor JellyfinAPIClient: JellyfinAPIService {
         limit: Int,
         searchTerm: String?
     ) async throws -> JellyfinItemPage {
-        var additionalQueryItems: [URLQueryItem] = []
-        if let artistID {
-            additionalQueryItems.append(
-                URLQueryItem(name: "AlbumArtistIds", value: artistID)
-            )
-        }
-        let query =
-            [
-                URLQueryItem(name: "ParentId", value: libraryID),
-                URLQueryItem(name: "IncludeItemTypes", value: "MusicAlbum"),
-                URLQueryItem(name: "Recursive", value: "true"),
-                URLQueryItem(name: "SortBy", value: "AlbumArtist,SortName"),
-                URLQueryItem(name: "SortOrder", value: "Ascending"),
-                URLQueryItem(
-                    name: "Fields",
-                    value: "AlbumArtist,Artists,ChildCount,ImageTags,SortName"
-                ),
-            ] + additionalQueryItems
-            + pageQueryItems(
-                startIndex: startIndex,
-                limit: limit,
-                searchTerm: searchTerm
-            )
+        let query = pagedItemQuery(
+            parentID: libraryID,
+            itemTypes: "MusicAlbum",
+            fields: "AlbumArtist,Artists,ChildCount,ImageTags,SortName",
+            sortBy: "AlbumArtist,SortName",
+            startIndex: startIndex,
+            limit: limit,
+            searchTerm: searchTerm,
+            additional: artistID.map { [URLQueryItem(name: "AlbumArtistIds", value: $0)] } ?? []
+        )
         return JellyfinItemPage(
             try await itemsResponse(userID: userID, query: query)
         )
@@ -1135,20 +1085,14 @@ actor JellyfinAPIClient: JellyfinAPIService {
         startIndex: Int,
         limit: Int
     ) async throws -> JellyfinItemPage {
-        let query = [
-            URLQueryItem(name: "ParentId", value: albumID),
-            URLQueryItem(name: "IncludeItemTypes", value: "Audio"),
-            URLQueryItem(name: "Recursive", value: "true"),
-            URLQueryItem(name: "SortBy", value: "ParentIndexNumber,IndexNumber,SortName"),
-            URLQueryItem(name: "SortOrder", value: "Ascending"),
-            URLQueryItem(name: "StartIndex", value: String(max(startIndex, 0))),
-            URLQueryItem(name: "Limit", value: String(max(limit, 1))),
-            URLQueryItem(
-                name: "Fields",
-                value:
-                    "Album,AlbumArtist,Artists,AlbumId,AlbumPrimaryImageTag,ImageTags,RunTimeTicks"
-            ),
-        ]
+        let query = pagedItemQuery(
+            parentID: albumID,
+            itemTypes: "Audio",
+            fields: Self.trackFields,
+            sortBy: "ParentIndexNumber,IndexNumber,SortName",
+            startIndex: startIndex,
+            limit: limit
+        )
         return JellyfinItemPage(
             try await itemsResponse(userID: userID, query: query)
         )
@@ -1293,6 +1237,38 @@ actor JellyfinAPIClient: JellyfinAPIService {
                 as: JellyfinItemsResponse.self
             )
         }
+    }
+
+    private static let trackFields =
+        "Album,AlbumArtist,Artists,AlbumId,AlbumPrimaryImageTag,ImageTags,RunTimeTicks"
+    private static let searchFields = trackFields + ",ChildCount"
+
+    private func pagedItemQuery(
+        parentID: String? = nil,
+        itemTypes: String? = nil,
+        fields: String,
+        sortBy: String? = "SortName",
+        startIndex: Int,
+        limit: Int,
+        searchTerm: String? = nil,
+        recursively: Bool = true,
+        additional: [URLQueryItem] = []
+    ) -> [URLQueryItem] {
+        var items = additional
+        if let parentID { items.append(URLQueryItem(name: "ParentId", value: parentID)) }
+        if let itemTypes { items.append(URLQueryItem(name: "IncludeItemTypes", value: itemTypes)) }
+        if recursively { items.append(URLQueryItem(name: "Recursive", value: "true")) }
+        if let sortBy {
+            items.append(URLQueryItem(name: "SortBy", value: sortBy))
+            items.append(URLQueryItem(name: "SortOrder", value: "Ascending"))
+        }
+        items.append(URLQueryItem(name: "Fields", value: fields))
+        items += pageQueryItems(
+            startIndex: startIndex,
+            limit: limit,
+            searchTerm: searchTerm
+        )
+        return items
     }
 
     private func pageQueryItems(

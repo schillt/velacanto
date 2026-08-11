@@ -5,8 +5,11 @@ import SwiftUI
 /// The model is main-actor isolated. Each reset advances the generation and
 /// cancels only its internally-owned pagination task, so a late loader, cache,
 /// or retry result can never update a newer query. A cursor belongs only to its
-/// generation and is passed unchanged to the next request. New pages preserve
-/// the existing server order, then append only first-seen item IDs in page order.
+/// generation and is passed unchanged to the next request. Cached snapshots are
+/// hydrated immediately; the first refreshed page replaces matching cached items
+/// but retains cached later pages, so an in-flight refresh never shrinks a visible
+/// paged collection. New pages preserve the existing server order, then append
+/// only first-seen item IDs in page order.
 ///
 /// Transient failures retry twice with a short backoff; terminal failures become
 /// `errorMessage` for the view to present. Cancellation is expected during view
@@ -157,7 +160,7 @@ final class PagedJellyfinItemsModel: ObservableObject {
                 guard generation == currentGeneration else { return }
 
                 if replacing {
-                    items = page.items
+                    items = mergedInitialPage(page.items, with: items)
                 } else {
                     var seen = Set(items.map(\.id))
                     items.append(
@@ -209,6 +212,16 @@ final class PagedJellyfinItemsModel: ObservableObject {
                 || (500...504).contains(status)
         case .unauthorized, .transportSecurity, .invalidResponse:
             return false
+        }
+    }
+
+    private func mergedInitialPage(
+        _ refreshedItems: [JellyfinItem],
+        with cachedItems: [JellyfinItem]
+    ) -> [JellyfinItem] {
+        var seen = Set<String>()
+        return (refreshedItems + cachedItems).filter {
+            seen.insert($0.id).inserted
         }
     }
 }

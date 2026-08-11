@@ -6,6 +6,7 @@ struct MusicAlbumsView: View {
 
     @StateObject private var model = PagedJellyfinItemsModel()
     @State private var searchText = ""
+    @State private var scrollPosition: String?
 
     private var query: String {
         searchText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -55,11 +56,13 @@ struct MusicAlbumsView: View {
                             MusicAlbumCard(album: album, jellyfin: jellyfin)
                         }
                         .buttonStyle(.plain)
+                        .id(album.id)
                         .onAppear {
                             loadMoreIfNeeded(album.id)
                         }
                     }
                 }
+                .scrollTargetLayout()
                 .padding(20)
 
                 if model.isLoadingMore {
@@ -77,6 +80,7 @@ struct MusicAlbumsView: View {
                 }
             }
         }
+        .scrollPosition(id: $scrollPosition)
         .navigationTitle("Albums")
         #if !os(macOS)
             .searchable(text: $searchText, prompt: "Albums and artists")

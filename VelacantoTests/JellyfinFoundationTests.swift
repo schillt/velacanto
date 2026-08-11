@@ -832,6 +832,33 @@ final class JellyfinFoundationTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(requestCount, 3)
     }
 
+    func testCachedCatalogSnapshotDoesNotShrinkWhenInitialPageRefreshes() async throws {
+        let decoder = JSONDecoder()
+        let cachedAlbums = try (0..<60).map { index in
+            try decoder.decode(
+                JellyfinItem.self,
+                from: Data(
+                    #"{"Id":"album-\#(index)","Name":"Album \#(index)","Type":"MusicAlbum"}"#.utf8
+                )
+            )
+        }
+        let refreshedFirstPage = Array(cachedAlbums.prefix(50))
+        let model = PagedJellyfinItemsModel()
+
+        await model.reset(
+            cachedItems: { cachedAlbums },
+            loader: { _ in
+                JellyfinCatalogPage(
+                    items: refreshedFirstPage,
+                    totalRecordCount: cachedAlbums.count,
+                    cursor: nil
+                )
+            }
+        )
+
+        XCTAssertEqual(model.items.map(\.id), cachedAlbums.map(\.id))
+    }
+
     func testCatalogCacheIsClearedOnLogout() async throws {
         let api = FakeJellyfinAPI()
         let controller = JellyfinSessionController(

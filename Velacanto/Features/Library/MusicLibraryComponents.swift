@@ -8,12 +8,18 @@ struct MusicQueuePlaybackControls: View {
     var body: some View {
         HStack(spacing: 10) {
             Button(action: play) {
-                Label("Play", systemImage: "play.fill")
+                HStack(spacing: 6) {
+                    Image(systemName: "play.fill")
+                    Text("Play")
+                }
             }
             .buttonStyle(.borderedProminent)
 
             Button(action: shuffle) {
-                Label("Shuffle", systemImage: "shuffle")
+                HStack(spacing: 6) {
+                    Image(systemName: "shuffle")
+                    Text("Shuffle")
+                }
             }
             .buttonStyle(.bordered)
         }

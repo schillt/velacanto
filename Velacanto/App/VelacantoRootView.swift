@@ -231,7 +231,7 @@ struct VelacantoRootView: View {
 
     #if os(macOS)
         private var macOSRoot: some View {
-            NavigationSplitView {
+            NavigationSplitView(columnVisibility: .constant(.all)) {
                 macOSSidebar
                     .navigationSplitViewColumnWidth(min: 180, ideal: 220)
                     .toolbar(removing: .sidebarToggle)

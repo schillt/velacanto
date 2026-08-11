@@ -1,5 +1,9 @@
 import SwiftUI
 
+#if os(macOS)
+    import AppKit
+#endif
+
 @main
 struct VelacantoApp: App {
     @StateObject private var playback = AudioPlaybackCoordinator(
@@ -17,6 +21,14 @@ struct VelacantoApp: App {
         }
         #if os(macOS)
             .windowToolbarStyle(.unified(showsTitle: true))
+            .commands {
+                CommandGroup(replacing: .sidebar) {
+                    Button("Toggle Full Screen") {
+                        NSApp.keyWindow?.toggleFullScreen(nil)
+                    }
+                    .keyboardShortcut("f", modifiers: [.command, .control])
+                }
+            }
         #endif
     }
 }
