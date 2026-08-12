@@ -1,20 +1,20 @@
 # Velacanto roadmap
 
-## Current release: 0.2
+## Current release: 0.2.0
 
-0.1.0 is the completed listening-path baseline. The active 0.2 release is a
-small, disciplined UI architecture and interface-quality pass; its complete
-scope, guardrails, and exit criteria live in the [0.2 plan](0.2-plan.md).
-
-| Priority | Work | Tracking |
-| --- | --- | --- |
-| Required | Separate UI ownership and remove catalog duplication | #33, #35 |
-| Required | Make persistence/cache/reporting failures diagnosable; document contracts | #36, #37 |
-| Required | Fix sidebar, artwork sizing, and Now Playing overlap defects | #40, #42, #45 |
-| Conditional | Play/Shuffle entry points, macOS playlist section, directly relevant API simplification | #43, #44, #34 |
-| Deferred | Favorites, editable playlists/queues, playback-mode indicator, search tolerance, and playback polish | #11, #12, #41, #46, #47 |
+0.2.0 is the current release. It completes a small, disciplined UI architecture
+and interface-quality pass over the 0.1 listening-path baseline. The completed
+scope and validation record are in the [0.2 release notes](0.2-release-notes.md);
+the original scope is retained in the [0.2 plan](0.2-plan.md).
 
 ## Release history
+
+### 0.2.0 — current
+
+The 0.2 release separates presentation ownership, removes duplicated catalog
+and artwork behavior, fixes the targeted platform UI defects, and improves
+persistence diagnostics. It also adds native Play/Shuffle entry points and a
+macOS playlist section. See the [0.2 release notes](0.2-release-notes.md).
 
 ### 0.1.0 — complete
 
@@ -26,7 +26,7 @@ historical scope and recorded device/server evidence remain in
 
 ## Later direction
 
-The following are intentionally not scheduled into 0.2:
+The following are intentionally not scheduled into the current release:
 
 - Favorites and editable playlists/queues.
 - Offline downloads, artwork-storage controls, and network-transition work.

@@ -5,7 +5,9 @@ technical planning.
 
 ## Planning
 
-- [0.2 plan](0.2-plan.md) — current UI architecture release scope and exit
+- [0.2 release notes](0.2-release-notes.md) — completed scope, validation, and
+  known limitations for the current release.
+- [0.2 plan](0.2-plan.md) — historical UI architecture release scope and exit
   criteria.
 - [0.1.0 plan](0.1-plan.md) — scope, delivery slices, and acceptance criteria.
 - [0.1 stability acceptance](0.1-stability-acceptance.md) — final automated
