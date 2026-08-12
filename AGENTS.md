@@ -55,6 +55,16 @@ agreed base branch, and wait for required hosted checks before merge. Run
 build/test gate before publishing. Do not change application behavior or
 version/build metadata in a planning-only issue.
 
+### Branch lifetime
+
+The only persistent remote branches are `main`, `alpha`, `beta`, and `preview`.
+All 0.3 implementation lands in `alpha` first. Use a short-lived `codex/`
+branch only while its focused PR is active, then delete its remote and local
+branches after the PR merges. Before deletion, verify the branch is merged and
+is not checked out in a worktree. If it contains unmerged work, integrate it
+through its intended PR or ask the project owner; never discard it to tidy the
+branch list.
+
 ## Product and privacy boundaries
 
 The 0.3 work is provider-neutral catalog/actions, native player surfaces, and
