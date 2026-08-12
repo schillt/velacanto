@@ -18,6 +18,7 @@ struct NowPlayingSnapshot: Equatable {
     let artwork: PlatformImage?
     let canGoPrevious: Bool
     let canGoNext: Bool
+    let repeatMode: PlaybackRepeatMode
 
     init(
         item: PlaybackItem?,
@@ -27,7 +28,8 @@ struct NowPlayingSnapshot: Equatable {
         artworkIdentifier: String? = nil,
         artwork: PlatformImage? = nil,
         canGoPrevious: Bool = false,
-        canGoNext: Bool = false
+        canGoNext: Bool = false,
+        repeatMode: PlaybackRepeatMode = .off
     ) {
         self.item = item
         self.elapsed = elapsed
@@ -37,6 +39,7 @@ struct NowPlayingSnapshot: Equatable {
         self.artwork = artwork
         self.canGoPrevious = canGoPrevious
         self.canGoNext = canGoNext
+        self.repeatMode = repeatMode
     }
 
     static func == (lhs: Self, rhs: Self) -> Bool {
@@ -47,6 +50,7 @@ struct NowPlayingSnapshot: Equatable {
             && lhs.artworkIdentifier == rhs.artworkIdentifier
             && lhs.canGoPrevious == rhs.canGoPrevious
             && lhs.canGoNext == rhs.canGoNext
+            && lhs.repeatMode == rhs.repeatMode
     }
 
     static let empty = NowPlayingSnapshot(
@@ -70,7 +74,9 @@ protocol SystemMediaControlling: AnyObject {
         previous: @escaping @MainActor () -> Void,
         next: @escaping @MainActor () -> Void,
         togglePlayPause: @escaping @MainActor () -> Void,
-        seek: @escaping @MainActor (TimeInterval) -> Void
+        seek: @escaping @MainActor (TimeInterval) -> Void,
+        changeRepeatMode: @escaping @MainActor (PlaybackRepeatMode) -> Void,
+        shuffle: @escaping @MainActor () -> Void
     )
 
     func update(_ snapshot: NowPlayingSnapshot)
@@ -98,7 +104,9 @@ final class MediaPlayerSystemMediaController: SystemMediaControlling {
         previous: @escaping @MainActor () -> Void,
         next: @escaping @MainActor () -> Void,
         togglePlayPause: @escaping @MainActor () -> Void,
-        seek: @escaping @MainActor (TimeInterval) -> Void
+        seek: @escaping @MainActor (TimeInterval) -> Void,
+        changeRepeatMode: @escaping @MainActor (PlaybackRepeatMode) -> Void,
+        shuffle: @escaping @MainActor () -> Void
     ) {
         removeCommandTargets()
 
@@ -129,6 +137,36 @@ final class MediaPlayerSystemMediaController: SystemMediaControlling {
             return .success
         }
         commandTargets.append((positionCommand, positionTarget))
+
+        let repeatCommand = commandCenter.changeRepeatModeCommand
+        let repeatTarget = repeatCommand.addTarget { event in
+            guard let event = event as? MPChangeRepeatModeCommandEvent else {
+                return .commandFailed
+            }
+            let mode: PlaybackRepeatMode
+            switch event.repeatType {
+            case .off: mode = .off
+            case .all: mode = .all
+            case .one: mode = .one
+            @unknown default: return .commandFailed
+            }
+            Task { @MainActor in changeRepeatMode(mode) }
+            return .success
+        }
+        commandTargets.append((repeatCommand, repeatTarget))
+
+        let shuffleCommand = commandCenter.changeShuffleModeCommand
+        let shuffleTarget = shuffleCommand.addTarget { event in
+            guard
+                let event = event as? MPChangeShuffleModeCommandEvent,
+                event.shuffleType == .items
+            else {
+                return .commandFailed
+            }
+            Task { @MainActor in shuffle() }
+            return .success
+        }
+        commandTargets.append((shuffleCommand, shuffleTarget))
     }
 
     func update(_ snapshot: NowPlayingSnapshot) {
@@ -150,6 +188,12 @@ final class MediaPlayerSystemMediaController: SystemMediaControlling {
             canGoPrevious: snapshot.canGoPrevious,
             canGoNext: snapshot.canGoNext
         )
+        commandCenter.changeRepeatModeCommand.currentRepeatType =
+            switch snapshot.repeatMode {
+            case .off: .off
+            case .all: .all
+            case .one: .one
+            }
 
         #if os(macOS)
             nowPlayingInfoCenter.playbackState = snapshot.isPlaying ? .playing : .paused
@@ -219,6 +263,8 @@ final class MediaPlayerSystemMediaController: SystemMediaControlling {
         commandCenter.stopCommand.isEnabled = false
         commandCenter.togglePlayPauseCommand.isEnabled = isEnabled
         commandCenter.changePlaybackPositionCommand.isEnabled = isEnabled
+        commandCenter.changeRepeatModeCommand.isEnabled = isEnabled
+        commandCenter.changeShuffleModeCommand.isEnabled = isEnabled
 
         commandCenter.nextTrackCommand.isEnabled = isEnabled && canGoNext
         commandCenter.previousTrackCommand.isEnabled = isEnabled && canGoPrevious
