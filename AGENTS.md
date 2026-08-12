@@ -23,37 +23,57 @@ not be authorized through its integration. When that happens, use `gh` after
 the checks above. Treat a 403 response as an authorization problem, not a
 reason to retry blindly.
 
-### Push an approved issue
+### Complete and hand off an approved issue
 
-For an assigned, in-scope issue, agents are authorized to commit focused work,
-push its short-lived branch, and open a pull request to `alpha` after the
-required local checks pass. Do not ask the user to repeat how to push.
+For an assigned, in-scope issue, work only in that issue's local worktree.
+Run its local checks, commit the focused changes locally, and hand off the
+branch name, commit ID, and verification evidence to the integration agent.
+Do not push an issue branch to GitHub and do not create an issue pull request.
+
+```sh
+git status -sb
+git add <only-the-assigned-files>
+git commit -m "<focused issue summary>"
+git rev-parse HEAD
+```
+
+### Integrate and push `alpha`
+
+Only the integration agent moves accepted local issue commits to the shared
+remote. Integrate one issue at a time in a clean local worktree based on the
+latest `origin/alpha`, run the required checks, and then push the resulting
+candidate directly to `alpha`.
 
 ```sh
 gh auth status
-git status -sb
-git push --set-upstream origin "$(git branch --show-current)"
-gh pr create --base alpha --head "$(git branch --show-current)"
+git fetch origin alpha
+integration_worktree=$(mktemp -d /private/tmp/velacanto-integrate-<number>-XXXXXX)
+git worktree add -b codex/integrate-<number> "$integration_worktree" origin/alpha
+cd "$integration_worktree"
+git cherry-pick <accepted-issue-commit>
+# Run the issue's required checks here.
+git push origin HEAD:refs/heads/alpha
 ```
 
 `gh auth status` succeeding means GitHub CLI authentication is valid. Do not
 report it as invalid because a sandbox requests network permission or because
 the GitHub app connector returns `403 Resource not accessible by integration`;
 request the approved network permission and use `gh` instead. Report
-authentication as invalid only when `gh auth status` itself fails. If `git
-push` is rejected after a successful status check, report the exact remote
-message and stop rather than changing credentials or retrying blindly.
+authentication as invalid only when `gh auth status` itself fails. If the
+`alpha` push is rejected after a successful status check, report the exact
+remote message and stop rather than changing credentials or retrying blindly.
 
-Merge only after required hosted checks pass and the assigned task includes the
-merge or release promotion. Delete the short-lived source branch after merge.
+After the push, remove the clean integration worktree and delete its local
+integration branch. Promotion from `alpha` remains `alpha → beta → preview →
+main` with the documented release gates.
 
 ### Worktree isolation
 
-Use one clean worktree and one short-lived branch for exactly one issue or
-pull request. Never add a second issue to an existing worktree, even if its
-branch is already open. Before editing, check `git status --short` and `git
-worktree list --porcelain`; if either shows another issue's work, stop and use
-a new worktree based on the current `origin/alpha` instead.
+Use one clean local worktree and one local-only branch for exactly one issue.
+Never add a second issue to an existing worktree, even if its branch is already
+open. Before editing, check `git status --short` and `git worktree list
+--porcelain`; if either shows another issue's work, stop and use a new worktree
+based on the current `origin/alpha` instead.
 
 ```sh
 git fetch origin alpha
@@ -63,8 +83,9 @@ cd "$task_worktree"
 ```
 
 Do not reset, stash, revert, commit, stage, or move changes made by another
-issue. Finish and merge the focused PR, then remove its clean worktree and
-delete its short-lived branch before starting another issue.
+issue. Hand off the focused commit for serial integration into `alpha`, then
+remove its clean worktree and delete its local branch before starting another
+issue.
 
 ### Issues, milestones, and board
 
@@ -100,13 +121,12 @@ version/build metadata in a planning-only issue.
 
 ### Branch lifetime
 
-The only persistent remote branches are `main`, `alpha`, `beta`, and `preview`.
-All 0.3 implementation lands in `alpha` first. Use a short-lived `codex/`
-branch only while its focused PR is active, then delete its remote and local
-branches after the PR merges. Before deletion, verify the branch is merged and
-is not checked out in a worktree. If it contains unmerged work, integrate it
-through its intended PR or ask the project owner; never discard it to tidy the
-branch list.
+GitHub has exactly four branches: `main`, `alpha`, `beta`, and `preview`.
+All issue and integration branches are local only. All 0.3 implementation lands
+in `alpha` through the single integration-push workflow above; never create or
+push an issue branch to GitHub. Before deleting a local branch, verify its work
+was integrated and it is not checked out in a worktree. Never discard
+unintegrated work to tidy the branch list.
 
 ## Product and privacy boundaries
 
