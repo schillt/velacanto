@@ -30,6 +30,14 @@ enum AudioPlayerEngineEvent: Equatable, Sendable {
     case bufferStateChanged(PlaybackBufferState)
 }
 
+/// Main-actor bridge to the platform player.
+///
+/// The coordinator owns command ordering. Engine implementations must publish
+/// events synchronously on the main actor in the order observed from the
+/// platform, including terminal `.failed` and `.ended` states, and must replace
+/// the current item before reporting its initial loading state. Commands do not
+/// throw; platform failures belong in `eventHandler`, which is replaced rather
+/// than accumulated by the coordinator.
 @MainActor
 protocol AudioPlayerEngine: AnyObject {
     var eventHandler: (@MainActor (AudioPlayerEngineEvent) -> Void)? { get set }
