@@ -186,7 +186,7 @@ private struct MusicLibraryCategoryRow: View {
 }
 
 struct MusicDetailHeader: View {
-    let item: JellyfinItem
+    let item: MusicCatalogItem
     @ObservedObject var jellyfin: JellyfinSessionController
     let subtitle: String
     let detail: String?

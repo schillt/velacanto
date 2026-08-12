@@ -5,7 +5,7 @@ struct MusicPlaylistsView: View {
     @ObservedObject var playback: AudioPlaybackCoordinator
     let showNowPlaying: () -> Void
 
-    @StateObject private var model = PagedJellyfinItemsModel()
+    @StateObject private var model = PagedMusicCatalogModel()
     @State private var searchText = ""
 
     private var query: String {
@@ -117,7 +117,7 @@ struct MusicPlaylistsView: View {
         )
     }
 
-    private func loadMoreIfNeeded(_ itemID: String) {
+    private func loadMoreIfNeeded(_ itemID: MusicCatalogItemID) {
         model.loadMoreIfNeeded(
             itemID: itemID,
             loader: pageLoader,
@@ -132,7 +132,7 @@ struct MusicPlaylistsView: View {
         )
     }
 
-    private var pageLoader: PagedJellyfinItemsModel.Loader {
+    private var pageLoader: PagedMusicCatalogModel.Loader {
         { cursor in
             try await jellyfin.musicPlaylistsPage(
                 cursor: cursor,
@@ -141,7 +141,7 @@ struct MusicPlaylistsView: View {
         }
     }
 
-    private var cacheWriter: PagedJellyfinItemsModel.CacheWriter {
+    private var cacheWriter: PagedMusicCatalogModel.CacheWriter {
         { items in
             await jellyfin.cacheCatalogItems(items, kind: .playlists)
         }
@@ -149,13 +149,13 @@ struct MusicPlaylistsView: View {
 }
 
 struct MusicPlaylistView: View {
-    let playlist: JellyfinItem
+    let playlist: MusicCatalogItem
     @ObservedObject var jellyfin: JellyfinSessionController
     @ObservedObject var playback: AudioPlaybackCoordinator
     let showNowPlaying: () -> Void
 
-    @StateObject private var model = PagedJellyfinItemsModel()
-    @State private var preparingTrackID: String?
+    @StateObject private var model = PagedMusicCatalogModel()
+    @State private var preparingTrackID: MusicCatalogItemID?
     @State private var playbackErrorMessage: String?
 
     var body: some View {
@@ -265,7 +265,7 @@ struct MusicPlaylistView: View {
         )
     }
 
-    private func loadMoreIfNeeded(_ itemID: String) {
+    private func loadMoreIfNeeded(_ itemID: MusicCatalogItemID) {
         model.loadMoreIfNeeded(
             itemID: itemID,
             loader: pageLoader,
@@ -277,7 +277,7 @@ struct MusicPlaylistView: View {
         await model.retry(loader: pageLoader, cacheWriter: cacheWriter)
     }
 
-    private var pageLoader: PagedJellyfinItemsModel.Loader {
+    private var pageLoader: PagedMusicCatalogModel.Loader {
         { cursor in
             try await jellyfin.tracksPage(
                 inPlaylist: playlist,
@@ -286,7 +286,7 @@ struct MusicPlaylistView: View {
         }
     }
 
-    private var cacheWriter: PagedJellyfinItemsModel.CacheWriter {
+    private var cacheWriter: PagedMusicCatalogModel.CacheWriter {
         { items in
             await jellyfin.cacheCatalogItems(
                 items,
@@ -296,7 +296,7 @@ struct MusicPlaylistView: View {
         }
     }
 
-    private func play(_ song: JellyfinItem) {
+    private func play(_ song: MusicCatalogItem) {
         preparingTrackID = song.id
         playbackErrorMessage = nil
         Task {
@@ -307,7 +307,7 @@ struct MusicPlaylistView: View {
                     queueItems: model.items.map(
                         JellyfinPlaybackAdapter.playbackItem(for:)
                     ),
-                    context: .playlist(id: playlist.id),
+                    context: .playlist(id: playlist.id.opaqueID),
                     account: jellyfin.playbackAccount,
                     queueExpansion: {
                         await model.loadNextPage(
@@ -340,14 +340,14 @@ struct MusicPlaylistView: View {
                     playback.play(
                         request,
                         queueItems: songs.map(JellyfinPlaybackAdapter.playbackItem(for:)),
-                        context: .playlist(id: playlist.id),
+                        context: .playlist(id: playlist.id.opaqueID),
                         account: jellyfin.playbackAccount
                     )
                 } else {
                     playback.play(
                         request,
                         queueItems: songs.map(JellyfinPlaybackAdapter.playbackItem(for:)),
-                        context: .playlist(id: playlist.id),
+                        context: .playlist(id: playlist.id.opaqueID),
                         account: jellyfin.playbackAccount,
                         queueExpansion: {
                             await model.loadNextPage(

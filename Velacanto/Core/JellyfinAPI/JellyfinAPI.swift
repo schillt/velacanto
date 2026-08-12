@@ -235,6 +235,7 @@ struct JellyfinItem: Codable, Equatable, Identifiable, Sendable {
     let albumID: String?
     let imageTags: [String: String]
     let albumPrimaryImageTag: String?
+    let userData: JellyfinUserData?
 
     var displayArtist: String {
         if let albumArtist, !albumArtist.isEmpty {
@@ -263,6 +264,8 @@ struct JellyfinItem: Codable, Equatable, Identifiable, Sendable {
         JellyfinItemKind(apiValue: type)
     }
 
+    var isFavorite: Bool { userData?.isFavorite ?? false }
+
     var isMusicLibrary: Bool {
         collectionType?.caseInsensitiveCompare("music") == .orderedSame
     }
@@ -283,6 +286,7 @@ struct JellyfinItem: Codable, Equatable, Identifiable, Sendable {
         case albumID = "AlbumId"
         case imageTags = "ImageTags"
         case albumPrimaryImageTag = "AlbumPrimaryImageTag"
+        case userData = "UserData"
     }
 
     init(from decoder: any Decoder) throws {
@@ -307,6 +311,7 @@ struct JellyfinItem: Codable, Equatable, Identifiable, Sendable {
             String.self,
             forKey: .albumPrimaryImageTag
         )
+        userData = try container.decodeIfPresent(JellyfinUserData.self, forKey: .userData)
     }
 
     func encode(to encoder: any Encoder) throws {
@@ -329,6 +334,15 @@ struct JellyfinItem: Codable, Equatable, Identifiable, Sendable {
             albumPrimaryImageTag,
             forKey: .albumPrimaryImageTag
         )
+        try container.encodeIfPresent(userData, forKey: .userData)
+    }
+}
+
+struct JellyfinUserData: Codable, Equatable, Sendable {
+    let isFavorite: Bool
+
+    private enum CodingKeys: String, CodingKey {
+        case isFavorite = "IsFavorite"
     }
 }
 
@@ -1240,7 +1254,7 @@ actor JellyfinAPIClient: JellyfinAPIService {
     }
 
     private static let trackFields =
-        "Album,AlbumArtist,Artists,AlbumId,AlbumPrimaryImageTag,ImageTags,RunTimeTicks"
+        "Album,AlbumArtist,Artists,AlbumId,AlbumPrimaryImageTag,ImageTags,RunTimeTicks,UserData"
     private static let searchFields = trackFields + ",ChildCount"
 
     private func pagedItemQuery(

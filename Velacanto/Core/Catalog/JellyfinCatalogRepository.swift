@@ -1,42 +1,12 @@
 import Foundation
 import os
 
-enum JellyfinCatalogKind: String, Codable, Sendable {
-    case albums
-    case artists
-    case songs
-    case playlists
-    case search
-    case albumTracks
-    case artistTracks
-    case playlistTracks
-}
-
-struct JellyfinCatalogCursor: Sendable {
-    let identity: String
-    var offsets: [String: Int]
-    var totals: [String: Int]
-    var buffers: [String: [JellyfinItem]]
-    var exhaustedSources: Set<String>
-    var seenItemIDs: Set<String>
-}
-
-struct JellyfinCatalogPage: Sendable {
-    let items: [JellyfinItem]
-    let totalRecordCount: Int
-    let cursor: JellyfinCatalogCursor?
-
-    var hasMore: Bool {
-        cursor != nil
-    }
-}
-
 /// Fetches and merges catalog pages for one authenticated Jellyfin account.
 ///
 /// A repository is a short-lived snapshot of the current session and libraries.
 /// Its cursor is valid only for the query identity recorded in the cursor; callers
 /// must discard it when the query, context, or library list changes.
-actor JellyfinCatalogRepository {
+actor JellyfinCatalogRepository: MusicLibraryProviding {
     private static let performanceLog = OSLog(
         subsystem: "com.chameleonenterprise.velacanto",
         category: "Performance"
@@ -44,15 +14,18 @@ actor JellyfinCatalogRepository {
 
     private let api: any JellyfinAPIService
     private let userID: String
+    private let mapper: JellyfinCatalogMapper
     private let libraryIDs: [String]
 
     init(
         api: any JellyfinAPIService,
         userID: String,
+        accountScope: String,
         libraryIDs: [String]
     ) {
         self.api = api
         self.userID = userID
+        mapper = JellyfinCatalogMapper(accountScope: accountScope)
         self.libraryIDs = libraryIDs
     }
 
@@ -88,17 +61,17 @@ actor JellyfinCatalogRepository {
     // MARK: - Paging
 
     func page(
-        kind: JellyfinCatalogKind,
-        contextID: String? = nil,
-        cursor: JellyfinCatalogCursor?,
+        kind: MusicCatalogKind,
+        contextID: MusicCatalogItemID? = nil,
+        cursor: MusicCatalogCursor?,
         limit: Int = 50,
         searchTerm: String? = nil
-    ) async throws -> JellyfinCatalogPage {
+    ) async throws -> MusicCatalogPage {
         switch kind {
         case .albums, .artists, .songs, .artistTracks:
             return try await multiLibraryPage(
                 kind: kind,
-                contextID: contextID,
+                contextID: contextID?.opaqueID,
                 cursor: cursor,
                 limit: limit,
                 searchTerm: searchTerm
@@ -106,7 +79,7 @@ actor JellyfinCatalogRepository {
         case .playlists, .search, .albumTracks, .playlistTracks:
             return try await singleSourcePage(
                 kind: kind,
-                contextID: contextID,
+                contextID: contextID?.opaqueID,
                 cursor: cursor,
                 limit: limit,
                 searchTerm: searchTerm
@@ -115,12 +88,12 @@ actor JellyfinCatalogRepository {
     }
 
     private func multiLibraryPage(
-        kind: JellyfinCatalogKind,
+        kind: MusicCatalogKind,
         contextID: String?,
-        cursor: JellyfinCatalogCursor?,
+        cursor: MusicCatalogCursor?,
         limit: Int,
         searchTerm: String?
-    ) async throws -> JellyfinCatalogPage {
+    ) async throws -> MusicCatalogPage {
         try await pageFromSources(
             kind: kind,
             contextID: contextID,
@@ -153,12 +126,12 @@ actor JellyfinCatalogRepository {
     }
 
     private func singleSourcePage(
-        kind: JellyfinCatalogKind,
+        kind: MusicCatalogKind,
         contextID: String?,
-        cursor: JellyfinCatalogCursor?,
+        cursor: MusicCatalogCursor?,
         limit: Int,
         searchTerm: String?
-    ) async throws -> JellyfinCatalogPage {
+    ) async throws -> MusicCatalogPage {
         try await pageFromSources(
             kind: kind,
             contextID: contextID,
@@ -195,14 +168,14 @@ actor JellyfinCatalogRepository {
     }
 
     private func pageFromSources(
-        kind: JellyfinCatalogKind,
+        kind: MusicCatalogKind,
         contextID: String?,
         sourceIDs: [String],
-        cursor: JellyfinCatalogCursor?,
+        cursor: MusicCatalogCursor?,
         limit: Int,
         searchTerm: String?,
         loader: @escaping @Sendable (String, Int, Int) async throws -> JellyfinItemPage
-    ) async throws -> JellyfinCatalogPage {
+    ) async throws -> MusicCatalogPage {
         let signpostID = OSSignpostID(log: Self.performanceLog)
         os_signpost(.begin, log: Self.performanceLog, name: "Catalog Page", signpostID: signpostID)
         defer {
@@ -212,13 +185,13 @@ actor JellyfinCatalogRepository {
 
         let safeLimit = max(limit, 1)
         let identity = [
-            kind.rawValue, contextID ?? "", searchTerm ?? "",
+            mapper.accountScope, kind.rawValue, contextID ?? "", searchTerm ?? "",
             sourceIDs.sorted().joined(separator: ","),
         ].joined(separator: "|")
         var state =
             cursor?.identity == identity
             ? cursor!
-            : JellyfinCatalogCursor(
+            : MusicCatalogCursor(
                 identity: identity,
                 offsets: Dictionary(uniqueKeysWithValues: sourceIDs.map { ($0, 0) }),
                 totals: [:],
@@ -227,7 +200,7 @@ actor JellyfinCatalogRepository {
                 seenItemIDs: []
             )
 
-        var output: [JellyfinItem] = []
+        var output: [MusicCatalogItem] = []
         while output.count < safeLimit {
             let sourcesToFill = sourceIDs.filter {
                 state.buffers[$0, default: []].isEmpty && !state.exhaustedSources.contains($0)
@@ -249,7 +222,9 @@ actor JellyfinCatalogRepository {
                     return values
                 }
                 for (sourceID, page) in responses {
-                    state.buffers[sourceID, default: []].append(contentsOf: page.items)
+                    state.buffers[sourceID, default: []].append(
+                        contentsOf: page.items.compactMap(mapper.map)
+                    )
                     state.offsets[sourceID] = page.nextStartIndex
                     state.totals[sourceID] = page.totalRecordCount
                     if page.items.isEmpty
@@ -275,20 +250,13 @@ actor JellyfinCatalogRepository {
         let hasMore = sourceIDs.contains {
             !state.exhaustedSources.contains($0) || !state.buffers[$0, default: []].isEmpty
         }
-        return JellyfinCatalogPage(
+        return MusicCatalogPage(
             items: output, totalRecordCount: state.totals.values.reduce(0, +),
             cursor: hasMore ? state : nil)
     }
 
-    private func uniqueAndSorted(_ items: [JellyfinItem]) -> [JellyfinItem] {
-        var seen = Set<String>()
-        return items.filter { seen.insert($0.id).inserted }.sorted {
-            $0.name.localizedStandardCompare($1.name) == .orderedAscending
-        }
-    }
-
     private func catalogSortComparison(
-        _ left: JellyfinItem, _ right: JellyfinItem, kind: JellyfinCatalogKind
+        _ left: MusicCatalogItem, _ right: MusicCatalogItem, kind: MusicCatalogKind
     ) -> ComparisonResult {
         if kind == .albums {
             let artistComparison = (left.albumArtist ?? "").localizedStandardCompare(
@@ -298,7 +266,60 @@ actor JellyfinCatalogRepository {
         let nameComparison = (left.sortName ?? left.name).localizedStandardCompare(
             right.sortName ?? right.name)
         return nameComparison == .orderedSame
-            ? left.id.localizedStandardCompare(right.id) : nameComparison
+            ? left.id.opaqueID.localizedStandardCompare(right.id.opaqueID) : nameComparison
+    }
+}
+
+struct JellyfinCatalogMapper: Sendable {
+    let accountScope: String
+
+    func map(_ item: JellyfinItem) -> MusicCatalogItem? {
+        guard let kind = item.kind.map(MusicCatalogItem.Kind.init) else { return nil }
+        return MusicCatalogItem(
+            id: MusicCatalogItemID(
+                source: .jellyfin,
+                accountScope: accountScope,
+                opaqueID: item.id
+            ),
+            name: item.name,
+            kind: kind,
+            sortName: item.sortName,
+            artists: item.artists,
+            albumArtist: item.albumArtist,
+            album: item.album,
+            trackNumber: item.indexNumber,
+            discNumber: item.parentIndexNumber,
+            childCount: item.childCount,
+            duration: item.duration,
+            artwork: MusicArtworkReference(
+                opaqueItemID: item.artworkItemID,
+                imageTag: item.primaryImageTag
+            ),
+            isFavorite: item.isFavorite,
+            capabilities: capabilities(for: kind)
+        )
+    }
+
+    func capabilities(
+        for kind: MusicCatalogItem.Kind
+    ) -> MusicItemCapabilities {
+        switch kind {
+        case .song:
+            [.play, .favorite, .playNext, .playLast]
+        case .album, .artist, .playlist:
+            [.navigate, .play, .shuffle, .favorite]
+        }
+    }
+}
+
+extension MusicCatalogItem.Kind {
+    init(_ jellyfinKind: JellyfinItemKind) {
+        switch jellyfinKind {
+        case .song: self = .song
+        case .album: self = .album
+        case .artist: self = .artist
+        case .playlist: self = .playlist
+        }
     }
 }
 
@@ -315,7 +336,7 @@ actor JellyfinCatalogCache {
         category: "CatalogCache"
     )
     private struct Record: Codable {
-        var items: [JellyfinItem]
+        var items: [MusicCatalogItem]
         var updatedAt: Date
         var lastAccessedAt: Date
         let isDetail: Bool
@@ -349,7 +370,7 @@ actor JellyfinCatalogCache {
         self.now = now
     }
 
-    func load(serverID: String, userID: String, key: String) -> [JellyfinItem] {
+    func load(serverID: String, userID: String, key: String) -> [MusicCatalogItem] {
         var envelope = readEnvelope(serverID: serverID, userID: userID)
         guard var record = envelope.records[key] else { return [] }
         guard now().timeIntervalSince(record.updatedAt) <= maxAge else {
@@ -364,7 +385,7 @@ actor JellyfinCatalogCache {
     }
 
     func save(
-        _ items: [JellyfinItem], serverID: String, userID: String, key: String, isDetail: Bool
+        _ items: [MusicCatalogItem], serverID: String, userID: String, key: String, isDetail: Bool
     ) {
         var envelope = readEnvelope(serverID: serverID, userID: userID)
         let now = now()

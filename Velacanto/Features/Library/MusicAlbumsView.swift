@@ -4,9 +4,9 @@ struct MusicAlbumsView: View {
     @ObservedObject var jellyfin: JellyfinSessionController
     @ObservedObject var playback: AudioPlaybackCoordinator
 
-    @StateObject private var model = PagedJellyfinItemsModel()
+    @StateObject private var model = PagedMusicCatalogModel()
     @State private var searchText = ""
-    @State private var scrollPosition: String?
+    @StateObject private var gridPosition = AlbumGridPositionState()
 
     private var query: String {
         searchText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -80,21 +80,31 @@ struct MusicAlbumsView: View {
                 }
             }
         }
-        .scrollPosition(id: $scrollPosition)
+        .scrollPosition(id: scrollPositionBinding)
         .navigationTitle("Albums")
         #if !os(macOS)
             .searchable(text: $searchText, prompt: "Albums and artists")
         #endif
         .task(id: taskID) {
+            guard gridPosition.begin(identity: taskID) else { return }
             await reset()
         }
         .refreshable {
+            _ = gridPosition.begin(identity: taskID, forceReset: true)
             await reset()
         }
     }
 
     private var taskID: String {
-        "\(jellyfin.session?.serverID ?? "signed-out")|\(query)"
+        let account = jellyfin.playbackAccount
+        return "\(account?.serverID ?? "signed-out")|\(account?.userID ?? "none")|\(query)"
+    }
+
+    private var scrollPositionBinding: Binding<MusicCatalogItemID?> {
+        Binding(
+            get: { gridPosition.anchor },
+            set: { gridPosition.record($0, identity: taskID) }
+        )
     }
 
     private func reset() async {
@@ -110,7 +120,7 @@ struct MusicAlbumsView: View {
         )
     }
 
-    private func loadMoreIfNeeded(_ itemID: String) {
+    private func loadMoreIfNeeded(_ itemID: MusicCatalogItemID) {
         model.loadMoreIfNeeded(
             itemID: itemID,
             loader: pageLoader,
@@ -125,7 +135,7 @@ struct MusicAlbumsView: View {
         )
     }
 
-    private var pageLoader: PagedJellyfinItemsModel.Loader {
+    private var pageLoader: PagedMusicCatalogModel.Loader {
         { cursor in
             try await jellyfin.musicAlbumsPage(
                 cursor: cursor,
@@ -134,7 +144,7 @@ struct MusicAlbumsView: View {
         }
     }
 
-    private var cacheWriter: PagedJellyfinItemsModel.CacheWriter {
+    private var cacheWriter: PagedMusicCatalogModel.CacheWriter {
         { items in
             await jellyfin.cacheCatalogItems(items, kind: .albums)
         }
@@ -142,7 +152,7 @@ struct MusicAlbumsView: View {
 }
 
 struct MusicAlbumCard: View {
-    let album: JellyfinItem
+    let album: MusicCatalogItem
     @ObservedObject var jellyfin: JellyfinSessionController
 
     var body: some View {

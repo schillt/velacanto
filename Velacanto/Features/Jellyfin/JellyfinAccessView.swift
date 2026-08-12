@@ -171,11 +171,11 @@ private struct JellyfinSignInView: View {
 }
 
 struct JellyfinTracksView: View {
-    let album: JellyfinItem
+    let album: MusicCatalogItem
     @ObservedObject var jellyfin: JellyfinSessionController
     @ObservedObject var playback: AudioPlaybackCoordinator
-    @StateObject private var model = PagedJellyfinItemsModel()
-    @State private var preparingTrackID: String?
+    @StateObject private var model = PagedMusicCatalogModel()
+    @State private var preparingTrackID: MusicCatalogItemID?
     @State private var playbackErrorMessage: String?
 
     var body: some View {
@@ -322,7 +322,7 @@ struct JellyfinTracksView: View {
         }
     }
 
-    private func trackButton(_ track: JellyfinItem, position: Int) -> some View {
+    private func trackButton(_ track: MusicCatalogItem, position: Int) -> some View {
         Button {
             play(track)
         } label: {
@@ -373,7 +373,7 @@ struct JellyfinTracksView: View {
         )
     }
 
-    private func loadMoreIfNeeded(_ itemID: String) {
+    private func loadMoreIfNeeded(_ itemID: MusicCatalogItemID) {
         model.loadMoreIfNeeded(
             itemID: itemID,
             loader: pageLoader,
@@ -385,13 +385,13 @@ struct JellyfinTracksView: View {
         await model.retry(loader: pageLoader, cacheWriter: cacheWriter)
     }
 
-    private var pageLoader: PagedJellyfinItemsModel.Loader {
+    private var pageLoader: PagedMusicCatalogModel.Loader {
         { cursor in
             try await jellyfin.tracksPage(in: album, cursor: cursor)
         }
     }
 
-    private var cacheWriter: PagedJellyfinItemsModel.CacheWriter {
+    private var cacheWriter: PagedMusicCatalogModel.CacheWriter {
         { items in
             await jellyfin.cacheCatalogItems(
                 items,
@@ -401,7 +401,7 @@ struct JellyfinTracksView: View {
         }
     }
 
-    private func play(_ track: JellyfinItem) {
+    private func play(_ track: MusicCatalogItem) {
         preparingTrackID = track.id
         playbackErrorMessage = nil
         Task {
@@ -412,7 +412,7 @@ struct JellyfinTracksView: View {
                     queueItems: model.items.map {
                         JellyfinPlaybackAdapter.playbackItem(for: $0)
                     },
-                    context: .album(id: album.id),
+                    context: .album(id: album.id.opaqueID),
                     account: jellyfin.playbackAccount,
                     queueExpansion: {
                         await model.loadNextPage(
@@ -445,14 +445,14 @@ struct JellyfinTracksView: View {
                     playback.play(
                         request,
                         queueItems: tracks.map(JellyfinPlaybackAdapter.playbackItem(for:)),
-                        context: .album(id: album.id),
+                        context: .album(id: album.id.opaqueID),
                         account: jellyfin.playbackAccount
                     )
                 } else {
                     playback.play(
                         request,
                         queueItems: tracks.map(JellyfinPlaybackAdapter.playbackItem(for:)),
-                        context: .album(id: album.id),
+                        context: .album(id: album.id.opaqueID),
                         account: jellyfin.playbackAccount,
                         queueExpansion: {
                             await model.loadNextPage(

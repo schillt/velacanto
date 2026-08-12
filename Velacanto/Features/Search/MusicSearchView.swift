@@ -8,27 +8,27 @@ struct MusicSearchView: View {
     let showProfile: () -> Void
     let showNowPlaying: () -> Void
 
-    @StateObject private var model = PagedJellyfinItemsModel()
-    @State private var preparingTrackID: String?
+    @StateObject private var model = PagedMusicCatalogModel()
+    @State private var preparingTrackID: MusicCatalogItemID?
     @State private var playbackErrorMessage: String?
 
     private var query: String {
         searchText.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private var albums: [JellyfinItem] {
+    private var albums: [MusicCatalogItem] {
         model.items.filter { $0.kind == .album }
     }
 
-    private var artists: [JellyfinItem] {
+    private var artists: [MusicCatalogItem] {
         model.items.filter { $0.kind == .artist }
     }
 
-    private var songs: [JellyfinItem] {
+    private var songs: [MusicCatalogItem] {
         model.items.filter { $0.kind == .song }
     }
 
-    private var playlists: [JellyfinItem] {
+    private var playlists: [MusicCatalogItem] {
         model.items.filter { $0.kind == .playlist }
     }
 
@@ -199,7 +199,7 @@ struct MusicSearchView: View {
         guard jellyfin.isSignedIn, query.count >= 2 else {
             await model.reset(
                 loader: { _ in
-                    JellyfinCatalogPage(
+                    MusicCatalogPage(
                         items: [],
                         totalRecordCount: 0,
                         cursor: nil
@@ -215,7 +215,7 @@ struct MusicSearchView: View {
         )
     }
 
-    private func loadMoreIfNeeded(_ itemID: String) {
+    private func loadMoreIfNeeded(_ itemID: MusicCatalogItemID) {
         model.loadMoreIfNeeded(itemID: itemID, loader: pageLoader)
     }
 
@@ -223,7 +223,7 @@ struct MusicSearchView: View {
         await model.retry(loader: pageLoader)
     }
 
-    private var pageLoader: PagedJellyfinItemsModel.Loader {
+    private var pageLoader: PagedMusicCatalogModel.Loader {
         { cursor in
             try await jellyfin.searchMusicPage(
                 query: query,
@@ -232,7 +232,7 @@ struct MusicSearchView: View {
         }
     }
 
-    private func play(_ song: JellyfinItem) {
+    private func play(_ song: MusicCatalogItem) {
         preparingTrackID = song.id
         playbackErrorMessage = nil
 
@@ -264,7 +264,7 @@ struct MusicSearchView: View {
 }
 
 private struct SearchResultRow: View {
-    let item: JellyfinItem
+    let item: MusicCatalogItem
     @ObservedObject var jellyfin: JellyfinSessionController
     var isPreparing = false
 
@@ -314,8 +314,6 @@ private struct SearchResultRow: View {
                 return "\(childCount) \(childCount == 1 ? "song" : "songs")"
             }
             return "Playlist"
-        case nil:
-            return "Music"
         }
     }
 }

@@ -4,7 +4,7 @@ struct MusicArtistsView: View {
     @ObservedObject var jellyfin: JellyfinSessionController
     @ObservedObject var playback: AudioPlaybackCoordinator
 
-    @StateObject private var model = PagedJellyfinItemsModel()
+    @StateObject private var model = PagedMusicCatalogModel()
     @State private var searchText = ""
 
     private var query: String {
@@ -103,7 +103,7 @@ struct MusicArtistsView: View {
         )
     }
 
-    private func loadMoreIfNeeded(_ itemID: String) {
+    private func loadMoreIfNeeded(_ itemID: MusicCatalogItemID) {
         model.loadMoreIfNeeded(
             itemID: itemID,
             loader: pageLoader,
@@ -118,7 +118,7 @@ struct MusicArtistsView: View {
         )
     }
 
-    private var pageLoader: PagedJellyfinItemsModel.Loader {
+    private var pageLoader: PagedMusicCatalogModel.Loader {
         { cursor in
             try await jellyfin.musicArtistsPage(
                 cursor: cursor,
@@ -127,7 +127,7 @@ struct MusicArtistsView: View {
         }
     }
 
-    private var cacheWriter: PagedJellyfinItemsModel.CacheWriter {
+    private var cacheWriter: PagedMusicCatalogModel.CacheWriter {
         { items in
             await jellyfin.cacheCatalogItems(items, kind: .artists)
         }
@@ -135,11 +135,11 @@ struct MusicArtistsView: View {
 }
 
 struct MusicArtistView: View {
-    let artist: JellyfinItem
+    let artist: MusicCatalogItem
     @ObservedObject var jellyfin: JellyfinSessionController
     @ObservedObject var playback: AudioPlaybackCoordinator
 
-    @StateObject private var model = PagedJellyfinItemsModel()
+    @StateObject private var model = PagedMusicCatalogModel()
     @State private var isPreparingQueue = false
     @State private var playbackErrorMessage: String?
 
@@ -268,7 +268,7 @@ struct MusicArtistView: View {
         )
     }
 
-    private func loadMoreIfNeeded(_ itemID: String) {
+    private func loadMoreIfNeeded(_ itemID: MusicCatalogItemID) {
         model.loadMoreIfNeeded(
             itemID: itemID,
             loader: pageLoader,
@@ -280,7 +280,7 @@ struct MusicArtistView: View {
         await model.retry(loader: pageLoader, cacheWriter: cacheWriter)
     }
 
-    private var pageLoader: PagedJellyfinItemsModel.Loader {
+    private var pageLoader: PagedMusicCatalogModel.Loader {
         { cursor in
             try await jellyfin.musicAlbumsPage(
                 cursor: cursor,
@@ -289,7 +289,7 @@ struct MusicArtistView: View {
         }
     }
 
-    private var cacheWriter: PagedJellyfinItemsModel.CacheWriter {
+    private var cacheWriter: PagedMusicCatalogModel.CacheWriter {
         { items in
             await jellyfin.cacheCatalogItems(
                 items,
@@ -315,7 +315,7 @@ struct MusicArtistView: View {
                 playback.play(
                     request,
                     queueItems: queue.map(JellyfinPlaybackAdapter.playbackItem(for:)),
-                    context: .artist(id: artist.id),
+                    context: .artist(id: artist.id.opaqueID),
                     account: jellyfin.playbackAccount
                 )
             } catch {
@@ -325,9 +325,9 @@ struct MusicArtistView: View {
         }
     }
 
-    private func artistTracks() async throws -> [JellyfinItem] {
-        var tracks: [JellyfinItem] = []
-        var cursor: JellyfinCatalogCursor?
+    private func artistTracks() async throws -> [MusicCatalogItem] {
+        var tracks: [MusicCatalogItem] = []
+        var cursor: MusicCatalogCursor?
 
         repeat {
             let page = try await jellyfin.musicSongsPage(
@@ -339,7 +339,7 @@ struct MusicArtistView: View {
             cursor = page.cursor
         } while cursor != nil
 
-        var seen = Set<String>()
+        var seen = Set<MusicCatalogItemID>()
         return tracks.filter { seen.insert($0.id).inserted }
     }
 }

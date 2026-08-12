@@ -13,13 +13,14 @@ struct JellyfinPlaybackRequestResolver: Sendable {
         self.userID = userID
     }
 
-    func playbackRequest(for track: JellyfinItem) async throws -> PlaybackRequest {
-        let resolution = try await api.playbackResolution(itemID: track.id, userID: userID)
+    func playbackRequest(for track: MusicCatalogItem) async throws -> PlaybackRequest {
+        let itemID = track.id.opaqueID
+        let resolution = try await api.playbackResolution(itemID: itemID, userID: userID)
         return try await adapter.playbackRequest(
             for: JellyfinTrackSelection(
                 track: track,
                 streamURL: resolution.streamURL,
-                reporter: reporter(itemID: track.id, resolution: resolution)
+                reporter: reporter(itemID: itemID, resolution: resolution)
             ))
     }
 

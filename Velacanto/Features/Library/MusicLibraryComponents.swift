@@ -35,7 +35,7 @@ struct MusicQueuePlaybackControls: View {
 }
 
 struct MusicSongRow: View {
-    let song: JellyfinItem
+    let song: MusicCatalogItem
     var leadingNumber: Int?
     @ObservedObject var jellyfin: JellyfinSessionController
     @ObservedObject var playback: AudioPlaybackCoordinator
@@ -73,7 +73,7 @@ struct MusicSongRow: View {
             if isPreparing {
                 ProgressView()
                     .controlSize(.small)
-            } else if playback.currentItem?.id == song.id {
+            } else if playback.currentItem?.id == song.id.opaqueID {
                 Image(
                     systemName: playback.showsPauseControl
                         ? "speaker.wave.2.fill"

@@ -479,7 +479,7 @@ struct VelacantoRootView: View {
         @ObservedObject var jellyfin: JellyfinSessionController
         @Binding var selection: MacDestination
 
-        @StateObject private var model = PagedJellyfinItemsModel()
+        @StateObject private var model = PagedMusicCatalogModel()
         @State private var isExpanded = true
 
         var body: some View {
@@ -518,7 +518,7 @@ struct VelacantoRootView: View {
             )
         }
 
-        private func loadMoreIfNeeded(_ itemID: String) {
+        private func loadMoreIfNeeded(_ itemID: MusicCatalogItemID) {
             model.loadMoreIfNeeded(
                 itemID: itemID,
                 loader: pageLoader,
@@ -526,13 +526,13 @@ struct VelacantoRootView: View {
             )
         }
 
-        private var pageLoader: PagedJellyfinItemsModel.Loader {
+        private var pageLoader: PagedMusicCatalogModel.Loader {
             { cursor in
                 try await jellyfin.musicPlaylistsPage(cursor: cursor)
             }
         }
 
-        private var cacheWriter: PagedJellyfinItemsModel.CacheWriter {
+        private var cacheWriter: PagedMusicCatalogModel.CacheWriter {
             { items in
                 await jellyfin.cacheCatalogItems(items, kind: .playlists)
             }

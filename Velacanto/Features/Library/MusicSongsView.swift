@@ -4,8 +4,8 @@ struct MusicSongsView: View {
     @ObservedObject var jellyfin: JellyfinSessionController
     @ObservedObject var playback: AudioPlaybackCoordinator
 
-    @StateObject private var model = PagedJellyfinItemsModel()
-    @State private var preparingTrackID: String?
+    @StateObject private var model = PagedMusicCatalogModel()
+    @State private var preparingTrackID: MusicCatalogItemID?
     @State private var playbackErrorMessage: String?
     @State private var searchText = ""
 
@@ -104,7 +104,7 @@ struct MusicSongsView: View {
         )
     }
 
-    private func loadMoreIfNeeded(_ itemID: String) {
+    private func loadMoreIfNeeded(_ itemID: MusicCatalogItemID) {
         model.loadMoreIfNeeded(
             itemID: itemID,
             loader: pageLoader,
@@ -119,7 +119,7 @@ struct MusicSongsView: View {
         )
     }
 
-    private var pageLoader: PagedJellyfinItemsModel.Loader {
+    private var pageLoader: PagedMusicCatalogModel.Loader {
         { cursor in
             try await jellyfin.musicSongsPage(
                 cursor: cursor,
@@ -128,13 +128,13 @@ struct MusicSongsView: View {
         }
     }
 
-    private var cacheWriter: PagedJellyfinItemsModel.CacheWriter {
+    private var cacheWriter: PagedMusicCatalogModel.CacheWriter {
         { items in
             await jellyfin.cacheCatalogItems(items, kind: .songs)
         }
     }
 
-    private func play(_ song: JellyfinItem) {
+    private func play(_ song: MusicCatalogItem) {
         preparingTrackID = song.id
         playbackErrorMessage = nil
         Task {

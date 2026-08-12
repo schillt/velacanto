@@ -1,12 +1,12 @@
 import Foundation
 
 struct JellyfinTrackSelection: Sendable {
-    let track: JellyfinItem
+    let track: MusicCatalogItem
     let streamURL: URL
     let reporter: (any PlaybackLifecycleReporting)?
 
     init(
-        track: JellyfinItem,
+        track: MusicCatalogItem,
         streamURL: URL,
         reporter: (any PlaybackLifecycleReporting)? = nil
     ) {
@@ -19,9 +19,9 @@ struct JellyfinTrackSelection: Sendable {
 struct JellyfinPlaybackAdapter: PlaybackSourceAdapter {
     let source = MusicSourceID.jellyfin
 
-    static func playbackItem(for track: JellyfinItem) -> PlaybackItem {
+    static func playbackItem(for track: MusicCatalogItem) -> PlaybackItem {
         PlaybackItem(
-            id: track.id,
+            id: track.id.opaqueID,
             title: track.name,
             artist: track.displayArtist,
             albumTitle: track.album,

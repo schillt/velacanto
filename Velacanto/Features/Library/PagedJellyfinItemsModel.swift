@@ -16,19 +16,19 @@ import SwiftUI
 /// changes and leaves no error state. See `docs/architecture.md` for the
 /// catalog snapshot and paging boundary.
 @MainActor
-final class PagedJellyfinItemsModel: ObservableObject {
-    typealias Loader = (JellyfinCatalogCursor?) async throws -> JellyfinCatalogPage
-    typealias CacheLoader = () async -> [JellyfinItem]
-    typealias CacheWriter = ([JellyfinItem]) async -> Void
+final class PagedMusicCatalogModel: ObservableObject {
+    typealias Loader = (MusicCatalogCursor?) async throws -> MusicCatalogPage
+    typealias CacheLoader = () async -> [MusicCatalogItem]
+    typealias CacheWriter = ([MusicCatalogItem]) async -> Void
 
-    @Published private(set) var items: [JellyfinItem] = []
+    @Published private(set) var items: [MusicCatalogItem] = []
     @Published private(set) var isInitialLoading = true
     @Published private(set) var isLoadingMore = false
     @Published private(set) var hasMore = true
     @Published private(set) var totalRecordCount = 0
     @Published private(set) var errorMessage: String?
 
-    private var cursor: JellyfinCatalogCursor?
+    private var cursor: MusicCatalogCursor?
     private var generation = UUID()
     private var paginationTask: Task<Void, Never>?
     private var paginationTaskID: UUID?
@@ -77,7 +77,7 @@ final class PagedJellyfinItemsModel: ObservableObject {
 
     @discardableResult
     func loadMoreIfNeeded(
-        itemID: String,
+        itemID: MusicCatalogItemID,
         loader: @escaping Loader,
         cacheWriter: CacheWriter? = nil
     ) -> Task<Void, Never>? {
@@ -216,12 +216,35 @@ final class PagedJellyfinItemsModel: ObservableObject {
     }
 
     private func mergedInitialPage(
-        _ refreshedItems: [JellyfinItem],
-        with cachedItems: [JellyfinItem]
-    ) -> [JellyfinItem] {
-        var seen = Set<String>()
+        _ refreshedItems: [MusicCatalogItem],
+        with cachedItems: [MusicCatalogItem]
+    ) -> [MusicCatalogItem] {
+        var seen = Set<MusicCatalogItemID>()
         return (refreshedItems + cachedItems).filter {
             seen.insert($0.id).inserted
         }
+    }
+}
+
+@MainActor
+final class AlbumGridPositionState: ObservableObject {
+    @Published private(set) var anchor: MusicCatalogItemID?
+    private(set) var identity: String?
+
+    func begin(identity newIdentity: String, forceReset: Bool = false) -> Bool {
+        guard forceReset || identity != newIdentity else { return false }
+        identity = newIdentity
+        anchor = nil
+        return true
+    }
+
+    func record(_ visibleAnchor: MusicCatalogItemID?, identity: String) {
+        guard self.identity == identity else { return }
+        anchor = visibleAnchor
+    }
+
+    func restorationAnchor(in items: [MusicCatalogItem]) -> MusicCatalogItemID? {
+        guard let anchor, items.contains(where: { $0.id == anchor }) else { return nil }
+        return anchor
     }
 }

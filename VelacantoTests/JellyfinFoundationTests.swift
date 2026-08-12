@@ -572,7 +572,7 @@ final class JellyfinFoundationTests: XCTestCase {
             }
             """.utf8
         )
-        let track = try JSONDecoder().decode(JellyfinItem.self, from: data)
+        let track = try catalogItem(from: data)
         let streamURL = try XCTUnwrap(
             URL(string: "https://example.com/Audio/track-id/universal")
         )
@@ -633,7 +633,7 @@ final class JellyfinFoundationTests: XCTestCase {
         let albums = try await controller.musicAlbumsPage(cursor: nil).items
 
         XCTAssertEqual(
-            albums.map(\.id),
+            albums.map(\.id.opaqueID),
             ["album-a", "album-shared"]
         )
     }
@@ -757,7 +757,7 @@ final class JellyfinFoundationTests: XCTestCase {
 
         let page = try await controller.musicAlbumsPage(cursor: nil, limit: 2)
 
-        XCTAssertEqual(page.items.map(\.id), ["alpha", "zebra"])
+        XCTAssertEqual(page.items.map(\.id.opaqueID), ["alpha", "zebra"])
     }
 
     func testCatalogPageAdvancesByRawItemsConsumedWhenFilteringAPlaylist() throws {
@@ -806,8 +806,8 @@ final class JellyfinFoundationTests: XCTestCase {
         )
         await controller.connect(to: "https://example.com")
         await controller.signIn(username: "Tyler", password: "correct")
-        let model = PagedJellyfinItemsModel()
-        let loader: PagedJellyfinItemsModel.Loader = { cursor in
+        let model = PagedMusicCatalogModel()
+        let loader: PagedMusicCatalogModel.Loader = { cursor in
             try await controller.musicAlbumsPage(cursor: cursor)
         }
 
@@ -833,22 +833,21 @@ final class JellyfinFoundationTests: XCTestCase {
     }
 
     func testCachedCatalogSnapshotDoesNotShrinkWhenInitialPageRefreshes() async throws {
-        let decoder = JSONDecoder()
         let cachedAlbums = try (0..<60).map { index in
-            try decoder.decode(
-                JellyfinItem.self,
+            try catalogItem(
                 from: Data(
-                    #"{"Id":"album-\#(index)","Name":"Album \#(index)","Type":"MusicAlbum"}"#.utf8
+                    #"{"Id":"album-\#(index)","Name":"Album \#(index)","Type":"MusicAlbum"}"#
+                        .utf8
                 )
             )
         }
         let refreshedFirstPage = Array(cachedAlbums.prefix(50))
-        let model = PagedJellyfinItemsModel()
+        let model = PagedMusicCatalogModel()
 
         await model.reset(
             cachedItems: { cachedAlbums },
             loader: { _ in
-                JellyfinCatalogPage(
+                MusicCatalogPage(
                     items: refreshedFirstPage,
                     totalRecordCount: cachedAlbums.count,
                     cursor: nil
@@ -867,12 +866,13 @@ final class JellyfinFoundationTests: XCTestCase {
             autoRestore: false,
             makeClient: { _, _, _ in api }
         )
-        let contextID = UUID().uuidString
-        let item = try JSONDecoder().decode(
-            JellyfinItem.self,
-            from: Data(
-                #"{"Id":"cached-item","Name":"Cached","Type":"Audio"}"#.utf8
-            )
+        let contextID = MusicCatalogItemID(
+            source: .jellyfin,
+            accountScope: "server-id|user-id",
+            opaqueID: UUID().uuidString
+        )
+        let item = try catalogItem(
+            from: Data(#"{"Id":"cached-item","Name":"Cached","Type":"Audio"}"#.utf8)
         )
         await controller.connect(to: "https://example.com")
         await controller.signIn(username: "Tyler", password: "correct")
@@ -1244,8 +1244,7 @@ final class JellyfinFoundationTests: XCTestCase {
             directoryHint: .isDirectory
         )
         defer { try? FileManager.default.removeItem(at: directory) }
-        let item = try JSONDecoder().decode(
-            JellyfinItem.self,
+        let item = try catalogItem(
             from: Data(#"{"Id":"cached-item","Name":"Cached","Type":"Audio"}"#.utf8)
         )
         let savedAt = Date(timeIntervalSinceReferenceDate: 0)
@@ -1272,11 +1271,8 @@ final class JellyfinFoundationTests: XCTestCase {
     }
 
     func testPlaybackResolverDoesNotRequireCatalogState() async throws {
-        let track = try JSONDecoder().decode(
-            JellyfinItem.self,
-            from: Data(
-                #"{"Id":"track-id","Name":"Night Drive","Type":"Audio"}"#.utf8
-            )
+        let track = try catalogItem(
+            from: Data(#"{"Id":"track-id","Name":"Night Drive","Type":"Audio"}"#.utf8)
         )
 
         let request = try await JellyfinPlaybackRequestResolver(
@@ -1284,9 +1280,133 @@ final class JellyfinFoundationTests: XCTestCase {
             userID: "user-id"
         ).playbackRequest(for: track)
 
-        XCTAssertEqual(request.item.id, track.id)
+        XCTAssertEqual(request.item.id, track.id.opaqueID)
         XCTAssertEqual(request.item.source, .jellyfin)
         XCTAssertNotNil(request.reporter)
+    }
+
+    func testJellyfinCatalogMappingProducesScopedNeutralMetadataAndCapabilities() throws {
+        let data = Data(
+            #"{"Id":"track-id","Name":"Night Drive","Type":"Audio","AlbumArtist":"Velacanto","Artists":["Velacanto"],"Album":"Open Roads","IndexNumber":2,"ParentIndexNumber":1,"RunTimeTicks":1800000000,"AlbumId":"album-id","AlbumPrimaryImageTag":"art-tag","UserData":{"IsFavorite":true}}"#
+                .utf8
+        )
+        let transport = try JSONDecoder().decode(JellyfinItem.self, from: data)
+        let item = try XCTUnwrap(
+            JellyfinCatalogMapper(accountScope: "server-a|user-a").map(transport)
+        )
+        let otherAccountItem = try XCTUnwrap(
+            JellyfinCatalogMapper(accountScope: "server-a|user-b").map(transport)
+        )
+
+        XCTAssertEqual(item.id.opaqueID, "track-id")
+        XCTAssertEqual(item.id.source, .jellyfin)
+        XCTAssertNotEqual(item.id, otherAccountItem.id)
+        XCTAssertEqual(item.kind, .song)
+        XCTAssertEqual(item.displayArtist, "Velacanto")
+        XCTAssertEqual(item.album, "Open Roads")
+        XCTAssertEqual(item.trackNumber, 2)
+        XCTAssertEqual(item.discNumber, 1)
+        XCTAssertEqual(item.duration, 180)
+        XCTAssertEqual(item.artwork?.opaqueItemID, "album-id")
+        XCTAssertEqual(item.artwork?.imageTag, "art-tag")
+        XCTAssertTrue(item.isFavorite)
+        XCTAssertTrue(item.capabilities.contains(.play))
+        XCTAssertTrue(item.capabilities.contains(.favorite))
+        XCTAssertTrue(item.capabilities.contains(.playNext))
+        XCTAssertTrue(item.capabilities.contains(.playLast))
+        XCTAssertFalse(item.capabilities.contains(.navigate))
+        XCTAssertFalse(item.capabilities.contains(.shuffle))
+    }
+
+    func testJellyfinCatalogCapabilitiesDoNotClaimUnsupportedItemActions() throws {
+        let mapper = JellyfinCatalogMapper(accountScope: "server|user")
+        let album = try catalogItem(
+            from: Data(#"{"Id":"album","Name":"Album","Type":"MusicAlbum"}"#.utf8)
+        )
+        let unsupportedTransport = try JSONDecoder().decode(
+            JellyfinItem.self,
+            from: Data(#"{"Id":"folder","Name":"Folder","Type":"Folder"}"#.utf8)
+        )
+
+        XCTAssertTrue(album.capabilities.contains(.navigate))
+        XCTAssertTrue(album.capabilities.contains(.play))
+        XCTAssertTrue(album.capabilities.contains(.shuffle))
+        XCTAssertTrue(album.capabilities.contains(.favorite))
+        XCTAssertFalse(album.capabilities.contains(.playNext))
+        XCTAssertFalse(album.capabilities.contains(.playLast))
+        XCTAssertNil(mapper.map(unsupportedTransport))
+    }
+
+    func testCatalogCursorCannotCrossAccountScopes() async throws {
+        let decoder = JSONDecoder()
+        let albums = try ["Alpha", "Bravo"].enumerated().map { index, name in
+            try decoder.decode(
+                JellyfinItem.self,
+                from: Data(
+                    #"{"Id":"album-\#(index)","Name":"\#(name)","Type":"MusicAlbum"}"#.utf8
+                )
+            )
+        }
+        let api = FakeJellyfinAPI(albumsByLibrary: ["library": albums])
+        let firstAccount = JellyfinCatalogRepository(
+            api: api,
+            userID: "user-a",
+            accountScope: "server|user-a",
+            libraryIDs: ["library"]
+        )
+        let secondAccount = JellyfinCatalogRepository(
+            api: api,
+            userID: "user-b",
+            accountScope: "server|user-b",
+            libraryIDs: ["library"]
+        )
+
+        let firstPage = try await firstAccount.page(
+            kind: .albums,
+            cursor: nil,
+            limit: 1
+        )
+        let secondAccountPage = try await secondAccount.page(
+            kind: .albums,
+            cursor: firstPage.cursor,
+            limit: 1
+        )
+
+        XCTAssertEqual(secondAccountPage.items.map(\.name), ["Alpha"])
+        XCTAssertEqual(secondAccountPage.items.first?.id.accountScope, "server|user-b")
+    }
+
+    func testAlbumGridPositionRetainsAnchorUntilRefreshOrQueryChange() throws {
+        let state = AlbumGridPositionState()
+        let anchor = try catalogItem(
+            from: Data(#"{"Id":"anchor","Name":"Anchor","Type":"MusicAlbum"}"#.utf8)
+        )
+
+        XCTAssertTrue(state.begin(identity: "account|albums"))
+        state.record(anchor.id, identity: "account|albums")
+        XCTAssertFalse(state.begin(identity: "account|albums"))
+        XCTAssertEqual(state.anchor, anchor.id)
+
+        XCTAssertNil(state.restorationAnchor(in: []))
+        XCTAssertEqual(state.anchor, anchor.id)
+        XCTAssertEqual(state.restorationAnchor(in: [anchor]), anchor.id)
+
+        state.record(nil, identity: "stale-account|albums")
+        XCTAssertEqual(state.anchor, anchor.id)
+
+        XCTAssertTrue(state.begin(identity: "account|albums", forceReset: true))
+        XCTAssertNil(state.anchor)
+        state.record(anchor.id, identity: "account|albums")
+        XCTAssertTrue(state.begin(identity: "account|new-query"))
+        XCTAssertNil(state.anchor)
+    }
+
+    private func catalogItem(
+        from data: Data,
+        accountScope: String = "server-id|user-id"
+    ) throws -> MusicCatalogItem {
+        let transport = try JSONDecoder().decode(JellyfinItem.self, from: data)
+        return try XCTUnwrap(JellyfinCatalogMapper(accountScope: accountScope).map(transport))
     }
 }
 

@@ -34,7 +34,7 @@ enum AppDestination: String, Hashable, Identifiable, CaseIterable {
     enum MacDestination: Hashable {
         case home
         case library(MusicLibraryCategory)
-        case playlist(JellyfinItem)
+        case playlist(MusicCatalogItem)
 
         static func == (lhs: Self, rhs: Self) -> Bool {
             switch (lhs, rhs) {

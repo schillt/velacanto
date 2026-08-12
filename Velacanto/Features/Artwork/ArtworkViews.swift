@@ -2,7 +2,7 @@ import SwiftUI
 import os
 
 struct JellyfinArtworkView: View {
-    let item: JellyfinItem
+    let item: MusicCatalogItem
     @ObservedObject var jellyfin: JellyfinSessionController
     var cornerRadius: CGFloat = 12
     var maxWidth = 640

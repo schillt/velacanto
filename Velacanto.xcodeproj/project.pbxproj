@@ -39,6 +39,7 @@
 		000000000000000000000233 /* Features/Library/MusicSongsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000136 /* Features/Library/MusicSongsView.swift */; };
 		000000000000000000000234 /* Features/Library/MusicPlaylistsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000137 /* Features/Library/MusicPlaylistsView.swift */; };
 		000000000000000000000235 /* Features/Library/MusicLibraryComponents.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000138 /* Features/Library/MusicLibraryComponents.swift */; };
+		000000000000000000000236 /* Core/Catalog/MusicCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000139 /* Core/Catalog/MusicCatalog.swift */; };
 		000000000000000000000221 /* Resources/AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000124 /* Resources/AppIcon.icon */; };
 /* End PBXBuildFile section */
 
@@ -89,6 +90,7 @@
 		000000000000000000000136 /* Features/Library/MusicSongsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Library/MusicSongsView.swift; sourceTree = "<group>"; };
 		000000000000000000000137 /* Features/Library/MusicPlaylistsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Library/MusicPlaylistsView.swift; sourceTree = "<group>"; };
 		000000000000000000000138 /* Features/Library/MusicLibraryComponents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Library/MusicLibraryComponents.swift; sourceTree = "<group>"; };
+		000000000000000000000139 /* Core/Catalog/MusicCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Core/Catalog/MusicCatalog.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -156,6 +158,7 @@
 				000000000000000000000116 /* Core/Session/JellyfinSessionController.swift */,
 				000000000000000000000127 /* Core/Session/JellyfinSessionPersistence.swift */,
 				000000000000000000000125 /* Core/Catalog/JellyfinCatalogRepository.swift */,
+				000000000000000000000139 /* Core/Catalog/MusicCatalog.swift */,
 				000000000000000000000117 /* Features/Jellyfin/JellyfinAccessView.swift */,
 				000000000000000000000118 /* Sources/Jellyfin/JellyfinPlaybackAdapter.swift */,
 				000000000000000000000126 /* Sources/Jellyfin/JellyfinPlaybackRequestResolver.swift */,
@@ -302,6 +305,7 @@
 				000000000000000000000219 /* Features/Profile/ProfileView.swift in Sources */,
 				000000000000000000000220 /* Features/Search/MusicSearchView.swift in Sources */,
 				000000000000000000000222 /* Core/Catalog/JellyfinCatalogRepository.swift in Sources */,
+				000000000000000000000236 /* Core/Catalog/MusicCatalog.swift in Sources */,
 				000000000000000000000223 /* Sources/Jellyfin/JellyfinPlaybackRequestResolver.swift in Sources */,
 				000000000000000000000224 /* Core/Session/JellyfinSessionPersistence.swift in Sources */,
 				000000000000000000000225 /* App/AppNavigation.swift in Sources */,

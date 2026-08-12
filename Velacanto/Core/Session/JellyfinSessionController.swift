@@ -208,11 +208,11 @@ final class JellyfinSessionController: ObservableObject {
     // MARK: - Catalog façade
 
     func musicAlbumsPage(
-        cursor: JellyfinCatalogCursor?,
+        cursor: MusicCatalogCursor?,
         limit: Int = 50,
         searchTerm: String? = nil,
-        artist: JellyfinItem? = nil
-    ) async throws -> JellyfinCatalogPage {
+        artist: MusicCatalogItem? = nil
+    ) async throws -> MusicCatalogPage {
         try await catalogPage(
             kind: .albums, contextID: artist?.id, cursor: cursor,
             limit: limit, searchTerm: searchTerm
@@ -220,10 +220,10 @@ final class JellyfinSessionController: ObservableObject {
     }
 
     func musicArtistsPage(
-        cursor: JellyfinCatalogCursor?,
+        cursor: MusicCatalogCursor?,
         limit: Int = 50,
         searchTerm: String? = nil
-    ) async throws -> JellyfinCatalogPage {
+    ) async throws -> MusicCatalogPage {
         try await catalogPage(
             kind: .artists, cursor: cursor, limit: limit,
             searchTerm: searchTerm
@@ -231,11 +231,11 @@ final class JellyfinSessionController: ObservableObject {
     }
 
     func musicSongsPage(
-        cursor: JellyfinCatalogCursor?,
+        cursor: MusicCatalogCursor?,
         limit: Int = 50,
         searchTerm: String? = nil,
-        artist: JellyfinItem? = nil
-    ) async throws -> JellyfinCatalogPage {
+        artist: MusicCatalogItem? = nil
+    ) async throws -> MusicCatalogPage {
         try await catalogPage(
             kind: artist == nil ? .songs : .artistTracks,
             contextID: artist?.id,
@@ -245,10 +245,10 @@ final class JellyfinSessionController: ObservableObject {
     }
 
     func musicPlaylistsPage(
-        cursor: JellyfinCatalogCursor?,
+        cursor: MusicCatalogCursor?,
         limit: Int = 50,
         searchTerm: String? = nil
-    ) async throws -> JellyfinCatalogPage {
+    ) async throws -> MusicCatalogPage {
         try await catalogPage(
             kind: .playlists, cursor: cursor, limit: limit,
             searchTerm: searchTerm
@@ -257,28 +257,28 @@ final class JellyfinSessionController: ObservableObject {
 
     func searchMusicPage(
         query: String,
-        cursor: JellyfinCatalogCursor?,
+        cursor: MusicCatalogCursor?,
         limit: Int = 50
-    ) async throws -> JellyfinCatalogPage {
+    ) async throws -> MusicCatalogPage {
         let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedQuery.isEmpty else {
-            return JellyfinCatalogPage(
+            return MusicCatalogPage(
                 items: [],
                 totalRecordCount: 0,
                 cursor: nil
             )
         }
         return try await catalogPage(
-            kind: .search, contextID: trimmedQuery, cursor: cursor,
+            kind: .search, cursor: cursor,
             limit: limit, searchTerm: trimmedQuery
         )
     }
 
     func tracksPage(
-        in album: JellyfinItem,
-        cursor: JellyfinCatalogCursor?,
+        in album: MusicCatalogItem,
+        cursor: MusicCatalogCursor?,
         limit: Int = 50
-    ) async throws -> JellyfinCatalogPage {
+    ) async throws -> MusicCatalogPage {
         try await catalogPage(
             kind: .albumTracks, contextID: album.id, cursor: cursor,
             limit: limit
@@ -286,10 +286,10 @@ final class JellyfinSessionController: ObservableObject {
     }
 
     func tracksPage(
-        inPlaylist playlist: JellyfinItem,
-        cursor: JellyfinCatalogCursor?,
+        inPlaylist playlist: MusicCatalogItem,
+        cursor: MusicCatalogCursor?,
         limit: Int = 50
-    ) async throws -> JellyfinCatalogPage {
+    ) async throws -> MusicCatalogPage {
         try await catalogPage(
             kind: .playlistTracks, contextID: playlist.id, cursor: cursor,
             limit: limit
@@ -297,9 +297,9 @@ final class JellyfinSessionController: ObservableObject {
     }
 
     func cachedCatalogItems(
-        kind: JellyfinCatalogKind,
-        contextID: String? = nil
-    ) async -> [JellyfinItem] {
+        kind: MusicCatalogKind,
+        contextID: MusicCatalogItemID? = nil
+    ) async -> [MusicCatalogItem] {
         guard kind != .search, let session else { return [] }
         let items = await catalogCache.load(
             serverID: session.serverID,
@@ -310,9 +310,9 @@ final class JellyfinSessionController: ObservableObject {
     }
 
     func cacheCatalogItems(
-        _ items: [JellyfinItem],
-        kind: JellyfinCatalogKind,
-        contextID: String? = nil
+        _ items: [MusicCatalogItem],
+        kind: MusicCatalogKind,
+        contextID: MusicCatalogItemID? = nil
     ) async {
         guard kind != .search, let session else { return }
         await catalogCache.save(
@@ -327,7 +327,7 @@ final class JellyfinSessionController: ObservableObject {
 
     // MARK: - Playback façade
 
-    func playbackRequest(for track: JellyfinItem) async throws -> PlaybackRequest {
+    func playbackRequest(for track: MusicCatalogItem) async throws -> PlaybackRequest {
         do {
             return try await playbackResolver().playbackRequest(for: track)
         } catch {
@@ -434,17 +434,18 @@ final class JellyfinSessionController: ObservableObject {
         return JellyfinCatalogRepository(
             api: client,
             userID: session.userID,
+            accountScope: "\(session.serverID)|\(session.userID)",
             libraryIDs: libraries.map(\.id)
         )
     }
 
     private func catalogPage(
-        kind: JellyfinCatalogKind,
-        contextID: String? = nil,
-        cursor: JellyfinCatalogCursor?,
+        kind: MusicCatalogKind,
+        contextID: MusicCatalogItemID? = nil,
+        cursor: MusicCatalogCursor?,
         limit: Int,
         searchTerm: String? = nil
-    ) async throws -> JellyfinCatalogPage {
+    ) async throws -> MusicCatalogPage {
         do {
             return try await catalogRepository().page(
                 kind: kind,
@@ -467,10 +468,10 @@ final class JellyfinSessionController: ObservableObject {
     }
 
     private func catalogCacheKey(
-        kind: JellyfinCatalogKind,
-        contextID: String?
+        kind: MusicCatalogKind,
+        contextID: MusicCatalogItemID?
     ) -> String {
-        "\(kind.rawValue)|\(contextID ?? "root")"
+        "\(kind.rawValue)|\(contextID?.opaqueID ?? "root")"
     }
 
     private func restore() async {
