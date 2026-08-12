@@ -1,26 +1,27 @@
 # Velacanto known issues
 
-This list describes limitations that remain after the 0.1 performance and
-playback stabilization implementation. It is not a release-readiness statement.
+This list records current operational limitations. It is not a substitute for
+the [0.3 acceptance matrix](0.3-stability-acceptance.md).
 
+- The current checked-in project still targets iOS 18 and macOS 15. ADR 0007
+  raises the 0.3 product baseline to iOS/iPadOS 26 and macOS 26; implementation
+  work must update and validate the project settings.
+- General library presentation currently consumes `JellyfinItem`. Issue work
+  for 0.3 introduces a provider-neutral catalog/action boundary before the UI
+  and future CarPlay surface expand.
 - Universal audio streaming requests MP3 as the fallback transcode format.
-  Direct-play and transcode behavior still need compatibility testing across
-  common Jellyfin server versions and source codecs.
+  Direct-play and transcode behavior still need broader Jellyfin version and
+  codec coverage.
 - AVPlayer receives a playback URL containing the Jellyfin access token as an
-  API query parameter. Velacanto does not log that URL, but playback error
-  review must continue to treat URLs as sensitive.
-- A saved session remains available when launch-time validation fails because
-  the server is offline. An explicitly rejected or expired token is removed and
-  returns the user to sign-in.
-- Seven audio-session interruption, route-recovery, and system-command tests
-  fail in the iOS Simulator runtime suite even though the corresponding
-  physical-device acceptance scenarios pass. The hosted quality gate therefore
-  runs the platform-neutral tests on macOS and compiles the iOS app; the
-  simulator runtime suite remains an explicit local diagnostic.
-- Cached metadata and artwork are purgeable browsing accelerators, not offline
-  playback. Audio remains transiently buffered by AVFoundation.
-- The active queue keeps a bounded restoration window and expands Songs/Search
-  while the originating view model is alive. Relaunch restores the saved window,
-  not an unbounded server-side queue.
-- Sample-accurate gapless playback is not promised for transcoded Jellyfin
-  streams.
+  API query parameter. Velacanto does not log it, but errors and diagnostics
+  must continue treating playback URLs as sensitive.
+- A saved session remains available when launch validation fails because the
+  server is offline. An explicitly rejected token is removed.
+- Seven audio-session, route-recovery, and system-command tests fail only in the
+  iOS Simulator runtime suite; corresponding physical-device scenarios passed.
+- Metadata and artwork caches are account-isolated browsing accelerators, not
+  offline playback. The artwork cache is bounded to 64 MB; user-visible storage
+  management and offline policy remain 0.4 work.
+- The active queue restores a bounded window. Editable Up Next, shuffle, and
+  repeat are 0.3 work and must retain that bounded restoration policy.
+- Sample-accurate gapless playback is not promised for transcoded streams.

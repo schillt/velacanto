@@ -1,83 +1,123 @@
-# Foundational product design
+# Velacanto 0.3 native-player design
 
-This section records Velacanto's approved visual direction for iOS and macOS.
-It is a foundation for iteration, not a frozen production specification.
+## Intent
 
-## Current direction
+Velacanto should feel like a current Apple-platform music player while retaining
+its own identity and personal-library focus. Apple Music is a reference for
+information hierarchy and interaction vocabulary, not a visual asset source or
+a requirement to reproduce every feature.
 
-The July 29, 2026 concept combines:
+Use native SwiftUI and Apple-designed components wherever they express the
+intended behavior. Prefer system layout, typography, materials, controls,
+animation, focus, and accessibility behavior over custom replicas.
 
-- An artwork-led Home hierarchy with **Continue Listening**, **Recently
-  Played**, and direct access to personal music sources.
-- A light, system-native content canvas.
-- Restrained Liquid Glass for navigation, account, and playback chrome.
-- Working primary navigation for **Home**, **Library**, and **Search**. The
-  concept's **New** and **Radio** destinations remain future options rather than
-  empty production tabs.
-- Native iOS tab navigation with Search using the system search role.
-- A native macOS sidebar and toolbar rather than a stretched phone layout.
-- Account access from Home. Broader preferences belong in the iOS Settings app
-  where appropriate and in Velacanto's macOS Settings menu.
+## Navigation
 
-The direction is inspired by Apple Music's clarity and platform conventions,
-but Velacanto retains its own cyan accent and personal-library focus.
+### iPhone
 
-## Implementation planning
+- System `TabView` with Home, Library, and Search.
+- Search uses the semantic search-tab role.
+- Active playback uses the system tab-view bottom accessory.
+- Full Now Playing is presented from the accessory; Up Next is reachable from
+  Now Playing without adding another primary destination.
 
-[Native UI merge record](ui-merge-readiness.md) records the verified
-functional baseline, native interface contract, implementation result, and
-remaining validation for tying this design to the working app.
+### iPad
 
-## Interactive prototype
+- Use adaptive system tab/sidebar behavior rather than stretching the iPhone
+  tab layout.
+- Preserve useful content when the app enters compact multitasking widths.
+- Use system split presentation or an inspector for Up Next when space permits,
+  with a compact modal fallback.
 
-[Open the foundational UI prototype](foundational-ui.html).
+### Mac
 
-Serve the repository over HTTP so the prototype can load its local artwork:
+- Preserve `NavigationSplitView`, the always-available global library search,
+  and Profile in the sidebar footer.
+- Sidebar selection replaces the active detail context rather than changing
+  content behind a pushed detail.
+- Use a native inspector or equivalent secondary presentation for Up Next.
+- Do not recreate a fixed custom sidebar, tab bar, toolbar, or settings window.
 
-```sh
-python3 -m http.server 8000
-```
+## Screen contract
 
-Then open:
+### Home
 
-```text
-http://localhost:8000/docs/design/foundational-ui.html
-```
+Show only real data:
 
-The prototype includes:
+1. Continue Listening when a restorable current item exists.
+2. Recently Played from source-neutral local playback history.
+3. Favorites from the active library provider.
+4. Recently Added from the active library provider.
+5. Music source entry points.
 
-- iPhone and macOS layouts.
-- Home, New, Radio, Library, and Search navigation.
-- Playing and Nothing Playing states.
-- Album selection and play/pause behavior.
-- Account access.
-- The macOS Velacanto menu and Settings surface.
+Omit empty shelves when their absence is self-explanatory. When the entire page
+has no useful content, show one honest signed-out, empty, offline, or error state
+with a direct recovery action.
 
-## iOS reference
+### Library and Search
 
-![Velacanto foundational iOS Home design](assets/foundational-ios.jpg)
+- Retain Albums, Artists, Songs, and Playlists.
+- Album collections use stable artwork grids; song-oriented collections use
+  native lists.
+- Search presents grouped albums, artists, songs, and playlists and rejects
+  stale results.
+- Every representation of the same item uses the same capability-driven action
+  vocabulary.
 
-## macOS reference
+### Music details
 
-![Velacanto foundational macOS Home design](assets/foundational-macos.jpg)
+- Use artwork, title, artist/secondary metadata, Play, and Shuffle as the
+  leading hierarchy.
+- Follow with the provider-authoritative track or album list.
+- Use native toolbar/menu actions for Favorite, Play Next, and Play Last.
+- Do not show unsupported or decorative actions.
 
-## Implementation guidance
+### Mini-player and Now Playing
 
-- Use native SwiftUI navigation and presentation components wherever they
-  produce the intended behavior.
-- Treat Liquid Glass as navigation and playback material, not as a decorative
-  surface for every content section.
-- Preserve readable contrast when artwork influences surrounding color.
-- Use availability checks and compatible fallbacks because the project targets
-  iOS 18 and macOS 15 while building with newer SDKs.
-- Adapt navigation to each platform: bottom navigation on iPhone and a sidebar
-  plus toolbar on macOS.
-- Keep the mini-player persistent across navigation and backed by the shared
-  playback coordinator.
-- Replace the fictional artwork and metadata before production use.
+- The mini-player remains concise: artwork, title/artist, and play/pause.
+- Now Playing owns full artwork, metadata, scrubbing, previous/play/next,
+  favorite, shuffle, repeat, playback-method information, errors, and Up Next.
+- Playback method uses neutral language: Local File, Direct Play, Direct Stream,
+  or Transcoding. It is informational, not a prominent warning.
+- Up Next permits reordering and removal only after the current item.
 
-## Design assets
+## Action vocabulary
 
-The artwork in `assets/` was generated specifically for this design prototype.
-It is checked in so the reference remains reproducible and does not depend on
-remote image services.
+| Action | Album/artist/playlist | Song | Now Playing |
+| --- | --- | --- | --- |
+| Play | Primary | Row activation | Resume/current |
+| Shuffle | Primary where a collection exists | Not applicable | Toggle upcoming order |
+| Favorite | Menu/toolbar when supported | Menu/swipe/context | Direct control |
+| Play Next | Menu when playable | Menu/swipe/context | Not applicable to current |
+| Play Last | Menu when playable | Menu/swipe/context | Not applicable to current |
+| Remove/reorder | Not applicable | Up Next only | Up Next presentation |
+
+## Native component rules
+
+- Use semantic colors and system type styles; cyan remains the app tint.
+- Let current SwiftUI navigation and playback chrome provide system materials.
+- Reserve explicit glass effects for the few custom playback surfaces that
+  cannot use system chrome directly.
+- Use SF Symbols for commands and always provide accessible labels.
+- Avoid fixed sizes except bounded artwork targets and minimum window geometry.
+- Prefer `ViewThatFits`, adaptive grids, layout priorities, and system spacing
+  over device-name conditionals.
+- Honor Reduce Motion and Reduce Transparency; motion must communicate state,
+  not decorate it.
+
+## State and accessibility requirements
+
+Every data surface defines loading, populated, empty, retryable error, terminal
+error, signed-out, and offline behavior. Mutating actions define in-flight,
+success, failure/rollback, and rapid-replacement behavior.
+
+Essential controls require meaningful VoiceOver labels, minimum target sizes,
+keyboard/focus behavior where applicable, and readable results at supported
+Dynamic Type sizes. Color and icon shape cannot be the sole indication of
+favorite, playback, error, or selection state.
+
+## Historical references
+
+The initial fictional prototype, screenshots, generated artwork, and merge
+record are retained under [`../archive/`](../archive/README.md). They preserve
+project history but do not define the 0.3 interface.
