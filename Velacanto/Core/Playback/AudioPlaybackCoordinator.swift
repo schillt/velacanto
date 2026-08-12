@@ -51,8 +51,9 @@ protocol PlaybackAudioSessionControlling: Sendable {
 #if os(iOS)
     /// Owns the blocking AVAudioSession API on a dedicated serial actor.
     ///
-    /// iOS 27 supplies completion-handler activation APIs. Earlier systems use
-    /// the synchronous API, but the actor keeps that work off the main actor.
+    /// iOS 27 SDKs supply completion-handler activation APIs. Earlier SDKs and
+    /// systems use the synchronous API, but the actor keeps that work off the
+    /// main actor.
     /// The small in-actor queue remains non-reentrant while an asynchronous
     /// operation is outstanding, so a deactivation cannot overtake activation.
     actor AVAudioSessionBoundary: PlaybackAudioSessionControlling {
@@ -118,42 +119,48 @@ protocol PlaybackAudioSessionControlling: Sendable {
         }
 
         private func activateSession() async throws {
-            if #available(iOS 27.0, *) {
-                try await withCheckedThrowingContinuation {
-                    (continuation: CheckedContinuation<Void, Error>) in
-                    session.activate(options: []) { activated, error in
-                        if let error {
-                            continuation.resume(throwing: error)
-                        } else if activated {
-                            continuation.resume()
-                        } else {
-                            continuation.resume(
-                                throwing: CocoaError(.fileWriteUnknown)
-                            )
+            #if swift(>=6.4)
+                if #available(iOS 27.0, *) {
+                    try await withCheckedThrowingContinuation {
+                        (continuation: CheckedContinuation<Void, Error>) in
+                        session.activate(options: []) { activated, error in
+                            if let error {
+                                continuation.resume(throwing: error)
+                            } else if activated {
+                                continuation.resume()
+                            } else {
+                                continuation.resume(
+                                    throwing: CocoaError(.fileWriteUnknown)
+                                )
+                            }
                         }
                     }
+                    return
                 }
-            } else {
-                try session.setActive(true)
-            }
+            #endif
+
+            try session.setActive(true)
         }
 
         private func deactivateSession(notifyingOthers: Bool) async {
-            if #available(iOS 27.0, *) {
-                await withCheckedContinuation { continuation in
-                    session.deactivate(
-                        options: notifyingOthers
-                            ? [.notifyOthersOnDeactivation] : []
-                    ) { _, _ in
-                        continuation.resume()
+            #if swift(>=6.4)
+                if #available(iOS 27.0, *) {
+                    await withCheckedContinuation { continuation in
+                        session.deactivate(
+                            options: notifyingOthers
+                                ? [.notifyOthersOnDeactivation] : []
+                        ) { _, _ in
+                            continuation.resume()
+                        }
                     }
+                    return
                 }
-            } else {
-                try? session.setActive(
-                    false,
-                    options: notifyingOthers ? [.notifyOthersOnDeactivation] : []
-                )
-            }
+            #endif
+
+            try? session.setActive(
+                false,
+                options: notifyingOthers ? [.notifyOthersOnDeactivation] : []
+            )
         }
     }
 #endif
