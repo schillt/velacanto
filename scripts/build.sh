@@ -18,7 +18,8 @@ export DEVELOPER_DIR
 xcodebuild_path="$DEVELOPER_DIR/usr/bin/xcodebuild"
 project_path="$project_root/Velacanto.xcodeproj"
 temporary_build_root=${TMPDIR:-/private/tmp}
-derived_data_path=${VELACANTO_DERIVED_DATA_PATH:-"${temporary_build_root%/}/VelacantoDerivedData"}
+worktree_build_key=$(printf '%s' "$project_root" | cksum | awk '{print $1}')
+derived_data_path=${VELACANTO_DERIVED_DATA_PATH:-"${temporary_build_root%/}/VelacantoDerivedData-${worktree_build_key}"}
 ios_simulator_destination=${VELACANTO_IOS_SIMULATOR_DESTINATION:-'platform=iOS Simulator,name=iPhone Air,OS=27.0'}
 
 if [ ! -x "$xcodebuild_path" ]; then

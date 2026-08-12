@@ -87,6 +87,24 @@ issue. Hand off the focused commit for serial integration into `alpha`, then
 remove its clean worktree and delete its local branch before starting another
 issue.
 
+### Xcode and test isolation
+
+Treat the `alpha` worktree as the canonical combined-app test tree. Use it only
+for integration and release-candidate testing. Open each issue's own
+`Velacanto.xcodeproj` in a separate Xcode window for focused development and
+testing; do not build or run another issue from the `alpha` window.
+
+`./scripts/build.sh` gives each worktree a distinct derived-data directory by
+default. Do not override `VELACANTO_DERIVED_DATA_PATH` with a shared path. When
+two issue trees need simulator testing at the same time, give each a distinct
+simulator destination with `VELACANTO_IOS_SIMULATOR_DESTINATION`; otherwise run
+simulator and physical-device tests serially because the app shares a bundle
+identifier and device state.
+
+An issue agent proves focused behavior in its own tree. The integration agent
+proves combined behavior in a clean `alpha` tree after applying the accepted
+commit. Unintegrated worktrees are intentionally not a combined test target.
+
 ### Issues, milestones, and board
 
 - Inspect first; preserve issue history and existing Project items.
