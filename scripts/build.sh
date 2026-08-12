@@ -105,7 +105,8 @@ lint_swift() {
     --strict \
     --recursive \
     "$project_root/Velacanto" \
-    "$project_root/VelacantoTests"
+    "$project_root/VelacantoTests" \
+    "$project_root/VelacantoUITests"
 }
 
 case "$build_mode" in
