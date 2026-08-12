@@ -55,15 +55,31 @@ enum PlaybackQueueContext: Equatable, Codable, Sendable {
     case single
 }
 
+enum PlaybackRepeatMode: String, CaseIterable, Codable, Sendable {
+    case off
+    case all
+    case one
+
+    var next: Self {
+        switch self {
+        case .off: .all
+        case .all: .one
+        case .one: .off
+        }
+    }
+}
+
 struct PlaybackQueue: Equatable, Codable, Sendable {
     private(set) var items: [PlaybackItem]
     private(set) var currentIndex: Int
     let context: PlaybackQueueContext
+    private(set) var repeatMode: PlaybackRepeatMode
 
     init(
         items: [PlaybackItem],
         currentItemID: String,
-        context: PlaybackQueueContext
+        context: PlaybackQueueContext,
+        repeatMode: PlaybackRepeatMode = .off
     ) {
         var seen = Set<String>()
         let uniqueItems = items.filter {
@@ -75,6 +91,30 @@ struct PlaybackQueue: Equatable, Codable, Sendable {
                 $0.id == currentItemID
             }) ?? 0
         self.context = context
+        self.repeatMode = repeatMode
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case items
+        case currentIndex
+        case context
+        case repeatMode
+    }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        items = try container.decode([PlaybackItem].self, forKey: .items)
+        let decodedIndex = try container.decode(Int.self, forKey: .currentIndex)
+        currentIndex = items.indices.contains(decodedIndex) ? decodedIndex : 0
+        context = try container.decode(
+            PlaybackQueueContext.self,
+            forKey: .context
+        )
+        repeatMode =
+            try container.decodeIfPresent(
+                PlaybackRepeatMode.self,
+                forKey: .repeatMode
+            ) ?? .off
     }
 
     var currentItem: PlaybackItem? {
@@ -89,6 +129,12 @@ struct PlaybackQueue: Equatable, Codable, Sendable {
     var nextItem: PlaybackItem? {
         let index = currentIndex + 1
         return items.indices.contains(index) ? items[index] : nil
+    }
+
+    var upcomingItems: [PlaybackItem] {
+        let start = currentIndex + 1
+        guard items.indices.contains(start) else { return [] }
+        return Array(items[start...])
     }
 
     var canGoPrevious: Bool {
@@ -109,13 +155,107 @@ struct PlaybackQueue: Equatable, Codable, Sendable {
         currentIndex += 1
     }
 
-    mutating func append(_ newItems: [PlaybackItem]) {
+    mutating func movePrevious(wrapping: Bool) {
+        if canGoPrevious {
+            currentIndex -= 1
+        } else if wrapping, !items.isEmpty {
+            currentIndex = items.count - 1
+        }
+    }
+
+    mutating func moveNext(wrapping: Bool) {
+        if canGoNext {
+            currentIndex += 1
+        } else if wrapping, !items.isEmpty {
+            currentIndex = 0
+        }
+    }
+
+    mutating func setRepeatMode(_ mode: PlaybackRepeatMode) {
+        repeatMode = mode
+    }
+
+    @discardableResult
+    mutating func playNext(_ item: PlaybackItem) -> Bool {
+        insertUpcoming(item, at: currentIndex + 1)
+    }
+
+    @discardableResult
+    mutating func playLast(_ item: PlaybackItem) -> Bool {
+        insertUpcoming(item, at: items.endIndex)
+    }
+
+    @discardableResult
+    mutating func removeUpcomingItem(_ item: PlaybackItem) -> Bool {
+        let key = "\(item.source.rawValue)|\(item.id)"
+        guard
+            let index = items.indices.first(where: {
+                $0 > currentIndex
+                    && "\(items[$0].source.rawValue)|\(items[$0].id)" == key
+            })
+        else {
+            return false
+        }
+        items.remove(at: index)
+        return true
+    }
+
+    @discardableResult
+    mutating func moveUpcomingItem(from source: Int, to destination: Int) -> Bool {
+        let start = currentIndex + 1
+        let sourceIndex = start + source
+        guard items.indices.contains(sourceIndex), destination >= 0 else {
+            return false
+        }
+        let clampedDestination = min(destination, upcomingItems.count - 1)
+        guard source != clampedDestination else { return false }
+        let item = items.remove(at: sourceIndex)
+        items.insert(item, at: start + clampedDestination)
+        return true
+    }
+
+    @discardableResult
+    mutating func shuffleUpcoming(
+        randomIndex: (Range<Int>) -> Int = { Int.random(in: $0) }
+    ) -> Bool {
+        let start = currentIndex + 1
+        guard items.count - start > 1 else { return false }
+        for upperBound in stride(from: items.count - 1, through: start + 1, by: -1) {
+            let range = start..<upperBound + 1
+            let candidate = randomIndex(range)
+            let swapIndex = range.contains(candidate) ? candidate : range.lowerBound
+            items.swapAt(upperBound, swapIndex)
+        }
+        return true
+    }
+
+    @discardableResult
+    mutating func append(_ newItems: [PlaybackItem]) -> Bool {
         var seen = Set(items.map { "\($0.source.rawValue)|\($0.id)" })
-        items.append(
-            contentsOf: newItems.filter {
-                seen.insert("\($0.source.rawValue)|\($0.id)").inserted
-            }
-        )
+        let uniqueItems = newItems.filter {
+            seen.insert("\($0.source.rawValue)|\($0.id)").inserted
+        }
+        items.append(contentsOf: uniqueItems)
+        return !uniqueItems.isEmpty
+    }
+
+    private mutating func insertUpcoming(
+        _ item: PlaybackItem,
+        at requestedIndex: Int
+    ) -> Bool {
+        let key = "\(item.source.rawValue)|\(item.id)"
+        if let existingIndex = items.firstIndex(where: {
+            "\($0.source.rawValue)|\($0.id)" == key
+        }) {
+            guard existingIndex > currentIndex else { return false }
+            let existingItem = items.remove(at: existingIndex)
+            let insertionIndex = min(requestedIndex, items.endIndex)
+            items.insert(existingItem, at: insertionIndex)
+            return existingIndex != insertionIndex
+        }
+
+        items.insert(item, at: min(requestedIndex, items.endIndex))
+        return true
     }
 
     func persistenceWindow() -> PlaybackQueue {
@@ -125,7 +265,8 @@ struct PlaybackQueue: Equatable, Codable, Sendable {
         return PlaybackQueue(
             items: Array(items[lowerBound...upperBound]),
             currentItemID: items[currentIndex].id,
-            context: context
+            context: context,
+            repeatMode: repeatMode
         )
     }
 }

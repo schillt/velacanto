@@ -991,6 +991,287 @@ final class PlaybackFoundationTests: XCTestCase {
         XCTAssertLessThanOrEqual(saved.items.count, 76)
     }
 
+    func testPlaybackQueueEditsOnlyUpcomingItemsWithoutDuplicates() {
+        let items = (0..<4).map {
+            PlaybackItem(
+                id: "track-\($0)",
+                title: "Track \($0)",
+                artist: "Velacanto",
+                source: .jellyfin
+            )
+        }
+        let inserted = PlaybackItem(
+            id: "inserted",
+            title: "Inserted",
+            artist: "Velacanto",
+            source: .jellyfin
+        )
+        var queue = PlaybackQueue(
+            items: items,
+            currentItemID: "track-1",
+            context: .songs
+        )
+
+        XCTAssertFalse(queue.removeUpcomingItem(items[0]))
+        XCTAssertFalse(queue.removeUpcomingItem(items[1]))
+        XCTAssertTrue(queue.playNext(inserted))
+        XCTAssertTrue(queue.playLast(items[2]))
+        XCTAssertEqual(
+            queue.upcomingItems.map(\.id),
+            ["inserted", "track-3", "track-2"]
+        )
+
+        XCTAssertTrue(queue.moveUpcomingItem(from: 2, to: 0))
+        XCTAssertTrue(queue.removeUpcomingItem(inserted))
+        XCTAssertTrue(queue.shuffleUpcoming(randomIndex: { $0.lowerBound }))
+
+        XCTAssertEqual(queue.items.prefix(2).map(\.id), ["track-0", "track-1"])
+        XCTAssertEqual(Set(queue.items.map(\.id)).count, queue.items.count)
+        XCTAssertEqual(Set(queue.upcomingItems.map(\.id)), ["track-2", "track-3"])
+    }
+
+    func testQueueEditsAndPlaybackModesRestoreSafely() {
+        let stateStore = RecordingNowPlayingStateStore()
+        let systemMediaController = RecordingSystemMediaController()
+        let account = PlaybackAccount(serverID: "server", userID: "user")
+        let items = (0..<3).map {
+            PlaybackItem(
+                id: "track-\($0)",
+                title: "Track \($0)",
+                artist: "Velacanto",
+                source: .jellyfin
+            )
+        }
+        let inserted = PlaybackItem(
+            id: "inserted",
+            title: "Inserted",
+            artist: "Velacanto",
+            source: .jellyfin
+        )
+        let coordinator = AudioPlaybackCoordinator(
+            engine: RecordingAudioPlayerEngine(),
+            systemMediaController: systemMediaController,
+            nowPlayingStateStore: stateStore
+        )
+        coordinator.play(
+            PlaybackRequest(
+                item: items[0],
+                asset: PlaybackAsset(
+                    url: URL(fileURLWithPath: "/tmp/track-0.caf")
+                )
+            ),
+            queueItems: items,
+            context: .songs,
+            account: account
+        )
+
+        coordinator.playNext(inserted)
+        systemMediaController.changeRepeatMode?(.all)
+        systemMediaController.shuffle?()
+
+        XCTAssertEqual(coordinator.repeatMode, .all)
+        XCTAssertEqual(
+            Set(coordinator.upcomingItems.map(\.id)),
+            [
+                "inserted", "track-1", "track-2",
+            ]
+        )
+        XCTAssertEqual(stateStore.state?.queue.repeatMode, .all)
+
+        let restored = AudioPlaybackCoordinator(
+            engine: RecordingAudioPlayerEngine(),
+            systemMediaController: RecordingSystemMediaController(),
+            nowPlayingStateStore: stateStore
+        )
+        restored.restoreSavedState(serverID: "server", userID: "user")
+
+        XCTAssertEqual(restored.repeatMode, .all)
+        XCTAssertEqual(restored.queue, stateStore.state?.queue)
+        XCTAssertEqual(restored.playbackState, .paused)
+    }
+
+    func testRepeatModesHandleQueueBoundaries() async {
+        let engine = RecordingAudioPlayerEngine()
+        let first = PlaybackItem(
+            id: "first",
+            title: "First",
+            artist: "Velacanto",
+            source: .jellyfin
+        )
+        let last = PlaybackItem(
+            id: "last",
+            title: "Last",
+            artist: "Velacanto",
+            source: .jellyfin
+        )
+        let coordinator = AudioPlaybackCoordinator(
+            engine: engine,
+            systemMediaController: RecordingSystemMediaController()
+        )
+        coordinator.configureRequestResolver { item in
+            PlaybackRequest(
+                item: item,
+                asset: PlaybackAsset(
+                    url: URL(fileURLWithPath: "/tmp/\(item.id).caf")
+                )
+            )
+        }
+        coordinator.play(
+            PlaybackRequest(
+                item: last,
+                asset: PlaybackAsset(
+                    url: URL(fileURLWithPath: "/tmp/last.caf")
+                )
+            ),
+            queueItems: [first, last],
+            context: .songs
+        )
+        coordinator.setRepeatMode(.all)
+
+        coordinator.nextTrack()
+        await waitUntil { coordinator.currentItem == first }
+        XCTAssertEqual(coordinator.currentItem, first)
+
+        coordinator.setRepeatMode(.one)
+        let playCount = engine.playCallCount
+        engine.send(.stateChanged(.ended))
+
+        XCTAssertEqual(coordinator.currentItem, first)
+        XCTAssertEqual(engine.seekTimes.last, 0)
+        XCTAssertEqual(engine.playCallCount, playCount + 1)
+    }
+
+    func testPlaybackWaitsForLatePagingAtQueueBoundary() async {
+        let engine = RecordingAudioPlayerEngine()
+        let current = PlaybackItem(
+            id: "current",
+            title: "Current",
+            artist: "Velacanto",
+            source: .jellyfin
+        )
+        let pagedItem = PlaybackItem(
+            id: "paged",
+            title: "Paged",
+            artist: "Velacanto",
+            source: .jellyfin
+        )
+        var expansionContinuation: CheckedContinuation<[PlaybackItem], Never>?
+        let coordinator = AudioPlaybackCoordinator(
+            engine: engine,
+            systemMediaController: RecordingSystemMediaController()
+        )
+        coordinator.configureRequestResolver { item in
+            PlaybackRequest(
+                item: item,
+                asset: PlaybackAsset(
+                    url: URL(fileURLWithPath: "/tmp/\(item.id).caf")
+                )
+            )
+        }
+        coordinator.play(
+            PlaybackRequest(
+                item: current,
+                asset: PlaybackAsset(
+                    url: URL(fileURLWithPath: "/tmp/current.caf")
+                )
+            ),
+            queueItems: [current],
+            context: .songs,
+            queueExpansion: {
+                await withCheckedContinuation { continuation in
+                    expansionContinuation = continuation
+                }
+            }
+        )
+        await waitUntil { expansionContinuation != nil }
+
+        engine.send(.stateChanged(.ended))
+        expansionContinuation?.resume(returning: [pagedItem])
+        await waitUntil { coordinator.currentItem == pagedItem }
+
+        XCTAssertEqual(coordinator.currentItem, pagedItem)
+        XCTAssertEqual(engine.loadCallCount, 2)
+    }
+
+    func testExplicitQueueEditInvalidatesPreloadAndLatePaging() async {
+        let engine = RecordingAudioPlayerEngine()
+        let current = PlaybackItem(
+            id: "current",
+            title: "Current",
+            artist: "Velacanto",
+            source: .jellyfin
+        )
+        let originalNext = PlaybackItem(
+            id: "original-next",
+            title: "Original Next",
+            artist: "Velacanto",
+            source: .jellyfin
+        )
+        let explicitNext = PlaybackItem(
+            id: "explicit-next",
+            title: "Explicit Next",
+            artist: "Velacanto",
+            source: .jellyfin
+        )
+        let latePage = PlaybackItem(
+            id: "late-page",
+            title: "Late Page",
+            artist: "Velacanto",
+            source: .jellyfin
+        )
+        var expansionContinuation: CheckedContinuation<[PlaybackItem], Never>?
+        let coordinator = AudioPlaybackCoordinator(
+            engine: engine,
+            systemMediaController: RecordingSystemMediaController()
+        )
+        coordinator.configureRequestResolver { item in
+            PlaybackRequest(
+                item: item,
+                asset: PlaybackAsset(
+                    url: URL(fileURLWithPath: "/tmp/\(item.id).caf")
+                )
+            )
+        }
+        coordinator.play(
+            PlaybackRequest(
+                item: current,
+                asset: PlaybackAsset(
+                    url: URL(fileURLWithPath: "/tmp/current.caf")
+                )
+            ),
+            queueItems: [current],
+            context: .songs,
+            queueExpansion: {
+                await withCheckedContinuation { continuation in
+                    expansionContinuation = continuation
+                }
+            }
+        )
+        await waitUntil { expansionContinuation != nil }
+
+        coordinator.playNext(originalNext)
+        await waitUntil {
+            engine.preloadedURLs.last
+                == URL(
+                    fileURLWithPath: "/tmp/original-next.caf"
+                )
+        }
+
+        coordinator.playNext(explicitNext)
+        await waitUntil {
+            engine.preloadedURLs.last
+                == URL(
+                    fileURLWithPath: "/tmp/explicit-next.caf"
+                )
+        }
+        coordinator.removeUpcomingItem(originalNext)
+        expansionContinuation?.resume(returning: [latePage])
+        await Task.yield()
+
+        XCTAssertEqual(coordinator.upcomingItems, [explicitNext])
+        XCTAssertTrue(engine.preloadReceivedNil)
+    }
+
     func testSavedNowPlayingRestoresPausedWithoutLoadingStream() {
         let stateStore = RecordingNowPlayingStateStore()
         let account = PlaybackAccount(serverID: "server", userID: "user")
@@ -1319,13 +1600,23 @@ private final class RecordingAudioPlayerEngine: AudioPlayerEngine {
     private(set) var pauseCallCount = 0
     private(set) var stopCallCount = 0
     private(set) var seekTimes: [TimeInterval] = []
+    private(set) var preloadedURLs: [URL] = []
+    private(set) var preloadReceivedNil = false
 
     func load(_ item: AVPlayerItem) {
         hasCurrentItem = true
         loadCallCount += 1
     }
 
-    func preload(_ item: AVPlayerItem?) {}
+    func preload(_ item: AVPlayerItem?) {
+        guard let item else {
+            preloadReceivedNil = true
+            return
+        }
+        if let asset = item.asset as? AVURLAsset {
+            preloadedURLs.append(asset.url)
+        }
+    }
 
     func advanceToNextItem() {
         eventHandler?(.advancedToNextItem)
@@ -1449,6 +1740,8 @@ private final class RecordingSystemMediaController: SystemMediaControlling {
     private(set) var next: (@MainActor () -> Void)?
     private(set) var togglePlayPause: (@MainActor () -> Void)?
     private(set) var seek: (@MainActor (TimeInterval) -> Void)?
+    private(set) var changeRepeatMode: (@MainActor (PlaybackRepeatMode) -> Void)?
+    private(set) var shuffle: (@MainActor () -> Void)?
 
     var latestSnapshot: NowPlayingSnapshot? {
         snapshots.last
@@ -1460,7 +1753,9 @@ private final class RecordingSystemMediaController: SystemMediaControlling {
         previous: @escaping @MainActor () -> Void,
         next: @escaping @MainActor () -> Void,
         togglePlayPause: @escaping @MainActor () -> Void,
-        seek: @escaping @MainActor (TimeInterval) -> Void
+        seek: @escaping @MainActor (TimeInterval) -> Void,
+        changeRepeatMode: @escaping @MainActor (PlaybackRepeatMode) -> Void,
+        shuffle: @escaping @MainActor () -> Void
     ) {
         self.play = play
         self.pause = pause
@@ -1468,6 +1763,8 @@ private final class RecordingSystemMediaController: SystemMediaControlling {
         self.next = next
         self.togglePlayPause = togglePlayPause
         self.seek = seek
+        self.changeRepeatMode = changeRepeatMode
+        self.shuffle = shuffle
     }
 
     func update(_ snapshot: NowPlayingSnapshot) {

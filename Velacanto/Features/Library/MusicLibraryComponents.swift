@@ -102,6 +102,29 @@ struct MusicSongRow: View {
             }
         }
         .contentShape(Rectangle())
+        .contextMenu {
+            if song.capabilities.contains(.playNext) {
+                Button {
+                    playback.playNext(
+                        JellyfinPlaybackAdapter.playbackItem(for: song)
+                    )
+                } label: {
+                    Label("Play Next", systemImage: "text.line.first.and.arrowtriangle.forward")
+                }
+                .disabled(playback.currentItem == nil)
+            }
+
+            if song.capabilities.contains(.playLast) {
+                Button {
+                    playback.playLast(
+                        JellyfinPlaybackAdapter.playbackItem(for: song)
+                    )
+                } label: {
+                    Label("Play Last", systemImage: "text.line.last.and.arrowtriangle.forward")
+                }
+                .disabled(playback.currentItem == nil)
+            }
+        }
     }
 
     private var songSubtitle: String {

@@ -300,7 +300,10 @@ final class AudioPlaybackCoordinator: ObservableObject {
     private var lastStateSaveTime = Date.distantPast
     private var queueTransitionTask: Task<Void, Never>?
     private var preloadTask: Task<Void, Never>?
+    private var preloadTaskID: UUID?
     private var preloadedRequest: PlaybackRequest?
+    private var queueEditRevision = 0
+    private var advancesAfterQueueExpansion = false
     private var artworkTask: Task<Void, Never>?
     private var artworkRequestID: UUID?
     private var nowPlayingArtworkIdentifier: String?
@@ -385,10 +388,21 @@ final class AudioPlaybackCoordinator: ObservableObject {
 
     var canGoPrevious: Bool {
         elapsed > 3 || queue?.canGoPrevious == true
+            || (queue?.repeatMode == .all && queue?.items.isEmpty == false)
     }
 
     var canGoNext: Bool {
         queue?.canGoNext == true
+            || queueExpansionHandler != nil
+            || (queue?.repeatMode == .all && queue?.items.isEmpty == false)
+    }
+
+    var upcomingItems: [PlaybackItem] {
+        queue?.upcomingItems ?? []
+    }
+
+    var repeatMode: PlaybackRepeatMode {
+        queue?.repeatMode ?? .off
     }
 
     func configureRequestResolver(
@@ -420,6 +434,7 @@ final class AudioPlaybackCoordinator: ObservableObject {
             currentItemID: request.item.id,
             context: context
         )
+        queueEditRevision += 1
         playbackAccount = account
         queueExpansionHandler = queueExpansion
         restoredElapsed = nil
@@ -441,6 +456,7 @@ final class AudioPlaybackCoordinator: ObservableObject {
         reportPlaybackStopped()
         queueTransitionTask?.cancel()
         preloadTask?.cancel()
+        preloadTaskID = nil
         preloadedRequest = nil
         nowPlayingArtworkIdentifier = nil
         nowPlayingArtwork = nil
@@ -565,6 +581,7 @@ final class AudioPlaybackCoordinator: ObservableObject {
         cancelPendingPlaybackActivation()
         queueTransitionTask?.cancel()
         preloadTask?.cancel()
+        preloadTaskID = nil
         artworkTask?.cancel()
         artworkTask = nil
         artworkRequestID = nil
@@ -579,6 +596,8 @@ final class AudioPlaybackCoordinator: ObservableObject {
         playbackState = .idle
         errorMessage = nil
         queue = nil
+        queueEditRevision += 1
+        advancesAfterQueueExpansion = false
         queueExpansionHandler = nil
         playbackAccount = nil
         restoredElapsed = nil
@@ -700,7 +719,9 @@ final class AudioPlaybackCoordinator: ObservableObject {
         }
         if state == .ended {
             reportPlaybackStopped()
-            if canGoNext {
+            if repeatMode == .one {
+                resumePlayback()
+            } else if canGoNext {
                 nextTrack()
             }
         }
@@ -748,6 +769,12 @@ final class AudioPlaybackCoordinator: ObservableObject {
             },
             seek: { [weak self] time in
                 self?.seek(toTime: time)
+            },
+            changeRepeatMode: { [weak self] mode in
+                self?.setRepeatMode(mode)
+            },
+            shuffle: { [weak self] in
+                self?.shuffleUpcoming()
             }
         )
     }
@@ -762,7 +789,8 @@ final class AudioPlaybackCoordinator: ObservableObject {
                 artworkIdentifier: nowPlayingArtworkIdentifier,
                 artwork: nowPlayingArtwork,
                 canGoPrevious: canGoPrevious,
-                canGoNext: canGoNext
+                canGoNext: canGoNext,
+                repeatMode: repeatMode
             )
         )
     }
@@ -818,7 +846,10 @@ final class AudioPlaybackCoordinator: ObservableObject {
             seek(toTime: 0)
             return
         }
-        guard let previousItem = queue?.previousItem else {
+        let previousItem =
+            queue?.previousItem
+            ?? (repeatMode == .all ? queue?.items.last : nil)
+        guard let previousItem else {
             seek(toTime: 0)
             return
         }
@@ -826,12 +857,70 @@ final class AudioPlaybackCoordinator: ObservableObject {
     }
 
     func nextTrack() {
-        guard let nextItem = queue?.nextItem else { return }
+        if queue?.nextItem == nil, queueExpansionHandler != nil {
+            advancesAfterQueueExpansion = true
+            expandQueueIfPossible()
+            return
+        }
+        let nextItem =
+            queue?.nextItem
+            ?? (repeatMode == .all ? queue?.items.first : nil)
+        guard let nextItem else { return }
         if preloadedRequest?.item.id == nextItem.id {
             engine.advanceToNextItem()
             return
         }
         transition(to: nextItem, direction: .next)
+    }
+
+    func playNext(_ item: PlaybackItem) {
+        editQueue { $0.playNext(item) }
+    }
+
+    func playLast(_ item: PlaybackItem) {
+        editQueue { $0.playLast(item) }
+    }
+
+    func removeUpcomingItem(_ item: PlaybackItem) {
+        editQueue { $0.removeUpcomingItem(item) }
+    }
+
+    func moveUpcomingItem(from source: Int, to destination: Int) {
+        editQueue { $0.moveUpcomingItem(from: source, to: destination) }
+    }
+
+    func shuffleUpcoming() {
+        editQueue { $0.shuffleUpcoming() }
+    }
+
+    func cycleRepeatMode() {
+        setRepeatMode(repeatMode.next)
+    }
+
+    func setRepeatMode(_ mode: PlaybackRepeatMode) {
+        guard queue != nil, repeatMode != mode else { return }
+        queue?.setRepeatMode(mode)
+        queueEditRevision += 1
+        invalidatePreloadAndRefreshQueue()
+    }
+
+    private func editQueue(_ mutation: (inout PlaybackQueue) -> Bool) {
+        guard var editedQueue = queue, mutation(&editedQueue) else { return }
+        queue = editedQueue
+        queueEditRevision += 1
+        invalidatePreloadAndRefreshQueue()
+    }
+
+    private func invalidatePreloadAndRefreshQueue() {
+        advancesAfterQueueExpansion = false
+        preloadTask?.cancel()
+        preloadTask = nil
+        preloadTaskID = nil
+        preloadedRequest = nil
+        engine.preload(nil)
+        saveNowPlayingState(force: true)
+        publishNowPlaying()
+        preloadNextItem()
     }
 
     func restoreSavedState(serverID: String, userID: String) {
@@ -897,9 +986,9 @@ final class AudioPlaybackCoordinator: ObservableObject {
                 guard currentItem?.id == expectedCurrentID else { return }
                 switch direction {
                 case .previous:
-                    queue?.movePrevious()
+                    queue?.movePrevious(wrapping: repeatMode == .all)
                 case .next:
-                    queue?.moveNext()
+                    queue?.moveNext(wrapping: repeatMode == .all)
                 }
                 hasRetriedCurrentItem = false
                 Self.logger.debug("Queue transition")
@@ -1028,9 +1117,15 @@ final class AudioPlaybackCoordinator: ObservableObject {
 
     private func preloadNextItem() {
         preloadTask?.cancel()
+        preloadTaskID = nil
         preloadedRequest = nil
         engine.preload(nil)
-        guard let nextItem = queue?.nextItem else {
+        let nextItem =
+            queue?.nextItem
+            ?? (queueExpansionHandler == nil && repeatMode == .all
+                && (queue?.items.count ?? 0) > 1
+                ? queue?.items.first : nil)
+        guard let nextItem else {
             expandQueueIfPossible()
             return
         }
@@ -1038,17 +1133,24 @@ final class AudioPlaybackCoordinator: ObservableObject {
             return
         }
         let currentItemID = currentItem?.id
+        let expectedRevision = queueEditRevision
+        let taskID = UUID()
+        preloadTaskID = taskID
         preloadTask = Task { [weak self] in
             guard let self else { return }
             defer {
-                preloadTask = nil
+                if preloadTaskID == taskID {
+                    preloadTask = nil
+                    preloadTaskID = nil
+                }
             }
             do {
                 let request = try await requestResolver(nextItem)
                 try Task.checkCancellation()
                 guard
                     currentItem?.id == currentItemID,
-                    queue?.nextItem?.id == request.item.id
+                    queueEditRevision == expectedRevision,
+                    nextQueueItemForPreloading?.id == request.item.id
                 else {
                     return
                 }
@@ -1062,19 +1164,36 @@ final class AudioPlaybackCoordinator: ObservableObject {
 
     private func expandQueueIfPossible() {
         guard
-            let queueExpansionHandler,
+            let expansionHandler = queueExpansionHandler,
             preloadTask == nil
         else {
             return
         }
         let currentItemID = currentItem?.id
+        let expectedRevision = queueEditRevision
+        let taskID = UUID()
+        preloadTaskID = taskID
         preloadTask = Task { [weak self] in
             guard let self else { return }
-            let expandedItems = await queueExpansionHandler()
+            let expandedItems = await expansionHandler()
+            guard
+                currentItem?.id == currentItemID,
+                queueEditRevision == expectedRevision,
+                preloadTaskID == taskID
+            else {
+                return
+            }
             preloadTask = nil
-            guard currentItem?.id == currentItemID else { return }
-            queue?.append(expandedItems)
-            if queue?.nextItem != nil {
+            preloadTaskID = nil
+            let appendedItems = queue?.append(expandedItems) == true
+            if !appendedItems {
+                queueExpansionHandler = nil
+            }
+            let shouldAdvance = advancesAfterQueueExpansion
+            advancesAfterQueueExpansion = false
+            if shouldAdvance {
+                nextTrack()
+            } else if queue?.nextItem != nil || repeatMode == .all {
                 preloadNextItem()
             }
         }
@@ -1083,11 +1202,11 @@ final class AudioPlaybackCoordinator: ObservableObject {
     private func commitPreloadedNextItem() {
         guard
             let request = preloadedRequest,
-            queue?.nextItem?.id == request.item.id
+            nextQueueItemForPreloading?.id == request.item.id
         else {
             return
         }
-        queue?.moveNext()
+        queue?.moveNext(wrapping: repeatMode == .all)
         reportPlaybackStopped()
         currentItem = request.item
         replaceLifecycleReporter(with: request.reporter)
@@ -1106,6 +1225,13 @@ final class AudioPlaybackCoordinator: ObservableObject {
         publishNowPlaying()
         loadNowPlayingArtwork()
         preloadNextItem()
+    }
+
+    private var nextQueueItemForPreloading: PlaybackItem? {
+        queue?.nextItem
+            ?? (queueExpansionHandler == nil && repeatMode == .all
+                && (queue?.items.count ?? 0) > 1
+                ? queue?.items.first : nil)
     }
 
     private func reportPlaybackProgress(isPaused: Bool) {

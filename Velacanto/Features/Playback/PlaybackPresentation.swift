@@ -303,11 +303,85 @@ struct NowPlayingView: View {
                 .accessibilityLabel("Next")
             }
 
+            HStack(spacing: 22) {
+                Button {
+                    playback.shuffleUpcoming()
+                } label: {
+                    Label("Shuffle Up Next", systemImage: "shuffle")
+                        .labelStyle(.iconOnly)
+                        .frame(width: 36, height: 36)
+                }
+                .buttonStyle(.borderless)
+                .disabled(playback.upcomingItems.count < 2)
+                .accessibilityLabel("Shuffle Up Next")
+
+                Button {
+                    playback.cycleRepeatMode()
+                } label: {
+                    Label(
+                        repeatAccessibilityLabel,
+                        systemImage: playback.repeatMode == .one
+                            ? "repeat.1" : "repeat"
+                    )
+                    .labelStyle(.iconOnly)
+                    .frame(width: 36, height: 36)
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(
+                    playback.repeatMode == .off
+                        ? Color.secondary : Color.cyan
+                )
+                .accessibilityLabel(repeatAccessibilityLabel)
+            }
+
+            if !playback.upcomingItems.isEmpty {
+                Divider()
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Up Next")
+                        .font(.headline)
+
+                    ForEach(
+                        Array(playback.upcomingItems.enumerated()),
+                        id: \.element.id
+                    ) { index, queuedItem in
+                        UpNextRow(
+                            item: queuedItem,
+                            canMoveUp: index > 0,
+                            canMoveDown: index < playback.upcomingItems.count - 1,
+                            moveUp: {
+                                playback.moveUpcomingItem(
+                                    from: index,
+                                    to: index - 1
+                                )
+                            },
+                            moveDown: {
+                                playback.moveUpcomingItem(
+                                    from: index,
+                                    to: index + 1
+                                )
+                            },
+                            remove: {
+                                playback.removeUpcomingItem(queuedItem)
+                            }
+                        )
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
             if let errorMessage = playback.errorMessage {
                 Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
                     .font(.callout)
                     .foregroundStyle(.red)
             }
+        }
+    }
+
+    private var repeatAccessibilityLabel: String {
+        switch playback.repeatMode {
+        case .off: "Repeat Off"
+        case .all: "Repeat All"
+        case .one: "Repeat One"
         }
     }
 
@@ -323,6 +397,46 @@ struct NowPlayingView: View {
 
     private func horizontalArtworkSize(in availableSize: CGSize) -> CGFloat {
         min(280, max(140, availableSize.height - 48))
+    }
+}
+
+private struct UpNextRow: View {
+    let item: PlaybackItem
+    let canMoveUp: Bool
+    let canMoveDown: Bool
+    let moveUp: () -> Void
+    let moveDown: () -> Void
+    let remove: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(item.title)
+                    .lineLimit(1)
+                Text(item.artist)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 8)
+            Button(action: moveUp) {
+                Image(systemName: "chevron.up")
+            }
+            .buttonStyle(.borderless)
+            .disabled(!canMoveUp)
+            .accessibilityLabel("Move Earlier")
+            Button(action: moveDown) {
+                Image(systemName: "chevron.down")
+            }
+            .buttonStyle(.borderless)
+            .disabled(!canMoveDown)
+            .accessibilityLabel("Move Later")
+            Button(role: .destructive, action: remove) {
+                Image(systemName: "minus.circle")
+            }
+            .buttonStyle(.borderless)
+            .accessibilityLabel("Remove from Up Next")
+        }
     }
 }
 
