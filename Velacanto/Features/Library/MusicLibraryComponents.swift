@@ -1,5 +1,62 @@
 import SwiftUI
 
+enum MusicGenre: String, CaseIterable, Identifiable {
+    case alternative = "Alternative"
+    case classical = "Classical"
+    case country = "Country"
+    case electronic = "Electronic"
+    case jazz = "Jazz"
+    case pop = "Pop"
+    case rock = "Rock"
+    case soundtrack = "Soundtrack"
+
+    var id: Self { self }
+
+    var symbolName: String {
+        switch self {
+        case .alternative: "guitars"
+        case .classical: "music.quarternote.3"
+        case .country: "music.mic"
+        case .electronic: "waveform"
+        case .jazz: "music.note"
+        case .pop: "music.note"
+        case .rock: "guitars"
+        case .soundtrack: "film"
+        }
+    }
+}
+
+struct MusicGenreGrid: View {
+    let selectGenre: (MusicGenre) -> Void
+
+    var body: some View {
+        LazyVGrid(
+            columns: [GridItem(.adaptive(minimum: 116), spacing: 12)],
+            spacing: 12
+        ) {
+            ForEach(MusicGenre.allCases) { genre in
+                Button {
+                    selectGenre(genre)
+                } label: {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Image(systemName: genre.symbolName)
+                            .font(.title2.weight(.medium))
+                        Text(genre.rawValue)
+                            .font(.headline)
+                            .lineLimit(1)
+                    }
+                    .foregroundStyle(.primary)
+                    .frame(maxWidth: .infinity, minHeight: 104, alignment: .leading)
+                    .padding(14)
+                    .background(.quaternary, in: .rect(cornerRadius: 14))
+                }
+                .buttonStyle(.plain)
+                .accessibilityHint("Searches your library for \(genre.rawValue) music")
+            }
+        }
+    }
+}
+
 struct MusicQueuePlaybackControls: View {
     let capabilities: MusicItemCapabilities
     let isPreparing: Bool
@@ -103,6 +160,10 @@ struct MusicSongRow: View {
         }
         .contentShape(Rectangle())
         .contextMenu {
+            MusicFavoriteButton(item: song)
+
+            Divider()
+
             if song.capabilities.contains(.playNext) {
                 Button {
                     playback.playNext(
@@ -120,9 +181,45 @@ struct MusicSongRow: View {
                         JellyfinPlaybackAdapter.playbackItem(for: song)
                     )
                 } label: {
-                    Label("Play Last", systemImage: "text.line.last.and.arrowtriangle.forward")
+                    Label("Add to Queue", systemImage: "text.line.last.and.arrowtriangle.forward")
                 }
                 .disabled(playback.currentItem == nil)
+            }
+
+            Divider()
+
+            NavigationLink {
+                MusicSongDetailView(
+                    song: song,
+                    jellyfin: jellyfin,
+                    playback: playback
+                )
+            } label: {
+                Label("Go to Song", systemImage: "music.note")
+            }
+
+            if let album = song.albumNavigationItem {
+                NavigationLink {
+                    JellyfinTracksView(
+                        album: album,
+                        jellyfin: jellyfin,
+                        playback: playback
+                    )
+                } label: {
+                    Label("Go to Album", systemImage: "square.stack")
+                }
+            }
+
+            if let artist = song.artistNavigationItem {
+                NavigationLink {
+                    MusicArtistView(
+                        artist: artist,
+                        jellyfin: jellyfin,
+                        playback: playback
+                    )
+                } label: {
+                    Label("Go to Artist", systemImage: "music.mic")
+                }
             }
         }
     }
@@ -132,6 +229,59 @@ struct MusicSongRow: View {
             return "\(song.displayArtist) · \(album)"
         }
         return song.displayArtist
+    }
+}
+
+private struct MusicSongDetailView: View {
+    let song: MusicCatalogItem
+    @ObservedObject var jellyfin: JellyfinSessionController
+    @ObservedObject var playback: AudioPlaybackCoordinator
+    @State private var isPreparing = false
+    @State private var errorMessage: String?
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                MusicDetailHeader(
+                    item: song,
+                    jellyfin: jellyfin,
+                    subtitle: song.displayArtist,
+                    detail: song.album
+                )
+
+                Button("Play", systemImage: "play.fill") {
+                    play()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(isPreparing)
+
+                if let errorMessage {
+                    ErrorMessageView(message: errorMessage)
+                }
+            }
+            .padding(20)
+            .frame(maxWidth: 720, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .navigationTitle(song.name)
+    }
+
+    private func play() {
+        isPreparing = true
+        errorMessage = nil
+        Task {
+            defer { isPreparing = false }
+            do {
+                let request = try await jellyfin.playbackRequest(for: song)
+                playback.play(
+                    request,
+                    context: .single,
+                    account: jellyfin.playbackAccount
+                )
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
     }
 }
 

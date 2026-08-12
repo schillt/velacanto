@@ -1,15 +1,17 @@
 import XCTest
 
+@MainActor
 final class VelacantoUITests: XCTestCase {
     private let app = XCUIApplication()
 
-    override func setUpWithError() throws {
-        continueAfterFailure = false
+    private func launchApplication() {
         app.launchArguments = ["-uiTesting"]
         app.launch()
     }
 
     func testSignedOutPrimaryNavigation() {
+        continueAfterFailure = false
+        launchApplication()
         XCTAssertTrue(app.navigationBars["Home"].waitForExistence(timeout: 5))
 
         app.tabBars.buttons["Library"].tap()
@@ -24,6 +26,8 @@ final class VelacantoUITests: XCTestCase {
     }
 
     func testSignedOutLibraryCanOpenProfile() {
+        continueAfterFailure = false
+        launchApplication()
         app.tabBars.buttons["Library"].tap()
         app.buttons["Open Profile"].tap()
 

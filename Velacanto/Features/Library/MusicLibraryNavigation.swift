@@ -10,6 +10,19 @@ struct MusicLibraryView: View {
     var body: some View {
         List {
             if jellyfin.isSignedIn {
+                Section("Pinned") {
+                    NavigationLink {
+                        MusicLibraryCollectionView(
+                            title: "Favorites",
+                            collection: .favorites,
+                            playback: playback,
+                            jellyfin: jellyfin
+                        )
+                    } label: {
+                        Label("Favorites", systemImage: "heart.fill")
+                    }
+                }
+
                 Section {
                     ForEach(MusicLibraryCategory.allCases) { category in
                         NavigationLink {
@@ -25,6 +38,19 @@ struct MusicLibraryView: View {
                         Text(
                             "Music from every library available to \(session.username) is combined here."
                         )
+                    }
+                }
+
+                Section("Recently Added") {
+                    NavigationLink {
+                        MusicLibraryCollectionView(
+                            title: "Recently Added",
+                            collection: .recentlyAdded,
+                            playback: playback,
+                            jellyfin: jellyfin
+                        )
+                    } label: {
+                        Label("Recently Added", systemImage: "clock.badge.plus")
                     }
                 }
             } else {
@@ -155,6 +181,127 @@ struct MusicLibraryCategoryView: View {
                 jellyfin: jellyfin,
                 playback: playback
             )
+        }
+    }
+}
+
+private struct MusicLibraryCollectionView: View {
+    enum Collection {
+        case favorites
+        case recentlyAdded
+    }
+
+    let title: String
+    let collection: Collection
+    @ObservedObject var playback: AudioPlaybackCoordinator
+    @ObservedObject var jellyfin: JellyfinSessionController
+
+    @StateObject private var model = PagedMusicCatalogModel()
+    @State private var preparingItemID: MusicCatalogItemID?
+
+    var body: some View {
+        ScrollView {
+            if model.isInitialLoading {
+                ProgressView("Loading \(title.lowercased())…")
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 80)
+            } else if let errorMessage = model.errorMessage, model.items.isEmpty {
+                MusicCatalogErrorView(message: errorMessage) {
+                    Task { await retry() }
+                }
+            } else if model.items.isEmpty {
+                ContentUnavailableView(
+                    "No \(title)",
+                    systemImage: collection == .favorites ? "heart" : "music.note",
+                    description: Text("Music will appear here when it is available.")
+                )
+                .padding(.top, 60)
+            } else {
+                LazyVGrid(
+                    columns: [GridItem(.adaptive(minimum: 138, maximum: 210), spacing: 18)],
+                    alignment: .leading,
+                    spacing: 24
+                ) {
+                    ForEach(model.items) { item in
+                        itemView(item)
+                            .onAppear { loadMoreIfNeeded(item.id) }
+                    }
+                }
+                .padding(20)
+            }
+        }
+        .navigationTitle(title)
+        .task(id: jellyfin.playbackAccount) {
+            await reset()
+        }
+        .refreshable { await reset() }
+    }
+
+    @ViewBuilder
+    private func itemView(_ item: MusicCatalogItem) -> some View {
+        if item.kind == .song {
+            Button {
+                play(item)
+            } label: {
+                MusicAlbumCard(album: item, jellyfin: jellyfin)
+            }
+            .buttonStyle(.plain)
+            .disabled(preparingItemID != nil)
+        } else {
+            NavigationLink {
+                destination(for: item)
+            } label: {
+                MusicAlbumCard(album: item, jellyfin: jellyfin)
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    @ViewBuilder
+    private func destination(for item: MusicCatalogItem) -> some View {
+        switch item.kind {
+        case .album:
+            JellyfinTracksView(album: item, jellyfin: jellyfin, playback: playback)
+        case .artist:
+            MusicArtistView(artist: item, jellyfin: jellyfin, playback: playback)
+        case .playlist:
+            MusicPlaylistView(playlist: item, jellyfin: jellyfin, playback: playback)
+        case .song:
+            EmptyView()
+        }
+    }
+
+    private func reset() async {
+        await model.reset(loader: pageLoader)
+    }
+
+    private func retry() async {
+        await model.retry(loader: pageLoader)
+    }
+
+    private func loadMoreIfNeeded(_ itemID: MusicCatalogItemID) {
+        model.loadMoreIfNeeded(itemID: itemID, loader: pageLoader)
+    }
+
+    private var pageLoader: PagedMusicCatalogModel.Loader {
+        { cursor in
+            switch collection {
+            case .favorites:
+                try await jellyfin.homeFavoritesPage(cursor: cursor)
+            case .recentlyAdded:
+                try await jellyfin.homeRecentlyAddedPage(cursor: cursor)
+            }
+        }
+    }
+
+    private func play(_ item: MusicCatalogItem) {
+        preparingItemID = item.id
+        Task {
+            defer { preparingItemID = nil }
+            guard let request = try? await jellyfin.playbackRequest(for: item) else {
+                return
+            }
+            playback.play(request, context: .single, account: jellyfin.playbackAccount)
         }
     }
 }
