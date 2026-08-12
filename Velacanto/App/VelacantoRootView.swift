@@ -10,7 +10,6 @@ struct VelacantoRootView: View {
     @State private var globalSearchText = ""
     #if os(macOS)
         @State private var selectedMacDestination = MacDestination.home
-        @State private var playlistOwnsPlaybackAccessory = false
     #endif
     @State private var isChoosingLocalFile = false
     @State private var isPreparingTestTone = false
@@ -28,7 +27,6 @@ struct VelacantoRootView: View {
                 macOSRoot
             #endif
         }
-        .environmentObject(jellyfin.itemActions)
         .modifier(MusicItemActionFailurePresenter(actions: jellyfin.itemActions))
         .tint(.cyan)
         .fileImporter(
@@ -37,19 +35,12 @@ struct VelacantoRootView: View {
         ) { result in
             handleLocalFileSelection(result)
         }
-        .sheet(isPresented: $isShowingNowPlaying) {
+        .inspector(isPresented: $isShowingNowPlaying) {
             NowPlayingView(
                 playback: playback,
                 jellyfin: jellyfin
             )
-            #if os(macOS)
-                .frame(
-                    minWidth: 680,
-                    idealWidth: 820,
-                    minHeight: 520,
-                    idealHeight: 620
-                )
-            #endif
+            .inspectorColumnWidth(min: 360, ideal: 440, max: 620)
         }
         .sheet(isPresented: $isShowingProfile) {
             NavigationStack {
@@ -155,15 +146,16 @@ struct VelacantoRootView: View {
                 playback.stop()
             }
         }
+        .environmentObject(jellyfin.itemActions)
     }
 
     #if os(iOS)
         @ViewBuilder
         private var iOSRoot: some View {
             if #available(iOS 26.0, *) {
-                if playback.hasPlayableItem {
-                    iOSTabs
-                        .tabViewBottomAccessory {
+                iOSTabs
+                    .tabViewBottomAccessory {
+                        if playback.hasPlayableItem && !isShowingNowPlaying {
                             ModernPlaybackAccessory(
                                 playback: playback,
                                 jellyfin: jellyfin,
@@ -172,15 +164,12 @@ struct VelacantoRootView: View {
                                 }
                             )
                         }
-                        .tabBarMinimizeBehavior(.onScrollDown)
-                } else {
-                    iOSTabs
-                        .tabBarMinimizeBehavior(.onScrollDown)
-                }
+                    }
+                    .tabBarMinimizeBehavior(.onScrollDown)
             } else {
                 iOSTabs
                     .safeAreaInset(edge: .bottom, spacing: 0) {
-                        if playback.hasPlayableItem {
+                        if playback.hasPlayableItem && !isShowingNowPlaying {
                             PlaybackAccessory(
                                 playback: playback,
                                 jellyfin: jellyfin,
@@ -302,19 +291,13 @@ struct VelacantoRootView: View {
                         MusicLibraryCategoryView(
                             category: category,
                             playback: playback,
-                            jellyfin: jellyfin,
-                            showNowPlaying: {
-                                isShowingNowPlaying = true
-                            }
+                            jellyfin: jellyfin
                         )
                     case .playlist(let playlist):
                         MusicPlaylistView(
                             playlist: playlist,
                             jellyfin: jellyfin,
-                            playback: playback,
-                            showNowPlaying: {
-                                isShowingNowPlaying = true
-                            }
+                            playback: playback
                         )
                     }
                 }
@@ -324,14 +307,11 @@ struct VelacantoRootView: View {
                 playback: playback,
                 jellyfin: jellyfin,
                 isVisible: playback.hasPlayableItem
-                    && !playlistOwnsPlaybackAccessory,
+                    && !isShowingNowPlaying,
                 showNowPlaying: {
                     isShowingNowPlaying = true
                 }
             )
-            .onPreferenceChange(PlaybackAccessoryOwnerPreferenceKey.self) {
-                playlistOwnsPlaybackAccessory = $0
-            }
         }
 
         private var isSearchingLibrary: Bool {
@@ -391,9 +371,6 @@ struct VelacantoRootView: View {
             searchText: $globalSearchText,
             showProfile: {
                 isShowingProfile = true
-            },
-            showNowPlaying: {
-                isShowingNowPlaying = true
             }
         )
     }
@@ -438,6 +415,7 @@ struct VelacantoRootView: View {
                     PlaybackRequest(
                         item: localRequest.item,
                         asset: localRequest.asset,
+                        transportKind: localRequest.transportKind,
                         recordsHistory: false
                     )
                 )

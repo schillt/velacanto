@@ -48,6 +48,7 @@ final class PlaybackFoundationTests: XCTestCase {
         XCTAssertEqual(asset.url.standardizedFileURL, url.standardizedFileURL)
         XCTAssertEqual(request.item.source, .localFiles)
         XCTAssertEqual(request.item.title, "playback-test-tone-60s")
+        XCTAssertEqual(request.transportKind, .localFile)
         XCTAssertNotNil(request.asset.resourceLease)
     }
 
@@ -166,7 +167,8 @@ final class PlaybackFoundationTests: XCTestCase {
             ),
             asset: PlaybackAsset(
                 url: URL(fileURLWithPath: "/tmp/known-duration.caf")
-            )
+            ),
+            transportKind: .directPlay
         )
 
         coordinator.play(request)
@@ -681,7 +683,8 @@ final class PlaybackFoundationTests: XCTestCase {
             asset: PlaybackAsset(
                 url: URL(fileURLWithPath: "/tmp/lease-test.caf"),
                 resourceLease: lease
-            )
+            ),
+            transportKind: .localFile
         )
 
         try play(request, on: coordinator)
@@ -723,6 +726,7 @@ final class PlaybackFoundationTests: XCTestCase {
             PlaybackRequest(
                 item: request.item,
                 asset: request.asset,
+                transportKind: request.transportKind,
                 recordsHistory: false
             )
         )
@@ -867,7 +871,8 @@ final class PlaybackFoundationTests: XCTestCase {
                 item: item,
                 asset: PlaybackAsset(
                     url: URL(fileURLWithPath: "/tmp/artwork-track.caf")
-                )
+                ),
+                transportKind: .localFile
             )
         )
         await waitUntil {
@@ -931,7 +936,8 @@ final class PlaybackFoundationTests: XCTestCase {
                 item: firstItem,
                 asset: PlaybackAsset(
                     url: URL(fileURLWithPath: "/tmp/first-track.caf")
-                )
+                ),
+                transportKind: .localFile
             )
         )
         await waitUntil { firstContinuation != nil }
@@ -940,7 +946,8 @@ final class PlaybackFoundationTests: XCTestCase {
                 item: secondItem,
                 asset: PlaybackAsset(
                     url: URL(fileURLWithPath: "/tmp/second-track.caf")
-                )
+                ),
+                transportKind: .localFile
             )
         )
         await waitUntil {
@@ -963,6 +970,74 @@ final class PlaybackFoundationTests: XCTestCase {
         XCTAssertTrue(
             systemMediaController.latestSnapshot?.artwork === secondImage
         )
+    }
+
+    func testStaleResolutionCannotReplaceCurrentTransportKind() async {
+        let first = PlaybackItem(
+            id: "first",
+            title: "First",
+            artist: "Velacanto",
+            source: .jellyfin
+        )
+        let queued = PlaybackItem(
+            id: "queued",
+            title: "Queued",
+            artist: "Velacanto",
+            source: .jellyfin
+        )
+        let replacement = PlaybackItem(
+            id: "replacement",
+            title: "Replacement",
+            artist: "Velacanto",
+            source: .jellyfin
+        )
+        let coordinator = AudioPlaybackCoordinator(
+            engine: RecordingAudioPlayerEngine(),
+            systemMediaController: RecordingSystemMediaController()
+        )
+        coordinator.play(
+            PlaybackRequest(
+                item: first,
+                asset: PlaybackAsset(
+                    url: URL(fileURLWithPath: "/tmp/first.caf")
+                ),
+                transportKind: .directPlay
+            ),
+            queueItems: [first, queued],
+            context: .songs
+        )
+
+        var staleContinuation: CheckedContinuation<PlaybackRequest, Never>?
+        coordinator.configureRequestResolver { item in
+            await withCheckedContinuation { continuation in
+                staleContinuation = continuation
+            }
+        }
+        coordinator.nextTrack()
+        await waitUntil { staleContinuation != nil }
+
+        coordinator.play(
+            PlaybackRequest(
+                item: replacement,
+                asset: PlaybackAsset(
+                    url: URL(fileURLWithPath: "/tmp/replacement.caf")
+                ),
+                transportKind: .directStream
+            )
+        )
+        staleContinuation?.resume(
+            returning: PlaybackRequest(
+                item: queued,
+                asset: PlaybackAsset(
+                    url: URL(fileURLWithPath: "/tmp/queued.caf")
+                ),
+                transportKind: .transcoding
+            )
+        )
+        await Task.yield()
+
+        XCTAssertEqual(coordinator.currentItem, replacement)
+        XCTAssertEqual(coordinator.transportKind, .directStream)
     }
 
     func testPlaybackQueuePreservesOrderAndBoundsSavedWindow() {
@@ -1058,7 +1133,8 @@ final class PlaybackFoundationTests: XCTestCase {
                 item: items[0],
                 asset: PlaybackAsset(
                     url: URL(fileURLWithPath: "/tmp/track-0.caf")
-                )
+                ),
+                transportKind: .directPlay
             ),
             queueItems: items,
             context: .songs,
@@ -1113,7 +1189,8 @@ final class PlaybackFoundationTests: XCTestCase {
                 item: item,
                 asset: PlaybackAsset(
                     url: URL(fileURLWithPath: "/tmp/\(item.id).caf")
-                )
+                ),
+                transportKind: .directPlay
             )
         }
         coordinator.play(
@@ -1121,7 +1198,8 @@ final class PlaybackFoundationTests: XCTestCase {
                 item: last,
                 asset: PlaybackAsset(
                     url: URL(fileURLWithPath: "/tmp/last.caf")
-                )
+                ),
+                transportKind: .directPlay
             ),
             queueItems: [first, last],
             context: .songs
@@ -1165,7 +1243,8 @@ final class PlaybackFoundationTests: XCTestCase {
                 item: item,
                 asset: PlaybackAsset(
                     url: URL(fileURLWithPath: "/tmp/\(item.id).caf")
-                )
+                ),
+                transportKind: .directPlay
             )
         }
         coordinator.play(
@@ -1173,7 +1252,8 @@ final class PlaybackFoundationTests: XCTestCase {
                 item: current,
                 asset: PlaybackAsset(
                     url: URL(fileURLWithPath: "/tmp/current.caf")
-                )
+                ),
+                transportKind: .directPlay
             ),
             queueItems: [current],
             context: .songs,
@@ -1229,7 +1309,8 @@ final class PlaybackFoundationTests: XCTestCase {
                 item: item,
                 asset: PlaybackAsset(
                     url: URL(fileURLWithPath: "/tmp/\(item.id).caf")
-                )
+                ),
+                transportKind: .directPlay
             )
         }
         coordinator.play(
@@ -1237,7 +1318,8 @@ final class PlaybackFoundationTests: XCTestCase {
                 item: current,
                 asset: PlaybackAsset(
                     url: URL(fileURLWithPath: "/tmp/current.caf")
-                )
+                ),
+                transportKind: .directPlay
             ),
             queueItems: [current],
             context: .songs,
@@ -1539,6 +1621,7 @@ final class PlaybackFoundationTests: XCTestCase {
                     URL(string: "https://example.com/audio.mp3")
                 )
             ),
+            transportKind: .directPlay,
             reporter: reporter
         )
     }

@@ -20,6 +20,7 @@ struct JellyfinPlaybackRequestResolver: Sendable {
             for: JellyfinTrackSelection(
                 track: track,
                 streamURL: resolution.streamURL,
+                transportKind: resolution.playMethod.transportKind,
                 reporter: reporter(itemID: itemID, resolution: resolution)
             ))
     }
@@ -29,6 +30,7 @@ struct JellyfinPlaybackRequestResolver: Sendable {
         return PlaybackRequest(
             item: item,
             asset: PlaybackAsset(url: resolution.streamURL),
+            transportKind: resolution.playMethod.transportKind,
             reporter: reporter(itemID: item.id, resolution: resolution)
         )
     }

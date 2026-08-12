@@ -35,7 +35,8 @@ struct LocalFilePlaybackAdapter: PlaybackSourceAdapter {
             asset: PlaybackAsset(
                 url: selection.url,
                 resourceLease: resourceLease
-            )
+            ),
+            transportKind: .localFile
         )
     }
 }

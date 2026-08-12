@@ -3,15 +3,18 @@ import Foundation
 struct JellyfinTrackSelection: Sendable {
     let track: MusicCatalogItem
     let streamURL: URL
+    let transportKind: PlaybackTransportKind
     let reporter: (any PlaybackLifecycleReporting)?
 
     init(
         track: MusicCatalogItem,
         streamURL: URL,
+        transportKind: PlaybackTransportKind,
         reporter: (any PlaybackLifecycleReporting)? = nil
     ) {
         self.track = track
         self.streamURL = streamURL
+        self.transportKind = transportKind
         self.reporter = reporter
     }
 }
@@ -40,6 +43,7 @@ struct JellyfinPlaybackAdapter: PlaybackSourceAdapter {
         return PlaybackRequest(
             item: Self.playbackItem(for: selection.track),
             asset: PlaybackAsset(url: selection.streamURL),
+            transportKind: selection.transportKind,
             reporter: selection.reporter
         )
     }

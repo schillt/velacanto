@@ -6,7 +6,6 @@ struct MusicSearchView: View {
     @Binding var searchText: String
 
     let showProfile: () -> Void
-    let showNowPlaying: () -> Void
 
     @StateObject private var model = PagedMusicCatalogModel()
     @State private var preparingTrackID: MusicCatalogItemID?
@@ -160,8 +159,7 @@ struct MusicSearchView: View {
                             MusicPlaylistView(
                                 playlist: playlist,
                                 jellyfin: jellyfin,
-                                playback: playback,
-                                showNowPlaying: showNowPlaying
+                                playback: playback
                             )
                         } label: {
                             SearchResultRow(item: playlist, jellyfin: jellyfin)
