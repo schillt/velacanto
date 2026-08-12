@@ -23,6 +23,30 @@ not be authorized through its integration. When that happens, use `gh` after
 the checks above. Treat a 403 response as an authorization problem, not a
 reason to retry blindly.
 
+### Push an approved issue
+
+For an assigned, in-scope issue, agents are authorized to commit focused work,
+push its short-lived branch, and open a pull request to `alpha` after the
+required local checks pass. Do not ask the user to repeat how to push.
+
+```sh
+gh auth status
+git status -sb
+git push --set-upstream origin "$(git branch --show-current)"
+gh pr create --base alpha --head "$(git branch --show-current)"
+```
+
+`gh auth status` succeeding means GitHub CLI authentication is valid. Do not
+report it as invalid because a sandbox requests network permission or because
+the GitHub app connector returns `403 Resource not accessible by integration`;
+request the approved network permission and use `gh` instead. Report
+authentication as invalid only when `gh auth status` itself fails. If `git
+push` is rejected after a successful status check, report the exact remote
+message and stop rather than changing credentials or retrying blindly.
+
+Merge only after required hosted checks pass and the assigned task includes the
+merge or release promotion. Delete the short-lived source branch after merge.
+
 ### Issues, milestones, and board
 
 - Inspect first; preserve issue history and existing Project items.
