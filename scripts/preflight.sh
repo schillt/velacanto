@@ -102,13 +102,14 @@ else
   warn "Repository has no initial commit"
 fi
 
-if [ -f README.md ] && [ -f docs/0.1-plan.md ]; then
-  pass "Product brief and 0.1.0 plan exist"
+if [ -f README.md ] && [ -f docs/0.3-plan.md ] &&
+  [ -f docs/archive/0.1/0.1-plan.md ]; then
+  pass "Product brief, current plan, and archived 0.1.0 plan exist"
 else
-  fail "Product brief or 0.1.0 plan is missing"
+  fail "Product brief, current plan, or archived 0.1.0 plan is missing"
 fi
 
-if rg -q 'com\.chameleonenterprise\.velacanto' README.md docs/0.1-plan.md; then
+if rg -q 'com\.chameleonenterprise\.velacanto' README.md docs/0.3-plan.md; then
   pass "Bundle identifier is documented"
 else
   fail "Bundle identifier is not documented consistently"

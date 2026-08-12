@@ -1,10 +1,8 @@
 # Velacanto architecture
 
-This document describes the architecture that 0.1 established and 0.2 must
-preserve while reducing oversized UI and service change surfaces. It is a
-design target, not a claim that every boundary is already reflected one-to-one
-in the implementation. The [0.2 plan](0.2-plan.md) is the source of truth for
-current delivery status.
+This document describes the target architecture for 0.3. The 0.2 playback,
+session, catalog, and platform foundations remain valid; 0.3 closes the gap
+where general library presentation still consumes Jellyfin-specific items.
 
 ## Component map
 
@@ -13,283 +11,220 @@ flowchart TB
     User["User"]
     SystemUI["Lock Screen, Control Center, routes"]
 
-    subgraph Presentation["Platform presentation"]
-        IOS["iOS SwiftUI<br/>(native shell implemented)"]
-        Mac["macOS SwiftUI<br/>(native shell implemented)"]
+    subgraph Presentation["Native presentation"]
+        IOS["iPhone SwiftUI"]
+        IPad["iPad SwiftUI"]
+        Mac["macOS SwiftUI"]
         CarPlay["CarPlay later"]
     end
 
-    subgraph Application["Application state"]
-        Coordinator["App state and coordinator<br/>(playback owner implemented)"]
-        Models["Shared domain models<br/>(playback and Jellyfin implemented)"]
+    subgraph Application["Provider-neutral application state"]
+        Catalog["MusicLibraryProviding"]
+        Items["MusicCatalogItem and capabilities"]
+        Actions["Favorite/action state owner"]
+        Player["AudioPlaybackCoordinator"]
+        Queue["PlaybackQueue and modes"]
     end
 
-    subgraph Core["Shared core services"]
-        Session["Session service<br/>(Slice 1 complete)"]
-        API["Jellyfin API client<br/>(Slice 1 complete)"]
-        Library["Music library access<br/>(first browse slice implemented)"]
-        Playback["Playback coordinator<br/>(foundation implemented)"]
+    subgraph Providers["Source implementations"]
+        JellyfinCatalog["Jellyfin catalog mapping"]
+        JellyfinPlayback["Jellyfin playback resolver"]
+        Local["Local-file adapter"]
+        Navidrome["Navidrome later"]
     end
 
-    subgraph Sources["Playback source adapters"]
-        LocalAdapter["Local Files adapter<br/>(implemented)"]
-        JellyfinAdapter["Jellyfin adapter<br/>(Slice 3 implemented)"]
-        NavidromeAdapter["Navidrome adapter<br/>(after 0.1)"]
+    subgraph Platform["Apple platform services"]
+        Networking["URLSession and network policy"]
+        Keychain["Device-local Keychain"]
+        AV["AVFoundation and audio session"]
+        Media["Now Playing and remote commands"]
     end
 
-    subgraph Apple["Apple platform services"]
-        Networking["URLSession and local-network policy<br/>(implemented)"]
-        Keychain["Device-local Keychain item<br/>(implemented)"]
-        Engine["Audio player engine<br/>(implemented)"]
-        AV["AVFoundation and AVAudioSession<br/>(implemented)"]
-        Media["Now Playing and remote commands<br/>(implemented)"]
-    end
-
-    LocalFile["User-selected audio file"]
     Jellyfin["Jellyfin server"]
-    Navidrome["Navidrome server later"]
+    LocalFile["Selected local file"]
 
     User --> IOS
+    User --> IPad
     User --> Mac
-    IOS --> Coordinator
-    Mac --> Coordinator
-    CarPlay -. "after core playback" .-> Coordinator
+    IOS --> Catalog
+    IPad --> Catalog
+    Mac --> Catalog
+    IOS --> Player
+    IPad --> Player
+    Mac --> Player
+    CarPlay -. "future neutral consumer" .-> Catalog
+    CarPlay -. "future neutral consumer" .-> Player
 
-    Coordinator --> Session
-    Coordinator --> Library
-    Coordinator --> Playback
-    Coordinator --> Models
-    Coordinator --> LocalAdapter
-    Coordinator --> JellyfinAdapter
-    Coordinator -. "after 0.1" .-> NavidromeAdapter
-
-    Session --> API
-    Session --> Keychain
-    Library --> API
-    Library --> Models
-    Playback --> Models
-    LocalAdapter -- "PlaybackRequest" --> Playback
-    JellyfinAdapter -- "PlaybackRequest" --> Playback
-    NavidromeAdapter -. "PlaybackRequest" .-> Playback
-    LocalAdapter --> LocalFile
-    JellyfinAdapter --> API
-    NavidromeAdapter --> Networking
-    API --> Networking
+    Catalog --> Items
+    Catalog --> Actions
+    Catalog --> JellyfinCatalog
+    Actions --> JellyfinCatalog
+    JellyfinCatalog --> Networking
     Networking --> Jellyfin
-    Networking -. "future" .-> Navidrome
-    Playback --> Engine
-    Engine --> AV
-    Playback <--> Media
+
+    Player --> Queue
+    Player --> JellyfinPlayback
+    Player --> Local
+    JellyfinPlayback --> Networking
+    Local --> LocalFile
+    Player --> AV
+    Player <--> Media
     Media <--> SystemUI
+    JellyfinCatalog --> Keychain
 ```
 
-Every source adapter asynchronously resolves its own selection into the same
-provider-neutral playback request. The coordinator therefore sees display
-metadata, an opaque resource lease, and a playback-asset factory rather than
-Jellyfin, Navidrome, or file-picker details. Local Files passes the selected URL
-through unchanged and holds its security-scoped access only for the active item.
-The app owns this coordinator rather than an individual view, so playback and
-the temporary file-access lease survive navigation and backgrounding until the
-user stops playback, replaces the item, or the app terminates.
+CarPlay is shown only as a future consumer. Version 0.3 adds no entitlement,
+target, scene, or templates.
 
-The main-actor playback engine owns AVFoundation and translates item readiness,
-waiting, playing, pause, completion, stall, and failure events into an explicit
-provider-neutral playback state. Periodic time observations update the in-app
-progress display; system Now Playing metadata is republished only when the item,
-duration, seek position, or playback state changes.
+## Provider-neutral catalog contract
 
-## Delivery status
+`MusicCatalogItem` is the presentation and action value for albums, artists,
+songs, and playlists. It contains:
 
-The 0.1 listening path is complete. Version 0.2 does not replace its provider,
-session, playback, or platform boundaries; it separates the presentation and
-service responsibilities that accumulated while delivering that path. In
-particular, root composition, catalog presentation, artwork infrastructure,
-and playback presentation need smaller, explicit owners. See the
-[0.2 plan](0.2-plan.md) for the tracked work and guardrails.
+- an opaque source-scoped identifier;
+- kind and display metadata;
+- duration and artwork reference where available;
+- provider-authoritative favorite state; and
+- `MusicItemCapabilities` describing supported actions.
 
-## Local-file playback journey
+`MusicLibraryProviding` supplies paged library/search/detail/Home queries and
+supported mutations. Jellyfin API response models are mapped at the repository
+boundary and do not enter general Home, library, search, navigation, or playback
+presentation.
+
+Connection, authentication, and account management may remain explicitly
+Jellyfin-specific because they are provider setup surfaces rather than general
+music presentation.
+
+### Catalog and mutation invariants
+
+- IDs are opaque and source-scoped; display strings never establish identity.
+- Page cursors belong to one query, context, account, and library snapshot.
+- Stale query results cannot replace current state.
+- One account-scoped state owner sequences favorite mutations and reconciles
+  server results across visible item copies.
+- Optimistic mutation failure restores the authoritative prior value and emits
+  a user-safe error without item metadata or credentials in logs.
+- Logout clears only the active account's transient mutation state and caches.
+
+## Playback handoff
+
+Every source asynchronously resolves its selection into a provider-neutral
+`PlaybackRequest`. The request contains the `PlaybackItem`, opaque asset lease,
+player-item factory, lifecycle reporter, and `PlaybackTransportKind`:
+
+- Local File
+- Direct Play
+- Direct Stream
+- Transcoding
+
+Jellyfin continues to negotiate through `PlaybackInfo`; its response and play
+method are mapped before the request reaches presentation. The coordinator owns
+AVFoundation, audio-session policy, observed player state, and system media
+integration for the app lifetime.
+
+## Queue ownership and modes
+
+`AudioPlaybackCoordinator` remains the sole public playback owner.
+`PlaybackQueue` divides its sequence conceptually into history, current item,
+and Up Next:
+
+- History and the current item are not editable.
+- Play Next inserts immediately after current; Play Last appends after current
+  explicit and provider-expanded upcoming items.
+- Remove and move affect only Up Next.
+- Shuffle keeps current fixed and randomizes the remaining upcoming sequence
+  once without duplicates.
+- Repeat one restarts current; repeat all wraps at the queue boundary; off ends
+  normally.
+- A mutation that changes the preloaded next item cancels or replaces stale
+  preload work before it can advance.
+- Late source expansion appends only unseen items and never overwrites explicit
+  user order.
+- Relaunch persists a bounded window of 25 historical and 50 upcoming items,
+  including explicit edits and playback modes.
+
+## Primary browse and action journey
 
 ```mermaid
 sequenceDiagram
     actor User
-    participant UI as SwiftUI
-    participant Files as System file picker
-    participant Adapter as Local Files adapter
-    participant Player as Playback coordinator
-    participant AV as AVFoundation
+    participant UI as Native SwiftUI
+    participant Library as MusicLibraryProviding
+    participant State as Item action state
+    participant Provider as Jellyfin repository
+    participant API as Jellyfin API
 
-    User->>UI: Open Audio File
-    UI->>Files: Request one audio file
-    Files-->>UI: Security-scoped file URL
-    UI->>Adapter: Resolve playback request
-    Adapter-->>UI: Asset factory plus temporary access lease
-    UI->>Player: Play request
-    Player->>AV: Play selected URL in place
-    User->>Player: Stop or replace item
-    Player->>Player: Release file access
+    User->>UI: Open Home, Library, or Search
+    UI->>Library: Request neutral page
+    Library->>Provider: Load provider items
+    Provider->>API: Authenticated request
+    API-->>Provider: Jellyfin response models
+    Provider-->>Library: Neutral items and capabilities
+    Library-->>UI: Current page and state
+    User->>UI: Favorite item
+    UI->>State: Optimistic mutation
+    State-->>UI: Immediate shared state
+    State->>Provider: Apply supported mutation
+    Provider->>API: Jellyfin favorite request
+    API-->>State: Success or failure
+    State-->>UI: Reconcile or roll back
 ```
 
-## Primary user journey
+## Playback and system-control journey
 
 ```mermaid
 sequenceDiagram
     actor User
-    participant UI as SwiftUI
-    participant App as App coordinator
-    participant Adapter as Jellyfin adapter
-    participant API as Jellyfin API client
-    participant SessionFile as Private session file
-    participant JF as Jellyfin server
+    participant UI as Native SwiftUI
     participant Player as Playback coordinator
-    participant OS as Apple media surfaces
+    participant Resolver as Source resolver
+    participant Engine as AVFoundation engine
+    participant Media as System media
 
-    User->>UI: Enter server URL
-    UI->>App: Connect
-    App->>API: Validate server
-    API->>JF: Request public server information
-    JF-->>API: Server identity
-
-    User->>UI: Submit credentials
-    UI->>App: Authenticate
-    App->>API: Authenticate user
-    API->>JF: Username and password
-    JF-->>API: User and access token
-    API-->>App: Authenticated session
-    App->>SessionFile: Store access token
-
-    User->>UI: Browse music
-    App->>API: Request libraries, albums, and tracks
-    API->>JF: Authenticated metadata requests
-    JF-->>API: Music metadata
-    API-->>App: Decoded music models
-    App-->>UI: Browse state
-
-    User->>UI: Select track
-    UI->>App: Play item
-    App->>Adapter: Resolve selected track
-    Adapter->>API: Resolve Jellyfin playback info
-    API->>JF: Request playable stream
-    JF-->>API: Stream response
-    API-->>Adapter: Provider response
-    Adapter-->>App: Provider-neutral playback request
-    App->>Player: Play request
-    Player->>OS: Publish playback state and metadata
-    OS-->>Player: Play, pause, stop, toggle, and seek
-```
-
-## Background and system-control lifecycle
-
-```mermaid
-sequenceDiagram
-    participant App as App-lifetime state
-    participant Player as Playback coordinator
-    participant Engine as Audio player engine
-    participant Audio as AVAudioSession and AVPlayer
-    participant Media as Now Playing and remote commands
-    participant System as Lock Screen and Control Center
-
-    App->>Player: Retain one coordinator
-    Player->>Audio: Activate playback audio session
-    Player->>Engine: Load and control player item
-    Engine->>Audio: Apply AVPlayer operations
-    Audio-->>Engine: Readiness, timing, wait, end, failure
-    Engine-->>Player: Observed playback state
-    Player->>Media: Publish item, timing, and playback rate
-    Media->>System: Present current media controls
-    System-->>Media: Play, pause, stop, toggle, or seek
-    Media-->>Player: Forward command
-    Player->>Audio: Apply command
-    Player->>Media: Publish updated state
-    Note over App,Audio: View navigation does not release the player
+    User->>UI: Play item or edit Up Next
+    UI->>Player: Provider-neutral intent
+    Player->>Resolver: Resolve selected item
+    Resolver-->>Player: PlaybackRequest and transport kind
+    Player->>Engine: Load current and safe preload
+    Player->>Media: Publish metadata and controls
+    Media-->>Player: Play, pause, previous, next, seek
+    User->>Player: Remove or reorder upcoming item
+    Player->>Player: Update queue and invalidate stale preload
+    Player->>Media: Publish current capability state
 ```
 
 ## Responsibilities
 
 | Component | Owns | Must not own |
 | --- | --- | --- |
-| SwiftUI surfaces | Presentation, navigation intent, accessible controls | Endpoint construction, token persistence, audio-session policy |
-| App coordinator | Session state, loading state, navigation state, service coordination | Raw file persistence, URLSession, or AVFoundation calls |
-| Session service | Authentication, restoration, logout, stable device identity | Password persistence or library browsing |
-| Jellyfin API client | Authenticated requests, endpoint details, response decoding | UI state or playback controls |
-| Library repository | Music views, albums, tracks, artwork, browse errors | Credential storage or audio routing |
-| Playback source adapters | Asynchronous source-specific asset resolution and the shortest required access lifetime | Transport controls, audio-session policy, or unrelated source APIs |
-| Playback coordinator | Observed player state, opaque resource leases, audio-session policy, interruptions, routes, and system controls | User authentication, source-specific resolution, or library presentation |
-| AVFoundation playback engine | Player-item readiness, timing, waiting, completion, stalls, and failures | Source identity, navigation, or authentication |
-| Platform adapters | Private token persistence, networking policy, audio, now-playing integration | Product navigation or domain rules |
+| SwiftUI surfaces | Presentation, navigation, accessible intent | Provider responses, endpoints, token storage, AVFoundation |
+| Music library boundary | Neutral paging, search, details, Home collections, supported mutations | Platform navigation or playback engine |
+| Provider repository | Jellyfin mapping, catalog ordering, cursors, request execution | General UI state or audio policy |
+| Item action state | Sequencing, optimistic state, reconciliation, rollback | Endpoint construction or unrelated catalog paging |
+| Playback source adapter | Source-specific resolution and shortest required resource lease | Queue UI, audio-session policy, authentication UI |
+| Playback coordinator | Queue/modes, player state, preloading, interruptions, routes, system commands | Account setup or provider catalog presentation |
+| AVFoundation engine | Readiness, timing, waiting, completion, stalls, failures | Source identity or navigation |
+| Platform adapters | Keychain, network policy, audio, Now Playing | Product navigation or provider domain rules |
 
-### Jellyfin collaboration invariants
+## Security and privacy
 
-- `JellyfinSessionController` is the only owner of published authentication and
-  library-loading state. It snapshots that state before starting non-UI work;
-  stale results must not repopulate the UI after logout or a different sign-in.
-- `JellyfinCatalogRepository` owns catalog ordering, de-duplication, and
-  multi-library cursor state. A cursor belongs only to its query, context, and
-  library snapshot; views discard it when any of those inputs change.
-- `JellyfinCatalogCache` serializes each server/user cache independently.
-  Expired, version-mismatched, or corrupt data is a cache miss, not a session
-  error. Its clock is injected for expiry tests. Logout clears only that
-  account's cache.
-- `JellyfinPlaybackRequestResolver` owns stream negotiation and reports for the
-  duration of playback. It receives an authenticated client and item identity,
-  never a catalog view model or navigation state.
-
-## Security and privacy boundaries
-
-- The password is transient and is not persisted by Velacanto.
-- The access token is stored in a non-synchronizing Keychain item and removed
-  on logout. On iOS it is device-local and available after first unlock, so
-  background playback can restore it without a user-presence prompt.
-- Real tokens and passwords must not appear in logs, fixtures, screenshots, or
-  Git. Tests use clearly synthetic credential values.
-- Remote servers use HTTPS by default.
-- Local servers require an explicit local-network purpose string and the
-  narrowest transport-security policy that supports the approved use case.
-- The privacy manifest must reflect the APIs and data flows actually present in
-  the shipped target.
-- User-selected local files are played from their original URL. Velacanto does
-  not copy, upload, index, or persist access to them.
-
-## Source layout
-
-The project now has the playback foundation, native app shell, and Jellyfin
-vertical slice in place. The layout keeps endpoint, session, source-adapter,
-and presentation responsibilities separated:
-
-```text
-Velacanto/
-├── App/                         # implemented: app-lifetime ownership
-├── Features/
-│   ├── Jellyfin/                # connection, auth, and album tracks
-│   ├── Library/                 # albums, artists, songs, and playlists
-│   ├── Profile/                 # account, settings, and diagnostics
-│   └── Search/                  # cross-library music search
-├── Core/
-│   ├── Models/                  # implemented: source and playback contracts
-│   ├── Playback/                # implemented: coordinator and player engine
-│   ├── Session/                 # implemented: restore, credentials, and logout
-│   └── JellyfinAPI/             # implemented: auth, browse, and stream requests
-├── Sources/
-│   ├── LocalFiles/              # implemented
-│   ├── Jellyfin/                # implemented: playback request adapter
-│   └── Navidrome/               # after 0.1
-├── Platform/
-│   └── Media/                   # Now Playing and remote commands
-└── Resources/
-
-VelacantoTests/
-├── PlaybackFoundationTests.swift
-└── JellyfinFoundationTests.swift
-```
-
-Keychain token persistence currently lives beside the session boundary, and
-networking policy lives in the Jellyfin API actor. They remain isolated behind
-protocols even though the codebase is not yet large enough to justify separate
-platform directories for each adapter.
+- Passwords remain transient.
+- Tokens remain in a non-synchronizing device-local Keychain item and are
+  removed on logout.
+- Tokens, passwords, authenticated URLs, server addresses, and personal media
+  names must not enter logs, fixtures, screenshots, documents, or issues.
+- Remote servers use HTTPS with normal certificate validation.
+- Plain HTTP remains limited to explicitly validated local destinations.
+- User-selected files play in place and receive no persistent bookmark.
+- Account-scoped metadata, artwork, item mutation state, and saved playback do
+  not cross account boundaries.
 
 ## Related documents
 
-- [0.2 plan](0.2-plan.md)
-- [0.1.0 plan](0.1-plan.md) (historical release record)
+- [0.3 plan](0.3-plan.md)
+- [0.3 acceptance](0.3-stability-acceptance.md)
+- [Native-player design](design/README.md)
 - [Roadmap](roadmap.md)
 - [Architecture decisions](decisions/README.md)
-- [Interactive visualization](visualizations/README.md)
+- [Historical archive](archive/README.md)
