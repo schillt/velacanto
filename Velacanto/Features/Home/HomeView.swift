@@ -10,6 +10,11 @@ struct HomeView: View {
     let showNowPlaying: () -> Void
     let showLibrary: () -> Void
 
+    @StateObject private var favorites = PagedMusicCatalogModel()
+    @StateObject private var recentlyAdded = PagedMusicCatalogModel()
+    @State private var preparingCatalogItemID: MusicCatalogItemID?
+    @State private var catalogPlaybackError: String?
+
     var body: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 30) {
@@ -17,6 +22,20 @@ struct HomeView: View {
 
                 if !playback.recentItems.isEmpty {
                     recentlyPlayed
+                }
+
+                if jellyfin.isSignedIn {
+                    catalogShelf(
+                        title: "Favorites",
+                        model: favorites,
+                        retry: loadFavorites
+                    )
+
+                    catalogShelf(
+                        title: "Recently Added",
+                        model: recentlyAdded,
+                        retry: loadRecentlyAdded
+                    )
                 }
 
                 librarySources
@@ -37,6 +56,28 @@ struct HomeView: View {
                     .accessibilityLabel("Profile and settings")
                 }
             #endif
+        }
+        .task(id: jellyfin.playbackAccount) {
+            guard jellyfin.isSignedIn else {
+                await clearProviderShelves()
+                return
+            }
+            async let favoriteLoad: Void = loadFavorites()
+            async let recentLoad: Void = loadRecentlyAdded()
+            _ = await (favoriteLoad, recentLoad)
+        }
+        .alert(
+            "Couldn’t Play Music",
+            isPresented: Binding(
+                get: { catalogPlaybackError != nil },
+                set: { if !$0 { catalogPlaybackError = nil } }
+            )
+        ) {
+            Button("OK", role: .cancel) {
+                catalogPlaybackError = nil
+            }
+        } message: {
+            Text(catalogPlaybackError ?? "An unknown playback error occurred.")
         }
     }
 
@@ -114,6 +155,162 @@ struct HomeView: View {
         }
     }
 
+    @ViewBuilder
+    private func catalogShelf(
+        title: String,
+        model: PagedMusicCatalogModel,
+        retry: @escaping @MainActor () async -> Void
+    ) -> some View {
+        if model.isInitialLoading {
+            VStack(alignment: .leading, spacing: 12) {
+                Text(title).font(.title2.weight(.semibold))
+                ProgressView("Loading \(title.lowercased())…")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 24)
+            }
+        } else if !model.items.isEmpty {
+            VStack(alignment: .leading, spacing: 12) {
+                Text(title).font(.title2.weight(.semibold))
+                ScrollView(.horizontal, showsIndicators: false) {
+                    LazyHStack(spacing: 14) {
+                        ForEach(model.items) { item in
+                            catalogItem(item, shelfItems: model.items)
+                        }
+                    }
+                }
+
+                if let errorMessage = model.errorMessage {
+                    MusicPaginationErrorView(message: errorMessage) {
+                        Task { await retry() }
+                    }
+                }
+            }
+        } else if let errorMessage = model.errorMessage {
+            VStack(alignment: .leading, spacing: 12) {
+                Text(title).font(.title2.weight(.semibold))
+                MusicPaginationErrorView(message: errorMessage) {
+                    Task { await retry() }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func catalogItem(
+        _ item: MusicCatalogItem,
+        shelfItems: [MusicCatalogItem]
+    ) -> some View {
+        if item.kind == .song {
+            Button {
+                play(item, shelfItems: shelfItems)
+            } label: {
+                HomeCatalogCard(
+                    item: item,
+                    jellyfin: jellyfin,
+                    isPreparing: preparingCatalogItemID == item.id
+                )
+            }
+            .buttonStyle(.plain)
+            .disabled(preparingCatalogItemID != nil)
+            .accessibilityHint("Plays this song")
+        } else {
+            NavigationLink {
+                destination(for: item)
+            } label: {
+                HomeCatalogCard(item: item, jellyfin: jellyfin)
+            }
+            .buttonStyle(.plain)
+            .accessibilityHint("Opens \(item.name)")
+        }
+    }
+
+    @ViewBuilder
+    private func destination(for item: MusicCatalogItem) -> some View {
+        switch item.kind {
+        case .album:
+            JellyfinTracksView(
+                album: item,
+                jellyfin: jellyfin,
+                playback: playback
+            )
+        case .artist:
+            MusicArtistView(
+                artist: item,
+                jellyfin: jellyfin,
+                playback: playback
+            )
+        case .playlist:
+            MusicPlaylistView(
+                playlist: item,
+                jellyfin: jellyfin,
+                playback: playback,
+                showNowPlaying: showNowPlaying
+            )
+        case .song:
+            EmptyView()
+        }
+    }
+
+    private func loadFavorites() async {
+        await favorites.reset(
+            cachedItems: {
+                await jellyfin.cachedCatalogItems(kind: .favorites)
+            },
+            loader: { cursor in
+                try await jellyfin.homeFavoritesPage(cursor: cursor)
+            },
+            cacheWriter: { items in
+                await jellyfin.cacheCatalogItems(items, kind: .favorites)
+            }
+        )
+    }
+
+    private func loadRecentlyAdded() async {
+        await recentlyAdded.reset(
+            cachedItems: {
+                await jellyfin.cachedCatalogItems(kind: .recentlyAdded)
+            },
+            loader: { cursor in
+                try await jellyfin.homeRecentlyAddedPage(cursor: cursor)
+            },
+            cacheWriter: { items in
+                await jellyfin.cacheCatalogItems(items, kind: .recentlyAdded)
+            }
+        )
+    }
+
+    private func clearProviderShelves() async {
+        let emptyLoader: PagedMusicCatalogModel.Loader = { _ in
+            MusicCatalogPage(items: [], totalRecordCount: 0, cursor: nil)
+        }
+        await favorites.reset(loader: emptyLoader)
+        await recentlyAdded.reset(loader: emptyLoader)
+    }
+
+    private func play(
+        _ song: MusicCatalogItem,
+        shelfItems: [MusicCatalogItem]
+    ) {
+        guard song.capabilities.contains(.play) else { return }
+        preparingCatalogItemID = song.id
+        catalogPlaybackError = nil
+        Task {
+            defer { preparingCatalogItemID = nil }
+            do {
+                let request = try await jellyfin.playbackRequest(for: song)
+                let songs = shelfItems.filter { $0.kind == .song }
+                playback.play(
+                    request,
+                    queueItems: songs.map(JellyfinPlaybackAdapter.playbackItem(for:)),
+                    context: .single,
+                    account: jellyfin.playbackAccount
+                )
+            } catch {
+                catalogPlaybackError = error.localizedDescription
+            }
+        }
+    }
+
     private var librarySources: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("From Your Library").font(.title2.weight(.semibold))
@@ -142,6 +339,54 @@ struct HomeView: View {
         jellyfin.isSignedIn
             ? "Choose music from your library or open a local audio file."
             : "Open a local audio file, or add a music server from your profile."
+    }
+}
+
+private struct HomeCatalogCard: View {
+    let item: MusicCatalogItem
+    @ObservedObject var jellyfin: JellyfinSessionController
+    var isPreparing = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            JellyfinArtworkView(
+                item: item,
+                jellyfin: jellyfin,
+                cornerRadius: 14,
+                maxWidth: 360
+            )
+            .frame(width: 142, height: 142)
+            .overlay {
+                if isPreparing {
+                    ProgressView()
+                        .padding(10)
+                        .background(.regularMaterial, in: Circle())
+                }
+            }
+
+            Text(item.name)
+                .font(.callout.weight(.medium))
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+            Text(subtitle)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
+        .frame(width: 142, alignment: .leading)
+        .contentShape(Rectangle())
+    }
+
+    private var subtitle: String {
+        switch item.kind {
+        case .song, .album:
+            item.displayArtist
+        case .artist:
+            "Artist"
+        case .playlist:
+            item.childCount.map { "\($0) \($0 == 1 ? "song" : "songs")" }
+                ?? "Playlist"
+        }
     }
 }
 

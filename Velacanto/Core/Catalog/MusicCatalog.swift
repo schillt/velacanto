@@ -66,6 +66,8 @@ enum MusicCatalogKind: String, Codable, Sendable {
     case albumTracks
     case artistTracks
     case playlistTracks
+    case favorites
+    case recentlyAdded
 }
 
 struct MusicCatalogCursor: Sendable {

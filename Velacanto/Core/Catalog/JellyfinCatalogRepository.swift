@@ -76,7 +76,8 @@ actor JellyfinCatalogRepository: MusicLibraryProviding {
                 limit: limit,
                 searchTerm: searchTerm
             )
-        case .playlists, .search, .albumTracks, .playlistTracks:
+        case .playlists, .search, .albumTracks, .playlistTracks, .favorites,
+            .recentlyAdded:
             return try await singleSourcePage(
                 kind: kind,
                 contextID: contextID?.opaqueID,
@@ -119,7 +120,8 @@ actor JellyfinCatalogRepository: MusicLibraryProviding {
                     artistID: kind == .artistTracks ? contextID : nil, startIndex: offset,
                     limit: pageLimit, searchTerm: searchTerm
                 )
-            case .playlists, .search, .albumTracks, .playlistTracks:
+            case .playlists, .search, .albumTracks, .playlistTracks, .favorites,
+                .recentlyAdded:
                 preconditionFailure("Multi-library paging only supports music views.")
             }
         }
@@ -160,6 +162,16 @@ actor JellyfinCatalogRepository: MusicLibraryProviding {
                 return try await api.playlistItemsPage(
                     userID: userID, playlistID: contextID ?? "", startIndex: offset,
                     limit: pageLimit
+                )
+            case .favorites:
+                return try await api.homeItemsPage(
+                    userID: userID, collection: .favorites,
+                    startIndex: offset, limit: pageLimit
+                )
+            case .recentlyAdded:
+                return try await api.homeItemsPage(
+                    userID: userID, collection: .recentlyAdded,
+                    startIndex: offset, limit: pageLimit
                 )
             case .albums, .artists, .songs, .artistTracks:
                 preconditionFailure("Single-source paging only supports global views.")

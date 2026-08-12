@@ -172,6 +172,7 @@ struct MusicPlaylistView: View {
                     )
 
                     MusicQueuePlaybackControls(
+                        capabilities: playlist.capabilities,
                         isPreparing: preparingTrackID != nil,
                         play: { playQueue(shuffled: false) },
                         shuffle: { playQueue(shuffled: true) }

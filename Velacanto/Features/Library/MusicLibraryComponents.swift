@@ -1,27 +1,20 @@
 import SwiftUI
 
 struct MusicQueuePlaybackControls: View {
+    let capabilities: MusicItemCapabilities
     let isPreparing: Bool
     let play: () -> Void
     let shuffle: () -> Void
 
     var body: some View {
-        HStack(spacing: 10) {
-            Button(action: play) {
-                HStack(spacing: 6) {
-                    Image(systemName: "play.fill")
-                    Text("Play")
-                }
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 10) {
+                actionButtons
             }
-            .buttonStyle(.borderedProminent)
 
-            Button(action: shuffle) {
-                HStack(spacing: 6) {
-                    Image(systemName: "shuffle")
-                    Text("Shuffle")
-                }
+            VStack(spacing: 10) {
+                actionButtons
             }
-            .buttonStyle(.bordered)
         }
         .disabled(isPreparing)
         .overlay {
@@ -31,6 +24,25 @@ struct MusicQueuePlaybackControls: View {
             }
         }
         .accessibilityElement(children: .contain)
+    }
+
+    @ViewBuilder
+    private var actionButtons: some View {
+        if capabilities.contains(.play) {
+            Button(action: play) {
+                Label("Play", systemImage: "play.fill")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+        }
+
+        if capabilities.contains(.shuffle) {
+            Button(action: shuffle) {
+                Label("Shuffle", systemImage: "shuffle")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+        }
     }
 }
 

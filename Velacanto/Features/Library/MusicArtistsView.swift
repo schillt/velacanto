@@ -164,6 +164,7 @@ struct MusicArtistView: View {
                 .frame(maxWidth: .infinity)
 
                 MusicQueuePlaybackControls(
+                    capabilities: artist.capabilities,
                     isPreparing: isPreparingQueue,
                     play: { playQueue(shuffled: false) },
                     shuffle: { playQueue(shuffled: true) }

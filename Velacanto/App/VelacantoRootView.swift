@@ -226,6 +226,7 @@ struct VelacantoRootView: View {
                     }
                 }
             }
+            .tabViewStyle(.sidebarAdaptable)
         }
     #endif
 

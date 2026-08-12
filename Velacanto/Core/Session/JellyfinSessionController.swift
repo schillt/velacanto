@@ -274,6 +274,24 @@ final class JellyfinSessionController: ObservableObject {
         )
     }
 
+    func homeFavoritesPage(
+        cursor: MusicCatalogCursor?,
+        limit: Int = 12
+    ) async throws -> MusicCatalogPage {
+        try await catalogPage(
+            kind: .favorites, cursor: cursor, limit: limit
+        )
+    }
+
+    func homeRecentlyAddedPage(
+        cursor: MusicCatalogCursor?,
+        limit: Int = 12
+    ) async throws -> MusicCatalogPage {
+        try await catalogPage(
+            kind: .recentlyAdded, cursor: cursor, limit: limit
+        )
+    }
+
     func tracksPage(
         in album: MusicCatalogItem,
         cursor: MusicCatalogCursor?,

@@ -413,6 +413,11 @@ struct JellyfinItemPage: Equatable, Sendable {
     }
 }
 
+enum JellyfinHomeCollection: Equatable, Sendable {
+    case favorites
+    case recentlyAdded
+}
+
 struct JellyfinRequestBuilder: Sendable {
     let server: JellyfinServerURL
     let deviceID: String
@@ -817,6 +822,12 @@ protocol JellyfinAPIService: Sendable {
         startIndex: Int,
         limit: Int
     ) async throws -> JellyfinItemPage
+    func homeItemsPage(
+        userID: String,
+        collection: JellyfinHomeCollection,
+        startIndex: Int,
+        limit: Int
+    ) async throws -> JellyfinItemPage
     func playlistItemsPage(
         userID: String,
         playlistID: String,
@@ -1037,6 +1048,37 @@ actor JellyfinAPIClient: JellyfinAPIService {
         )
         return JellyfinItemPage(
             try await itemsResponse(userID: userID, query: queryItems)
+        )
+    }
+
+    func homeItemsPage(
+        userID: String,
+        collection: JellyfinHomeCollection,
+        startIndex: Int,
+        limit: Int
+    ) async throws -> JellyfinItemPage {
+        let query: [URLQueryItem]
+        switch collection {
+        case .favorites:
+            query = pagedItemQuery(
+                itemTypes: "Audio,MusicAlbum,MusicArtist,Playlist",
+                fields: Self.searchFields,
+                startIndex: startIndex,
+                limit: limit,
+                additional: [URLQueryItem(name: "Filters", value: "IsFavorite")]
+            )
+        case .recentlyAdded:
+            query = pagedItemQuery(
+                itemTypes: "MusicAlbum",
+                fields: "AlbumArtist,Artists,ChildCount,ImageTags,SortName",
+                sortBy: "DateCreated",
+                sortOrder: "Descending",
+                startIndex: startIndex,
+                limit: limit
+            )
+        }
+        return JellyfinItemPage(
+            try await itemsResponse(userID: userID, query: query)
         )
     }
 
@@ -1262,6 +1304,7 @@ actor JellyfinAPIClient: JellyfinAPIService {
         itemTypes: String? = nil,
         fields: String,
         sortBy: String? = "SortName",
+        sortOrder: String = "Ascending",
         startIndex: Int,
         limit: Int,
         searchTerm: String? = nil,
@@ -1274,7 +1317,7 @@ actor JellyfinAPIClient: JellyfinAPIService {
         if recursively { items.append(URLQueryItem(name: "Recursive", value: "true")) }
         if let sortBy {
             items.append(URLQueryItem(name: "SortBy", value: sortBy))
-            items.append(URLQueryItem(name: "SortOrder", value: "Ascending"))
+            items.append(URLQueryItem(name: "SortOrder", value: sortOrder))
         }
         items.append(URLQueryItem(name: "Fields", value: fields))
         items += pageQueryItems(

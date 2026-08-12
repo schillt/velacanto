@@ -1376,6 +1376,47 @@ final class JellyfinFoundationTests: XCTestCase {
         XCTAssertEqual(secondAccountPage.items.first?.id.accountScope, "server|user-b")
     }
 
+    func testHomeCollectionsUseNeutralItemsAndKeepProviderOrder() async throws {
+        let decoder = JSONDecoder()
+        let favorite = try decoder.decode(
+            JellyfinItem.self,
+            from: Data(
+                #"{"Id":"favorite","Name":"Favorite","Type":"MusicAlbum","UserData":{"IsFavorite":true}}"#
+                    .utf8
+            )
+        )
+        let newest = try decoder.decode(
+            JellyfinItem.self,
+            from: Data(#"{"Id":"newest","Name":"Newest","Type":"MusicAlbum"}"#.utf8)
+        )
+        let api = FakeJellyfinAPI(
+            favorites: [favorite],
+            recentlyAdded: [newest]
+        )
+        let repository = JellyfinCatalogRepository(
+            api: api,
+            userID: "user",
+            accountScope: "server|user",
+            libraryIDs: []
+        )
+
+        let favorites = try await repository.page(
+            kind: .favorites,
+            cursor: nil,
+            limit: 12
+        )
+        let recentlyAdded = try await repository.page(
+            kind: .recentlyAdded,
+            cursor: nil,
+            limit: 12
+        )
+
+        XCTAssertEqual(favorites.items.map(\.id.opaqueID), ["favorite"])
+        XCTAssertTrue(try XCTUnwrap(favorites.items.first).isFavorite)
+        XCTAssertEqual(recentlyAdded.items.map(\.id.opaqueID), ["newest"])
+        XCTAssertEqual(recentlyAdded.items.first?.id.accountScope, "server|user")
+    }
+
     func testAlbumGridPositionRetainsAnchorUntilRefreshOrQueryChange() throws {
         let state = AlbumGridPositionState()
         let anchor = try catalogItem(
@@ -1518,6 +1559,8 @@ private actor FakeJellyfinAPI: JellyfinAPIService {
     private let albumsError: JellyfinAPIError?
     private let availableLibraries: [JellyfinItem]
     private let albumsByLibrary: [String: [JellyfinItem]]
+    private let favorites: [JellyfinItem]
+    private let recentlyAdded: [JellyfinItem]
     private let albumPageDelay: Duration?
     private var transientAlbumPageFailures: Int
     private var albumPageRequests = 0
@@ -1529,6 +1572,8 @@ private actor FakeJellyfinAPI: JellyfinAPIService {
         albumsError: JellyfinAPIError? = nil,
         availableLibraries: [JellyfinItem] = [],
         albumsByLibrary: [String: [JellyfinItem]] = [:],
+        favorites: [JellyfinItem] = [],
+        recentlyAdded: [JellyfinItem] = [],
         albumPageDelay: Duration? = nil,
         transientAlbumPageFailures: Int = 0
     ) {
@@ -1538,6 +1583,8 @@ private actor FakeJellyfinAPI: JellyfinAPIService {
         self.albumsError = albumsError
         self.availableLibraries = availableLibraries
         self.albumsByLibrary = albumsByLibrary
+        self.favorites = favorites
+        self.recentlyAdded = recentlyAdded
         self.albumPageDelay = albumPageDelay
         self.transientAlbumPageFailures = transientAlbumPageFailures
     }
@@ -1658,6 +1705,20 @@ private actor FakeJellyfinAPI: JellyfinAPIService {
     func searchMusicPage(
         userID: String, query: String, startIndex: Int, limit: Int
     ) async throws -> JellyfinItemPage { emptyPage(startIndex) }
+
+    func homeItemsPage(
+        userID: String, collection: JellyfinHomeCollection,
+        startIndex: Int, limit: Int
+    ) async throws -> JellyfinItemPage {
+        let items = collection == .favorites ? favorites : recentlyAdded
+        let safeStart = min(max(startIndex, 0), items.count)
+        let safeEnd = min(safeStart + max(limit, 1), items.count)
+        return JellyfinItemPage(
+            items: Array(items[safeStart..<safeEnd]),
+            startIndex: safeStart,
+            totalRecordCount: items.count
+        )
+    }
 
     func playlistItemsPage(
         userID: String, playlistID: String, startIndex: Int, limit: Int

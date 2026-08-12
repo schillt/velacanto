@@ -315,6 +315,7 @@ struct JellyfinTracksView: View {
             )
 
             MusicQueuePlaybackControls(
+                capabilities: album.capabilities,
                 isPreparing: preparingTrackID != nil,
                 play: { playQueue(shuffled: false) },
                 shuffle: { playQueue(shuffled: true) }
