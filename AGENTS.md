@@ -47,6 +47,25 @@ message and stop rather than changing credentials or retrying blindly.
 Merge only after required hosted checks pass and the assigned task includes the
 merge or release promotion. Delete the short-lived source branch after merge.
 
+### Worktree isolation
+
+Use one clean worktree and one short-lived branch for exactly one issue or
+pull request. Never add a second issue to an existing worktree, even if its
+branch is already open. Before editing, check `git status --short` and `git
+worktree list --porcelain`; if either shows another issue's work, stop and use
+a new worktree based on the current `origin/alpha` instead.
+
+```sh
+git fetch origin alpha
+task_worktree=$(mktemp -d /private/tmp/velacanto-issue-<number>-XXXXXX)
+git worktree add -b codex/issue-<number> "$task_worktree" origin/alpha
+cd "$task_worktree"
+```
+
+Do not reset, stash, revert, commit, stage, or move changes made by another
+issue. Finish and merge the focused PR, then remove its clean worktree and
+delete its short-lived branch before starting another issue.
+
 ### Issues, milestones, and board
 
 - Inspect first; preserve issue history and existing Project items.
