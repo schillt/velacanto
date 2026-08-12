@@ -1742,6 +1742,12 @@ private actor FakeJellyfinAPI: JellyfinAPIService {
         )
     }
 
+    func setFavorite(
+        _ isFavorite: Bool,
+        itemID: String,
+        userID: String
+    ) async throws {}
+
     func artworkRequest(
         itemID: String,
         imageTag: String?,

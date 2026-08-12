@@ -96,3 +96,10 @@ protocol MusicLibraryProviding: Sendable {
         searchTerm: String?
     ) async throws -> MusicCatalogPage
 }
+
+protocol MusicItemActionProviding: Sendable {
+    func setFavorite(
+        _ isFavorite: Bool,
+        for itemID: MusicCatalogItemID
+    ) async throws
+}

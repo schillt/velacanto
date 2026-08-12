@@ -48,6 +48,7 @@ struct MusicSongsView: View {
                         }
                         .buttonStyle(.plain)
                         .disabled(preparingTrackID != nil)
+                        .musicFavoriteActions(for: song)
                         .onAppear {
                             loadMoreIfNeeded(song.id)
                         }

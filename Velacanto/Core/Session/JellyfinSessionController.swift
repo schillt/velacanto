@@ -35,6 +35,8 @@ final class JellyfinSessionController: ObservableObject {
     @Published private(set) var isRefreshingLibraries = false
     @Published private(set) var errorMessage: String?
 
+    let itemActions = MusicItemActionStateOwner()
+
     private let tokenStore: any JellyfinTokenStoring
     private let sessionStore: any JellyfinSessionPersisting
     private let makeClient: ClientFactory
@@ -176,6 +178,7 @@ final class JellyfinSessionController: ObservableObject {
             session = newSession
             client = authenticatedClient
             phase = .signedIn
+            configureItemActions()
             await refreshLibraries()
         } catch {
             phase = .awaitingCredentials
@@ -196,6 +199,7 @@ final class JellyfinSessionController: ObservableObject {
             let refreshedLibraries = try await catalogRepository().libraries()
             guard session == activeSession else { return }
             libraries = refreshedLibraries
+            configureItemActions()
             errorMessage = nil
         } catch {
             guard session == activeSession else { return }
@@ -324,6 +328,7 @@ final class JellyfinSessionController: ObservableObject {
             userID: session.userID,
             key: catalogCacheKey(kind: kind, contextID: contextID)
         )
+        itemActions.reconcile(items)
         return items
     }
 
@@ -465,13 +470,15 @@ final class JellyfinSessionController: ObservableObject {
         searchTerm: String? = nil
     ) async throws -> MusicCatalogPage {
         do {
-            return try await catalogRepository().page(
+            let page = try await catalogRepository().page(
                 kind: kind,
                 contextID: contextID,
                 cursor: cursor,
                 limit: limit,
                 searchTerm: searchTerm
             )
+            itemActions.reconcile(page.items)
+            return page
         } catch {
             handleExpiredSessionIfNeeded(error)
             throw error
@@ -513,6 +520,7 @@ final class JellyfinSessionController: ObservableObject {
             session = savedSession
             candidateServer = server
             client = authenticatedClient
+            configureItemActions()
 
             do {
                 let user = try await authenticatedClient.currentUser()
@@ -527,6 +535,7 @@ final class JellyfinSessionController: ObservableObject {
                 session = restored
                 sessionStore.saveSession(restored)
                 phase = .signedIn
+                configureItemActions()
                 await refreshLibraries()
             } catch JellyfinAPIError.unauthorized {
                 discardExpiredCredentials()
@@ -565,6 +574,7 @@ final class JellyfinSessionController: ObservableObject {
     }
 
     private func clearSession() {
+        itemActions.clear()
         session = nil
         candidateServer = nil
         serverInfo = nil
@@ -572,6 +582,17 @@ final class JellyfinSessionController: ObservableObject {
         libraries = []
         isRefreshingLibraries = false
         phase = .signedOut
+    }
+
+    private func configureItemActions() {
+        guard let session, let repository = try? catalogRepository() else {
+            itemActions.clear()
+            return
+        }
+        itemActions.configure(
+            accountScope: "\(session.serverID)|\(session.userID)",
+            provider: repository
+        )
     }
 }
 

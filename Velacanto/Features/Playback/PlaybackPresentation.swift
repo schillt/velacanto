@@ -234,6 +234,17 @@ struct NowPlayingView: View {
                 }
             }
 
+            if item.source == .jellyfin, let session = jellyfin.session {
+                MusicFavoriteIDButton(
+                    itemID: MusicCatalogItemID(
+                        source: .jellyfin,
+                        accountScope: "\(session.serverID)|\(session.userID)",
+                        opaqueID: item.id
+                    )
+                )
+                .buttonStyle(.bordered)
+            }
+
             VStack(spacing: 7) {
                 Slider(
                     value: Binding(

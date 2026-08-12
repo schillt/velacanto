@@ -68,6 +68,7 @@ struct MusicPlaylistsView: View {
                             }
                         }
                     }
+                    .musicFavoriteActions(for: playlist)
                     .onAppear {
                         loadMoreIfNeeded(playlist.id)
                     }
@@ -211,6 +212,7 @@ struct MusicPlaylistView: View {
                     }
                     .buttonStyle(.plain)
                     .disabled(preparingTrackID != nil)
+                    .musicFavoriteActions(for: song)
                     .onAppear {
                         loadMoreIfNeeded(song.id)
                     }
@@ -236,6 +238,11 @@ struct MusicPlaylistView: View {
             }
         }
         .navigationTitle(playlist.name)
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                MusicFavoriteButton(item: playlist, presentation: .icon)
+            }
+        }
         .task(id: playlist.id) {
             await reset()
         }

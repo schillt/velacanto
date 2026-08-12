@@ -56,6 +56,7 @@ struct MusicAlbumsView: View {
                             MusicAlbumCard(album: album, jellyfin: jellyfin)
                         }
                         .buttonStyle(.plain)
+                        .musicFavoriteActions(for: album)
                         .id(album.id)
                         .onAppear {
                             loadMoreIfNeeded(album.id)

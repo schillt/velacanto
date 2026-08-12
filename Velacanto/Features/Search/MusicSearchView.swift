@@ -103,6 +103,7 @@ struct MusicSearchView: View {
                         } label: {
                             SearchResultRow(item: album, jellyfin: jellyfin)
                         }
+                        .musicFavoriteActions(for: album)
                         .onAppear {
                             loadMoreIfNeeded(album.id)
                         }
@@ -122,6 +123,7 @@ struct MusicSearchView: View {
                         } label: {
                             SearchResultRow(item: artist, jellyfin: jellyfin)
                         }
+                        .musicFavoriteActions(for: artist)
                         .onAppear {
                             loadMoreIfNeeded(artist.id)
                         }
@@ -143,6 +145,7 @@ struct MusicSearchView: View {
                         }
                         .buttonStyle(.plain)
                         .disabled(preparingTrackID != nil)
+                        .musicFavoriteActions(for: song)
                         .onAppear {
                             loadMoreIfNeeded(song.id)
                         }
@@ -163,6 +166,7 @@ struct MusicSearchView: View {
                         } label: {
                             SearchResultRow(item: playlist, jellyfin: jellyfin)
                         }
+                        .musicFavoriteActions(for: playlist)
                         .onAppear {
                             loadMoreIfNeeded(playlist.id)
                         }

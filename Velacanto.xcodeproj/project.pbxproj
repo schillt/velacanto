@@ -40,6 +40,9 @@
 		000000000000000000000234 /* Features/Library/MusicPlaylistsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000137 /* Features/Library/MusicPlaylistsView.swift */; };
 		000000000000000000000235 /* Features/Library/MusicLibraryComponents.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000138 /* Features/Library/MusicLibraryComponents.swift */; };
 		000000000000000000000236 /* Core/Catalog/MusicCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000139 /* Core/Catalog/MusicCatalog.swift */; };
+		000000000000000000000237 /* Core/Catalog/MusicItemActionStateOwner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000140 /* Core/Catalog/MusicItemActionStateOwner.swift */; };
+		000000000000000000000238 /* Features/Library/MusicFavoriteControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000141 /* Features/Library/MusicFavoriteControls.swift */; };
+		000000000000000000000239 /* MusicItemActionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000142 /* MusicItemActionTests.swift */; };
 		000000000000000000000221 /* Resources/AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000124 /* Resources/AppIcon.icon */; };
 /* End PBXBuildFile section */
 
@@ -91,6 +94,9 @@
 		000000000000000000000137 /* Features/Library/MusicPlaylistsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Library/MusicPlaylistsView.swift; sourceTree = "<group>"; };
 		000000000000000000000138 /* Features/Library/MusicLibraryComponents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Library/MusicLibraryComponents.swift; sourceTree = "<group>"; };
 		000000000000000000000139 /* Core/Catalog/MusicCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Core/Catalog/MusicCatalog.swift; sourceTree = "<group>"; };
+		000000000000000000000140 /* Core/Catalog/MusicItemActionStateOwner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Core/Catalog/MusicItemActionStateOwner.swift; sourceTree = "<group>"; };
+		000000000000000000000141 /* Features/Library/MusicFavoriteControls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Library/MusicFavoriteControls.swift; sourceTree = "<group>"; };
+		000000000000000000000142 /* MusicItemActionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MusicItemActionTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -145,6 +151,7 @@
 				000000000000000000000136 /* Features/Library/MusicSongsView.swift */,
 				000000000000000000000137 /* Features/Library/MusicPlaylistsView.swift */,
 				000000000000000000000138 /* Features/Library/MusicLibraryComponents.swift */,
+				000000000000000000000141 /* Features/Library/MusicFavoriteControls.swift */,
 				000000000000000000000122 /* Features/Profile/ProfileView.swift */,
 				000000000000000000000123 /* Features/Search/MusicSearchView.swift */,
 				000000000000000000000103 /* Core/Playback/PlaybackTimeFormatter.swift */,
@@ -159,6 +166,7 @@
 				000000000000000000000127 /* Core/Session/JellyfinSessionPersistence.swift */,
 				000000000000000000000125 /* Core/Catalog/JellyfinCatalogRepository.swift */,
 				000000000000000000000139 /* Core/Catalog/MusicCatalog.swift */,
+				000000000000000000000140 /* Core/Catalog/MusicItemActionStateOwner.swift */,
 				000000000000000000000117 /* Features/Jellyfin/JellyfinAccessView.swift */,
 				000000000000000000000118 /* Sources/Jellyfin/JellyfinPlaybackAdapter.swift */,
 				000000000000000000000126 /* Sources/Jellyfin/JellyfinPlaybackRequestResolver.swift */,
@@ -174,6 +182,7 @@
 			children = (
 				000000000000000000000104 /* PlaybackFoundationTests.swift */,
 				000000000000000000000119 /* JellyfinFoundationTests.swift */,
+				000000000000000000000142 /* MusicItemActionTests.swift */,
 			);
 			path = VelacantoTests;
 			sourceTree = "<group>";
@@ -306,6 +315,8 @@
 				000000000000000000000220 /* Features/Search/MusicSearchView.swift in Sources */,
 				000000000000000000000222 /* Core/Catalog/JellyfinCatalogRepository.swift in Sources */,
 				000000000000000000000236 /* Core/Catalog/MusicCatalog.swift in Sources */,
+				000000000000000000000237 /* Core/Catalog/MusicItemActionStateOwner.swift in Sources */,
+				000000000000000000000238 /* Features/Library/MusicFavoriteControls.swift in Sources */,
 				000000000000000000000223 /* Sources/Jellyfin/JellyfinPlaybackRequestResolver.swift in Sources */,
 				000000000000000000000224 /* Core/Session/JellyfinSessionPersistence.swift in Sources */,
 				000000000000000000000225 /* App/AppNavigation.swift in Sources */,
@@ -318,6 +329,7 @@
 			files = (
 				000000000000000000000204 /* PlaybackFoundationTests.swift in Sources */,
 				000000000000000000000216 /* JellyfinFoundationTests.swift in Sources */,
+				000000000000000000000239 /* MusicItemActionTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

@@ -187,6 +187,11 @@ struct JellyfinTracksView: View {
             #endif
         }
         .navigationTitle(album.name)
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                MusicFavoriteButton(item: album, presentation: .icon)
+            }
+        }
         .task(id: album.id) {
             await reset()
         }
@@ -338,6 +343,7 @@ struct JellyfinTracksView: View {
         }
         .buttonStyle(.plain)
         .disabled(preparingTrackID != nil)
+        .musicFavoriteActions(for: track)
         .onAppear {
             loadMoreIfNeeded(track.id)
         }

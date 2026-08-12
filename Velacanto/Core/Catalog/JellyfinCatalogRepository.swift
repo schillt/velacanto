@@ -6,7 +6,7 @@ import os
 /// A repository is a short-lived snapshot of the current session and libraries.
 /// Its cursor is valid only for the query identity recorded in the cursor; callers
 /// must discard it when the query, context, or library list changes.
-actor JellyfinCatalogRepository: MusicLibraryProviding {
+actor JellyfinCatalogRepository: MusicLibraryProviding, MusicItemActionProviding {
     private static let performanceLog = OSLog(
         subsystem: "com.chameleonenterprise.velacanto",
         category: "Performance"
@@ -14,6 +14,7 @@ actor JellyfinCatalogRepository: MusicLibraryProviding {
 
     private let api: any JellyfinAPIService
     private let userID: String
+    private let accountScope: String
     private let mapper: JellyfinCatalogMapper
     private let libraryIDs: [String]
 
@@ -25,8 +26,23 @@ actor JellyfinCatalogRepository: MusicLibraryProviding {
     ) {
         self.api = api
         self.userID = userID
+        self.accountScope = accountScope
         mapper = JellyfinCatalogMapper(accountScope: accountScope)
         self.libraryIDs = libraryIDs
+    }
+
+    func setFavorite(
+        _ isFavorite: Bool,
+        for itemID: MusicCatalogItemID
+    ) async throws {
+        guard itemID.source == .jellyfin, itemID.accountScope == accountScope else {
+            throw JellyfinAPIError.invalidResponse
+        }
+        try await api.setFavorite(
+            isFavorite,
+            itemID: itemID.opaqueID,
+            userID: userID
+        )
     }
 
     func libraries() async throws -> [JellyfinItem] {

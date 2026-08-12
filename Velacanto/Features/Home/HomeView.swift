@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct HomeView: View {
+    @EnvironmentObject private var favoriteActions: MusicItemActionStateOwner
     @ObservedObject var playback: AudioPlaybackCoordinator
     @ObservedObject var jellyfin: JellyfinSessionController
 
@@ -161,6 +162,11 @@ struct HomeView: View {
         model: PagedMusicCatalogModel,
         retry: @escaping @MainActor () async -> Void
     ) -> some View {
+        let visibleItems =
+            title == "Favorites"
+            ? model.items.filter { favoriteActions.isFavorite($0) }
+            : model.items
+
         if model.isInitialLoading {
             VStack(alignment: .leading, spacing: 12) {
                 Text(title).font(.title2.weight(.semibold))
@@ -168,13 +174,13 @@ struct HomeView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.vertical, 24)
             }
-        } else if !model.items.isEmpty {
+        } else if !visibleItems.isEmpty {
             VStack(alignment: .leading, spacing: 12) {
                 Text(title).font(.title2.weight(.semibold))
                 ScrollView(.horizontal, showsIndicators: false) {
                     LazyHStack(spacing: 14) {
-                        ForEach(model.items) { item in
-                            catalogItem(item, shelfItems: model.items)
+                        ForEach(visibleItems) { item in
+                            catalogItem(item, shelfItems: visibleItems)
                         }
                     }
                 }
@@ -213,6 +219,7 @@ struct HomeView: View {
             .buttonStyle(.plain)
             .disabled(preparingCatalogItemID != nil)
             .accessibilityHint("Plays this song")
+            .musicFavoriteActions(for: item)
         } else {
             NavigationLink {
                 destination(for: item)
@@ -221,6 +228,7 @@ struct HomeView: View {
             }
             .buttonStyle(.plain)
             .accessibilityHint("Opens \(item.name)")
+            .musicFavoriteActions(for: item)
         }
     }
 

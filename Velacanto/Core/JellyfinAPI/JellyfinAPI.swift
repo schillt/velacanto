@@ -534,6 +534,17 @@ struct JellyfinRequestBuilder: Sendable {
         )
     }
 
+    func favoriteRequest(
+        itemID: String,
+        userID: String,
+        isFavorite: Bool
+    ) throws -> URLRequest {
+        try request(
+            pathComponents: ["Users", userID, "FavoriteItems", itemID],
+            method: isFavorite ? "POST" : "DELETE"
+        )
+    }
+
     func playbackResolution(
         itemID: String,
         response: JellyfinPlaybackInfoResponse
@@ -787,6 +798,11 @@ protocol JellyfinAPIService: Sendable {
         itemID: String,
         userID: String
     ) async throws -> JellyfinPlaybackResolution
+    func setFavorite(
+        _ isFavorite: Bool,
+        itemID: String,
+        userID: String
+    ) async throws
     func albumsPage(
         userID: String,
         libraryID: String,
@@ -1166,6 +1182,19 @@ actor JellyfinAPIClient: JellyfinAPIService {
             itemID: itemID,
             response: response
         )
+    }
+
+    func setFavorite(
+        _ isFavorite: Bool,
+        itemID: String,
+        userID: String
+    ) async throws {
+        let request = try builder.favoriteRequest(
+            itemID: itemID,
+            userID: userID,
+            isFavorite: isFavorite
+        )
+        _ = try await executeWithoutResponse(request)
     }
 
     func artworkURL(

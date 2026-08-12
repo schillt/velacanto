@@ -28,6 +28,8 @@ struct VelacantoRootView: View {
                 macOSRoot
             #endif
         }
+        .environmentObject(jellyfin.itemActions)
+        .modifier(MusicItemActionFailurePresenter(actions: jellyfin.itemActions))
         .tint(.cyan)
         .fileImporter(
             isPresented: $isChoosingLocalFile,

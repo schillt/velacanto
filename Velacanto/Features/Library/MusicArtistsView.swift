@@ -54,6 +54,7 @@ struct MusicArtistsView: View {
                                 .font(.body.weight(.medium))
                         }
                     }
+                    .musicFavoriteActions(for: artist)
                     .onAppear {
                         loadMoreIfNeeded(artist.id)
                     }
@@ -221,6 +222,7 @@ struct MusicArtistView: View {
                                     )
                                 }
                                 .buttonStyle(.plain)
+                                .musicFavoriteActions(for: album)
                                 .onAppear {
                                     loadMoreIfNeeded(album.id)
                                 }
@@ -245,6 +247,11 @@ struct MusicArtistView: View {
             .frame(maxWidth: .infinity)
         }
         .navigationTitle(artist.name)
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                MusicFavoriteButton(item: artist, presentation: .icon)
+            }
+        }
         #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
         #endif
