@@ -43,11 +43,19 @@
 		000000000000000000000237 /* Core/Catalog/MusicItemActionStateOwner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000140 /* Core/Catalog/MusicItemActionStateOwner.swift */; };
 		000000000000000000000238 /* Features/Library/MusicFavoriteControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000141 /* Features/Library/MusicFavoriteControls.swift */; };
 		000000000000000000000239 /* MusicItemActionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000142 /* MusicItemActionTests.swift */; };
+		000000000000000000000240 /* VelacantoUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000143 /* VelacantoUITests.swift */; };
 		000000000000000000000221 /* Resources/AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000124 /* Resources/AppIcon.icon */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
 		000000000000000000000701 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 000000000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 000000000000000000000401;
+			remoteInfo = Velacanto;
+		};
+		000000000000000000000703 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 000000000000000000000001 /* Project object */;
 			proxyType = 1;
@@ -62,6 +70,8 @@
 		000000000000000000000104 /* PlaybackFoundationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackFoundationTests.swift; sourceTree = "<group>"; };
 		000000000000000000000105 /* Velacanto.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Velacanto.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		000000000000000000000106 /* VelacantoTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = VelacantoTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		000000000000000000000143 /* VelacantoUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VelacantoUITests.swift; sourceTree = "<group>"; };
+		000000000000000000000144 /* VelacantoUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = VelacantoUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		000000000000000000000107 /* Resources/Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Resources/Info.plist; sourceTree = "<group>"; };
 		000000000000000000000108 /* Resources/PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Resources/PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		000000000000000000000109 /* Core/Models/MusicSource.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Core/Models/MusicSource.swift; sourceTree = "<group>"; };
@@ -114,6 +124,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		000000000000000000000308 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -122,6 +139,7 @@
 			children = (
 				000000000000000000000004 /* Velacanto */,
 				000000000000000000000005 /* VelacantoTests */,
+				000000000000000000000006 /* VelacantoUITests */,
 				000000000000000000000003 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -131,6 +149,7 @@
 			children = (
 				000000000000000000000105 /* Velacanto.app */,
 				000000000000000000000106 /* VelacantoTests.xctest */,
+				000000000000000000000144 /* VelacantoUITests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -187,6 +206,14 @@
 			path = VelacantoTests;
 			sourceTree = "<group>";
 		};
+		000000000000000000000006 /* VelacantoUITests */ = {
+			isa = PBXGroup;
+			children = (
+				000000000000000000000143 /* VelacantoUITests.swift */,
+			);
+			path = VelacantoUITests;
+			sourceTree = "<group>";
+		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
@@ -225,6 +252,24 @@
 			productReference = 000000000000000000000106 /* VelacantoTests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
 		};
+		000000000000000000000403 /* VelacantoUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 000000000000000000000504 /* Build configuration list for PBXNativeTarget "VelacantoUITests" */;
+			buildPhases = (
+				000000000000000000000307 /* Sources */,
+				000000000000000000000308 /* Frameworks */,
+				000000000000000000000309 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				000000000000000000000704 /* PBXTargetDependency */,
+			);
+			name = VelacantoUITests;
+			productName = VelacantoUITests;
+			productReference = 000000000000000000000144 /* VelacantoUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -239,6 +284,10 @@
 						CreatedOnToolsVersion = 27.0;
 					};
 					000000000000000000000402 = {
+						CreatedOnToolsVersion = 27.0;
+						TestTargetID = 000000000000000000000401;
+					};
+					000000000000000000000403 = {
 						CreatedOnToolsVersion = 27.0;
 						TestTargetID = 000000000000000000000401;
 					};
@@ -260,6 +309,7 @@
 			targets = (
 				000000000000000000000401 /* Velacanto */,
 				000000000000000000000402 /* VelacantoTests */,
+				000000000000000000000403 /* VelacantoUITests */,
 			);
 		};
 /* End PBXProject section */
@@ -275,6 +325,13 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		000000000000000000000306 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		000000000000000000000309 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -333,6 +390,14 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		000000000000000000000307 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				000000000000000000000240 /* VelacantoUITests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -340,6 +405,11 @@
 			isa = PBXTargetDependency;
 			target = 000000000000000000000401 /* Velacanto */;
 			targetProxy = 000000000000000000000701 /* PBXContainerItemProxy */;
+		};
+		000000000000000000000704 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 000000000000000000000401 /* Velacanto */;
+			targetProxy = 000000000000000000000703 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -526,6 +596,48 @@
 			};
 			name = Release;
 		};
+		000000000000000000000607 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.chameleonenterprise.velacanto.uitests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx";
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = Velacanto;
+			};
+			name = Debug;
+		};
+		000000000000000000000608 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.chameleonenterprise.velacanto.uitests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx";
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = Velacanto;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -552,6 +664,15 @@
 			buildConfigurations = (
 				000000000000000000000605 /* Debug */,
 				000000000000000000000606 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		000000000000000000000504 /* Build configuration list for PBXNativeTarget "VelacantoUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				000000000000000000000607 /* Debug */,
+				000000000000000000000608 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
