@@ -630,7 +630,7 @@ final class JellyfinFoundationTests: XCTestCase {
 
         await controller.connect(to: "https://example.com")
         await controller.signIn(username: "Tyler", password: "correct")
-        let albums = try await controller.musicAlbums()
+        let albums = try await controller.musicAlbumsPage(cursor: nil).items
 
         XCTAssertEqual(
             albums.map(\.id),
@@ -832,6 +832,33 @@ final class JellyfinFoundationTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(requestCount, 3)
     }
 
+    func testCachedCatalogSnapshotDoesNotShrinkWhenInitialPageRefreshes() async throws {
+        let decoder = JSONDecoder()
+        let cachedAlbums = try (0..<60).map { index in
+            try decoder.decode(
+                JellyfinItem.self,
+                from: Data(
+                    #"{"Id":"album-\#(index)","Name":"Album \#(index)","Type":"MusicAlbum"}"#.utf8
+                )
+            )
+        }
+        let refreshedFirstPage = Array(cachedAlbums.prefix(50))
+        let model = PagedJellyfinItemsModel()
+
+        await model.reset(
+            cachedItems: { cachedAlbums },
+            loader: { _ in
+                JellyfinCatalogPage(
+                    items: refreshedFirstPage,
+                    totalRecordCount: cachedAlbums.count,
+                    cursor: nil
+                )
+            }
+        )
+
+        XCTAssertEqual(model.items.map(\.id), cachedAlbums.map(\.id))
+    }
+
     func testCatalogCacheIsClearedOnLogout() async throws {
         let api = FakeJellyfinAPI()
         let controller = JellyfinSessionController(
@@ -967,6 +994,44 @@ final class JellyfinFoundationTests: XCTestCase {
         XCTAssertEqual(try tokenStore.loadToken(), "access-token")
     }
 
+    func testCorruptSavedSessionMetadataIsDiscarded() throws {
+        let suiteName = "VelacantoTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set(Data("not JSON".utf8), forKey: "jellyfin.session")
+
+        let store = UserDefaultsJellyfinSessionStore(defaults: defaults)
+
+        XCTAssertNil(store.loadSession())
+        XCTAssertNil(defaults.data(forKey: "jellyfin.session"))
+    }
+
+    func testSavedSessionWriteFailureKeepsActiveSessionUsable() async throws {
+        let suiteName = "VelacantoTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let writer = SessionWriteAttemptRecorder()
+        let sessionStore = UserDefaultsJellyfinSessionStore(
+            defaults: defaults,
+            writeData: writer.failWrite
+        )
+        let api = FakeJellyfinAPI()
+        let controller = JellyfinSessionController(
+            tokenStore: RecordingTokenStore(),
+            sessionStore: sessionStore,
+            autoRestore: false,
+            makeClient: { _, _, _ in api }
+        )
+
+        await controller.connect(to: "https://example.com")
+        await controller.signIn(username: "Tyler", password: "correct")
+
+        XCTAssertTrue(writer.didAttemptWrite)
+        XCTAssertEqual(controller.phase, .signedIn)
+        XCTAssertEqual(controller.session?.username, "Tyler")
+        XCTAssertNil(sessionStore.loadSession())
+    }
+
     func testExpiredRestoredSessionDeletesSavedToken() async throws {
         let tokenStore = RecordingTokenStore(token: "expired-token")
         let serverURL = try XCTUnwrap(URL(string: "https://example.com"))
@@ -1068,23 +1133,25 @@ final class JellyfinFoundationTests: XCTestCase {
     func testExpiredSessionDuringBrowsingDeletesSavedCredentials() async throws {
         let tokenStore = RecordingTokenStore()
         let sessionStore = RecordingSessionStore()
-        let api = FakeJellyfinAPI(albumsError: .unauthorized)
+        let library = try JSONDecoder().decode(
+            JellyfinItem.self,
+            from: Data(#"{"Id":"library","Name":"Music"}"#.utf8)
+        )
+        let api = FakeJellyfinAPI(
+            albumsError: .unauthorized,
+            availableLibraries: [library]
+        )
         let controller = JellyfinSessionController(
             tokenStore: tokenStore,
             sessionStore: sessionStore,
             autoRestore: false,
             makeClient: { _, _, _ in api }
         )
-        let library = try JSONDecoder().decode(
-            JellyfinItem.self,
-            from: Data(#"{"Id":"library-id","Name":"Music"}"#.utf8)
-        )
-
         await controller.connect(to: "https://example.com")
         await controller.signIn(username: "Tyler", password: "correct")
 
         do {
-            _ = try await controller.albums(in: library)
+            _ = try await controller.musicAlbumsPage(cursor: nil)
             XCTFail("Expected the expired session to reject browsing.")
         } catch {
             XCTAssertEqual(error as? JellyfinAPIError, .unauthorized)
@@ -1098,6 +1165,128 @@ final class JellyfinFoundationTests: XCTestCase {
             controller.errorMessage,
             JellyfinSessionError.expiredSession.localizedDescription
         )
+    }
+
+    func testExpiredSessionReportsKeychainDeletionFailure() async throws {
+        let tokenStore = RecordingTokenStore(
+            token: "expired-token",
+            deleteError: SessionPersistenceFailure.unavailable
+        )
+        let sessionStore = RecordingSessionStore()
+        let library = try JSONDecoder().decode(
+            JellyfinItem.self,
+            from: Data(#"{"Id":"library","Name":"Music"}"#.utf8)
+        )
+        let controller = JellyfinSessionController(
+            tokenStore: tokenStore,
+            sessionStore: sessionStore,
+            autoRestore: false,
+            makeClient: { _, _, _ in
+                FakeJellyfinAPI(
+                    albumsError: .unauthorized,
+                    availableLibraries: [library]
+                )
+            }
+        )
+        await controller.connect(to: "https://example.com")
+        await controller.signIn(username: "Tyler", password: "correct")
+
+        do {
+            _ = try await controller.musicAlbumsPage(cursor: nil)
+            XCTFail("Expected the expired session to reject browsing.")
+        } catch {
+            XCTAssertEqual(error as? JellyfinAPIError, .unauthorized)
+        }
+
+        XCTAssertEqual(controller.phase, .signedOut)
+        XCTAssertNil(controller.session)
+        XCTAssertNil(sessionStore.session)
+        XCTAssertEqual(tokenStore.token, "access-token")
+        XCTAssertEqual(
+            controller.errorMessage,
+            JellyfinSessionError.expiredCredentialRemovalFailed
+                .localizedDescription
+        )
+    }
+
+    func testCatalogCacheTreatsCorruptDiskDataAsACacheMiss() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(
+            path: "VelacantoCatalogCacheTests-\(UUID().uuidString)",
+            directoryHint: .isDirectory
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        let corruptFile = directory.appending(path: "server-user.json")
+        try Data("not JSON".utf8).write(to: corruptFile)
+
+        let cache = JellyfinCatalogCache(directory: directory)
+        let items = await cache.load(
+            serverID: "server",
+            userID: "user",
+            key: "albums|root"
+        )
+
+        XCTAssertTrue(items.isEmpty)
+        let remainingFiles = try FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil
+        )
+        XCTAssertEqual(remainingFiles.count, 1)
+        XCTAssertTrue(remainingFiles[0].lastPathComponent.contains(".corrupt.json"))
+    }
+
+    func testCatalogCacheExpiresRecordsAfterSevenDays() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(
+            path: "VelacantoCatalogCacheExpiryTests-\(UUID().uuidString)",
+            directoryHint: .isDirectory
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let item = try JSONDecoder().decode(
+            JellyfinItem.self,
+            from: Data(#"{"Id":"cached-item","Name":"Cached","Type":"Audio"}"#.utf8)
+        )
+        let savedAt = Date(timeIntervalSinceReferenceDate: 0)
+        let cache = JellyfinCatalogCache(directory: directory, now: { savedAt })
+        await cache.save(
+            [item],
+            serverID: "server",
+            userID: "user",
+            key: "albums|root",
+            isDetail: false
+        )
+
+        let expiredCache = JellyfinCatalogCache(
+            directory: directory,
+            now: { savedAt.addingTimeInterval(7 * 24 * 60 * 60 + 1) }
+        )
+        let items = await expiredCache.load(
+            serverID: "server",
+            userID: "user",
+            key: "albums|root"
+        )
+
+        XCTAssertTrue(items.isEmpty)
+    }
+
+    func testPlaybackResolverDoesNotRequireCatalogState() async throws {
+        let track = try JSONDecoder().decode(
+            JellyfinItem.self,
+            from: Data(
+                #"{"Id":"track-id","Name":"Night Drive","Type":"Audio"}"#.utf8
+            )
+        )
+
+        let request = try await JellyfinPlaybackRequestResolver(
+            api: FakeJellyfinAPI(),
+            userID: "user-id"
+        ).playbackRequest(for: track)
+
+        XCTAssertEqual(request.item.id, track.id)
+        XCTAssertEqual(request.item.source, .jellyfin)
+        XCTAssertNotNil(request.reporter)
     }
 }
 
@@ -1132,9 +1321,11 @@ private enum LegacyFileRemovalError: Error {
 private final class RecordingTokenStore: JellyfinTokenStoring {
     var token: String?
     private(set) var deleteCount = 0
+    private let deleteError: Error?
 
-    init(token: String? = nil) {
+    init(token: String? = nil, deleteError: Error? = nil) {
         self.token = token
+        self.deleteError = deleteError
     }
 
     func loadToken() throws -> String? {
@@ -1146,9 +1337,25 @@ private final class RecordingTokenStore: JellyfinTokenStoring {
     }
 
     func deleteToken() throws {
+        if let deleteError {
+            throw deleteError
+        }
         token = nil
         deleteCount += 1
     }
+}
+
+private final class SessionWriteAttemptRecorder {
+    private(set) var didAttemptWrite = false
+
+    func failWrite(_: UserDefaults, _: Data, _: String) throws {
+        didAttemptWrite = true
+        throw SessionPersistenceFailure.unavailable
+    }
+}
+
+private enum SessionPersistenceFailure: Error {
+    case unavailable
 }
 
 private final class RecordingSessionStore: JellyfinSessionPersisting {
@@ -1315,36 +1522,30 @@ private actor FakeJellyfinAPI: JellyfinAPIService {
         albumPageRequests
     }
 
-    func artists(userID: String, libraryID: String) async throws -> [JellyfinItem] {
-        []
-    }
+    func artistsPage(
+        userID: String, libraryID: String, startIndex: Int, limit: Int, searchTerm: String?
+    ) async throws -> JellyfinItemPage { emptyPage(startIndex) }
 
-    func songs(userID: String, libraryID: String) async throws -> [JellyfinItem] {
-        []
-    }
+    func songsPage(
+        userID: String, libraryID: String, artistID: String?, startIndex: Int, limit: Int,
+        searchTerm: String?
+    ) async throws -> JellyfinItemPage { emptyPage(startIndex) }
 
-    func playlists(userID: String) async throws -> [JellyfinItem] {
-        []
-    }
+    func playlistsPage(
+        userID: String, startIndex: Int, limit: Int, searchTerm: String?
+    ) async throws -> JellyfinItemPage { emptyPage(startIndex) }
 
-    func searchMusic(
-        userID: String,
-        query: String,
-        limit: Int
-    ) async throws -> [JellyfinItem] {
-        []
-    }
+    func searchMusicPage(
+        userID: String, query: String, startIndex: Int, limit: Int
+    ) async throws -> JellyfinItemPage { emptyPage(startIndex) }
 
-    func playlistItems(
-        userID: String,
-        playlistID: String
-    ) async throws -> [JellyfinItem] {
-        []
-    }
+    func playlistItemsPage(
+        userID: String, playlistID: String, startIndex: Int, limit: Int
+    ) async throws -> JellyfinItemPage { emptyPage(startIndex) }
 
-    func tracks(userID: String, albumID: String) async throws -> [JellyfinItem] {
-        []
-    }
+    func tracksPage(
+        userID: String, albumID: String, startIndex: Int, limit: Int
+    ) async throws -> JellyfinItemPage { emptyPage(startIndex) }
 
     func playbackResolution(
         itemID: String,
@@ -1360,11 +1561,11 @@ private actor FakeJellyfinAPI: JellyfinAPIService {
         )
     }
 
-    func artworkURL(
+    func artworkRequest(
         itemID: String,
         imageTag: String?,
         maxWidth: Int
-    ) async throws -> URL {
+    ) async throws -> URLRequest {
         guard
             var components = URLComponents(
                 string: "https://example.com/Items/\(itemID)/Images/Primary"
@@ -1379,14 +1580,14 @@ private actor FakeJellyfinAPI: JellyfinAPIService {
         guard let url = components.url else {
             throw JellyfinAPIError.invalidResponse
         }
-        return url
+        return URLRequest(url: url)
     }
 
-    func userImageURL(
+    func userImageRequest(
         userID: String,
         imageTag: String?,
         maxWidth: Int
-    ) async throws -> URL {
+    ) async throws -> URLRequest {
         guard
             var components = URLComponents(
                 string: "https://example.com/Users/\(userID)/Images/Primary"
@@ -1401,7 +1602,11 @@ private actor FakeJellyfinAPI: JellyfinAPIService {
         guard let url = components.url else {
             throw JellyfinAPIError.invalidResponse
         }
-        return url
+        return URLRequest(url: url)
+    }
+
+    private func emptyPage(_ startIndex: Int) -> JellyfinItemPage {
+        JellyfinItemPage(items: [], startIndex: max(startIndex, 0), totalRecordCount: 0)
     }
 
     func logout() async throws {}

@@ -305,13 +305,21 @@ struct JellyfinTracksView: View {
     #endif
 
     private var albumHeader: some View {
-        MusicDetailHeader(
-            item: album,
-            jellyfin: jellyfin,
-            subtitle: album.displayArtist,
-            detail:
-                "\(model.totalRecordCount) \(model.totalRecordCount == 1 ? "track" : "tracks")"
-        )
+        VStack(alignment: .leading, spacing: 16) {
+            MusicDetailHeader(
+                item: album,
+                jellyfin: jellyfin,
+                subtitle: album.displayArtist,
+                detail:
+                    "\(model.totalRecordCount) \(model.totalRecordCount == 1 ? "track" : "tracks")"
+            )
+
+            MusicQueuePlaybackControls(
+                isPreparing: preparingTrackID != nil,
+                play: { playQueue(shuffled: false) },
+                shuffle: { playQueue(shuffled: true) }
+            )
+        }
     }
 
     private func trackButton(_ track: JellyfinItem, position: Int) -> some View {
@@ -416,6 +424,47 @@ struct JellyfinTracksView: View {
                         }
                     }
                 )
+            } catch {
+                playbackErrorMessage = error.localizedDescription
+            }
+            preparingTrackID = nil
+        }
+    }
+
+    private func playQueue(shuffled: Bool) {
+        guard !model.items.isEmpty else { return }
+        let tracks = shuffled ? model.items.shuffled() : model.items
+        guard let track = tracks.first else { return }
+
+        preparingTrackID = track.id
+        playbackErrorMessage = nil
+        Task {
+            do {
+                let request = try await jellyfin.playbackRequest(for: track)
+                if shuffled {
+                    playback.play(
+                        request,
+                        queueItems: tracks.map(JellyfinPlaybackAdapter.playbackItem(for:)),
+                        context: .album(id: album.id),
+                        account: jellyfin.playbackAccount
+                    )
+                } else {
+                    playback.play(
+                        request,
+                        queueItems: tracks.map(JellyfinPlaybackAdapter.playbackItem(for:)),
+                        context: .album(id: album.id),
+                        account: jellyfin.playbackAccount,
+                        queueExpansion: {
+                            await model.loadNextPage(
+                                loader: pageLoader,
+                                cacheWriter: cacheWriter
+                            )
+                            return model.items.map {
+                                JellyfinPlaybackAdapter.playbackItem(for: $0)
+                            }
+                        }
+                    )
+                }
             } catch {
                 playbackErrorMessage = error.localizedDescription
             }

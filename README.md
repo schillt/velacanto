@@ -4,12 +4,11 @@ Velacanto is an early-stage native music player for Apple platforms. It plays
 device-local audio in place and is being built to stream from personal Jellyfin
 and Navidrome libraries through source adapters.
 
-> **Status:** Alpha. Velacanto 0.1.0 has completed its required physical-device,
-> non-production Jellyfin, macOS, and automated quality gates and is cleared for
-> promotion and tagging. The `v1-alpha` branch is the active line for subsequent
-> alpha development.
+> **Status:** Alpha. Velacanto 0.2.0 is the current release: a focused UI
+> architecture and interface-quality update. See the [0.2 release notes](docs/0.2-release-notes.md)
+> and [roadmap](docs/roadmap.md).
 
-## Goal for 0.1.0
+## Completed 0.1.0 goal
 
 The first milestone will let a user:
 
@@ -25,6 +24,9 @@ after the core playback experience is proven.
 
 ## Project documentation
 
+- [0.2 release notes](docs/0.2-release-notes.md) — completed scope,
+  validation, and known limitations.
+- [0.2 plan](docs/0.2-plan.md) — historical scope and acceptance criteria.
 - [0.1.0 plan](docs/0.1-plan.md) — scope and acceptance criteria.
 - [0.1 stability acceptance](docs/0.1-stability-acceptance.md) — final
   device/server verification matrix.

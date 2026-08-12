@@ -1,4 +1,5 @@
 import AVFoundation
+import Foundation
 import MediaPlayer
 import XCTest
 
@@ -364,6 +365,86 @@ final class PlaybackFoundationTests: XCTestCase {
         XCTAssertEqual(resolverCallCount, 2)
         XCTAssertEqual(engine.seekTimes.last, 12)
         XCTAssertEqual(coordinator.playbackState, .loading)
+    }
+
+    func testPlaybackStartsOnlyAfterAudioSessionActivation() async throws {
+        let engine = RecordingAudioPlayerEngine()
+        let audioSession = ControlledAudioSessionController()
+        let coordinator = AudioPlaybackCoordinator(
+            engine: engine,
+            systemMediaController: RecordingSystemMediaController(),
+            audioSessionController: audioSession
+        )
+
+        coordinator.play(try await makePlaybackRequest())
+
+        await waitUntilAsync {
+            await audioSession.activationCount() == 1
+        }
+        XCTAssertEqual(engine.playCallCount, 0)
+
+        await audioSession.completeNextActivation()
+        await waitUntil {
+            engine.playCallCount == 1
+        }
+    }
+
+    func testCanceledOrReplacedActivationCannotStartPlayback() async throws {
+        let engine = RecordingAudioPlayerEngine()
+        let audioSession = ControlledAudioSessionController()
+        let coordinator = AudioPlaybackCoordinator(
+            engine: engine,
+            systemMediaController: RecordingSystemMediaController(),
+            audioSessionController: audioSession
+        )
+
+        coordinator.play(try await makePlaybackRequest())
+        await waitUntilAsync {
+            await audioSession.activationCount() == 1
+        }
+
+        coordinator.pausePlayback()
+        await audioSession.completeNextActivation()
+        for _ in 0..<10 {
+            await Task.yield()
+        }
+        XCTAssertEqual(engine.playCallCount, 0)
+
+        coordinator.play(try await makePlaybackRequest())
+        await waitUntilAsync {
+            await audioSession.activationCount() == 2
+        }
+        await audioSession.completeNextActivation()
+        await waitUntil {
+            engine.playCallCount == 1
+        }
+    }
+
+    func testStoppingPlaybackDeactivatesAndNotifiesOtherAudio() async throws {
+        let engine = RecordingAudioPlayerEngine()
+        let audioSession = ControlledAudioSessionController()
+        let coordinator = AudioPlaybackCoordinator(
+            engine: engine,
+            systemMediaController: RecordingSystemMediaController(),
+            audioSessionController: audioSession
+        )
+
+        coordinator.play(try await makePlaybackRequest())
+        await waitUntilAsync {
+            await audioSession.activationCount() == 1
+        }
+        await audioSession.completeNextActivation()
+        await waitUntil {
+            engine.playCallCount == 1
+        }
+
+        coordinator.stop()
+        await waitUntilAsync {
+            let requests = await audioSession.deactivationRequests()
+            return requests.count == 1
+        }
+        let requests = await audioSession.deactivationRequests()
+        XCTAssertEqual(requests, [true])
     }
 
     func testAudioInterruptionResumesOnlyWhenSystemPermitsIt() async throws {
@@ -984,6 +1065,69 @@ final class PlaybackFoundationTests: XCTestCase {
         XCTAssertNil(decoded.duration)
     }
 
+    func testCorruptNowPlayingStateIsDiscarded() throws {
+        let suiteName = "VelacantoTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set(Data("not JSON".utf8), forKey: "velacanto.now-playing-state-v1")
+
+        let store = UserDefaultsNowPlayingStateStore(defaults: defaults)
+
+        XCTAssertNil(store.loadState())
+        XCTAssertNil(defaults.data(forKey: "velacanto.now-playing-state-v1"))
+    }
+
+    func testCorruptPlaybackHistoryIsDiscarded() throws {
+        let suiteName = "VelacantoTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set(Data("not JSON".utf8), forKey: "velacanto.playback-history")
+
+        let store = UserDefaultsPlaybackHistoryStore(defaults: defaults)
+
+        XCTAssertTrue(store.loadItems().isEmpty)
+        XCTAssertNil(defaults.data(forKey: "velacanto.playback-history"))
+    }
+
+    func testNowPlayingWriteFailureDoesNotInterruptPlayback() async throws {
+        let recorder = PersistenceWriteAttemptRecorder()
+        let store = UserDefaultsNowPlayingStateStore(
+            writeData: recorder.failWrite
+        )
+        let engine = RecordingAudioPlayerEngine()
+        let coordinator = AudioPlaybackCoordinator(
+            engine: engine,
+            systemMediaController: RecordingSystemMediaController(),
+            nowPlayingStateStore: store
+        )
+
+        coordinator.play(try await makePlaybackRequest())
+
+        XCTAssertTrue(recorder.didAttemptWrite)
+        XCTAssertEqual(engine.loadCallCount, 1)
+        XCTAssertNotNil(coordinator.currentItem)
+    }
+
+    func testPlaybackHistoryWriteFailureDoesNotInterruptPlayback() async throws {
+        let recorder = PersistenceWriteAttemptRecorder()
+        let store = UserDefaultsPlaybackHistoryStore(
+            writeData: recorder.failWrite
+        )
+        let engine = RecordingAudioPlayerEngine()
+        let coordinator = AudioPlaybackCoordinator(
+            engine: engine,
+            systemMediaController: RecordingSystemMediaController(),
+            historyStore: store
+        )
+        let request = try await makePlaybackRequest()
+
+        coordinator.play(request)
+
+        XCTAssertTrue(recorder.didAttemptWrite)
+        XCTAssertEqual(coordinator.recentItems.first, request.item)
+        XCTAssertEqual(engine.loadCallCount, 1)
+    }
+
     func testBufferStateIsPublishedByCoordinator() {
         let engine = RecordingAudioPlayerEngine()
         let coordinator = AudioPlaybackCoordinator(
@@ -1036,6 +1180,56 @@ final class PlaybackFoundationTests: XCTestCase {
         XCTAssertNotNil(secondImage)
         XCTAssertNotNil(cachedImage)
         XCTAssertEqual(MockArtworkURLProtocol.requestCount, 1)
+    }
+
+    func testArtworkDiskCacheDiscardsCorruptIndex() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(
+            path: "VelacantoArtworkCacheTests-\(UUID().uuidString)",
+            directoryHint: .isDirectory
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        let indexURL = directory.appending(path: "index.json")
+        try Data("not JSON".utf8).write(to: indexURL)
+
+        let cache = ArtworkDiskCache(directory: directory)
+        let key = ArtworkKey(
+            serverID: "server",
+            userID: "user",
+            itemID: "item",
+            imageTag: "tag",
+            sizeBucket: 128
+        )
+
+        let cachedData = await cache.data(for: key)
+        XCTAssertNil(cachedData)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: indexURL.path))
+    }
+
+    func testArtworkDiskCacheTreatsBlockedWriteDirectoryAsACacheMiss()
+        async throws
+    {
+        let fileURL = FileManager.default.temporaryDirectory.appending(
+            path: "VelacantoArtworkCacheFile-\(UUID().uuidString)"
+        )
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        try Data().write(to: fileURL)
+        let cache = ArtworkDiskCache(directory: fileURL)
+        let key = ArtworkKey(
+            serverID: "server",
+            userID: "user",
+            itemID: "item",
+            imageTag: "tag",
+            sizeBucket: 128
+        )
+
+        await cache.store(Data([1, 2, 3]), for: key)
+
+        let cachedData = await cache.data(for: key)
+        XCTAssertNil(cachedData)
     }
 
     private func makePlaybackRequest() async throws -> PlaybackRequest {
@@ -1308,7 +1502,50 @@ private final class RecordingPlaybackPlatformEventObserver:
     }
 }
 
+private actor ControlledAudioSessionController: PlaybackAudioSessionControlling {
+    private var activationContinuations: [CheckedContinuation<Void, Error>] = []
+    private var recordedActivationCount = 0
+    private var recordedDeactivationRequests: [Bool] = []
+
+    func activate() async throws {
+        try await withCheckedThrowingContinuation { continuation in
+            recordedActivationCount += 1
+            activationContinuations.append(continuation)
+        }
+    }
+
+    func deactivate(notifyingOthers: Bool) async {
+        recordedDeactivationRequests.append(notifyingOthers)
+    }
+
+    func activationCount() -> Int {
+        recordedActivationCount
+    }
+
+    func completeNextActivation() {
+        guard !activationContinuations.isEmpty else { return }
+        activationContinuations.removeFirst().resume()
+    }
+
+    func deactivationRequests() -> [Bool] {
+        recordedDeactivationRequests
+    }
+}
+
 private final class RecordingResourceLease: PlaybackResourceLease, @unchecked Sendable {}
+
+private enum PersistenceWriteFailure: Error {
+    case unavailable
+}
+
+private final class PersistenceWriteAttemptRecorder {
+    private(set) var didAttemptWrite = false
+
+    func failWrite(_: UserDefaults, _: Data, _: String) throws {
+        didAttemptWrite = true
+        throw PersistenceWriteFailure.unavailable
+    }
+}
 
 private final class RecordingPlaybackHistoryStore: PlaybackHistoryStoring {
     private(set) var savedItems: [PlaybackItem] = []

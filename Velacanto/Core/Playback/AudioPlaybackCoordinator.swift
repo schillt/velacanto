@@ -33,6 +33,145 @@ enum PlaybackAudioRouteChange: Equatable, Sendable {
     case other
 }
 
+/// Serializes audio-session commands independently from playback presentation.
+///
+/// The coordinator creates a playback activation request only after it has
+/// loaded an item. This boundary then performs category changes and session
+/// activation away from the main actor, in command order. The coordinator must
+/// still validate its request identifier after activation before it starts the
+/// engine: a pause, stop, interruption, route loss, or replacement may have
+/// superseded that request while the system was activating the session.
+/// Deactivation is likewise ordered after the engine has stopped and retains
+/// the `notifyOthersOnDeactivation` policy.
+protocol PlaybackAudioSessionControlling: Sendable {
+    func activate() async throws
+    func deactivate(notifyingOthers: Bool) async
+}
+
+#if os(iOS)
+    /// Owns the blocking AVAudioSession API on a dedicated serial actor.
+    ///
+    /// iOS 27 SDKs supply completion-handler activation APIs. Earlier SDKs and
+    /// systems use the synchronous API, but the actor keeps that work off the
+    /// main actor.
+    /// The small in-actor queue remains non-reentrant while an asynchronous
+    /// operation is outstanding, so a deactivation cannot overtake activation.
+    actor AVAudioSessionBoundary: PlaybackAudioSessionControlling {
+        private enum Operation {
+            case activate(CheckedContinuation<Void, Error>)
+            case deactivate(
+                notifyingOthers: Bool,
+                CheckedContinuation<Void, Never>
+            )
+        }
+
+        private let session = AVAudioSession.sharedInstance()
+        private var operations: [Operation] = []
+        private var isPerformingOperation = false
+
+        func activate() async throws {
+            try await withCheckedThrowingContinuation { continuation in
+                operations.append(.activate(continuation))
+                performNextOperationIfNeeded()
+            }
+        }
+
+        func deactivate(notifyingOthers: Bool) async {
+            await withCheckedContinuation { continuation in
+                operations.append(
+                    .deactivate(
+                        notifyingOthers: notifyingOthers,
+                        continuation
+                    )
+                )
+                performNextOperationIfNeeded()
+            }
+        }
+
+        private func performNextOperationIfNeeded() {
+            guard !isPerformingOperation, !operations.isEmpty else { return }
+
+            isPerformingOperation = true
+            let operation = operations.removeFirst()
+            Task { [weak self] in
+                guard let self else { return }
+                await self.perform(operation)
+            }
+        }
+
+        private func perform(_ operation: Operation) async {
+            switch operation {
+            case .activate(let continuation):
+                do {
+                    try session.setCategory(.playback, mode: .default)
+                    try await activateSession()
+                    continuation.resume()
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            case .deactivate(let notifyingOthers, let continuation):
+                await deactivateSession(notifyingOthers: notifyingOthers)
+                continuation.resume()
+            }
+
+            isPerformingOperation = false
+            performNextOperationIfNeeded()
+        }
+
+        private func activateSession() async throws {
+            #if swift(>=6.4)
+                if #available(iOS 27.0, *) {
+                    try await withCheckedThrowingContinuation {
+                        (continuation: CheckedContinuation<Void, Error>) in
+                        session.activate(options: []) { activated, error in
+                            if let error {
+                                continuation.resume(throwing: error)
+                            } else if activated {
+                                continuation.resume()
+                            } else {
+                                continuation.resume(
+                                    throwing: CocoaError(.fileWriteUnknown)
+                                )
+                            }
+                        }
+                    }
+                    return
+                }
+            #endif
+
+            try session.setActive(true)
+        }
+
+        private func deactivateSession(notifyingOthers: Bool) async {
+            #if swift(>=6.4)
+                if #available(iOS 27.0, *) {
+                    await withCheckedContinuation { continuation in
+                        session.deactivate(
+                            options: notifyingOthers
+                                ? [.notifyOthersOnDeactivation] : []
+                        ) { _, _ in
+                            continuation.resume()
+                        }
+                    }
+                    return
+                }
+            #endif
+
+            try? session.setActive(
+                false,
+                options: notifyingOthers ? [.notifyOthersOnDeactivation] : []
+            )
+        }
+    }
+#endif
+
+/// Supplies platform lifecycle events to the playback coordinator.
+///
+/// `start` is called once for an observer instance. Implementations retain the
+/// registrations for their own lifetime and invoke every callback on the main
+/// actor without starting playback or performing network work themselves. This
+/// keeps interruption, route, and background policy in one coordinator-owned
+/// state machine.
 @MainActor
 protocol PlaybackPlatformEventObserving: AnyObject {
     func start(
@@ -174,6 +313,7 @@ final class AudioPlaybackCoordinator: ObservableObject {
     private var requiresRouteRecovery = false
     private var playbackActivationTask: Task<Void, Never>?
     private var playbackActivationID: UUID?
+    private let audioSessionController: (any PlaybackAudioSessionControlling)?
     private let platformEventObserver: (any PlaybackPlatformEventObserving)?
     private var hasRetriedCurrentItem = false
     private var lifecycleReporter: (any PlaybackLifecycleReporting)?
@@ -197,12 +337,19 @@ final class AudioPlaybackCoordinator: ObservableObject {
         systemMediaController: (any SystemMediaControlling)? = nil,
         historyStore: (any PlaybackHistoryStoring)? = nil,
         nowPlayingStateStore: (any NowPlayingStateStoring)? = nil,
-        platformEventObserver: (any PlaybackPlatformEventObserving)? = nil
+        platformEventObserver: (any PlaybackPlatformEventObserving)? = nil,
+        audioSessionController: (any PlaybackAudioSessionControlling)? = nil
     ) {
         self.engine = engine
         self.systemMediaController = systemMediaController
         self.historyStore = historyStore
         self.nowPlayingStateStore = nowPlayingStateStore
+        #if os(iOS)
+            self.audioSessionController =
+                audioSessionController ?? AVAudioSessionBoundary()
+        #else
+            self.audioSessionController = audioSessionController
+        #endif
         #if os(iOS)
             self.platformEventObserver =
                 platformEventObserver ?? IOSPlaybackPlatformEventObserver()
@@ -1072,40 +1219,42 @@ final class AudioPlaybackCoordinator: ObservableObject {
     }
 
     private func startPlaybackAfterAudioSessionActivation() {
-        #if os(iOS)
-            let itemID = currentItem?.id
-            cancelPendingPlaybackActivation()
-            let activationID = UUID()
-            playbackActivationID = activationID
-            playbackActivationTask = Task { [weak self] in
-                guard let self else { return }
-                defer {
-                    if playbackActivationID == activationID {
-                        playbackActivationTask = nil
-                    }
-                }
-                do {
-                    try await configureAudioSession()
-                    try Task.checkCancellation()
-                    guard
-                        currentItem?.id == itemID,
-                        playbackActivationID == activationID,
-                        !hasExplicitPlaybackPause,
-                        !isAudioSessionInterrupted || requiresRouteRecovery
-                    else {
-                        return
-                    }
-                    engine.play()
-                } catch is CancellationError {
-                    return
-                } catch {
-                    guard playbackActivationID == activationID else { return }
-                    apply(.failed(error.localizedDescription))
+        guard let audioSessionController else {
+            engine.play()
+            return
+        }
+
+        let itemID = currentItem?.id
+        cancelPendingPlaybackActivation()
+        let activationID = UUID()
+        playbackActivationID = activationID
+        playbackActivationTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if playbackActivationID == activationID {
+                    playbackActivationTask = nil
                 }
             }
-        #else
-            engine.play()
-        #endif
+            do {
+                try Task.checkCancellation()
+                try await audioSessionController.activate()
+                try Task.checkCancellation()
+                guard
+                    currentItem?.id == itemID,
+                    playbackActivationID == activationID,
+                    !hasExplicitPlaybackPause,
+                    !isAudioSessionInterrupted || requiresRouteRecovery
+                else {
+                    return
+                }
+                engine.play()
+            } catch is CancellationError {
+                return
+            } catch {
+                guard playbackActivationID == activationID else { return }
+                apply(.failed(error.localizedDescription))
+            }
+        }
     }
 
     private func cancelPendingPlaybackActivation() {
@@ -1114,22 +1263,11 @@ final class AudioPlaybackCoordinator: ObservableObject {
         playbackActivationID = nil
     }
 
-    private func configureAudioSession() async throws {
-        #if os(iOS)
-            let session = AVAudioSession.sharedInstance()
-            try session.setCategory(.playback, mode: .default)
-            try session.setActive(true)
-        #endif
-    }
-
     private func deactivateAudioSession() {
-        #if os(iOS)
-            let session = AVAudioSession.sharedInstance()
-            try? session.setActive(
-                false,
-                options: .notifyOthersOnDeactivation
-            )
-        #endif
+        guard let audioSessionController else { return }
+        Task {
+            await audioSessionController.deactivate(notifyingOthers: true)
+        }
     }
 
     private func installPlatformEventObserver() {
