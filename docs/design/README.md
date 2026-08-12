@@ -75,11 +75,6 @@ with a direct recovery action.
 ### Mini-player and Now Playing
 
 - The mini-player remains concise: artwork, title/artist, and play/pause.
-- With a playable current item, present it once at the root playback boundary
-  across Home, Library, Search (including active query/result interaction), and
-  catalog details. Do not duplicate it per destination or hide it as a side
-  effect of navigation. Full Now Playing intentionally replaces it; signed-out
-  and no-current-item states reserve no empty accessory space.
 - Now Playing owns full artwork, metadata, scrubbing, previous/play/next,
   favorite, shuffle, repeat, playback-method information, errors, and Up Next.
 - Playback method uses neutral language: Local File, Direct Play, Direct Stream,
