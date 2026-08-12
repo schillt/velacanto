@@ -251,8 +251,7 @@ struct HomeView: View {
             MusicPlaylistView(
                 playlist: item,
                 jellyfin: jellyfin,
-                playback: playback,
-                showNowPlaying: showNowPlaying
+                playback: playback
             )
         case .song:
             EmptyView()

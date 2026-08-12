@@ -3,7 +3,6 @@ import SwiftUI
 struct MusicPlaylistsView: View {
     @ObservedObject var jellyfin: JellyfinSessionController
     @ObservedObject var playback: AudioPlaybackCoordinator
-    let showNowPlaying: () -> Void
 
     @StateObject private var model = PagedMusicCatalogModel()
     @State private var searchText = ""
@@ -38,8 +37,7 @@ struct MusicPlaylistsView: View {
                         MusicPlaylistView(
                             playlist: playlist,
                             jellyfin: jellyfin,
-                            playback: playback,
-                            showNowPlaying: showNowPlaying
+                            playback: playback
                         )
                     } label: {
                         HStack(spacing: 14) {
@@ -153,7 +151,6 @@ struct MusicPlaylistView: View {
     let playlist: MusicCatalogItem
     @ObservedObject var jellyfin: JellyfinSessionController
     @ObservedObject var playback: AudioPlaybackCoordinator
-    let showNowPlaying: () -> Void
 
     @StateObject private var model = PagedMusicCatalogModel()
     @State private var preparingTrackID: MusicCatalogItemID?
@@ -249,15 +246,6 @@ struct MusicPlaylistView: View {
         .refreshable {
             await reset()
         }
-        #if os(macOS)
-            .macOSPlaybackAccessoryInset(
-                playback: playback,
-                jellyfin: jellyfin,
-                isVisible: playback.hasPlayableItem,
-                showNowPlaying: showNowPlaying
-            )
-            .preference(key: PlaybackAccessoryOwnerPreferenceKey.self, value: true)
-        #endif
     }
 
     private func reset() async {

@@ -580,13 +580,15 @@ final class JellyfinFoundationTests: XCTestCase {
         let request = try await JellyfinPlaybackAdapter().playbackRequest(
             for: JellyfinTrackSelection(
                 track: track,
-                streamURL: streamURL
+                streamURL: streamURL,
+                transportKind: .directStream
             )
         )
 
         XCTAssertEqual(request.item.id, "track-id")
         XCTAssertEqual(request.item.title, "Night Drive")
         XCTAssertEqual(request.item.artist, "Velacanto")
+        XCTAssertEqual(request.transportKind, .directStream)
         XCTAssertEqual(request.item.albumTitle, "Open Roads")
         XCTAssertEqual(request.item.source, .jellyfin)
         XCTAssertEqual(track.duration, 180)
@@ -1282,6 +1284,7 @@ final class JellyfinFoundationTests: XCTestCase {
 
         XCTAssertEqual(request.item.id, track.id.opaqueID)
         XCTAssertEqual(request.item.source, .jellyfin)
+        XCTAssertEqual(request.transportKind, .directPlay)
         XCTAssertNotNil(request.reporter)
     }
 

@@ -69,6 +69,22 @@ enum PlaybackRepeatMode: String, CaseIterable, Codable, Sendable {
     }
 }
 
+enum PlaybackTransportKind: String, Equatable, Codable, Sendable {
+    case localFile
+    case directPlay
+    case directStream
+    case transcoding
+
+    var displayName: String {
+        switch self {
+        case .localFile: "Local File"
+        case .directPlay: "Direct Play"
+        case .directStream: "Direct Stream"
+        case .transcoding: "Transcoding"
+        }
+    }
+}
+
 struct PlaybackQueue: Equatable, Codable, Sendable {
     private(set) var items: [PlaybackItem]
     private(set) var currentIndex: Int
@@ -474,17 +490,20 @@ protocol PlaybackLifecycleReporting: Sendable {
 struct PlaybackRequest: Sendable {
     let item: PlaybackItem
     let asset: PlaybackAsset
+    let transportKind: PlaybackTransportKind
     let recordsHistory: Bool
     let reporter: (any PlaybackLifecycleReporting)?
 
     init(
         item: PlaybackItem,
         asset: PlaybackAsset,
+        transportKind: PlaybackTransportKind,
         recordsHistory: Bool = true,
         reporter: (any PlaybackLifecycleReporting)? = nil
     ) {
         self.item = item
         self.asset = asset
+        self.transportKind = transportKind
         self.recordsHistory = recordsHistory
         self.reporter = reporter
     }

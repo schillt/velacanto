@@ -286,6 +286,7 @@ final class AudioPlaybackCoordinator: ObservableObject {
     @Published private(set) var recentItems: [PlaybackItem]
     @Published private(set) var queue: PlaybackQueue?
     @Published private(set) var bufferState = PlaybackBufferState.empty
+    @Published private(set) var transportKind: PlaybackTransportKind?
 
     private let engine: any AudioPlayerEngine
     private var systemMediaController: (any SystemMediaControlling)?
@@ -461,6 +462,7 @@ final class AudioPlaybackCoordinator: ObservableObject {
         nowPlayingArtworkIdentifier = nil
         nowPlayingArtwork = nil
         currentItem = request.item
+        transportKind = request.transportKind
         replaceLifecycleReporter(with: request.reporter)
         elapsed = 0
         duration = validatedDuration(request.item.duration)
@@ -590,6 +592,7 @@ final class AudioPlaybackCoordinator: ObservableObject {
         engine.stop()
         resourceLease = nil
         currentItem = nil
+        transportKind = nil
         elapsed = 0
         duration = 0
         bufferState = .empty
@@ -1209,6 +1212,7 @@ final class AudioPlaybackCoordinator: ObservableObject {
         queue?.moveNext(wrapping: repeatMode == .all)
         reportPlaybackStopped()
         currentItem = request.item
+        transportKind = request.transportKind
         replaceLifecycleReporter(with: request.reporter)
         resourceLease = request.asset.resourceLease
         preloadedRequest = nil
@@ -1312,6 +1316,7 @@ final class AudioPlaybackCoordinator: ObservableObject {
                 playbackState = .loading
                 errorMessage = nil
                 replaceLifecycleReporter(with: request.reporter)
+                transportKind = request.transportKind
                 resourceLease = request.asset.resourceLease
                 engine.load(request.asset.makePlayerItem())
                 if resumeTime > 0 {

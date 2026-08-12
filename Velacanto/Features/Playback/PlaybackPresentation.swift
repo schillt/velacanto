@@ -64,14 +64,6 @@ struct PlaybackAccessory: View {
 }
 
 #if os(macOS)
-    enum PlaybackAccessoryOwnerPreferenceKey: PreferenceKey {
-        static let defaultValue = false
-
-        static func reduce(value: inout Bool, nextValue: () -> Bool) {
-            value = value || nextValue()
-        }
-    }
-
     extension View {
         func macOSPlaybackAccessoryInset(
             playback: AudioPlaybackCoordinator,
@@ -231,6 +223,14 @@ struct NowPlayingView: View {
                     Text(albumTitle)
                         .font(.callout)
                         .foregroundStyle(.tertiary)
+                }
+                if let transportKind = playback.transportKind {
+                    Text(transportKind.displayName)
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.secondary)
+                        .accessibilityLabel(
+                            "Playback method: \(transportKind.displayName)"
+                        )
                 }
             }
 

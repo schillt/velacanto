@@ -121,6 +121,14 @@ enum JellyfinPlaybackMethod: String, Equatable, Sendable {
     case directPlay = "DirectPlay"
     case directStream = "DirectStream"
     case transcode = "Transcode"
+
+    var transportKind: PlaybackTransportKind {
+        switch self {
+        case .directPlay: .directPlay
+        case .directStream: .directStream
+        case .transcode: .transcoding
+        }
+    }
 }
 
 struct JellyfinPlaybackResolution: Equatable, Sendable {
