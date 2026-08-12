@@ -315,6 +315,8 @@ struct JellyfinCatalogMapper: Sendable {
             artists: item.artists,
             albumArtist: item.albumArtist,
             album: item.album,
+            albumID: item.albumID,
+            artistIDs: item.artistItems.map(\.id),
             trackNumber: item.indexNumber,
             discNumber: item.parentIndexNumber,
             childCount: item.childCount,

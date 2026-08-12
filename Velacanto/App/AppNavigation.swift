@@ -2,6 +2,7 @@ import SwiftUI
 
 enum AppDestination: String, Hashable, Identifiable, CaseIterable {
     case home
+    case new
     case library
     case search
 
@@ -11,6 +12,8 @@ enum AppDestination: String, Hashable, Identifiable, CaseIterable {
         switch self {
         case .home:
             "Home"
+        case .new:
+            "New"
         case .library:
             "Library"
         case .search:
@@ -21,7 +24,9 @@ enum AppDestination: String, Hashable, Identifiable, CaseIterable {
     var symbolName: String {
         switch self {
         case .home:
-            "house"
+            "house.fill"
+        case .new:
+            "music.note.list"
         case .library:
             "rectangle.stack"
         case .search:

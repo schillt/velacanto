@@ -37,6 +37,8 @@ struct MusicCatalogItem: Identifiable, Equatable, Codable, Sendable {
     let artists: [String]
     let albumArtist: String?
     let album: String?
+    let albumID: String?
+    let artistIDs: [String]
     let trackNumber: Int?
     let discNumber: Int?
     let childCount: Int?
@@ -45,10 +47,97 @@ struct MusicCatalogItem: Identifiable, Equatable, Codable, Sendable {
     let isFavorite: Bool
     let capabilities: MusicItemCapabilities
 
+    init(
+        id: MusicCatalogItemID,
+        name: String,
+        kind: Kind,
+        sortName: String?,
+        artists: [String],
+        albumArtist: String?,
+        album: String?,
+        albumID: String? = nil,
+        artistIDs: [String] = [],
+        trackNumber: Int?,
+        discNumber: Int?,
+        childCount: Int?,
+        duration: TimeInterval?,
+        artwork: MusicArtworkReference?,
+        isFavorite: Bool,
+        capabilities: MusicItemCapabilities
+    ) {
+        self.id = id
+        self.name = name
+        self.kind = kind
+        self.sortName = sortName
+        self.artists = artists
+        self.albumArtist = albumArtist
+        self.album = album
+        self.albumID = albumID
+        self.artistIDs = artistIDs
+        self.trackNumber = trackNumber
+        self.discNumber = discNumber
+        self.childCount = childCount
+        self.duration = duration
+        self.artwork = artwork
+        self.isFavorite = isFavorite
+        self.capabilities = capabilities
+    }
+
     var artworkItemID: String { artwork?.opaqueItemID ?? id.opaqueID }
     var primaryImageTag: String? { artwork?.imageTag }
     var indexNumber: Int? { trackNumber }
     var parentIndexNumber: Int? { discNumber }
+
+    var albumNavigationItem: MusicCatalogItem? {
+        guard let album, let albumID else { return nil }
+        return MusicCatalogItem(
+            id: MusicCatalogItemID(
+                source: id.source,
+                accountScope: id.accountScope,
+                opaqueID: albumID
+            ),
+            name: album,
+            kind: .album,
+            sortName: nil,
+            artists: artists,
+            albumArtist: albumArtist,
+            album: nil,
+            albumID: nil,
+            trackNumber: nil,
+            discNumber: nil,
+            childCount: nil,
+            duration: nil,
+            artwork: artwork,
+            isFavorite: false,
+            capabilities: [.navigate, .play, .shuffle, .favorite]
+        )
+    }
+
+    var artistNavigationItem: MusicCatalogItem? {
+        guard let artistID = artistIDs.first else { return nil }
+        return MusicCatalogItem(
+            id: MusicCatalogItemID(
+                source: id.source,
+                accountScope: id.accountScope,
+                opaqueID: artistID
+            ),
+            name: artists.first ?? albumArtist ?? "Artist",
+            kind: .artist,
+            sortName: nil,
+            artists: [],
+            albumArtist: nil,
+            album: nil,
+            albumID: nil,
+            artistIDs: [],
+            trackNumber: nil,
+            discNumber: nil,
+            childCount: nil,
+            duration: nil,
+            artwork: nil,
+            isFavorite: false,
+            capabilities: [.navigate, .play, .shuffle, .favorite]
+        )
+    }
 
     var displayArtist: String {
         if let albumArtist, !albumArtist.isEmpty { return albumArtist }
