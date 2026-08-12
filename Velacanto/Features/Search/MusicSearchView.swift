@@ -42,6 +42,17 @@ struct MusicSearchView: View {
                     Button("Open Profile", action: showProfile)
                         .buttonStyle(.borderedProminent)
                 }
+            } else if query.isEmpty {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        Text("Browse Genres")
+                            .font(.title2.weight(.semibold))
+                        MusicGenreGrid { genre in
+                            searchText = genre.rawValue
+                        }
+                    }
+                    .padding(20)
+                }
             } else if query.count < 2 {
                 ContentUnavailableView(
                     "Search Your Library",

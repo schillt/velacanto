@@ -15,6 +15,9 @@ struct VelacantoRootView: View {
     @State private var isPreparingTestTone = false
     @State private var isShowingProfile = false
     @State private var isShowingNowPlaying = false
+    #if os(macOS)
+        @State private var isShowingMacPlaybackAccessory = true
+    #endif
     @State private var actionError: String?
 
     private let localFiles = LocalFilePlaybackAdapter()
@@ -35,13 +38,16 @@ struct VelacantoRootView: View {
         ) { result in
             handleLocalFileSelection(result)
         }
-        .inspector(isPresented: $isShowingNowPlaying) {
-            NowPlayingView(
-                playback: playback,
-                jellyfin: jellyfin
-            )
-            .inspectorColumnWidth(min: 360, ideal: 440, max: 620)
-        }
+        #if os(iOS)
+            .fullScreenCover(isPresented: $isShowingNowPlaying) {
+                NowPlayingView(playback: playback, jellyfin: jellyfin)
+            }
+        #elseif os(macOS)
+            .inspector(isPresented: $isShowingNowPlaying) {
+                NowPlayingView(playback: playback, jellyfin: jellyfin)
+                .inspectorColumnWidth(min: 360, ideal: 440, max: 620)
+            }
+        #endif
         .sheet(isPresented: $isShowingProfile) {
             NavigationStack {
                 ProfileView(
@@ -49,13 +55,15 @@ struct VelacantoRootView: View {
                     isPreparingPlaybackCheck: isPreparingTestTone,
                     runPlaybackCheck: playTestTone
                 )
-                .toolbar {
-                    ToolbarItem(placement: .confirmationAction) {
-                        Button("Done") {
-                            isShowingProfile = false
+                #if os(iOS)
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("Done") {
+                                isShowingProfile = false
+                            }
                         }
                     }
-                }
+                #endif
             }
             #if os(macOS)
                 .frame(minWidth: 500, minHeight: 480)
@@ -146,6 +154,13 @@ struct VelacantoRootView: View {
                 playback.stop()
             }
         }
+        #if os(macOS)
+            .onChange(of: playback.currentItem?.id) { oldItemID, newItemID in
+                if oldItemID != newItemID, newItemID != nil {
+                    isShowingMacPlaybackAccessory = true
+                }
+            }
+        #endif
         .environmentObject(jellyfin.itemActions)
     }
 
@@ -197,6 +212,16 @@ struct VelacantoRootView: View {
                 }
 
                 Tab(
+                    AppDestination.new.title,
+                    systemImage: AppDestination.new.symbolName,
+                    value: AppDestination.new
+                ) {
+                    NavigationStack {
+                        newMusic
+                    }
+                }
+
+                Tab(
                     AppDestination.library.title,
                     systemImage: AppDestination.library.symbolName,
                     value: AppDestination.library
@@ -231,13 +256,26 @@ struct VelacantoRootView: View {
                 macOSContent
             }
             .searchable(text: $globalSearchText, prompt: "Search your library")
+            .macOSPlaybackAccessoryInset(
+                playback: playback,
+                jellyfin: jellyfin,
+                isVisible: playback.hasPlayableItem
+                    && !isShowingNowPlaying
+                    && isShowingMacPlaybackAccessory,
+                showNowPlaying: {
+                    isShowingNowPlaying = true
+                },
+                dismiss: {
+                    isShowingMacPlaybackAccessory = false
+                }
+            )
             .frame(minWidth: 700, minHeight: 500)
         }
 
         private var macOSSidebar: some View {
             VStack(spacing: 0) {
                 List(selection: $selectedMacDestination) {
-                    Label("Home", systemImage: "house")
+                    Label("Home", systemImage: "house.fill")
                         .tag(MacDestination.home)
 
                     Section("Library") {
@@ -303,15 +341,6 @@ struct VelacantoRootView: View {
                 }
             }
             .id(macOSContentIdentity)
-            .macOSPlaybackAccessoryInset(
-                playback: playback,
-                jellyfin: jellyfin,
-                isVisible: playback.hasPlayableItem
-                    && !isShowingNowPlaying,
-                showNowPlaying: {
-                    isShowingNowPlaying = true
-                }
-            )
         }
 
         private var isSearchingLibrary: Bool {
@@ -347,7 +376,44 @@ struct VelacantoRootView: View {
                 #else
                     selectedDestination = .library
                 #endif
+            },
+            showSearch: { query in
+                globalSearchText = query
+                #if os(iOS)
+                    selectedDestination = .search
+                #endif
             }
+        )
+    }
+
+    private var newMusic: some View {
+        HomeView(
+            playback: playback,
+            jellyfin: jellyfin,
+            openLocalFile: {
+                isChoosingLocalFile = true
+            },
+            playRecentItem: playRecentItem,
+            showProfile: {
+                isShowingProfile = true
+            },
+            showNowPlaying: {
+                isShowingNowPlaying = true
+            },
+            showLibrary: {
+                #if os(macOS)
+                    selectedMacDestination = .library(.albums)
+                #else
+                    selectedDestination = .library
+                #endif
+            },
+            showSearch: { query in
+                globalSearchText = query
+                #if os(iOS)
+                    selectedDestination = .search
+                #endif
+            },
+            presentation: .new
         )
     }
 

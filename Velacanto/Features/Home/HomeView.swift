@@ -1,6 +1,18 @@
 import SwiftUI
 
 struct HomeView: View {
+    enum Presentation: Equatable {
+        case home
+        case new
+
+        var title: String {
+            switch self {
+            case .home: "Home"
+            case .new: "New"
+            }
+        }
+    }
+
     @EnvironmentObject private var favoriteActions: MusicItemActionStateOwner
     @ObservedObject var playback: AudioPlaybackCoordinator
     @ObservedObject var jellyfin: JellyfinSessionController
@@ -10,6 +22,8 @@ struct HomeView: View {
     let showProfile: () -> Void
     let showNowPlaying: () -> Void
     let showLibrary: () -> Void
+    let showSearch: (String) -> Void
+    var presentation = Presentation.home
 
     @StateObject private var favorites = PagedMusicCatalogModel()
     @StateObject private var recentlyAdded = PagedMusicCatalogModel()
@@ -19,18 +33,26 @@ struct HomeView: View {
     var body: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 30) {
-                continueListening
+                if presentation == .home {
+                    continueListening
 
-                if !playback.recentItems.isEmpty {
-                    recentlyPlayed
+                    if !playback.recentItems.isEmpty {
+                        recentlyPlayed
+                    }
+
+                    if jellyfin.isSignedIn {
+                        genres
+                    }
                 }
 
                 if jellyfin.isSignedIn {
-                    catalogShelf(
-                        title: "Favorites",
-                        model: favorites,
-                        retry: loadFavorites
-                    )
+                    if presentation == .home {
+                        catalogShelf(
+                            title: "Favorites",
+                            model: favorites,
+                            retry: loadFavorites
+                        )
+                    }
 
                     catalogShelf(
                         title: "Recently Added",
@@ -39,14 +61,16 @@ struct HomeView: View {
                     )
                 }
 
-                librarySources
+                if presentation == .home {
+                    librarySources
+                }
             }
             .frame(maxWidth: 1_050, alignment: .leading)
             .padding(.horizontal, 20)
             .padding(.vertical, 18)
             .frame(maxWidth: .infinity)
         }
-        .navigationTitle("Home")
+        .navigationTitle(presentation.title)
         .toolbar {
             #if os(iOS)
                 ToolbarItem(placement: .primaryAction) {
@@ -152,6 +176,15 @@ struct HomeView: View {
                         )
                     }
                 }
+            }
+        }
+    }
+
+    private var genres: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Genres").font(.title2.weight(.semibold))
+            MusicGenreGrid { genre in
+                showSearch(genre.rawValue)
             }
         }
     }

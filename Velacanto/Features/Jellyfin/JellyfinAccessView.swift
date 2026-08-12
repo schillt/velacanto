@@ -16,6 +16,9 @@ struct JellyfinAccessView: View {
             }
         }
         .navigationTitle("Jellyfin Account")
+        #if os(macOS)
+            .frame(minWidth: 460, idealWidth: 560)
+        #endif
     }
 
     private var signedInView: some View {
@@ -48,6 +51,12 @@ struct JellyfinAccessView: View {
                 }
             }
         }
+        #if os(macOS)
+            .formStyle(.grouped)
+            .frame(maxWidth: 560)
+            .frame(maxWidth: .infinity)
+            .padding(.top, 8)
+        #endif
     }
 }
 
@@ -343,7 +352,6 @@ struct JellyfinTracksView: View {
         }
         .buttonStyle(.plain)
         .disabled(preparingTrackID != nil)
-        .musicFavoriteActions(for: track)
         .onAppear {
             loadMoreIfNeeded(track.id)
         }
