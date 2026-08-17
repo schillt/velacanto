@@ -167,18 +167,18 @@ struct VelacantoRootView: View {
     #if os(iOS)
         @ViewBuilder
         private var iOSRoot: some View {
-            if #available(iOS 26.0, *) {
+            if #available(iOS 26.1, *) {
                 iOSTabs
-                    .tabViewBottomAccessory {
-                        if playback.hasPlayableItem && !isShowingNowPlaying {
-                            ModernPlaybackAccessory(
-                                playback: playback,
-                                jellyfin: jellyfin,
-                                showNowPlaying: {
-                                    isShowingNowPlaying = true
-                                }
-                            )
-                        }
+                    .tabViewBottomAccessory(
+                        isEnabled: playback.hasPlayableItem && !isShowingNowPlaying
+                    ) {
+                        ModernPlaybackAccessory(
+                            playback: playback,
+                            jellyfin: jellyfin,
+                            showNowPlaying: {
+                                isShowingNowPlaying = true
+                            }
+                        )
                     }
                     .tabBarMinimizeBehavior(.onScrollDown)
             } else {
