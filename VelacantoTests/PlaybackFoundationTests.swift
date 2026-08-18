@@ -1,9 +1,12 @@
 import AVFoundation
 import Foundation
-import NowPlaying
 import XCTest
 
 @testable import Velacanto
+
+#if canImport(NowPlaying)
+    import NowPlaying
+#endif
 
 #if os(iOS)
     import UIKit
@@ -691,45 +694,47 @@ final class PlaybackFoundationTests: XCTestCase {
         XCTAssertTrue(history.savedItems.isEmpty)
     }
 
-    func testSystemMediaSessionMirrorsSemanticPlaybackContent()
-        async throws
-    {
-        let engine = RecordingAudioPlayerEngine()
-        let coordinator = AudioPlaybackCoordinator(
-            engine: engine
-        )
-        let media = PlaybackSystemMediaSession(playback: coordinator)
-        let item = PlaybackItem(
-            id: "artwork-track",
-            title: "Artwork",
-            artist: "Velacanto",
-            source: .jellyfin,
-            artworkItemID: "artwork-album",
-            artworkTag: "image-tag"
-        )
-        coordinator.play(
-            PlaybackRequest(
-                item: item,
-                asset: PlaybackAsset(
-                    url: URL(fileURLWithPath: "/tmp/artwork-track.caf")
-                ),
-                transportKind: .localFile
+    #if canImport(NowPlaying)
+        func testSystemMediaSessionMirrorsSemanticPlaybackContent()
+            async throws
+        {
+            let engine = RecordingAudioPlayerEngine()
+            let coordinator = AudioPlaybackCoordinator(
+                engine: engine
             )
-        )
-        engine.send(.stateChanged(.playing))
-        engine.send(.timeChanged(elapsed: 12, duration: 120))
-        await waitUntil { media.content != nil }
+            let media = PlaybackSystemMediaSession(playback: coordinator)
+            let item = PlaybackItem(
+                id: "artwork-track",
+                title: "Artwork",
+                artist: "Velacanto",
+                source: .jellyfin,
+                artworkItemID: "artwork-album",
+                artworkTag: "image-tag"
+            )
+            coordinator.play(
+                PlaybackRequest(
+                    item: item,
+                    asset: PlaybackAsset(
+                        url: URL(fileURLWithPath: "/tmp/artwork-track.caf")
+                    ),
+                    transportKind: .localFile
+                )
+            )
+            engine.send(.stateChanged(.playing))
+            engine.send(.timeChanged(elapsed: 12, duration: 120))
+            await waitUntil { media.content != nil }
 
-        let content = try XCTUnwrap(media.content as? MusicContent)
-        XCTAssertEqual(content.songTitle, "Artwork")
-        XCTAssertEqual(content.artistName, "Velacanto")
-        guard case .finite(let duration) = content.duration else {
-            return XCTFail("Expected finite media duration.")
+            let content = try XCTUnwrap(media.content as? MusicContent)
+            XCTAssertEqual(content.songTitle, "Artwork")
+            XCTAssertEqual(content.artistName, "Velacanto")
+            guard case .finite(let duration) = content.duration else {
+                return XCTFail("Expected finite media duration.")
+            }
+            XCTAssertEqual(duration, 120)
+            XCTAssertNotNil(media.playbackSnapshot)
+            XCTAssertFalse(media.commands.isEmpty)
         }
-        XCTAssertEqual(duration, 120)
-        XCTAssertNotNil(media.playbackSnapshot)
-        XCTAssertFalse(media.commands.isEmpty)
-    }
+    #endif
 
     func testStaleResolutionCannotReplaceCurrentTransportKind() async {
         let first = PlaybackItem(
