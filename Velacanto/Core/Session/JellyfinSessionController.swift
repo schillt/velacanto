@@ -73,6 +73,33 @@ final class JellyfinSessionController: ObservableObject {
         )
     }
 
+    /// A process-local, argument-gated fixture for UI automation. It deliberately
+    /// has no persistent credentials, network endpoint, or private media data.
+    convenience init(uiTestingSignedIn: Bool) {
+        self.init(
+            tokenStore: UITestTokenStore(),
+            sessionStore: UITestSessionStore(),
+            autoRestore: false,
+            makeClient: { _, _, _ in UITestJellyfinAPI() }
+        )
+        guard uiTestingSignedIn else { return }
+        let fixture = UITestJellyfinAPI()
+        client = fixture
+        session = JellyfinSession(
+            serverURL: URL(fileURLWithPath: "/"),
+            serverID: "ui-test-server",
+            serverName: "UI Test Library",
+            userID: "ui-test-user",
+            username: "UI Test User",
+            userPrimaryImageTag: nil
+        )
+        phase = .signedIn
+        configureItemActions()
+        Task { [weak self] in
+            await self?.refreshLibraries()
+        }
+    }
+
     init(
         tokenStore: any JellyfinTokenStoring,
         sessionStore: any JellyfinSessionPersisting,
@@ -849,5 +876,89 @@ enum JellyfinSessionError: LocalizedError, Equatable {
         case .unsupportedHistoryItem:
             "This recent item must be opened again from its original source."
         }
+    }
+}
+
+private final class UITestTokenStore: JellyfinTokenStoring {
+    func loadToken() throws -> String? { nil }
+    func saveToken(_: String) throws {}
+    func deleteToken() throws {}
+}
+
+private final class UITestSessionStore: JellyfinSessionPersisting {
+    func loadSession() -> JellyfinSession? { nil }
+    func saveSession(_: JellyfinSession) {}
+    func deleteSession() {}
+    func loadDeviceID() -> String? { "ui-test-device" }
+    func saveDeviceID(_: String) {}
+}
+
+/// Synthetic catalog responses used exclusively by the UI-test launch fixture.
+/// The values are generic and never leave the process.
+private actor UITestJellyfinAPI: JellyfinAPIService {
+    private let album = UITestJellyfinAPI.item(
+        #"{"Id":"ui-test-album","Name":"Test Album","Type":"MusicAlbum","AlbumArtist":"Test Artist","UserData":{"IsFavorite":false}}"#
+    )
+
+    func publicServerInfo() async throws -> JellyfinServerInfo {
+        throw JellyfinAPIError.invalidResponse
+    }
+    func authenticate(username: String, password: String) async throws
+        -> JellyfinAuthenticationResult
+    { throw JellyfinAPIError.invalidResponse }
+    func currentUser() async throws -> JellyfinUser {
+        JellyfinUser(id: "ui-test-user", name: "UI Test User")
+    }
+    func libraries(userID: String) async throws -> [JellyfinItem] { [] }
+    func playbackResolution(itemID: String, userID: String) async throws
+        -> JellyfinPlaybackResolution
+    { throw JellyfinAPIError.invalidResponse }
+    func setFavorite(_: Bool, itemID: String, userID: String) async throws {}
+    func albumsPage(
+        userID: String, libraryID: String, artistID: String?, startIndex: Int, limit: Int,
+        searchTerm: String?
+    ) async throws -> JellyfinItemPage { page([album], startIndex: startIndex) }
+    func artistsPage(
+        userID: String, libraryID: String, startIndex: Int, limit: Int, searchTerm: String?
+    ) async throws -> JellyfinItemPage { page([], startIndex: startIndex) }
+    func songsPage(
+        userID: String, libraryID: String, artistID: String?, startIndex: Int, limit: Int,
+        searchTerm: String?
+    ) async throws -> JellyfinItemPage { page([], startIndex: startIndex) }
+    func playlistsPage(userID: String, startIndex: Int, limit: Int, searchTerm: String?)
+        async throws -> JellyfinItemPage
+    { page([], startIndex: startIndex) }
+    func searchMusicPage(userID: String, query: String, startIndex: Int, limit: Int) async throws
+        -> JellyfinItemPage
+    { page([album], startIndex: startIndex) }
+    func homeItemsPage(
+        userID: String, collection: JellyfinHomeCollection, startIndex: Int, limit: Int
+    ) async throws -> JellyfinItemPage { page([album], startIndex: startIndex) }
+    func playlistItemsPage(userID: String, playlistID: String, startIndex: Int, limit: Int)
+        async throws -> JellyfinItemPage
+    { page([], startIndex: startIndex) }
+    func tracksPage(userID: String, albumID: String, startIndex: Int, limit: Int) async throws
+        -> JellyfinItemPage
+    { page([], startIndex: startIndex) }
+    func artworkRequest(itemID: String, imageTag: String?, maxWidth: Int) async throws -> URLRequest
+    { throw JellyfinAPIError.invalidResponse }
+    func userImageRequest(userID: String, imageTag: String?, maxWidth: Int) async throws
+        -> URLRequest
+    { throw JellyfinAPIError.invalidResponse }
+    func logout() async throws {}
+
+    func lyrics(itemID: String) async throws -> JellyfinLyricsResponse? {
+        JellyfinLyricsResponse(lyrics: [JellyfinLyricLine(text: "Test lyric", start: 0)])
+    }
+
+    private func page(_ items: [JellyfinItem], startIndex: Int) -> JellyfinItemPage {
+        JellyfinItemPage(
+            items: startIndex == 0 ? items : [], startIndex: startIndex,
+            totalRecordCount: items.count)
+    }
+
+    private static func item(_ json: String) -> JellyfinItem {
+        // The literal is authored alongside the fixture and guaranteed valid at launch.
+        try! JSONDecoder().decode(JellyfinItem.self, from: Data(json.utf8))
     }
 }
