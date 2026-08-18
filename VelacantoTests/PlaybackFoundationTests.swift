@@ -694,6 +694,48 @@ final class PlaybackFoundationTests: XCTestCase {
         XCTAssertTrue(history.savedItems.isEmpty)
     }
 
+    func testSystemMediaIdentifiersAreAppLocalAndRotateForNewContent() {
+        let first = PlaybackItem(
+            id: "provider-item-id",
+            title: "First",
+            artist: "Velacanto",
+            source: MusicSourceID(rawValue: "provider-server-user")
+        )
+        let second = PlaybackItem(
+            id: "replacement-provider-item-id",
+            title: "Second",
+            artist: "Velacanto",
+            source: MusicSourceID(rawValue: "provider-server-user")
+        )
+        let artworkIdentifier = "server-id/user-id/artwork-item/image-tag"
+        var identifiers = SystemMediaIdentifiers()
+
+        identifiers.update(
+            for: first,
+            artworkSourceIdentifier: artworkIdentifier
+        )
+        let firstContentID = identifiers.contentID
+        let firstArtworkID = identifiers.artworkID
+
+        XCTAssertNotEqual(firstContentID, first.id)
+        XCTAssertNotEqual(firstContentID, first.source.rawValue)
+        XCTAssertNotEqual(firstArtworkID, artworkIdentifier)
+
+        identifiers.update(
+            for: first,
+            artworkSourceIdentifier: artworkIdentifier
+        )
+        XCTAssertEqual(identifiers.contentID, firstContentID)
+        XCTAssertEqual(identifiers.artworkID, firstArtworkID)
+
+        identifiers.update(
+            for: second,
+            artworkSourceIdentifier: artworkIdentifier
+        )
+        XCTAssertNotEqual(identifiers.contentID, firstContentID)
+        XCTAssertNotEqual(identifiers.artworkID, firstArtworkID)
+    }
+
     #if canImport(NowPlaying)
         func testSystemMediaSessionMirrorsSemanticPlaybackContent()
             async throws
@@ -725,6 +767,7 @@ final class PlaybackFoundationTests: XCTestCase {
             await waitUntil { media.content != nil }
 
             let content = try XCTUnwrap(media.content as? MusicContent)
+            XCTAssertNotEqual(content.id, item.id)
             XCTAssertEqual(content.songTitle, "Artwork")
             XCTAssertEqual(content.artistName, "Velacanto")
             guard case .finite(let duration) = content.duration else {

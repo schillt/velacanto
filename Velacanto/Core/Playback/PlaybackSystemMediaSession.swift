@@ -19,6 +19,40 @@ struct ResolvedNowPlayingArtwork {
     let image: PlatformImage
 }
 
+/// Keeps provider and account identifiers inside the app while the system
+/// media model receives only app-local opaque values.
+struct SystemMediaIdentifiers {
+    private var playbackIdentity: PlaybackItemQueueIdentity?
+    private var artworkSourceIdentifier: String?
+
+    private(set) var contentID = UUID().uuidString
+    private(set) var artworkID = UUID().uuidString
+
+    mutating func update(
+        for item: PlaybackItem,
+        artworkSourceIdentifier: String?
+    ) {
+        if playbackIdentity != item.queueIdentity {
+            playbackIdentity = item.queueIdentity
+            contentID = UUID().uuidString
+            self.artworkSourceIdentifier = nil
+            artworkID = UUID().uuidString
+        }
+
+        if self.artworkSourceIdentifier != artworkSourceIdentifier {
+            self.artworkSourceIdentifier = artworkSourceIdentifier
+            artworkID = UUID().uuidString
+        }
+    }
+
+    mutating func reset() {
+        playbackIdentity = nil
+        artworkSourceIdentifier = nil
+        contentID = UUID().uuidString
+        artworkID = UUID().uuidString
+    }
+}
+
 /// The sole bridge from the app's playback coordinator to OS media surfaces.
 ///
 /// `MediaSession` observes this model directly, so a state change replaces the
@@ -37,6 +71,7 @@ struct ResolvedNowPlayingArtwork {
 
         private let playback: AudioPlaybackCoordinator
         private var observations: Set<AnyCancellable> = []
+        private var systemIdentifiers = SystemMediaIdentifiers()
 
         lazy var mediaSession = MediaSession(self)
 
@@ -67,14 +102,20 @@ struct ResolvedNowPlayingArtwork {
 
         private func refresh() {
             guard let item = playback.currentItem else {
+                systemIdentifiers.reset()
                 content = nil
                 playbackSnapshot = nil
                 commands = []
                 return
             }
 
+            systemIdentifiers.update(
+                for: item,
+                artworkSourceIdentifier: playback.nowPlayingArtworkIdentifier
+            )
+
             content = MusicContent(
-                id: item.id,
+                id: systemIdentifiers.contentID,
                 songTitle: item.title,
                 artistName: item.artist,
                 albumName: item.albumTitle ?? "",
@@ -99,12 +140,12 @@ struct ResolvedNowPlayingArtwork {
 
         private var systemArtwork: Artwork? {
             guard
-                let artworkIdentifier = playback.nowPlayingArtworkIdentifier,
+                playback.nowPlayingArtworkIdentifier != nil,
                 let artwork = playback.nowPlayingArtwork.flatMap(Self.cgImage(from:))
             else {
                 return nil
             }
-            return Artwork(id: artworkIdentifier) { _ in
+            return Artwork(id: systemIdentifiers.artworkID) { _ in
                 try ArtworkRepresentation(cgImage: artwork)
             }
         }
