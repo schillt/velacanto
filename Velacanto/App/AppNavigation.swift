@@ -1,5 +1,60 @@
 import SwiftUI
 
+#if os(iOS)
+    import UIKit
+#elseif os(macOS)
+    import AppKit
+#endif
+
+extension Color {
+    /// Velacanto's adaptive icon-derived identity color.
+    ///
+    /// The light appearance matches the icon's harbor-blue field, while the
+    /// dark appearance uses a restrained version of its warm musical mark.
+    static let velacantoAccent: Color = {
+        #if os(iOS)
+            Color(
+                uiColor: UIColor { traits in
+                    if traits.userInterfaceStyle == .dark {
+                        return UIColor(
+                            red: 140 / 255,
+                            green: 108 / 255,
+                            blue: 57 / 255,
+                            alpha: 1
+                        )
+                    }
+                    return UIColor(
+                        red: 24 / 255,
+                        green: 56 / 255,
+                        blue: 106 / 255,
+                        alpha: 1
+                    )
+                }
+            )
+        #elseif os(macOS)
+            Color(
+                nsColor: NSColor(name: NSColor.Name("VelacantoAccent")) { appearance in
+                    let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                    if isDark {
+                        return NSColor(
+                            srgbRed: 140 / 255,
+                            green: 108 / 255,
+                            blue: 57 / 255,
+                            alpha: 1
+                        )
+                    }
+                    return NSColor(
+                        srgbRed: 24 / 255,
+                        green: 56 / 255,
+                        blue: 106 / 255,
+                        alpha: 1
+                    )
+                }
+            )
+        #endif
+    }()
+}
+
 enum AppDestination: String, Hashable, Identifiable, CaseIterable {
     case home
     case new

@@ -7,6 +7,7 @@ struct MusicAlbumsView: View {
     @StateObject private var model = PagedMusicCatalogModel()
     @State private var searchText = ""
     @StateObject private var gridPosition = AlbumGridPositionState()
+    @Namespace private var albumTransitionNamespace
 
     private var query: String {
         searchText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -35,15 +36,9 @@ struct MusicAlbumsView: View {
                 .padding(.top, 60)
             } else {
                 LazyVGrid(
-                    columns: [
-                        GridItem(
-                            .adaptive(minimum: 138, maximum: 210),
-                            spacing: 18,
-                            alignment: .top
-                        )
-                    ],
+                    columns: MusicArtworkGridLayout.columns,
                     alignment: .leading,
-                    spacing: 24
+                    spacing: MusicArtworkGridLayout.verticalSpacing
                 ) {
                     ForEach(model.items) { album in
                         NavigationLink {
@@ -53,10 +48,14 @@ struct MusicAlbumsView: View {
                                 playback: playback
                             )
                         } label: {
-                            MusicAlbumCard(album: album, jellyfin: jellyfin)
+                            MusicAlbumCard(
+                                album: album,
+                                jellyfin: jellyfin,
+                                transitionNamespace: albumTransitionNamespace
+                            )
                         }
                         .buttonStyle(.plain)
-                        .musicFavoriteActions(for: album)
+                        .musicItemActions(for: album, jellyfin: jellyfin, playback: playback)
                         .id(album.id)
                         .onAppear {
                             loadMoreIfNeeded(album.id)
@@ -82,7 +81,7 @@ struct MusicAlbumsView: View {
             }
         }
         .scrollPosition(id: scrollPositionBinding)
-        .navigationTitle("Albums")
+        .progressivePageHeader("Albums")
         #if !os(macOS)
             .searchable(text: $searchText, prompt: "Albums and artists")
         #endif
@@ -155,6 +154,7 @@ struct MusicAlbumsView: View {
 struct MusicAlbumCard: View {
     let album: MusicCatalogItem
     @ObservedObject var jellyfin: JellyfinSessionController
+    var transitionNamespace: Namespace.ID?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -166,6 +166,10 @@ struct MusicAlbumCard: View {
                         jellyfin: jellyfin,
                         cornerRadius: 14,
                         maxWidth: 480
+                    )
+                    .albumArtworkTransitionSource(
+                        id: album.artworkTransitionID,
+                        in: transitionNamespace
                     )
                 }
                 .clipShape(.rect(cornerRadius: 14))
@@ -182,5 +186,45 @@ struct MusicAlbumCard: View {
             }
         }
         .contentShape(Rectangle())
+    }
+}
+
+extension MusicCatalogItem {
+    var artworkTransitionID: String {
+        "album-artwork-\(id.opaqueID)"
+    }
+}
+
+extension View {
+    @ViewBuilder
+    func albumArtworkTransitionSource(
+        id: String,
+        in namespace: Namespace.ID?
+    ) -> some View {
+        #if os(iOS)
+            if #available(iOS 18.0, *), let namespace {
+                matchedTransitionSource(id: id, in: namespace)
+            } else {
+                self
+            }
+        #else
+            self
+        #endif
+    }
+
+    @ViewBuilder
+    func albumArtworkZoomTransition(
+        sourceID: String,
+        in namespace: Namespace.ID?
+    ) -> some View {
+        #if os(iOS)
+            if #available(iOS 18.0, *), let namespace {
+                navigationTransition(.zoom(sourceID: sourceID, in: namespace))
+            } else {
+                self
+            }
+        #else
+            self
+        #endif
     }
 }

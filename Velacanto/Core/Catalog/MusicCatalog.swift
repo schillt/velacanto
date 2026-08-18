@@ -6,7 +6,39 @@ struct MusicCatalogItemID: Hashable, Codable, Sendable {
     let opaqueID: String
 }
 
-struct MusicArtworkReference: Equatable, Codable, Sendable {
+struct MusicGenre: Identifiable, Hashable, Codable, Sendable {
+    let id: MusicCatalogItemID
+    let name: String
+    let artwork: MusicArtworkReference?
+    let albumCount: Int
+
+    init(
+        id: MusicCatalogItemID,
+        name: String,
+        artwork: MusicArtworkReference?,
+        albumCount: Int = 0
+    ) {
+        self.id = id
+        self.name = name
+        self.artwork = artwork
+        self.albumCount = albumCount
+    }
+
+    static func hasBrowsableName(_ name: String) -> Bool {
+        let normalized =
+            name
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return !normalized.isEmpty
+            && ![
+                "unknown", "default", "(default)", "<unknown>", "[unknown]", "undefined",
+                "(undefined)", "<undefined>", "unknown genre", "unspecified", "none", "n/a",
+            ]
+            .contains(normalized)
+    }
+}
+
+struct MusicArtworkReference: Hashable, Codable, Sendable {
     let opaqueItemID: String
     let imageTag: String?
 }
@@ -78,6 +110,9 @@ struct MusicCatalogItem: Identifiable, Equatable, Codable, Sendable {
     let album: String?
     let albumID: String?
     let artistIDs: [String]
+    let genres: [String]
+    let genreIDs: [String]
+    let releaseYear: Int?
     let trackNumber: Int?
     let discNumber: Int?
     let childCount: Int?
@@ -96,6 +131,9 @@ struct MusicCatalogItem: Identifiable, Equatable, Codable, Sendable {
         album: String?,
         albumID: String? = nil,
         artistIDs: [String] = [],
+        genres: [String] = [],
+        genreIDs: [String] = [],
+        releaseYear: Int? = nil,
         trackNumber: Int?,
         discNumber: Int?,
         childCount: Int?,
@@ -113,6 +151,9 @@ struct MusicCatalogItem: Identifiable, Equatable, Codable, Sendable {
         self.album = album
         self.albumID = albumID
         self.artistIDs = artistIDs
+        self.genres = genres
+        self.genreIDs = genreIDs
+        self.releaseYear = releaseYear
         self.trackNumber = trackNumber
         self.discNumber = discNumber
         self.childCount = childCount
@@ -142,6 +183,9 @@ struct MusicCatalogItem: Identifiable, Equatable, Codable, Sendable {
             albumArtist: albumArtist,
             album: nil,
             albumID: nil,
+            genres: genres,
+            genreIDs: genreIDs,
+            releaseYear: releaseYear,
             trackNumber: nil,
             discNumber: nil,
             childCount: nil,
@@ -168,6 +212,8 @@ struct MusicCatalogItem: Identifiable, Equatable, Codable, Sendable {
             album: nil,
             albumID: nil,
             artistIDs: [],
+            genres: [],
+            genreIDs: [],
             trackNumber: nil,
             discNumber: nil,
             childCount: nil,
@@ -195,7 +241,10 @@ enum MusicCatalogKind: String, Codable, Sendable {
     case artistTracks
     case playlistTracks
     case favorites
+    case mostListened
     case recentlyAdded
+    case recentlyAddedTracks
+    case genreItems
 }
 
 struct MusicCatalogCursor: Sendable {

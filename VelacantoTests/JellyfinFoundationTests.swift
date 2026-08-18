@@ -1340,6 +1340,65 @@ final class JellyfinFoundationTests: XCTestCase {
         XCTAssertNil(mapper.map(unsupportedTransport))
     }
 
+    func testGenreDiscoveryUsesAlbumArtworkAndOmitsPlaceholderGenres() async throws {
+        let decoder = JSONDecoder()
+        let rock = try decoder.decode(
+            JellyfinItem.self,
+            from: Data(#"{"Id":"rock","Name":"Rock","Type":"Genre"}"#.utf8)
+        )
+        let unknown = try decoder.decode(
+            JellyfinItem.self,
+            from: Data(#"{"Id":"unknown","Name":"Unknown","Type":"Genre"}"#.utf8)
+        )
+        let albumWithoutArt = try decoder.decode(
+            JellyfinItem.self,
+            from: Data(#"{"Id":"plain","Name":"Plain","Type":"MusicAlbum"}"#.utf8)
+        )
+        let albumWithArt = try decoder.decode(
+            JellyfinItem.self,
+            from: Data(
+                #"{"Id":"cover","Name":"Cover","Type":"MusicAlbum","ImageTags":{"Primary":"cover-tag"}}"#
+                    .utf8
+            )
+        )
+        let repository = JellyfinCatalogRepository(
+            api: FakeJellyfinAPI(
+                genres: [unknown, rock],
+                genreAlbums: ["rock": [albumWithoutArt, albumWithArt]]
+            ),
+            userID: "user",
+            accountScope: "server|user",
+            libraryIDs: []
+        )
+
+        let genres = try await repository.musicGenres()
+
+        XCTAssertEqual(genres.map(\.name), ["Rock"])
+        XCTAssertEqual(genres.first?.albumCount, 2)
+        XCTAssertEqual(genres.first?.artwork?.opaqueItemID, "cover")
+        XCTAssertEqual(genres.first?.artwork?.imageTag, "cover-tag")
+        XCTAssertFalse(MusicGenre.hasBrowsableName("undefined"))
+    }
+
+    func testRecentlyAddedAlbumMappingPreservesGenreMetadata() throws {
+        let item = try catalogItem(
+            from: Data(
+                """
+                {
+                  "Id": "album",
+                  "Name": "New Album",
+                  "Type": "MusicAlbum",
+                  "Genres": ["Rock"],
+                  "GenreItems": [{"Id": "genre-rock", "Name": "Rock"}]
+                }
+                """.utf8
+            )
+        )
+
+        XCTAssertEqual(item.genres, ["Rock"])
+        XCTAssertEqual(item.genreIDs, ["genre-rock"])
+    }
+
     func testLyricsMappingNormalizesTimedUntimedBlankAndNegativeLines() async throws {
         let response = try lyricsResponse(
             """
@@ -1874,6 +1933,8 @@ private actor FakeJellyfinAPI: JellyfinAPIService {
     private let albumsByLibrary: [String: [JellyfinItem]]
     private let favorites: [JellyfinItem]
     private let recentlyAdded: [JellyfinItem]
+    private let genres: [JellyfinItem]
+    private let genreAlbums: [String: [JellyfinItem]]
     private let lyricsResponses: [String: JellyfinLyricsResponse]
     private let lyricsDelay: Duration?
     private let albumPageDelay: Duration?
@@ -1891,6 +1952,8 @@ private actor FakeJellyfinAPI: JellyfinAPIService {
         albumsByLibrary: [String: [JellyfinItem]] = [:],
         favorites: [JellyfinItem] = [],
         recentlyAdded: [JellyfinItem] = [],
+        genres: [JellyfinItem] = [],
+        genreAlbums: [String: [JellyfinItem]] = [:],
         lyricsResponses: [String: JellyfinLyricsResponse] = [:],
         lyricsDelay: Duration? = nil,
         transientLyricsFailures: Int = 0,
@@ -1905,6 +1968,8 @@ private actor FakeJellyfinAPI: JellyfinAPIService {
         self.albumsByLibrary = albumsByLibrary
         self.favorites = favorites
         self.recentlyAdded = recentlyAdded
+        self.genres = genres
+        self.genreAlbums = genreAlbums
         self.lyricsResponses = lyricsResponses
         self.lyricsDelay = lyricsDelay
         self.transientLyricsFailures = transientLyricsFailures
@@ -2034,6 +2099,26 @@ private actor FakeJellyfinAPI: JellyfinAPIService {
         startIndex: Int, limit: Int
     ) async throws -> JellyfinItemPage {
         let items = collection == .favorites ? favorites : recentlyAdded
+        let safeStart = min(max(startIndex, 0), items.count)
+        let safeEnd = min(safeStart + max(limit, 1), items.count)
+        return JellyfinItemPage(
+            items: Array(items[safeStart..<safeEnd]),
+            startIndex: safeStart,
+            totalRecordCount: items.count
+        )
+    }
+
+    func musicGenres(userID: String) async throws -> [JellyfinItem] {
+        genres
+    }
+
+    func genreItemsPage(
+        userID: String,
+        genreID: String,
+        startIndex: Int,
+        limit: Int
+    ) async throws -> JellyfinItemPage {
+        let items = genreAlbums[genreID] ?? []
         let safeStart = min(max(startIndex, 0), items.count)
         let safeEnd = min(safeStart + max(limit, 1), items.count)
         return JellyfinItemPage(

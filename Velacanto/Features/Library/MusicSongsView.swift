@@ -75,7 +75,7 @@ struct MusicSongsView: View {
                 ErrorMessageView(message: playbackErrorMessage)
             }
         }
-        .navigationTitle("Songs")
+        .progressivePageHeader("Songs")
         #if !os(macOS)
             .searchable(text: $searchText, prompt: "Songs, artists, and albums")
         #endif

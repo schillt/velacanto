@@ -52,11 +52,16 @@ final class JellyfinSessionController: ObservableObject {
     private let sessionStore: any JellyfinSessionPersisting
     private let makeClient: ClientFactory
     private let catalogCache = JellyfinCatalogCache()
+    private let genreCache = JellyfinGenreCache()
     private let deviceID: String
     private var candidateServer: JellyfinServerURL?
     private var client: (any JellyfinAPIService)?
     private var lyricsCache: [MusicCatalogItemID: CachedLyrics] = [:]
     private var activeLyricsRequest: ActiveLyricsRequest?
+    private var genreCacheAccount: PlaybackAccount?
+    private var cachedGenres: [MusicGenre] = []
+    private var genreLoadTask: Task<[MusicGenre], Error>?
+    private var homeGenreLoadTask: Task<[MusicGenre], Error>?
 
     convenience init(autoRestore: Bool = true) {
         self.init(
@@ -301,12 +306,146 @@ final class JellyfinSessionController: ObservableObject {
         )
     }
 
+    func homeMostListenedPage(
+        cursor: MusicCatalogCursor?,
+        limit: Int = 12
+    ) async throws -> MusicCatalogPage {
+        try await catalogPage(
+            kind: .mostListened, cursor: cursor, limit: limit
+        )
+    }
+
     func homeRecentlyAddedPage(
         cursor: MusicCatalogCursor?,
         limit: Int = 12
     ) async throws -> MusicCatalogPage {
         try await catalogPage(
             kind: .recentlyAdded, cursor: cursor, limit: limit
+        )
+    }
+
+    func homeRecentlyAddedTracksPage(
+        cursor: MusicCatalogCursor?,
+        limit: Int = 24
+    ) async throws -> MusicCatalogPage {
+        try await catalogPage(
+            kind: .recentlyAddedTracks, cursor: cursor, limit: limit
+        )
+    }
+
+    func cachedMusicGenres() async -> [MusicGenre] {
+        guard let session else { return [] }
+        return await genreCache.load(
+            serverID: session.serverID,
+            userID: session.userID,
+            key: "all"
+        )
+    }
+
+    func cachedHomeMusicGenres(limit: Int) async -> [MusicGenre] {
+        guard let session else { return [] }
+        return Array(
+            await genreCache.load(
+                serverID: session.serverID,
+                userID: session.userID,
+                key: "home"
+            )
+            .prefix(limit)
+        )
+    }
+
+    func musicGenres(forceRefresh: Bool = false) async throws -> [MusicGenre] {
+        guard let account = playbackAccount else {
+            throw JellyfinSessionError.notSignedIn
+        }
+        if !forceRefresh, genreCacheAccount == account, !cachedGenres.isEmpty {
+            return cachedGenres
+        }
+        if genreCacheAccount != account {
+            genreLoadTask?.cancel()
+            cachedGenres = []
+            genreCacheAccount = account
+        }
+        if let genreLoadTask {
+            return try await genreLoadTask.value
+        }
+        let repository = try catalogRepository()
+        let task = Task { try await repository.musicGenres() }
+        genreLoadTask = task
+        do {
+            let genres = try await task.value
+            guard playbackAccount == account else { return [] }
+            cachedGenres = genres
+            genreLoadTask = nil
+            if let session {
+                await genreCache.save(
+                    genres,
+                    serverID: session.serverID,
+                    userID: session.userID,
+                    key: "all"
+                )
+            }
+            return genres
+        } catch {
+            genreLoadTask = nil
+            handleExpiredSessionIfNeeded(error)
+            throw error
+        }
+    }
+
+    func homeMusicGenres(limit: Int = 5) async throws -> [MusicGenre] {
+        guard let account = playbackAccount else {
+            throw JellyfinSessionError.notSignedIn
+        }
+        if let homeGenreLoadTask {
+            return try await homeGenreLoadTask.value
+        }
+        let repository = try catalogRepository()
+        let task = Task { try await repository.homeMusicGenres(limit: limit) }
+        homeGenreLoadTask = task
+        do {
+            let genres = try await task.value
+            guard playbackAccount == account else { return [] }
+            homeGenreLoadTask = nil
+            if let session {
+                await genreCache.save(
+                    genres,
+                    serverID: session.serverID,
+                    userID: session.userID,
+                    key: "home"
+                )
+            }
+            return genres
+        } catch {
+            homeGenreLoadTask = nil
+            handleExpiredSessionIfNeeded(error)
+            throw error
+        }
+    }
+
+    func preloadGenreAlbums(for genres: [MusicGenre], limit: Int = 50) async {
+        for genre in genres {
+            guard !Task.isCancelled else { return }
+            let cached = await cachedCatalogItems(kind: .genreItems, contextID: genre.id)
+            guard cached.isEmpty else { continue }
+            guard let page = try? await genreItemsPage(in: genre, cursor: nil, limit: limit)
+            else {
+                continue
+            }
+            await cacheCatalogItems(page.items, kind: .genreItems, contextID: genre.id)
+        }
+    }
+
+    func genreItemsPage(
+        in genre: MusicGenre,
+        cursor: MusicCatalogCursor?,
+        limit: Int = 50
+    ) async throws -> MusicCatalogPage {
+        try await catalogPage(
+            kind: .genreItems,
+            contextID: genre.id,
+            cursor: cursor,
+            limit: limit
         )
     }
 
@@ -509,6 +648,10 @@ final class JellyfinSessionController: ObservableObject {
                 serverID: oldSession.serverID,
                 userID: oldSession.userID
             )
+            await genreCache.clear(
+                serverID: oldSession.serverID,
+                userID: oldSession.userID
+            )
         }
         do {
             try await oldClient?.logout()
@@ -650,6 +793,12 @@ final class JellyfinSessionController: ObservableObject {
     private func clearSession() {
         itemActions.clear()
         resetLyricsState()
+        genreLoadTask?.cancel()
+        genreLoadTask = nil
+        homeGenreLoadTask?.cancel()
+        homeGenreLoadTask = nil
+        cachedGenres = []
+        genreCacheAccount = nil
         session = nil
         candidateServer = nil
         serverInfo = nil
