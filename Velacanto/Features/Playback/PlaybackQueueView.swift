@@ -39,7 +39,7 @@ struct PlaybackQueueView: View {
 
                 if !playback.upcomingItems.isEmpty {
                     Section {
-                        ForEach(playback.upcomingItems) { item in
+                        ForEach(playback.upcomingItems, id: \.queueIdentity) { item in
                             QueueTrackRow(item: item, jellyfin: jellyfin)
                                 .queueContextMenu(item: item, playback: playback)
                                 .onTapGesture {
@@ -81,7 +81,7 @@ struct PlaybackQueueView: View {
             }
             .listStyle(.plain)
             #if compiler(>=6.4)
-                .reorderContainer(for: PlaybackItem.self) { difference in
+                .reorderContainer(for: PlaybackItem.self, itemID: \.queueIdentity) { difference in
                     reorderUpcomingItems(difference)
                 }
             #endif
@@ -128,9 +128,12 @@ struct PlaybackQueueView: View {
 
     #if compiler(>=6.4)
         private func reorderUpcomingItems(
-            _ difference: ReorderDifference<PlaybackItem.ID, ReorderableSingleCollectionIdentifier>
+            _ difference: ReorderDifference<
+                PlaybackItemQueueIdentity,
+                ReorderableSingleCollectionIdentifier
+            >
         ) {
-            let destinationID: PlaybackItem.ID?
+            let destinationID: PlaybackItemQueueIdentity?
             switch difference.destination.position {
             case .before(let itemID):
                 destinationID = itemID
@@ -312,7 +315,7 @@ struct NowPlayingQueueContent: View {
                                 QueueSectionHeader("Up Next")
                                     .queueScrollSectionHeaderStyle()
 
-                                ForEach(playback.upcomingItems) { item in
+                                ForEach(playback.upcomingItems, id: \.queueIdentity) { item in
                                     QueueTrackRow(
                                         item: item,
                                         jellyfin: jellyfin
@@ -361,7 +364,10 @@ struct NowPlayingQueueContent: View {
                     .frame(minHeight: availableSpace.size.height, alignment: .top)
                     .coordinateSpace(name: "queueContent")
                     #if compiler(>=6.4)
-                        .reorderContainer(for: PlaybackItem.self) { difference in
+                        .reorderContainer(
+                            for: PlaybackItem.self,
+                            itemID: \.queueIdentity
+                        ) { difference in
                             reorderUpcomingItems(difference)
                         }
                     #endif
@@ -410,9 +416,12 @@ struct NowPlayingQueueContent: View {
 
     #if compiler(>=6.4)
         private func reorderUpcomingItems(
-            _ difference: ReorderDifference<PlaybackItem.ID, ReorderableSingleCollectionIdentifier>
+            _ difference: ReorderDifference<
+                PlaybackItemQueueIdentity,
+                ReorderableSingleCollectionIdentifier
+            >
         ) {
-            let destinationID: PlaybackItem.ID?
+            let destinationID: PlaybackItemQueueIdentity?
             switch difference.destination.position {
             case .before(let itemID):
                 destinationID = itemID

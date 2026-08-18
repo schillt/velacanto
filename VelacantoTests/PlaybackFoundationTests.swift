@@ -885,8 +885,8 @@ final class PlaybackFoundationTests: XCTestCase {
 
         XCTAssertTrue(
             queue.reorderUpcomingItems(
-                withIDs: ["track-4", "track-3"],
-                before: "track-2"
+                withIDs: [items[4].queueIdentity, items[3].queueIdentity],
+                before: items[2].queueIdentity
             )
         )
         XCTAssertEqual(
@@ -898,9 +898,56 @@ final class PlaybackFoundationTests: XCTestCase {
         XCTAssertEqual(queue.currentItem?.id, "track-1")
         XCTAssertFalse(
             queue.reorderUpcomingItems(
-                withIDs: ["track-0"],
+                withIDs: [items[0].queueIdentity],
                 before: nil
             )
+        )
+    }
+
+    func testNativeReorderUsesSourceScopedOpaqueIDs() {
+        let current = PlaybackItem(
+            id: "current",
+            title: "Current",
+            artist: "Velacanto",
+            source: .jellyfin
+        )
+        let jellyfinDuplicate = PlaybackItem(
+            id: "same-provider-id",
+            title: "Jellyfin",
+            artist: "Velacanto",
+            source: .jellyfin
+        )
+        let localDuplicate = PlaybackItem(
+            id: "same-provider-id",
+            title: "Local",
+            artist: "Velacanto",
+            source: .localFiles
+        )
+        let destination = PlaybackItem(
+            id: "destination",
+            title: "Destination",
+            artist: "Velacanto",
+            source: .jellyfin
+        )
+        var queue = PlaybackQueue(
+            items: [current, jellyfinDuplicate, localDuplicate, destination],
+            currentItemID: current.id,
+            context: .songs
+        )
+
+        XCTAssertTrue(
+            queue.reorderUpcomingItems(
+                withIDs: [localDuplicate.queueIdentity],
+                before: jellyfinDuplicate.queueIdentity
+            )
+        )
+        XCTAssertEqual(
+            queue.upcomingItems.map(\.queueIdentity),
+            [
+                localDuplicate.queueIdentity,
+                jellyfinDuplicate.queueIdentity,
+                destination.queueIdentity,
+            ]
         )
     }
 

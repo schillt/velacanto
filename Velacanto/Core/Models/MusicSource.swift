@@ -33,6 +33,11 @@ struct PlaybackItem: Identifiable, Equatable, Codable, Sendable {
     /// reconciled a newer server value or an optimistic update.
     let isFavorite: Bool?
 
+    /// Identifies an item within a queue without changing its opaque provider ID.
+    var queueIdentity: PlaybackItemQueueIdentity {
+        PlaybackItemQueueIdentity(source: source, itemID: id)
+    }
+
     init(
         id: String = UUID().uuidString,
         title: String,
@@ -58,6 +63,11 @@ struct PlaybackItem: Identifiable, Equatable, Codable, Sendable {
         self.duration = duration
         self.isFavorite = isFavorite
     }
+}
+
+struct PlaybackItemQueueIdentity: Hashable, Sendable {
+    let source: MusicSourceID
+    let itemID: String
 }
 
 enum PlaybackQueueContext: Equatable, Codable, Sendable {
@@ -275,8 +285,8 @@ struct PlaybackQueue: Equatable, Codable, Sendable {
     /// currently playing item outside the editable collection.
     @discardableResult
     mutating func reorderUpcomingItems(
-        withIDs sourceIDs: [PlaybackItem.ID],
-        before destinationID: PlaybackItem.ID?
+        withIDs sourceIDs: [PlaybackItemQueueIdentity],
+        before destinationID: PlaybackItemQueueIdentity?
     ) -> Bool {
         let upcomingStart = currentIndex + 1
         guard items.indices.contains(upcomingStart), !sourceIDs.isEmpty else {
@@ -285,13 +295,13 @@ struct PlaybackQueue: Equatable, Codable, Sendable {
 
         let sourceIDSet = Set(sourceIDs)
         let upcoming = Array(items[upcomingStart...])
-        let movedItems = upcoming.filter { sourceIDSet.contains($0.id) }
+        let movedItems = upcoming.filter { sourceIDSet.contains($0.queueIdentity) }
         guard movedItems.count == sourceIDSet.count else { return false }
 
-        var reorderedItems = upcoming.filter { !sourceIDSet.contains($0.id) }
+        var reorderedItems = upcoming.filter { !sourceIDSet.contains($0.queueIdentity) }
         let destinationIndex =
             destinationID.flatMap { destinationID in
-                reorderedItems.firstIndex { $0.id == destinationID }
+                reorderedItems.firstIndex { $0.queueIdentity == destinationID }
             } ?? reorderedItems.endIndex
         reorderedItems.insert(contentsOf: movedItems, at: destinationIndex)
         guard reorderedItems != upcoming else { return false }
