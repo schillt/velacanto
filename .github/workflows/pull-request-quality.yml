@@ -35,4 +35,6 @@ jobs:
           xcrun simctl list devices available
 
       - name: Run quality checks
-        run: ./scripts/build.sh pr
+        # GitHub-hosted runners cannot compile OS 27 SDK APIs or launch OS 27
+        # tests yet. The full `pr` gate remains required on an OS 27 machine.
+        run: ./scripts/build.sh pr-hosted
