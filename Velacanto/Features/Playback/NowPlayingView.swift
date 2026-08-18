@@ -9,6 +9,8 @@ struct NowPlayingView: View {
     @ObservedObject var playback: AudioPlaybackCoordinator
     @ObservedObject var jellyfin: JellyfinSessionController
     @State private var isShowingQueue = false
+    @State private var isShowingLyrics = false
+    @State private var lyricsState = LyricsLoadState.loading
 
     var body: some View {
         NavigationStack {
@@ -25,7 +27,16 @@ struct NowPlayingView: View {
                             }
                         }
                     }
+                #else
+                    .toolbar {
+                        ToolbarItem(placement: .primaryAction) {
+                            lyricsControl
+                        }
+                    }
                 #endif
+                .task(id: lyricsLoadIdentity) {
+                    await loadLyrics()
+                }
         }
     }
 
@@ -59,31 +70,42 @@ struct NowPlayingView: View {
     }
 
     private var playerContent: some View {
-        GeometryReader { geometry in
-            ScrollView {
-                Group {
-                    if let item = playback.currentItem {
-                        #if os(iOS)
-                            if geometry.size.width > geometry.size.height {
-                                landscapePlayer(for: item, in: geometry.size)
+        Group {
+            if isShowingLyrics {
+                LyricsPresentation(
+                    playback: playback,
+                    state: lyricsState,
+                    dismiss: { isShowingLyrics = false },
+                    retry: { Task { await loadLyrics() } }
+                )
+            } else {
+                GeometryReader { geometry in
+                    ScrollView {
+                        Group {
+                            if let item = playback.currentItem {
+                                #if os(iOS)
+                                    if geometry.size.width > geometry.size.height {
+                                        landscapePlayer(for: item, in: geometry.size)
+                                    } else {
+                                        portraitPlayer(for: item, in: geometry.size)
+                                    }
+                                #else
+                                    macOSPlayer(for: item, in: geometry.size)
+                                #endif
                             } else {
-                                portraitPlayer(for: item, in: geometry.size)
+                                ContentUnavailableView(
+                                    "Nothing Playing",
+                                    systemImage: "music.note",
+                                    description: Text("Choose music from your library to begin.")
+                                )
                             }
-                        #else
-                            macOSPlayer(for: item, in: geometry.size)
-                        #endif
-                    } else {
-                        ContentUnavailableView(
-                            "Nothing Playing",
-                            systemImage: "music.note",
-                            description: Text("Choose music from your library to begin.")
-                        )
+                        }
+                        .padding(.horizontal, 24)
+                        .padding(.vertical, 20)
+                        .frame(width: geometry.size.width)
+                        .frame(minHeight: geometry.size.height)
                     }
                 }
-                .padding(.horizontal, 24)
-                .padding(.vertical, 20)
-                .frame(width: geometry.size.width)
-                .frame(minHeight: geometry.size.height)
             }
         }
     }
@@ -276,7 +298,7 @@ struct NowPlayingView: View {
                         .frame(width: 44, height: 44)
                         .accessibilityLabel("AirPlay")
                     Spacer()
-                    LyricsUnavailableControl()
+                    lyricsControl
                     Spacer()
                     Button {
                         isShowingQueue.toggle()
@@ -340,6 +362,52 @@ struct NowPlayingView: View {
         case .off: "Repeat Off"
         case .all: "Repeat All"
         case .one: "Repeat One"
+        }
+    }
+
+    private var lyricsControl: some View {
+        LyricsControl(
+            state: lyricsState,
+            isPresented: isShowingLyrics,
+            action: {
+                isShowingQueue = false
+                isShowingLyrics.toggle()
+            }
+        )
+    }
+
+    private var lyricsLoadIdentity: String {
+        guard let item = playback.currentItem else { return "no-track" }
+        return "\(item.source.rawValue)|\(item.id)"
+    }
+
+    @MainActor
+    private func loadLyrics() async {
+        guard let item = playback.currentItem else {
+            lyricsState = .unavailable
+            isShowingLyrics = false
+            return
+        }
+
+        lyricsState = .loading
+        do {
+            let lyrics = try await jellyfin.lyrics(for: item)
+            guard lyricsLoadIdentity == "\(item.source.rawValue)|\(item.id)" else {
+                return
+            }
+            if let lyrics {
+                lyricsState = .available(lyrics)
+            } else {
+                lyricsState = .unavailable
+                isShowingLyrics = false
+            }
+        } catch is CancellationError {
+            return
+        } catch {
+            guard lyricsLoadIdentity == "\(item.source.rawValue)|\(item.id)" else {
+                return
+            }
+            lyricsState = .failed
         }
     }
 
