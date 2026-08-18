@@ -73,11 +73,14 @@ final class PlaybackFoundationTests: XCTestCase {
     func testPlaybackCoordinatorFollowsEngineEvents() async throws {
         let engine = RecordingAudioPlayerEngine()
         let coordinator = AudioPlaybackCoordinator(
-            engine: engine
+            engine: engine,
+            audioSessionController: ImmediateAudioSessionController()
         )
         let request = try await makePlaybackRequest()
 
         coordinator.play(request)
+
+        await waitUntil { engine.playCallCount == 1 }
 
         XCTAssertEqual(coordinator.playbackState, .loading)
         XCTAssertFalse(coordinator.isPlaying)
@@ -96,6 +99,7 @@ final class PlaybackFoundationTests: XCTestCase {
         XCTAssertFalse(coordinator.isPlaying)
 
         coordinator.resumePlayback()
+        await waitUntil { engine.playCallCount == 2 }
         XCTAssertEqual(engine.playCallCount, 2)
         engine.send(.stateChanged(.playing))
 
@@ -428,10 +432,12 @@ final class PlaybackFoundationTests: XCTestCase {
         let coordinator = AudioPlaybackCoordinator(
             engine: engine,
             nowPlayingStateStore: stateStore,
-            platformEventObserver: platformEvents
+            platformEventObserver: platformEvents,
+            audioSessionController: ImmediateAudioSessionController()
         )
 
         coordinator.play(try await makePlaybackRequest())
+        await waitUntil { engine.playCallCount == 1 }
         engine.send(.stateChanged(.playing))
         platformEvents.sendInterruption(.began)
         engine.send(.stateChanged(.paused))
@@ -443,10 +449,12 @@ final class PlaybackFoundationTests: XCTestCase {
         XCTAssertEqual(engine.playCallCount, 1)
 
         coordinator.resumePlayback()
+        await waitUntil { engine.playCallCount == 2 }
         engine.send(.stateChanged(.playing))
         platformEvents.sendInterruption(.began)
         engine.send(.stateChanged(.paused))
         platformEvents.sendInterruption(.ended(shouldResume: true))
+        await waitUntil { engine.playCallCount == 3 }
 
         XCTAssertEqual(engine.pauseCallCount, 2)
         XCTAssertEqual(engine.playCallCount, 3)
@@ -457,10 +465,12 @@ final class PlaybackFoundationTests: XCTestCase {
         let platformEvents = RecordingPlaybackPlatformEventObserver()
         let coordinator = AudioPlaybackCoordinator(
             engine: engine,
-            platformEventObserver: platformEvents
+            platformEventObserver: platformEvents,
+            audioSessionController: ImmediateAudioSessionController()
         )
 
         coordinator.play(try await makePlaybackRequest())
+        await waitUntil { engine.playCallCount == 1 }
         engine.send(.stateChanged(.playing))
         platformEvents.sendInterruption(.began)
         engine.send(.stateChanged(.paused))
@@ -479,15 +489,19 @@ final class PlaybackFoundationTests: XCTestCase {
         let platformEvents = RecordingPlaybackPlatformEventObserver()
         let coordinator = AudioPlaybackCoordinator(
             engine: engine,
-            platformEventObserver: platformEvents
+            platformEventObserver: platformEvents,
+            audioSessionController: ImmediateAudioSessionController()
         )
 
         coordinator.play(try await makePlaybackRequest())
+        await waitUntil { engine.playCallCount == 1 }
         engine.send(.stateChanged(.playing))
         platformEvents.sendInterruption(.began)
         engine.send(.stateChanged(.paused))
 
         coordinator.resumePlayback()
+
+        await waitUntil { engine.playCallCount == 2 }
 
         XCTAssertEqual(coordinator.playbackState, .waiting)
         XCTAssertEqual(engine.playCallCount, 2)
@@ -498,10 +512,12 @@ final class PlaybackFoundationTests: XCTestCase {
         let platformEvents = RecordingPlaybackPlatformEventObserver()
         let coordinator = AudioPlaybackCoordinator(
             engine: engine,
-            platformEventObserver: platformEvents
+            platformEventObserver: platformEvents,
+            audioSessionController: ImmediateAudioSessionController()
         )
 
         coordinator.play(try await makePlaybackRequest())
+        await waitUntil { engine.playCallCount == 1 }
         engine.send(.stateChanged(.playing))
         platformEvents.sendRouteChange(.other)
         XCTAssertEqual(engine.pauseCallCount, 0)
@@ -520,10 +536,12 @@ final class PlaybackFoundationTests: XCTestCase {
         let platformEvents = RecordingPlaybackPlatformEventObserver()
         let coordinator = AudioPlaybackCoordinator(
             engine: engine,
-            platformEventObserver: platformEvents
+            platformEventObserver: platformEvents,
+            audioSessionController: ImmediateAudioSessionController()
         )
 
         coordinator.play(try await makePlaybackRequest())
+        await waitUntil { engine.playCallCount == 1 }
         engine.send(.stateChanged(.playing))
 
         platformEvents.sendRouteChange(.oldDeviceUnavailable)
@@ -537,6 +555,7 @@ final class PlaybackFoundationTests: XCTestCase {
         XCTAssertEqual(coordinator.playbackState, .paused)
 
         coordinator.togglePlayback()
+        await waitUntil { engine.playCallCount == 2 }
         XCTAssertEqual(coordinator.playbackState, .waiting)
         XCTAssertEqual(engine.pauseCallCount, 2)
         XCTAssertEqual(engine.playCallCount, 2)
@@ -552,15 +571,19 @@ final class PlaybackFoundationTests: XCTestCase {
         let platformEvents = RecordingPlaybackPlatformEventObserver()
         let coordinator = AudioPlaybackCoordinator(
             engine: engine,
-            platformEventObserver: platformEvents
+            platformEventObserver: platformEvents,
+            audioSessionController: ImmediateAudioSessionController()
         )
 
         coordinator.play(try await makePlaybackRequest())
+        await waitUntil { engine.playCallCount == 1 }
         engine.send(.stateChanged(.playing))
         platformEvents.sendRouteChange(.oldDeviceUnavailable)
         platformEvents.sendInterruption(.began)
 
         coordinator.togglePlayback()
+
+        await waitUntil { engine.playCallCount == 2 }
 
         XCTAssertEqual(coordinator.playbackState, .waiting)
         XCTAssertEqual(engine.playCallCount, 2)
@@ -573,12 +596,16 @@ final class PlaybackFoundationTests: XCTestCase {
         let engine = RecordingAudioPlayerEngine()
         let coordinator = AudioPlaybackCoordinator(
             engine: engine,
+            audioSessionController: ImmediateAudioSessionController()
         )
 
         coordinator.play(try await makePlaybackRequest())
+        await waitUntil { engine.playCallCount == 1 }
         engine.send(.stateChanged(.waiting))
 
         coordinator.togglePlayback()
+
+        await waitUntil { engine.playCallCount == 2 }
 
         XCTAssertEqual(engine.pauseCallCount, 0)
         XCTAssertEqual(engine.playCallCount, 2)
@@ -587,7 +614,7 @@ final class PlaybackFoundationTests: XCTestCase {
     func testFailedStreamResolutionIsSafeAndReplayable() async throws {
         let engine = RecordingAudioPlayerEngine()
         let coordinator = AudioPlaybackCoordinator(
-            engine: engine,
+            engine: engine
         )
         var resolverCallCount = 0
         var resolverFinished = false
@@ -631,7 +658,7 @@ final class PlaybackFoundationTests: XCTestCase {
     func testPlaybackCoordinatorRetainsResourceLeaseUntilStop() throws {
         let engine = RecordingAudioPlayerEngine()
         let coordinator = AudioPlaybackCoordinator(
-            engine: engine,
+            engine: engine
         )
         var lease: RecordingResourceLease? = RecordingResourceLease()
         weak let retainedLease = lease
@@ -1068,6 +1095,7 @@ final class PlaybackFoundationTests: XCTestCase {
         )
         let coordinator = AudioPlaybackCoordinator(
             engine: engine,
+            audioSessionController: ImmediateAudioSessionController()
         )
         coordinator.configureRequestResolver { item in
             PlaybackRequest(
@@ -1089,6 +1117,7 @@ final class PlaybackFoundationTests: XCTestCase {
             queueItems: [first, last],
             context: .songs
         )
+        await waitUntil { engine.playCallCount == 1 }
         coordinator.setRepeatMode(.all)
 
         coordinator.nextTrack()
@@ -1098,6 +1127,8 @@ final class PlaybackFoundationTests: XCTestCase {
         coordinator.setRepeatMode(.one)
         let playCount = engine.playCallCount
         engine.send(.stateChanged(.ended))
+
+        await waitUntil { engine.playCallCount == playCount + 1 }
 
         XCTAssertEqual(coordinator.currentItem, first)
         XCTAssertEqual(engine.seekTimes.last, 0)
@@ -1912,6 +1943,12 @@ private actor ControlledAudioSessionController: PlaybackAudioSessionControlling 
     func deactivationRequests() -> [Bool] {
         recordedDeactivationRequests
     }
+}
+
+private struct ImmediateAudioSessionController: PlaybackAudioSessionControlling {
+    func activate() async throws {}
+
+    func deactivate(notifyingOthers: Bool) async {}
 }
 
 private final class RecordingResourceLease: PlaybackResourceLease, @unchecked Sendable {}
