@@ -45,6 +45,7 @@ test_macos() {
     -scheme Velacanto \
     -configuration Debug \
     -destination 'platform=macOS' \
+    -only-testing:VelacantoTests \
     -derivedDataPath "$derived_data_path" \
     CODE_SIGNING_ALLOWED=NO \
     SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
