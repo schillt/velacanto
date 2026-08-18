@@ -165,38 +165,20 @@ struct VelacantoRootView: View {
     }
 
     #if os(iOS)
-        @ViewBuilder
         private var iOSRoot: some View {
-            if #available(iOS 26.1, *) {
-                iOSTabs
-                    .tabViewBottomAccessory(
-                        isEnabled: playback.hasPlayableItem && !isShowingNowPlaying
-                    ) {
-                        ModernPlaybackAccessory(
-                            playback: playback,
-                            jellyfin: jellyfin,
-                            showNowPlaying: {
-                                isShowingNowPlaying = true
-                            }
-                        )
-                    }
-                    .tabBarMinimizeBehavior(.onScrollDown)
-            } else {
-                iOSTabs
-                    .safeAreaInset(edge: .bottom, spacing: 0) {
-                        if playback.hasPlayableItem && !isShowingNowPlaying {
-                            PlaybackAccessory(
-                                playback: playback,
-                                jellyfin: jellyfin,
-                                showNowPlaying: {
-                                    isShowingNowPlaying = true
-                                }
-                            )
-                            .padding(.horizontal, 10)
-                            .padding(.bottom, 4)
+            iOSTabs
+                .tabViewBottomAccessory(
+                    isEnabled: playback.hasPlayableItem && !isShowingNowPlaying
+                ) {
+                    ModernPlaybackAccessory(
+                        playback: playback,
+                        jellyfin: jellyfin,
+                        showNowPlaying: {
+                            isShowingNowPlaying = true
                         }
-                    }
-            }
+                    )
+                }
+                .tabBarMinimizeBehavior(.onScrollDown)
         }
 
         private var iOSTabs: some View {
@@ -594,28 +576,16 @@ struct AccountAvatar: View {
     @StateObject private var loader = ArtworkViewLoader()
 
     var body: some View {
-        Group {
-            if #available(iOS 26.0, macOS 26.0, *) {
-                avatar
-                    .padding(2)
-                    .glassEffect(.clear.interactive(), in: Circle())
-            } else {
-                avatar
-                    .padding(2)
-                    .background(.ultraThinMaterial, in: Circle())
-                    .overlay {
-                        Circle()
-                            .stroke(.separator.opacity(0.42), lineWidth: 0.5)
-                    }
+        avatar
+            .padding(2)
+            .glassEffect(.clear.interactive(), in: Circle())
+            .task(id: taskID) {
+                guard let key = artworkKey else { return }
+                await loader.load(key: key) {
+                    await jellyfin.userImageRequest(maxWidth: key.sizeBucket)
+                }
             }
-        }
-        .task(id: taskID) {
-            guard let key = artworkKey else { return }
-            await loader.load(key: key) {
-                await jellyfin.userImageRequest(maxWidth: key.sizeBucket)
-            }
-        }
-        .accessibilityHidden(true)
+            .accessibilityHidden(true)
     }
 
     private var avatar: some View {

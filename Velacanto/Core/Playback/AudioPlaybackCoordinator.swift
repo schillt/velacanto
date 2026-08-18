@@ -119,48 +119,31 @@ protocol PlaybackAudioSessionControlling: Sendable {
         }
 
         private func activateSession() async throws {
-            #if swift(>=6.4)
-                if #available(iOS 27.0, *) {
-                    try await withCheckedThrowingContinuation {
-                        (continuation: CheckedContinuation<Void, Error>) in
-                        session.activate(options: []) { activated, error in
-                            if let error {
-                                continuation.resume(throwing: error)
-                            } else if activated {
-                                continuation.resume()
-                            } else {
-                                continuation.resume(
-                                    throwing: CocoaError(.fileWriteUnknown)
-                                )
-                            }
-                        }
+            try await withCheckedThrowingContinuation {
+                (continuation: CheckedContinuation<Void, Error>) in
+                session.activate(options: []) { activated, error in
+                    if let error {
+                        continuation.resume(throwing: error)
+                    } else if activated {
+                        continuation.resume()
+                    } else {
+                        continuation.resume(
+                            throwing: CocoaError(.fileWriteUnknown)
+                        )
                     }
-                    return
                 }
-            #endif
-
-            try session.setActive(true)
+            }
         }
 
         private func deactivateSession(notifyingOthers: Bool) async {
-            #if swift(>=6.4)
-                if #available(iOS 27.0, *) {
-                    await withCheckedContinuation { continuation in
-                        session.deactivate(
-                            options: notifyingOthers
-                                ? [.notifyOthersOnDeactivation] : []
-                        ) { _, _ in
-                            continuation.resume()
-                        }
-                    }
-                    return
+            await withCheckedContinuation { continuation in
+                session.deactivate(
+                    options: notifyingOthers
+                        ? [.notifyOthersOnDeactivation] : []
+                ) { _, _ in
+                    continuation.resume()
                 }
-            #endif
-
-            try? session.setActive(
-                false,
-                options: notifyingOthers ? [.notifyOthersOnDeactivation] : []
-            )
+            }
         }
     }
 #endif
@@ -199,42 +182,39 @@ protocol PlaybackPlatformEventObserving: AnyObject {
             let center = NotificationCenter.default
             observers = [
                 center.addObserver(
-                    forName: AVAudioSession.interruptionNotification,
+                    forName: AVAudioSession.didBecomeInactiveNotification,
                     object: nil,
                     queue: .main
                 ) { notification in
-                    let rawType =
+                    let context =
                         notification.userInfo?[
-                            AVAudioSessionInterruptionTypeKey
-                        ] as? UInt
-                    let rawOptions =
-                        notification.userInfo?[
-                            AVAudioSessionInterruptionOptionKey
-                        ] as? UInt
-                    guard
-                        let rawType,
-                        let type = AVAudioSession.InterruptionType(
-                            rawValue: rawType
-                        )
-                    else {
-                        return
-                    }
-                    let event: PlaybackAudioInterruption
-                    switch type {
-                    case .began:
-                        event = .began
-                    case .ended:
-                        let options = AVAudioSession.InterruptionOptions(
-                            rawValue: rawOptions ?? 0
-                        )
-                        event = .ended(
-                            shouldResume: options.contains(.shouldResume)
-                        )
-                    @unknown default:
+                            AVAudioSession.deactivationContextKey
+                        ] as? AVAudioSession.DeactivationContext
+                    guard context?.source == .system else {
                         return
                     }
                     MainActor.assumeIsolated {
-                        interruption(event)
+                        interruption(.began)
+                    }
+                },
+                center.addObserver(
+                    forName:
+                        AVAudioSession.resumptionRecommendationNotification,
+                    object: nil,
+                    queue: .main
+                ) { notification in
+                    let context =
+                        notification.userInfo?[
+                            AVAudioSession.resumptionContextKey
+                        ] as? AVAudioSession.ResumptionContext
+                    guard let context else { return }
+                    MainActor.assumeIsolated {
+                        interruption(
+                            .ended(
+                                shouldResume:
+                                    context.recommendation == .shouldResume
+                            )
+                        )
                     }
                 },
                 center.addObserver(

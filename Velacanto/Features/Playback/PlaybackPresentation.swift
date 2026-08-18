@@ -297,25 +297,15 @@ private struct PlaybackAccessorySurface: ViewModifier {
         case .embedded:
             content
         case .floating:
-            if #available(iOS 26.0, macOS 26.0, *) {
-                content.glassEffect(
-                    .regular.interactive(),
-                    in: .rect(cornerRadius: 20)
-                )
-            } else {
-                content
-                    .background(.ultraThinMaterial, in: .rect(cornerRadius: 20))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 20)
-                            .stroke(.separator.opacity(0.42), lineWidth: 0.5)
-                    }
-            }
+            content.glassEffect(
+                .regular.interactive(),
+                in: .rect(cornerRadius: 20)
+            )
         }
     }
 }
 
 #if os(iOS)
-    @available(iOS 26.0, *)
     struct ModernPlaybackAccessory: View {
         @Environment(\.tabViewBottomAccessoryPlacement) private var placement
 

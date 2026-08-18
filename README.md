@@ -66,9 +66,9 @@ Use `lint`, `macos`, `test`, `ios-simulator`, or `ios-simulator-test` instead
 of `all` to run one step. Build output defaults to `VelacantoDerivedData` under
 the system temporary directory.
 
-The 0.2 baseline targets iOS 18 and macOS 15. ADR 0007 raises the 0.3 product
-baseline to iOS/iPadOS 26 and macOS 26; the project deployment settings change
-with the implementation work rather than this planning-only package.
+The checked-in 0.3 project targets iOS 27, iPadOS 27, and macOS 27. Development
+requires Xcode 27 and Swift 6.4. Preview and final promotion wait for the stable
+OS 27 SDK and the complete acceptance gate described in ADR 0009.
 
 ### Jellyfin early access
 

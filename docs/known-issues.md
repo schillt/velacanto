@@ -3,9 +3,9 @@
 This list records current operational limitations. It is not a substitute for
 the [0.3 acceptance matrix](0.3-stability-acceptance.md).
 
-- The current checked-in project still targets iOS 18 and macOS 15. ADR 0009
-  raises the 0.3 product baseline to iOS/iPadOS 27 and macOS 27; issue #78 must
-  update and validate every app and test target.
+- Every checked-in app and test target now requires iOS/iPadOS 27 or macOS 27,
+  Xcode 27, and Swift 6.4. Preview and final promotion remain blocked until the
+  stable OS 27 SDK is available and the full acceptance matrix passes.
 - Local `alpha` history and three dirty worktrees were preserved on August 17,
   2026. Issue #76 and PR #77 own normalization; recovery state must remain until
   every patch hunk has an issue disposition.
