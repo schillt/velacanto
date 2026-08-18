@@ -149,8 +149,18 @@ case "$build_mode" in
     build_macos_release
     analyze_macos
     ;;
+  pr-os27-preview)
+    "$project_root/scripts/preflight.sh"
+    lint_swift
+    build_macos
+    test_macos
+    build_ios_simulator
+    test_ios_simulator
+    build_macos_release
+    analyze_macos
+    ;;
   *)
-    printf 'Usage: %s [all|macos|test|ios-simulator|ios-simulator-test|lint|pr|pr-hosted]\n' "$0" >&2
+    printf 'Usage: %s [all|macos|test|ios-simulator|ios-simulator-test|lint|pr|pr-hosted|pr-os27-preview]\n' "$0" >&2
     exit 2
     ;;
 esac

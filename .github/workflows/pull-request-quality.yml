@@ -35,6 +35,32 @@ jobs:
           xcrun simctl list devices available
 
       - name: Run quality checks
-        # GitHub-hosted runners cannot compile OS 27 SDK APIs or launch OS 27
-        # tests yet. The full `pr` gate remains required on an OS 27 machine.
+        # This stable Xcode 26.6 lane cannot compile OS 27 SDK APIs or launch
+        # OS 27 tests. The separate preview lane below covers that scope.
         run: ./scripts/build.sh pr-hosted
+
+  os27-preview:
+    name: OS 27 Preview Verification
+    runs-on: xcode-27
+    timeout-minutes: 60
+    env:
+      DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+      VELACANTO_IOS_SIMULATOR_DESTINATION: platform=iOS Simulator,name=iPhone Air,OS=27.0
+
+    steps:
+      - name: Check out pull request
+        uses: actions/checkout@v4
+
+      - name: Install preflight dependency
+        run: brew install ripgrep
+
+      - name: Show preview toolchain and simulator destination
+        run: |
+          xcodebuild -version
+          xcrun simctl list devices available
+
+      - name: Run OS 27 preview verification
+        # The xcode-27 image is a public preview. This job verifies native OS 27
+        # paths, macOS units, and iOS simulator tests for 0.3; it is not v1
+        # stable-release evidence and does not replace the Xcode 26.6 gate.
+        run: ./scripts/build.sh pr-os27-preview
