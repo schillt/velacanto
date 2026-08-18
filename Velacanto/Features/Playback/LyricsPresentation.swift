@@ -10,60 +10,45 @@ enum LyricsLoadState: Equatable {
 struct LyricsPresentation: View {
     @ObservedObject var playback: AudioPlaybackCoordinator
     let state: LyricsLoadState
-    let dismiss: () -> Void
+    let primaryColor: Color
+    let secondaryColor: Color
     let retry: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text("Lyrics")
-                    .font(.title2.bold())
-                Spacer()
-                Button("Back to Player", systemImage: "chevron.backward") {
-                    dismiss()
-                }
-            }
-            .padding(.horizontal, 20)
-            .padding(.top, 16)
-
-            Group {
-                switch state {
-                case .loading:
-                    ProgressView("Loading Lyrics")
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                case .unavailable:
-                    ContentUnavailableView(
-                        "Lyrics Unavailable",
-                        systemImage: "quote.bubble",
-                        description: Text("Lyrics are not available for this song.")
+        Group {
+            switch state {
+            case .loading:
+                ProgressView("Loading Lyrics")
+                    .tint(primaryColor)
+            case .unavailable:
+                ContentUnavailableView(
+                    "Lyrics Unavailable",
+                    systemImage: "quote.bubble",
+                    description: Text("Lyrics are not available for this song.")
+                )
+            case .available(let lyrics):
+                LyricsLines(
+                    playback: playback,
+                    lyrics: lyrics,
+                    primaryColor: primaryColor,
+                    secondaryColor: secondaryColor
+                )
+            case .failed:
+                ContentUnavailableView {
+                    Label(
+                        "Lyrics Could Not Load",
+                        systemImage: "exclamationmark.bubble"
                     )
-                case .available(let lyrics):
-                    LyricsLines(playback: playback, lyrics: lyrics)
-                case .failed:
-                    ContentUnavailableView {
-                        Label(
-                            "Lyrics Could Not Load",
-                            systemImage: "exclamationmark.bubble"
-                        )
-                    } description: {
-                        Text("Check your connection and try again.")
-                    } actions: {
-                        Button("Try Again", action: retry)
-                    }
+                } description: {
+                    Text("Check your connection and try again.")
+                } actions: {
+                    Button("Try Again", action: retry)
                 }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .background(lyricsBackground)
+        .foregroundStyle(primaryColor)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .accessibilityElement(children: .contain)
-    }
-
-    private var lyricsBackground: Color {
-        #if os(iOS)
-            Color(uiColor: .systemBackground)
-        #else
-            Color(nsColor: .windowBackgroundColor)
-        #endif
     }
 }
 
@@ -112,6 +97,8 @@ private struct LyricsLines: View {
 
     @ObservedObject var playback: AudioPlaybackCoordinator
     let lyrics: MusicLyrics
+    let primaryColor: Color
+    let secondaryColor: Color
 
     @State private var followsPlayback = true
 
@@ -122,7 +109,7 @@ private struct LyricsLines: View {
                     if let timingMessage {
                         Label(timingMessage, systemImage: "info.circle")
                             .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(secondaryColor)
                             .padding(.bottom, 6)
                     } else if !followsPlayback {
                         Button("Follow Playback", systemImage: "scope") {
@@ -131,6 +118,7 @@ private struct LyricsLines: View {
                         }
                         .font(.caption.bold())
                         .buttonStyle(.borderless)
+                        .foregroundStyle(primaryColor)
                     }
 
                     ForEach(lyrics.lines) { line in
@@ -184,7 +172,7 @@ private struct LyricsLines: View {
             .font(.title3.weight(isActive ? .bold : .semibold))
             .foregroundStyle(
                 isActive || !lyrics.hasTimedLines
-                    ? Color.primary : Color.secondary.opacity(0.72)
+                    ? primaryColor : secondaryColor.opacity(0.72)
             )
             .multilineTextAlignment(.leading)
             .frame(maxWidth: .infinity, alignment: .leading)

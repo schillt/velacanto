@@ -161,12 +161,7 @@ struct NowPlayingView: View {
                 GeometryReader { transitionSpace in
                     ZStack(alignment: .topLeading) {
                         if isShowingLyrics {
-                            LyricsPresentation(
-                                playback: playback,
-                                state: lyricsState,
-                                dismiss: { isShowingLyrics = false },
-                                retry: { Task { await loadLyrics() } }
-                            )
+                            lyricsPresentation
                         } else if isShowingQueue {
                             ZStack(alignment: .topLeading) {
                                 NowPlayingQueueContent(
@@ -238,14 +233,20 @@ struct NowPlayingView: View {
                 if let item = playback.currentItem {
                     #if os(iOS)
                         if geometry.size.width > geometry.size.height {
+                            let artworkSize = landscapeArtworkSize(in: geometry.size)
                             HStack(spacing: 28) {
-                                artwork(
-                                    for: item,
-                                    size: landscapeArtworkSize(in: geometry.size)
-                                )
+                                Group {
+                                    if isShowingLyrics {
+                                        lyricsPresentation
+                                    } else {
+                                        artwork(for: item, size: artworkSize)
+                                    }
+                                }
+                                .frame(width: artworkSize, height: artworkSize)
                                 playbackDetails(
                                     for: item,
-                                    width: min(360, max(220, geometry.size.width * 0.44))
+                                    width: min(360, max(220, geometry.size.width * 0.44)),
+                                    showsTrackDetails: !isShowingLyrics
                                 )
                             }
                             .frame(maxWidth: 760)
@@ -265,13 +266,19 @@ struct NowPlayingView: View {
                         }
                     #elseif os(macOS)
                         VStack(spacing: 28) {
-                            artwork(
-                                for: item,
-                                size: macOSArtworkSize(in: geometry.size)
-                            )
+                            let artworkSize = macOSArtworkSize(in: geometry.size)
+                            Group {
+                                if isShowingLyrics {
+                                    lyricsPresentation
+                                } else {
+                                    artwork(for: item, size: artworkSize)
+                                }
+                            }
+                            .frame(width: artworkSize, height: artworkSize)
                             playbackDetails(
                                 for: item,
-                                width: min(480, geometry.size.width - 80)
+                                width: min(480, geometry.size.width - 80),
+                                showsTrackDetails: !isShowingLyrics
                             )
                         }
                         .frame(maxWidth: 620)
@@ -570,6 +577,14 @@ struct NowPlayingView: View {
                             )
                     }
                 }
+            #elseif os(macOS)
+                HStack {
+                    Spacer()
+                    lyricsButton
+                    Spacer()
+                }
+                .foregroundStyle(playbackPrimaryTextColor)
+                .frame(width: width)
             #endif
 
             if let errorMessage = playback.errorMessage {
@@ -719,6 +734,16 @@ struct NowPlayingView: View {
             .buttonStyle(.borderless)
             .accessibilityLabel("Lyrics could not be loaded")
         }
+    }
+
+    private var lyricsPresentation: some View {
+        LyricsPresentation(
+            playback: playback,
+            state: lyricsState,
+            primaryColor: playbackPrimaryTextColor,
+            secondaryColor: playbackSecondaryTextColor,
+            retry: { Task { await loadLyrics() } }
+        )
     }
 
     private var lyricsFailureContent: some View {
