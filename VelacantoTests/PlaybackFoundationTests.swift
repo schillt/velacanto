@@ -1334,6 +1334,100 @@ final class PlaybackFoundationTests: XCTestCase {
         XCTAssertEqual(MockArtworkURLProtocol.requestCount, 1)
     }
 
+    func testVisibleArtworkPromotesAheadOfSpeculativeWork() async {
+        let limiter = ArtworkDownloadLimiter(limit: 1)
+        let heldKey = ArtworkKey(
+            serverID: "server",
+            userID: "user",
+            itemID: "held",
+            imageTag: "tag",
+            sizeBucket: 128
+        )
+        let speculativeKey = ArtworkKey(
+            serverID: "server",
+            userID: "user",
+            itemID: "speculative",
+            imageTag: "tag",
+            sizeBucket: 128
+        )
+        let visibleKey = ArtworkKey(
+            serverID: "server",
+            userID: "user",
+            itemID: "visible",
+            imageTag: "tag",
+            sizeBucket: 128
+        )
+        await limiter.acquire(key: heldKey, intent: .visible)
+
+        let (order, continuation) = AsyncStream<String>.makeStream()
+        let speculative = Task {
+            await limiter.acquire(key: speculativeKey, intent: .speculative)
+            continuation.yield("speculative")
+        }
+        while !(await limiter.hasQueuedRequest(for: speculativeKey)) {
+            await Task.yield()
+        }
+        let visible = Task {
+            await limiter.acquire(key: visibleKey, intent: .visible)
+            continuation.yield("visible")
+        }
+        while !(await limiter.hasQueuedRequest(for: visibleKey)) {
+            await Task.yield()
+        }
+        await limiter.release()
+
+        var iterator = order.makeAsyncIterator()
+        let first = await iterator.next()
+        XCTAssertEqual(first, "visible")
+        await limiter.release()
+        let second = await iterator.next()
+        XCTAssertEqual(second, "speculative")
+        _ = await (speculative.value, visible.value)
+    }
+
+    func testArtworkCancelsOnlyAfterFinalConsumerLeaves() async {
+        let repository = ArtworkRepository()
+        let probe = ArtworkRequestProbe()
+        let key = ArtworkKey(
+            serverID: "server",
+            userID: "user",
+            itemID: "item",
+            imageTag: "tag",
+            sizeBucket: 128
+        )
+        let first = Task { @MainActor in
+            await repository.image(for: key) {
+                await probe.request()
+            }
+        }
+        while (await probe.startedCount) == 0 {
+            await Task.yield()
+        }
+        let second = Task { @MainActor in
+            await repository.image(for: key) {
+                await probe.request()
+            }
+        }
+        while (await repository.consumerCount(for: key)) != 2 {
+            await Task.yield()
+        }
+
+        first.cancel()
+        while (await repository.consumerCount(for: key)) != 1 {
+            await Task.yield()
+        }
+        let cancellationCountAfterFirst = await probe.cancellationCount
+        XCTAssertEqual(cancellationCountAfterFirst, 0)
+
+        second.cancel()
+        _ = await (first.value, second.value)
+        while (await probe.cancellationCount) == 0 {
+            await Task.yield()
+        }
+        let finalCancellationCount = await probe.cancellationCount
+        XCTAssertEqual(finalCancellationCount, 1)
+    }
+
     func testArtworkDiskCacheDiscardsCorruptIndex() async throws {
         let directory = FileManager.default.temporaryDirectory.appending(
             path: "VelacantoArtworkCacheTests-\(UUID().uuidString)",
@@ -1700,6 +1794,33 @@ private final class RecordingNowPlayingStateStore: NowPlayingStateStoring {
 
     func clearState() {
         state = nil
+    }
+}
+
+private actor ArtworkRequestProbe {
+    private(set) var startedCount = 0
+    private(set) var cancellationCount = 0
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func request() async -> URLRequest? {
+        startedCount += 1
+        return await withTaskCancellationHandler(
+            operation: {
+                await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                    self.continuation = continuation
+                }
+                return nil as URLRequest?
+            },
+            onCancel: {
+                Task { await self.recordCancellation() }
+            }
+        )
+    }
+
+    private func recordCancellation() {
+        cancellationCount += 1
+        continuation?.resume()
+        continuation = nil
     }
 }
 
