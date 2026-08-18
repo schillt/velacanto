@@ -1,9 +1,48 @@
 import Combine
 import Foundation
+import os
 
 struct MusicItemActionFailure: Identifiable, Equatable, Sendable {
     let id = UUID()
     let message: String
+}
+
+/// Stores the device-local, user-curated Library shelf for each account.
+protocol MusicLibraryPinStoring {
+    func loadPins(accountScope: String) throws -> [MusicCatalogItem]
+    func savePins(_ items: [MusicCatalogItem], accountScope: String) throws
+}
+
+struct UserDefaultsMusicLibraryPinStore: MusicLibraryPinStoring {
+    private struct SavedPins: Codable {
+        var accounts: [String: [MusicCatalogItem]]
+    }
+
+    private let defaults: UserDefaults
+    private let key = "velacanto.library-pins-v1"
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+    }
+
+    func loadPins(accountScope: String) throws -> [MusicCatalogItem] {
+        guard let data = defaults.data(forKey: key) else { return [] }
+        return try JSONDecoder().decode(SavedPins.self, from: data)
+            .accounts[accountScope] ?? []
+    }
+
+    func savePins(_ items: [MusicCatalogItem], accountScope: String) throws {
+        var savedPins: SavedPins
+        if let data = defaults.data(forKey: key) {
+            savedPins =
+                (try? JSONDecoder().decode(SavedPins.self, from: data))
+                ?? SavedPins(accounts: [:])
+        } else {
+            savedPins = SavedPins(accounts: [:])
+        }
+        savedPins.accounts[accountScope] = items
+        defaults.set(try JSONEncoder().encode(savedPins), forKey: key)
+    }
 }
 
 /// Owns optimistic item-action state for exactly one signed-in account.
@@ -14,17 +53,28 @@ struct MusicItemActionFailure: Identifiable, Equatable, Sendable {
 /// newer optimistic choice.
 @MainActor
 final class MusicItemActionStateOwner: ObservableObject {
+    private static let logger = Logger(
+        subsystem: "com.chameleonenterprise.velacanto",
+        category: "LibraryPins"
+    )
+
     @Published private(set) var favoriteStates: [MusicCatalogItemID: Bool] = [:]
     @Published private(set) var pendingFavoriteIDs: Set<MusicCatalogItemID> = []
     @Published private(set) var failure: MusicItemActionFailure?
+    @Published private(set) var pinnedItems: [MusicCatalogItem] = []
 
     private var accountScope: String?
     private var provider: (any MusicItemActionProviding)?
+    private let pinStore: any MusicLibraryPinStoring
     private var confirmedFavoriteStates: [MusicCatalogItemID: Bool] = [:]
     private var desiredFavoriteStates: [MusicCatalogItemID: Bool] = [:]
     private var protectedFavoriteStates: [MusicCatalogItemID: Bool] = [:]
     private var mutationTasks: [MusicCatalogItemID: Task<Void, Never>] = [:]
     private var generation = UUID()
+
+    init(pinStore: any MusicLibraryPinStoring = UserDefaultsMusicLibraryPinStore()) {
+        self.pinStore = pinStore
+    }
 
     func configure(
         accountScope: String,
@@ -33,6 +83,7 @@ final class MusicItemActionStateOwner: ObservableObject {
         if self.accountScope != accountScope {
             reset()
             self.accountScope = accountScope
+            loadPins(accountScope: accountScope)
         }
         self.provider = provider
     }
@@ -54,6 +105,17 @@ final class MusicItemActionStateOwner: ObservableObject {
             confirmedFavoriteStates[item.id] = item.isFavorite
             favoriteStates[item.id] = item.isFavorite
         }
+
+        var didUpdatePins = false
+        for item in items where Self.isPinnable(item) {
+            guard let index = pinnedItems.firstIndex(where: { $0.id == item.id }) else {
+                continue
+            }
+            guard pinnedItems[index] != item else { continue }
+            pinnedItems[index] = item
+            didUpdatePins = true
+        }
+        if didUpdatePins { savePins() }
     }
 
     func isFavorite(_ item: MusicCatalogItem) -> Bool {
@@ -66,6 +128,24 @@ final class MusicItemActionStateOwner: ObservableObject {
 
     func isUpdatingFavorite(_ itemID: MusicCatalogItemID) -> Bool {
         pendingFavoriteIDs.contains(itemID)
+    }
+
+    func canPin(_ item: MusicCatalogItem) -> Bool {
+        item.id.accountScope == accountScope && Self.isPinnable(item)
+    }
+
+    func isPinned(_ item: MusicCatalogItem) -> Bool {
+        pinnedItems.contains { $0.id == item.id }
+    }
+
+    func togglePin(_ item: MusicCatalogItem) {
+        guard canPin(item) else { return }
+        if let index = pinnedItems.firstIndex(where: { $0.id == item.id }) {
+            pinnedItems.remove(at: index)
+        } else {
+            pinnedItems.insert(item, at: 0)
+        }
+        savePins()
     }
 
     func toggleFavorite(_ item: MusicCatalogItem) {
@@ -168,5 +248,36 @@ final class MusicItemActionStateOwner: ObservableObject {
         favoriteStates.removeAll()
         pendingFavoriteIDs.removeAll()
         failure = nil
+        pinnedItems = []
+    }
+
+    private static func isPinnable(_ item: MusicCatalogItem) -> Bool {
+        switch item.kind {
+        case .album, .artist, .playlist:
+            true
+        case .song:
+            false
+        }
+    }
+
+    private func loadPins(accountScope: String) {
+        do {
+            pinnedItems = try pinStore.loadPins(accountScope: accountScope)
+                .filter { $0.id.accountScope == accountScope && Self.isPinnable($0) }
+        } catch {
+            Self.logger.notice("Could not load Library pins; starting with an empty shelf")
+            pinnedItems = []
+        }
+    }
+
+    private func savePins() {
+        guard let accountScope else { return }
+        do {
+            try pinStore.savePins(pinnedItems, accountScope: accountScope)
+        } catch {
+            Self.logger.notice(
+                "Could not save Library pins; keeping the current shelf for this session"
+            )
+        }
     }
 }

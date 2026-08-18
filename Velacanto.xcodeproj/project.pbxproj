@@ -36,6 +36,8 @@
 		000000000000000000000243 /* Features/Playback/NowPlayingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000147 /* Features/Playback/NowPlayingView.swift */; };
 		000000000000000000000244 /* Features/Playback/LyricsPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000148 /* Features/Playback/LyricsPresentation.swift */; };
 		000000000000000000000245 /* Features/Playback/UpNextPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000149 /* Features/Playback/UpNextPresentation.swift */; };
+		000000000000000000000246 /* Features/Playback/PlaybackQueueView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000000000000000000014A /* Features/Playback/PlaybackQueueView.swift */; };
+		000000000000000000000247 /* Features/Playback/ModernPlaybackAccessory.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000000000000000000014B /* Features/Playback/ModernPlaybackAccessory.swift */; };
 		000000000000000000000229 /* Features/Library/PagedJellyfinItemsModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000132 /* Features/Library/PagedJellyfinItemsModel.swift */; };
 		000000000000000000000230 /* Features/Library/MusicLibraryNavigation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000133 /* Features/Library/MusicLibraryNavigation.swift */; };
 		000000000000000000000231 /* Features/Library/MusicAlbumsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000134 /* Features/Library/MusicAlbumsView.swift */; };
@@ -104,6 +106,8 @@
 		000000000000000000000147 /* Features/Playback/NowPlayingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Playback/NowPlayingView.swift; sourceTree = "<group>"; };
 		000000000000000000000148 /* Features/Playback/LyricsPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Playback/LyricsPresentation.swift; sourceTree = "<group>"; };
 		000000000000000000000149 /* Features/Playback/UpNextPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Playback/UpNextPresentation.swift; sourceTree = "<group>"; };
+		00000000000000000000014A /* Features/Playback/PlaybackQueueView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Playback/PlaybackQueueView.swift; sourceTree = "<group>"; };
+		00000000000000000000014B /* Features/Playback/ModernPlaybackAccessory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Playback/ModernPlaybackAccessory.swift; sourceTree = "<group>"; };
 		000000000000000000000132 /* Features/Library/PagedJellyfinItemsModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Library/PagedJellyfinItemsModel.swift; sourceTree = "<group>"; };
 		000000000000000000000133 /* Features/Library/MusicLibraryNavigation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Library/MusicLibraryNavigation.swift; sourceTree = "<group>"; };
 		000000000000000000000134 /* Features/Library/MusicAlbumsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Library/MusicAlbumsView.swift; sourceTree = "<group>"; };
@@ -175,6 +179,8 @@
 				000000000000000000000147 /* Features/Playback/NowPlayingView.swift */,
 				000000000000000000000148 /* Features/Playback/LyricsPresentation.swift */,
 				000000000000000000000149 /* Features/Playback/UpNextPresentation.swift */,
+				00000000000000000000014A /* Features/Playback/PlaybackQueueView.swift */,
+				00000000000000000000014B /* Features/Playback/ModernPlaybackAccessory.swift */,
 				000000000000000000000132 /* Features/Library/PagedJellyfinItemsModel.swift */,
 				000000000000000000000133 /* Features/Library/MusicLibraryNavigation.swift */,
 				000000000000000000000134 /* Features/Library/MusicAlbumsView.swift */,
@@ -377,6 +383,8 @@
 				000000000000000000000243 /* Features/Playback/NowPlayingView.swift in Sources */,
 				000000000000000000000244 /* Features/Playback/LyricsPresentation.swift in Sources */,
 				000000000000000000000245 /* Features/Playback/UpNextPresentation.swift in Sources */,
+				000000000000000000000246 /* Features/Playback/PlaybackQueueView.swift in Sources */,
+				000000000000000000000247 /* Features/Playback/ModernPlaybackAccessory.swift in Sources */,
 				000000000000000000000229 /* Features/Library/PagedJellyfinItemsModel.swift in Sources */,
 				000000000000000000000230 /* Features/Library/MusicLibraryNavigation.swift in Sources */,
 				000000000000000000000231 /* Features/Library/MusicAlbumsView.swift in Sources */,

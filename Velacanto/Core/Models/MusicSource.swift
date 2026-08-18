@@ -20,6 +20,8 @@ struct PlaybackItem: Identifiable, Equatable, Codable, Sendable {
     let title: String
     let artist: String
     let albumTitle: String?
+    let albumID: String?
+    let artistID: String?
     let source: MusicSourceID
     let artworkItemID: String?
     let artworkTag: String?
@@ -30,6 +32,8 @@ struct PlaybackItem: Identifiable, Equatable, Codable, Sendable {
         title: String,
         artist: String,
         albumTitle: String? = nil,
+        albumID: String? = nil,
+        artistID: String? = nil,
         source: MusicSourceID,
         artworkItemID: String? = nil,
         artworkTag: String? = nil,
@@ -39,6 +43,8 @@ struct PlaybackItem: Identifiable, Equatable, Codable, Sendable {
         self.title = title
         self.artist = artist
         self.albumTitle = albumTitle
+        self.albumID = albumID
+        self.artistID = artistID
         self.source = source
         self.artworkItemID = artworkItemID
         self.artworkTag = artworkTag
@@ -153,6 +159,11 @@ struct PlaybackQueue: Equatable, Codable, Sendable {
         return Array(items[start...])
     }
 
+    var playedItems: [PlaybackItem] {
+        guard currentIndex > items.startIndex else { return [] }
+        return Array(items[..<currentIndex])
+    }
+
     var canGoPrevious: Bool {
         previousItem != nil
     }
@@ -185,6 +196,28 @@ struct PlaybackQueue: Equatable, Codable, Sendable {
         } else if wrapping, !items.isEmpty {
             currentIndex = 0
         }
+    }
+
+    @discardableResult
+    mutating func select(_ item: PlaybackItem) -> Bool {
+        let key = "\(item.source.rawValue)|\(item.id)"
+        guard
+            let index = items.firstIndex(where: {
+                "\($0.source.rawValue)|\($0.id)" == key
+            }),
+            index != currentIndex
+        else {
+            return false
+        }
+
+        if index > currentIndex {
+            let selectedItem = items.remove(at: index)
+            currentIndex += 1
+            items.insert(selectedItem, at: currentIndex)
+        } else {
+            currentIndex = index
+        }
+        return true
     }
 
     mutating func setRepeatMode(_ mode: PlaybackRepeatMode) {

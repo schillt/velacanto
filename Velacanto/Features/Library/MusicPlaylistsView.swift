@@ -162,6 +162,7 @@ struct MusicPlaylistView: View {
     @StateObject private var model = PagedMusicCatalogModel()
     @State private var preparingTrackID: MusicCatalogItemID?
     @State private var playbackErrorMessage: String?
+    @State private var collectionPalette = MusicCollectionPalette.fallback
 
     var body: some View {
         ScrollView(.vertical, showsIndicators: false) {
@@ -175,6 +176,7 @@ struct MusicPlaylistView: View {
                         detail: model.items.isEmpty
                             ? nil
                             : "\(model.totalRecordCount) \(model.totalRecordCount == 1 ? "song" : "songs")",
+                        palette: collectionPalette,
                         isPreparing: preparingTrackID != nil,
                         play: { playQueue(shuffled: false) },
                         shuffle: { playQueue(shuffled: true) }
@@ -213,7 +215,9 @@ struct MusicPlaylistView: View {
                                 leadingNumber: index + 1,
                                 jellyfin: jellyfin,
                                 playback: playback,
-                                isPreparing: preparingTrackID == song.id
+                                isPreparing: preparingTrackID == song.id,
+                                foreground: collectionPalette.foreground,
+                                secondaryForeground: collectionPalette.secondaryForeground
                             )
                         }
                         .buttonStyle(.plain)
@@ -241,17 +245,31 @@ struct MusicPlaylistView: View {
             .padding(.bottom, 120)
         }
         .scrollBounceBehavior(.basedOnSize, axes: .vertical)
-        .background(.background)
+        .background {
+            MusicCollectionArtworkBackdrop(
+                item: playlist,
+                jellyfin: jellyfin,
+                palette: $collectionPalette
+            )
+        }
         .collectionDetailNavigationChrome()
         .albumArtworkZoomTransition(
             sourceID: playlist.artworkTransitionID,
             in: transitionNamespace
         )
+        #if os(iOS)
+            .toolbarBackground(.hidden, for: .navigationBar)
+            .toolbarColorScheme(
+                collectionPalette.usesLightForeground ? .dark : .light,
+                for: .navigationBar
+            )
+        #endif
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 #if os(macOS)
                     MusicFavoriteButton(item: playlist, presentation: .icon)
                 #endif
+                MusicLibraryPinMenu(item: playlist)
             }
         }
         .task(id: playlist.id) {

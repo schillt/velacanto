@@ -167,11 +167,13 @@ struct MusicGenreGrid: View {
         if !cached.isEmpty {
             genres = cached
             isLoading = false
+            prefetchGenreArtwork(genres, jellyfin: jellyfin)
             preloadLikelyGenreAlbums(from: genres)
         }
         do {
             genres = try await jellyfin.musicGenres(forceRefresh: true)
             errorMessage = nil
+            prefetchGenreArtwork(genres, jellyfin: jellyfin)
             preloadLikelyGenreAlbums(from: genres)
         } catch {
             genres = []
@@ -216,23 +218,9 @@ struct GenreTile: View {
     @ViewBuilder
     private var artworkBackground: some View {
         if let artwork = genre.artwork {
-            JellyfinArtworkView(
-                item: MusicCatalogItem(
-                    id: genre.id,
-                    name: genre.name,
-                    kind: .album,
-                    sortName: nil,
-                    artists: [],
-                    albumArtist: nil,
-                    album: nil,
-                    trackNumber: nil,
-                    discNumber: nil,
-                    childCount: genre.albumCount,
-                    duration: nil,
-                    artwork: artwork,
-                    isFavorite: false,
-                    capabilities: [.navigate]
-                ),
+            JellyfinArtworkReferenceView(
+                itemID: artwork.opaqueItemID,
+                imageTag: artwork.imageTag,
                 jellyfin: jellyfin,
                 cornerRadius: MusicGenreCardLayout.cornerRadius,
                 maxWidth: 360
@@ -674,122 +662,5 @@ struct MusicPaginationErrorView: View {
             Button("Retry", action: retry)
         }
         .padding(.vertical, 8)
-    }
-}
-
-private struct MusicCatalogItemActionsModifier: ViewModifier {
-    let item: MusicCatalogItem
-    @ObservedObject var jellyfin: JellyfinSessionController
-    @ObservedObject var playback: AudioPlaybackCoordinator
-
-    @ViewBuilder
-    func body(content: Content) -> some View {
-        #if os(iOS)
-            content
-                .contextMenu { actionMenu }
-                .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                    if item.capabilities.contains(.favorite) {
-                        MusicFavoriteButton(item: item, presentation: .icon)
-                            .tint(.pink)
-                    }
-                }
-        #else
-            content.contextMenu { actionMenu }
-        #endif
-    }
-
-    @ViewBuilder
-    private var actionMenu: some View {
-        if item.capabilities.contains(.favorite) {
-            MusicFavoriteButton(item: item)
-        }
-
-        if item.capabilities.contains(.playNext) {
-            Button {
-                playback.playNext(JellyfinPlaybackAdapter.playbackItem(for: item))
-            } label: {
-                Label("Play Next", systemImage: "text.line.first.and.arrowtriangle.forward")
-            }
-            .disabled(playback.currentItem == nil)
-        }
-
-        if item.capabilities.contains(.playLast) {
-            Button {
-                playback.playLast(JellyfinPlaybackAdapter.playbackItem(for: item))
-            } label: {
-                Label("Add to Queue", systemImage: "text.line.last.and.arrowtriangle.forward")
-            }
-            .disabled(playback.currentItem == nil)
-        }
-
-        switch item.kind {
-        case .album:
-            NavigationLink {
-                JellyfinTracksView(album: item, jellyfin: jellyfin, playback: playback)
-            } label: {
-                Label("View Album", systemImage: "square.stack")
-            }
-        case .artist:
-            NavigationLink {
-                MusicArtistView(artist: item, jellyfin: jellyfin, playback: playback)
-            } label: {
-                Label("View Artist", systemImage: "music.mic")
-            }
-        case .song:
-            if let album = item.albumNavigationItem {
-                NavigationLink {
-                    JellyfinTracksView(album: album, jellyfin: jellyfin, playback: playback)
-                } label: {
-                    Label("View Album", systemImage: "square.stack")
-                }
-            }
-            if let artist = item.artistNavigationItem {
-                NavigationLink {
-                    MusicArtistView(artist: artist, jellyfin: jellyfin, playback: playback)
-                } label: {
-                    Label("View Artist", systemImage: "music.mic")
-                }
-            }
-        case .playlist:
-            EmptyView()
-        }
-    }
-}
-
-extension View {
-    func musicItemActions(
-        for item: MusicCatalogItem,
-        jellyfin: JellyfinSessionController,
-        playback: AudioPlaybackCoordinator
-    ) -> some View {
-        modifier(
-            MusicCatalogItemActionsModifier(
-                item: item,
-                jellyfin: jellyfin,
-                playback: playback
-            )
-        )
-    }
-
-    @ViewBuilder
-    func progressivePageHeader(_ title: String?) -> some View {
-        #if os(iOS)
-            navigationTitle(title ?? "")
-                .navigationBarTitleDisplayMode(.large)
-        #else
-            navigationTitle(title ?? "")
-        #endif
-    }
-
-    func collectionDetailNavigationChrome() -> some View {
-        scrollContentBackground(.hidden)
-    }
-
-    func revealsRootHeader(_ isVisible: Binding<Bool>) -> some View {
-        self
-    }
-
-    func progressiveNavigationChrome() -> some View {
-        self
     }
 }

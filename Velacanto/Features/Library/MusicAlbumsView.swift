@@ -45,7 +45,8 @@ struct MusicAlbumsView: View {
                             JellyfinTracksView(
                                 album: album,
                                 jellyfin: jellyfin,
-                                playback: playback
+                                playback: playback,
+                                transitionNamespace: albumTransitionNamespace
                             )
                         } label: {
                             MusicAlbumCard(
@@ -202,7 +203,7 @@ extension View {
         in namespace: Namespace.ID?
     ) -> some View {
         #if os(iOS)
-            if #available(iOS 18.0, *), let namespace {
+            if let namespace {
                 matchedTransitionSource(id: id, in: namespace)
             } else {
                 self
@@ -218,7 +219,7 @@ extension View {
         in namespace: Namespace.ID?
     ) -> some View {
         #if os(iOS)
-            if #available(iOS 18.0, *), let namespace {
+            if let namespace {
                 navigationTransition(.zoom(sourceID: sourceID, in: namespace))
             } else {
                 self

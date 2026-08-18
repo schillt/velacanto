@@ -2,12 +2,17 @@ import SwiftUI
 import UniformTypeIdentifiers
 import os
 
+#if os(iOS)
+    import UIKit
+#endif
+
 struct VelacantoRootView: View {
     @ObservedObject var playback: AudioPlaybackCoordinator
     @ObservedObject var jellyfin: JellyfinSessionController
 
     @State private var selectedDestination = AppDestination.home
     @State private var globalSearchText = ""
+    @State private var searchFocusRequest = 0
     #if os(macOS)
         @State private var selectedMacDestination = MacDestination.home
     #endif
@@ -15,8 +20,11 @@ struct VelacantoRootView: View {
     @State private var isPreparingTestTone = false
     @State private var isShowingProfile = false
     @State private var isShowingNowPlaying = false
+    #if os(iOS)
+        @Namespace private var nowPlayingArtworkNamespace
+    #endif
     #if os(macOS)
-        @State private var isShowingMacPlaybackAccessory = true
+        @State private var isShowingMacQueue = false
     #endif
     @State private var actionError: String?
 
@@ -31,7 +39,7 @@ struct VelacantoRootView: View {
             #endif
         }
         .modifier(MusicItemActionFailurePresenter(actions: jellyfin.itemActions))
-        .tint(.cyan)
+        .tint(.velacantoAccent)
         .fileImporter(
             isPresented: $isChoosingLocalFile,
             allowedContentTypes: [.audio]
@@ -41,11 +49,12 @@ struct VelacantoRootView: View {
         #if os(iOS)
             .fullScreenCover(isPresented: $isShowingNowPlaying) {
                 NowPlayingView(playback: playback, jellyfin: jellyfin)
-            }
-        #elseif os(macOS)
-            .inspector(isPresented: $isShowingNowPlaying) {
-                NowPlayingView(playback: playback, jellyfin: jellyfin)
-                .inspectorColumnWidth(min: 360, ideal: 440, max: 620)
+                .navigationTransition(
+                    .zoom(
+                        sourceID: "now-playing-surface",
+                        in: nowPlayingArtworkNamespace
+                    )
+                )
             }
         #endif
         .sheet(isPresented: $isShowingProfile) {
@@ -154,42 +163,41 @@ struct VelacantoRootView: View {
                 playback.stop()
             }
         }
-        #if os(macOS)
-            .onChange(of: playback.currentItem?.id) { oldItemID, newItemID in
-                if oldItemID != newItemID, newItemID != nil {
-                    isShowingMacPlaybackAccessory = true
-                }
-            }
-        #endif
         .environmentObject(jellyfin.itemActions)
     }
 
     #if os(iOS)
+        @ViewBuilder
         private var iOSRoot: some View {
-            iOSTabs
-                .tabViewBottomAccessory(
-                    isEnabled: playback.hasPlayableItem && !isShowingNowPlaying
-                ) {
-                    ModernPlaybackAccessory(
-                        playback: playback,
-                        jellyfin: jellyfin,
-                        showNowPlaying: {
-                            isShowingNowPlaying = true
-                        }
-                    )
-                }
-                .tabBarMinimizeBehavior(.onScrollDown)
+            if playback.hasPlayableItem {
+                iOSTabs
+                    .tabViewBottomAccessory {
+                        ModernPlaybackAccessory(
+                            playback: playback,
+                            jellyfin: jellyfin,
+                            showNowPlaying: {
+                                isShowingNowPlaying = true
+                            },
+                            nowPlayingTransitionNamespace: nowPlayingArtworkNamespace
+                        )
+                    }
+                    .tabBarMinimizeBehavior(.onScrollDown)
+            } else {
+                iOSTabs
+            }
         }
 
         private var iOSTabs: some View {
             TabView(selection: $selectedDestination) {
-                Tab(
-                    AppDestination.home.title,
-                    systemImage: AppDestination.home.symbolName,
-                    value: AppDestination.home
-                ) {
+                Tab(value: AppDestination.home) {
                     NavigationStack {
                         home
+                    }
+                } label: {
+                    Label {
+                        Text(AppDestination.home.title)
+                    } icon: {
+                        RoundedHomeTabIcon()
                     }
                 }
 
@@ -225,33 +233,52 @@ struct VelacantoRootView: View {
                 }
             }
             .tabViewStyle(.sidebarAdaptable)
+            .onChange(of: selectedDestination) { _, destination in
+                if destination == .search {
+                    searchFocusRequest &+= 1
+                }
+            }
         }
     #endif
 
     #if os(macOS)
         private var macOSRoot: some View {
-            NavigationSplitView(columnVisibility: .constant(.all)) {
-                macOSSidebar
-                    .navigationSplitViewColumnWidth(min: 180, ideal: 220)
-                    .toolbar(removing: .sidebarToggle)
-            } detail: {
-                macOSContent
-            }
-            .searchable(text: $globalSearchText, prompt: "Search your library")
-            .macOSPlaybackAccessoryInset(
-                playback: playback,
-                jellyfin: jellyfin,
-                isVisible: playback.hasPlayableItem
-                    && !isShowingNowPlaying
-                    && isShowingMacPlaybackAccessory,
-                showNowPlaying: {
-                    isShowingNowPlaying = true
-                },
-                dismiss: {
-                    isShowingMacPlaybackAccessory = false
+            ZStack {
+                HStack(spacing: 0) {
+                    NavigationSplitView(columnVisibility: .constant(.all)) {
+                        macOSSidebar
+                            .navigationSplitViewColumnWidth(min: 180, ideal: 220)
+                            .toolbar(removing: .sidebarToggle)
+                    } detail: {
+                        macOSContent
+                    }
+                    .searchable(text: $globalSearchText, prompt: "Search your library")
+
+                    if isShowingMacQueue, !isShowingNowPlaying {
+                        Divider()
+                        PlaybackQueueView(
+                            playback: playback,
+                            jellyfin: jellyfin,
+                            close: { isShowingMacQueue = false }
+                        )
+                        .frame(width: 360)
+                        .background(.regularMaterial)
+                    }
                 }
-            )
-            .frame(minWidth: 700, minHeight: 500)
+                .frame(minWidth: 700, minHeight: 500)
+
+                if isShowingNowPlaying {
+                    NowPlayingView(
+                        playback: playback,
+                        jellyfin: jellyfin,
+                        dismissAction: { isShowingNowPlaying = false }
+                    )
+                    .background(.background)
+                    .transition(.opacity)
+                    .zIndex(1)
+                }
+            }
+            .animation(.easeInOut(duration: 0.18), value: isShowingNowPlaying)
         }
 
         private var macOSSidebar: some View {
@@ -323,6 +350,18 @@ struct VelacantoRootView: View {
                 }
             }
             .id(macOSContentIdentity)
+            .macOSPlaybackAccessoryInset(
+                playback: playback,
+                jellyfin: jellyfin,
+                isVisible: playback.hasPlayableItem
+                    && !isShowingNowPlaying,
+                showNowPlaying: {
+                    isShowingNowPlaying = true
+                },
+                showQueue: {
+                    isShowingMacQueue = true
+                }
+            )
         }
 
         private var isSearchingLibrary: Bool {
@@ -358,12 +397,6 @@ struct VelacantoRootView: View {
                 #else
                     selectedDestination = .library
                 #endif
-            },
-            showSearch: { query in
-                globalSearchText = query
-                #if os(iOS)
-                    selectedDestination = .search
-                #endif
             }
         )
     }
@@ -387,12 +420,6 @@ struct VelacantoRootView: View {
                     selectedMacDestination = .library(.albums)
                 #else
                     selectedDestination = .library
-                #endif
-            },
-            showSearch: { query in
-                globalSearchText = query
-                #if os(iOS)
-                    selectedDestination = .search
                 #endif
             },
             presentation: .new
@@ -419,7 +446,8 @@ struct VelacantoRootView: View {
             searchText: $globalSearchText,
             showProfile: {
                 isShowingProfile = true
-            }
+            },
+            focusRequest: searchFocusRequest
         )
     }
 
@@ -503,6 +531,163 @@ struct VelacantoRootView: View {
 
 }
 
+/// Lets root-tab content scroll beneath the navigation controls without the
+/// abrupt opaque edge of the standard navigation bar.
+struct ProgressiveNavigationChrome: ViewModifier {
+    func body(content: Content) -> some View {
+        #if os(iOS)
+            content
+                .toolbarBackgroundVisibility(.hidden, for: .navigationBar)
+                .overlay(alignment: .top) {
+                    LinearGradient(
+                        colors: [Color.primary.opacity(0.18), .clear],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                    .frame(height: 184)
+                    .ignoresSafeArea(edges: .top)
+                    .allowsHitTesting(false)
+                }
+        #else
+            content
+        #endif
+    }
+}
+
+extension View {
+    func progressiveNavigationChrome() -> some View {
+        modifier(ProgressiveNavigationChrome())
+    }
+
+    func revealsRootHeader(_ isVisible: Binding<Bool>) -> some View {
+        modifier(RootHeaderRevealModifier(isVisible: isVisible))
+    }
+
+    func progressivePageHeader(_ title: String?) -> some View {
+        modifier(ProgressivePageHeaderModifier(title: title))
+    }
+
+    /// Collection detail pages provide their own artwork-backed navigation
+    /// treatment, so they do not need the root header's scroll observer.
+    func collectionDetailNavigationChrome() -> some View {
+        scrollContentBackground(.hidden)
+            .progressiveNavigationChrome()
+    }
+}
+
+private struct ProgressivePageHeaderModifier: ViewModifier {
+    let title: String?
+    @State private var isVisible = true
+
+    func body(content: Content) -> some View {
+        content
+            .revealsRootHeader($isVisible)
+            .scrollContentBackground(.hidden)
+            .progressiveNavigationChrome()
+            #if os(iOS)
+                .toolbar {
+                    if isVisible, let title {
+                        ToolbarItem(placement: .topBarLeading) {
+                            Text(title)
+                            .font(.title2.weight(.bold))
+                            .fixedSize(horizontal: true, vertical: false)
+                        }
+                        .sharedBackgroundVisibility(.hidden)
+                    }
+                }
+            #endif
+    }
+}
+
+private struct RootHeaderRevealModifier: ViewModifier {
+    @Binding var isVisible: Bool
+    @State private var downwardTravel: CGFloat = 0
+    @State private var upwardTravel: CGFloat = 0
+
+    func body(content: Content) -> some View {
+        #if os(iOS)
+            content.onScrollGeometryChange(
+                for: CGFloat.self,
+                of: { $0.contentOffset.y },
+                action: { previousOffset, offset in
+                    let delta = offset - previousOffset
+
+                    if offset <= 8 {
+                        downwardTravel = 0
+                        upwardTravel = 0
+                        setHeaderVisible(true)
+                    } else if delta > 0 {
+                        downwardTravel += delta
+                        upwardTravel = 0
+                        if downwardTravel >= 24 {
+                            setHeaderVisible(false)
+                        }
+                    } else if delta < 0 {
+                        upwardTravel -= delta
+                        downwardTravel = 0
+                        if upwardTravel >= 12 {
+                            setHeaderVisible(true)
+                        }
+                    }
+                }
+            )
+        #else
+            content
+        #endif
+    }
+
+    private func setHeaderVisible(_ visible: Bool) {
+        guard isVisible != visible else { return }
+        withAnimation(.easeInOut(duration: 0.24)) {
+            isVisible = visible
+        }
+    }
+}
+
+#if os(iOS)
+    /// Public SF Symbols do not include Apple Music's private rounded Home
+    /// glyph. This compact, chimney-free outline keeps the tab visually close
+    /// without relying on private assets or APIs.
+    private struct RoundedHomeTabIcon: View {
+        var body: some View {
+            Image(uiImage: Self.image)
+                .renderingMode(.template)
+                .resizable()
+                .scaledToFit()
+                .frame(width: 21, height: 21)
+                .accessibilityHidden(true)
+        }
+
+        private static let image = UIGraphicsImageRenderer(
+            size: CGSize(width: 24, height: 24)
+        ).image { _ in
+            let path = UIBezierPath()
+            path.move(to: CGPoint(x: 3, y: 11))
+            path.addQuadCurve(
+                to: CGPoint(x: 12, y: 3),
+                controlPoint: CGPoint(x: 7.2, y: 6.5)
+            )
+            path.addQuadCurve(
+                to: CGPoint(x: 21, y: 11),
+                controlPoint: CGPoint(x: 16.8, y: 6.5)
+            )
+            path.addLine(to: CGPoint(x: 21, y: 18))
+            path.addQuadCurve(
+                to: CGPoint(x: 18, y: 21),
+                controlPoint: CGPoint(x: 21, y: 21)
+            )
+            path.addLine(to: CGPoint(x: 6, y: 21))
+            path.addQuadCurve(
+                to: CGPoint(x: 3, y: 18),
+                controlPoint: CGPoint(x: 3, y: 21)
+            )
+            path.close()
+            UIColor.black.setFill()
+            path.fill()
+        }
+    }
+#endif
+
 #if os(macOS)
     private struct MacPlaylistSidebarSection: View {
         @ObservedObject var jellyfin: JellyfinSessionController
@@ -576,16 +761,28 @@ struct AccountAvatar: View {
     @StateObject private var loader = ArtworkViewLoader()
 
     var body: some View {
-        avatar
-            .padding(2)
-            .glassEffect(.clear.interactive(), in: Circle())
-            .task(id: taskID) {
-                guard let key = artworkKey else { return }
-                await loader.load(key: key) {
-                    await jellyfin.userImageRequest(maxWidth: key.sizeBucket)
-                }
+        Group {
+            if #available(iOS 26.0, macOS 26.0, *) {
+                avatar
+                    .padding(2)
+                    .glassEffect(.clear.interactive(), in: Circle())
+            } else {
+                avatar
+                    .padding(2)
+                    .background(.ultraThinMaterial, in: Circle())
+                    .overlay {
+                        Circle()
+                            .stroke(.separator.opacity(0.42), lineWidth: 0.5)
+                    }
             }
-            .accessibilityHidden(true)
+        }
+        .task(id: taskID) {
+            guard let key = artworkKey else { return }
+            await loader.load(key: key) {
+                await jellyfin.userImageRequest(maxWidth: key.sizeBucket)
+            }
+        }
+        .accessibilityHidden(true)
     }
 
     private var avatar: some View {
@@ -597,9 +794,9 @@ struct AccountAvatar: View {
             } else {
                 Text(initials)
                     .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.cyan)
+                    .foregroundStyle(Color.velacantoAccent)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background(.cyan.opacity(0.12))
+                    .background(Color.velacantoAccent.opacity(0.12))
             }
         }
         .frame(width: size, height: size)

@@ -367,6 +367,13 @@ final class AudioPlaybackCoordinator: ObservableObject {
         isPlaying
     }
 
+    var isWaitingForPlayback: Bool {
+        currentItem != nil
+            && !hasExplicitPlaybackPause
+            && !isAudioSessionInterrupted
+            && (playbackState == .loading || playbackState == .waiting)
+    }
+
     var canGoPrevious: Bool {
         elapsed > 3 || queue?.canGoPrevious == true
             || (queue?.repeatMode == .all && queue?.items.isEmpty == false)
@@ -380,6 +387,10 @@ final class AudioPlaybackCoordinator: ObservableObject {
 
     var upcomingItems: [PlaybackItem] {
         queue?.upcomingItems ?? []
+    }
+
+    var playedQueueItems: [PlaybackItem] {
+        queue?.playedItems ?? []
     }
 
     var repeatMode: PlaybackRepeatMode {
@@ -856,6 +867,14 @@ final class AudioPlaybackCoordinator: ObservableObject {
         transition(to: nextItem, direction: .next)
     }
 
+    func playQueueItem(_ item: PlaybackItem) {
+        if currentItem?.source == item.source, currentItem?.id == item.id {
+            resumePlayback()
+            return
+        }
+        transition(to: item, direction: .selected)
+    }
+
     func playNext(_ item: PlaybackItem) {
         editQueue { $0.playNext(item) }
     }
@@ -945,6 +964,7 @@ final class AudioPlaybackCoordinator: ObservableObject {
     private enum QueueDirection {
         case previous
         case next
+        case selected
     }
 
     private func transition(
@@ -972,6 +992,8 @@ final class AudioPlaybackCoordinator: ObservableObject {
                     queue?.movePrevious(wrapping: repeatMode == .all)
                 case .next:
                     queue?.moveNext(wrapping: repeatMode == .all)
+                case .selected:
+                    guard queue?.select(item) == true else { return }
                 }
                 hasRetriedCurrentItem = false
                 Self.logger.debug("Queue transition")

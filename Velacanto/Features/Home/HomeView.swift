@@ -22,7 +22,6 @@ struct HomeView: View {
     let showProfile: () -> Void
     let showNowPlaying: () -> Void
     let showLibrary: () -> Void
-    let showSearch: (String) -> Void
     var presentation = Presentation.home
 
     @StateObject private var favorites = PagedMusicCatalogModel()
@@ -110,33 +109,25 @@ struct HomeView: View {
                 jellyfin: jellyfin
             )
         }
-        .toolbar {
-            if isRootHeaderVisible {
-                #if os(iOS)
-                    if #available(iOS 26.0, *) {
-                        ToolbarItem(placement: .topBarLeading) {
-                            Text(presentation.title)
-                                .font(.title2.weight(.bold))
-                                .fixedSize(horizontal: true, vertical: false)
-                        }
-                        .sharedBackgroundVisibility(.hidden)
-                    } else {
-                        ToolbarItem(placement: .topBarLeading) {
-                            Text(presentation.title)
-                                .font(.title2.weight(.bold))
-                                .fixedSize(horizontal: true, vertical: false)
-                        }
+        #if os(iOS)
+            .toolbar {
+                if isRootHeaderVisible {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Text(presentation.title)
+                        .font(.title2.weight(.bold))
+                        .fixedSize(horizontal: true, vertical: false)
                     }
-                #endif
-                ToolbarItem(placement: .primaryAction) {
-                    Button(action: showProfile) {
-                        AccountAvatar(jellyfin: jellyfin)
+                    .sharedBackgroundVisibility(.hidden)
+                    ToolbarItem(placement: .primaryAction) {
+                        Button(action: showProfile) {
+                            AccountAvatar(jellyfin: jellyfin)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Profile and settings")
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Profile and settings")
                 }
             }
-        }
+        #endif
         .task(id: jellyfin.playbackAccount) {
             guard jellyfin.isSignedIn else {
                 await clearProviderShelves()
@@ -423,7 +414,8 @@ struct HomeView: View {
             JellyfinTracksView(
                 album: item,
                 jellyfin: jellyfin,
-                playback: playback
+                playback: playback,
+                transitionNamespace: albumTransitionNamespace
             )
         case .artist:
             MusicArtistView(

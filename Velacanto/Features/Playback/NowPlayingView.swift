@@ -8,6 +8,7 @@ struct NowPlayingView: View {
 
     @ObservedObject var playback: AudioPlaybackCoordinator
     @ObservedObject var jellyfin: JellyfinSessionController
+    var dismissAction: (() -> Void)?
     @State private var isShowingQueue = false
     @State private var isShowingLyrics = false
     @State private var lyricsState = LyricsLoadState.loading
@@ -23,20 +24,31 @@ struct NowPlayingView: View {
                     .toolbar {
                         ToolbarItem(placement: .confirmationAction) {
                             Button("Done") {
-                                dismiss()
+                                close()
                             }
                         }
                     }
                 #else
                     .toolbar {
-                        ToolbarItem(placement: .primaryAction) {
+                        ToolbarItemGroup(placement: .primaryAction) {
                             lyricsControl
+                            if dismissAction != nil {
+                                Button("Done", action: close)
+                            }
                         }
                     }
                 #endif
                 .task(id: lyricsLoadIdentity) {
                     await loadLyrics()
                 }
+        }
+    }
+
+    private func close() {
+        if let dismissAction {
+            dismissAction()
+        } else {
+            dismiss()
         }
     }
 

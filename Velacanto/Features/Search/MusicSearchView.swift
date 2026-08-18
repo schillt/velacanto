@@ -122,20 +122,12 @@ struct MusicSearchView: View {
             )
             .toolbar {
                 if isRootHeaderVisible {
-                    if #available(iOS 26.0, *) {
-                        ToolbarItem(placement: .topBarLeading) {
-                            Text("Search")
-                            .font(.title2.weight(.bold))
-                            .fixedSize(horizontal: true, vertical: false)
-                        }
-                        .sharedBackgroundVisibility(.hidden)
-                    } else {
-                        ToolbarItem(placement: .topBarLeading) {
-                            Text("Search")
-                            .font(.title2.weight(.bold))
-                            .fixedSize(horizontal: true, vertical: false)
-                        }
+                    ToolbarItem(placement: .topBarLeading) {
+                        Text("Search")
+                        .font(.title2.weight(.bold))
+                        .fixedSize(horizontal: true, vertical: false)
                     }
+                    .sharedBackgroundVisibility(.hidden)
                     ToolbarItem(placement: .primaryAction) {
                         Button(action: showProfile) {
                             AccountAvatar(jellyfin: jellyfin)
