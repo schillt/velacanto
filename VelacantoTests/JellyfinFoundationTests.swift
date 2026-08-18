@@ -568,7 +568,8 @@ final class JellyfinFoundationTests: XCTestCase {
               "Artists": ["Velacanto"],
               "Album": "Open Roads",
               "IndexNumber": 2,
-              "RunTimeTicks": 1800000000
+              "RunTimeTicks": 1800000000,
+              "UserData": { "IsFavorite": true }
             }
             """.utf8
         )
@@ -591,6 +592,7 @@ final class JellyfinFoundationTests: XCTestCase {
         XCTAssertEqual(request.transportKind, .directStream)
         XCTAssertEqual(request.item.albumTitle, "Open Roads")
         XCTAssertEqual(request.item.source, .jellyfin)
+        XCTAssertEqual(request.item.isFavorite, true)
         XCTAssertEqual(track.duration, 180)
     }
 

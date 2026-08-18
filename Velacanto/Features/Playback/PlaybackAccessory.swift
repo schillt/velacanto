@@ -136,9 +136,12 @@ struct PlaybackAccessory: View {
                     Spacer(minLength: 12)
 
                     if let favoriteItemID {
-                        MusicFavoriteIDButton(itemID: favoriteItemID)
-                            .buttonStyle(.borderless)
-                            .frame(width: 28, height: 28)
+                        MusicFavoriteIDButton(
+                            itemID: favoriteItemID,
+                            fallback: playback.currentItem?.isFavorite ?? false
+                        )
+                        .buttonStyle(.borderless)
+                        .frame(width: 28, height: 28)
                     }
 
                     Button(action: showQueue ?? showNowPlaying) {

@@ -662,9 +662,12 @@ struct NowPlayingView: View {
                     .accessibilityLabel("More playback options")
                 }
 
-                MusicFavoriteIDButton(itemID: favoriteItemID)
-                    .buttonStyle(.borderless)
-                    .frame(width: 44, height: 44)
+                MusicFavoriteIDButton(
+                    itemID: favoriteItemID,
+                    fallback: playback.currentItem?.isFavorite ?? false
+                )
+                .buttonStyle(.borderless)
+                .frame(width: 44, height: 44)
             }
         }
         .frame(width: width, alignment: .leading)

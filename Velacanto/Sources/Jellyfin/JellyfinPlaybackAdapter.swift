@@ -40,7 +40,8 @@ struct JellyfinPlaybackAdapter: PlaybackSourceAdapter {
             source: .jellyfin,
             artworkItemID: track.artworkItemID,
             artworkTag: track.primaryImageTag,
-            duration: track.duration
+            duration: track.duration,
+            isFavorite: track.isFavorite
         )
     }
 

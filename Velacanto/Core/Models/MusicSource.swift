@@ -26,6 +26,12 @@ struct PlaybackItem: Identifiable, Equatable, Codable, Sendable {
     let artworkItemID: String?
     let artworkTag: String?
     let duration: TimeInterval?
+    /// The catalog state when this item entered the playback queue.
+    ///
+    /// This remains optional so queues saved before favorites were supported
+    /// continue to decode. The action owner takes precedence once it has
+    /// reconciled a newer server value or an optimistic update.
+    let isFavorite: Bool?
 
     init(
         id: String = UUID().uuidString,
@@ -37,7 +43,8 @@ struct PlaybackItem: Identifiable, Equatable, Codable, Sendable {
         source: MusicSourceID,
         artworkItemID: String? = nil,
         artworkTag: String? = nil,
-        duration: TimeInterval? = nil
+        duration: TimeInterval? = nil,
+        isFavorite: Bool? = nil
     ) {
         self.id = id
         self.title = title
@@ -49,6 +56,7 @@ struct PlaybackItem: Identifiable, Equatable, Codable, Sendable {
         self.artworkItemID = artworkItemID
         self.artworkTag = artworkTag
         self.duration = duration
+        self.isFavorite = isFavorite
     }
 }
 
