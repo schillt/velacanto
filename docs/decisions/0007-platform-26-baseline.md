@@ -1,6 +1,6 @@
 # 0007 — Platform version 26 baseline
 
-- Status: Accepted
+- Status: Superseded by [0009](0009-platform-27-baseline.md)
 - Date: 2026-08-11
 - Supersedes: [0002](0002-platform-baseline-and-surfaces.md)
 

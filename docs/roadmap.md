@@ -7,10 +7,13 @@ listening path into a coherent daily-use experience across iPhone, iPad, and
 Mac while keeping catalog, actions, queue state, and playback presentation
 usable by a future CarPlay surface.
 
-The internal preview checkpoint is **August 19, 2026**. That date does not
-override quality: the milestone remains open after preview, and final promotion
-to `main` occurs only after every required acceptance row passes or records an
-explicitly accepted limitation.
+0.3 requires iOS 27, iPadOS 27, and macOS 27 and includes provider-supported
+timed or untimed lyrics in the native Now Playing baseline.
+
+The original internal preview checkpoint was **August 19, 2026**. That date
+does not override quality or the stable OS 27 SDK requirement: the milestone
+remains open, and final promotion to `main` occurs only after every required
+acceptance row passes or records an explicitly accepted limitation.
 
 Required outcomes are maintained in the [0.3 plan](0.3-plan.md) and
 [acceptance matrix](0.3-stability-acceptance.md).
@@ -44,7 +47,7 @@ and casting evaluation. No CarPlay implementation belongs in 0.3.
 
 ### 0.6.0 — Accounts, Metadata, and Provider Expansion
 
-Multiple saved accounts, playlist creation/editing, lyrics and richer metadata,
+Multiple saved accounts, playlist creation/editing, richer credits and metadata,
 advanced playback controls, and Navidrome/OpenSubsonic support.
 
 ### 0.7.0 — Quality at Scale
