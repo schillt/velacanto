@@ -102,6 +102,7 @@ struct HomeView: View {
         .scrollPosition(id: $genreShelfScrollAnchor)
         .revealsRootHeader($isRootHeaderVisible)
         .progressiveNavigationChrome()
+        .navigationTitle(presentation.title)
         .navigationDestination(item: $selectedGenre) { genre in
             MusicGenreCollectionView(
                 genre: genre,

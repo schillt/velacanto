@@ -70,6 +70,7 @@ struct ProfileView: View {
         }
         .formStyle(.grouped)
         .progressivePageHeader("Profile & Settings")
+        .navigationTitle("Profile & Settings")
         #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
         #endif
