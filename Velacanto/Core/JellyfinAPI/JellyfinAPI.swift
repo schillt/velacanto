@@ -235,6 +235,7 @@ struct JellyfinItem: Codable, Equatable, Identifiable, Sendable {
     let albumArtist: String?
     let sortName: String?
     let artists: [String]
+    let artistItems: [JellyfinArtistReference]
     let album: String?
     let indexNumber: Int?
     let parentIndexNumber: Int?
@@ -286,6 +287,7 @@ struct JellyfinItem: Codable, Equatable, Identifiable, Sendable {
         case albumArtist = "AlbumArtist"
         case sortName = "SortName"
         case artists = "Artists"
+        case artistItems = "ArtistItems"
         case album = "Album"
         case indexNumber = "IndexNumber"
         case parentIndexNumber = "ParentIndexNumber"
@@ -306,6 +308,11 @@ struct JellyfinItem: Codable, Equatable, Identifiable, Sendable {
         albumArtist = try container.decodeIfPresent(String.self, forKey: .albumArtist)
         sortName = try container.decodeIfPresent(String.self, forKey: .sortName)
         artists = try container.decodeIfPresent([String].self, forKey: .artists) ?? []
+        artistItems =
+            try container.decodeIfPresent(
+                [JellyfinArtistReference].self,
+                forKey: .artistItems
+            ) ?? []
         album = try container.decodeIfPresent(String.self, forKey: .album)
         indexNumber = try container.decodeIfPresent(Int.self, forKey: .indexNumber)
         parentIndexNumber = try container.decodeIfPresent(Int.self, forKey: .parentIndexNumber)
@@ -331,6 +338,7 @@ struct JellyfinItem: Codable, Equatable, Identifiable, Sendable {
         try container.encodeIfPresent(albumArtist, forKey: .albumArtist)
         try container.encodeIfPresent(sortName, forKey: .sortName)
         try container.encode(artists, forKey: .artists)
+        try container.encode(artistItems, forKey: .artistItems)
         try container.encodeIfPresent(album, forKey: .album)
         try container.encodeIfPresent(indexNumber, forKey: .indexNumber)
         try container.encodeIfPresent(parentIndexNumber, forKey: .parentIndexNumber)
@@ -343,6 +351,16 @@ struct JellyfinItem: Codable, Equatable, Identifiable, Sendable {
             forKey: .albumPrimaryImageTag
         )
         try container.encodeIfPresent(userData, forKey: .userData)
+    }
+}
+
+struct JellyfinArtistReference: Codable, Equatable, Sendable {
+    let id: String
+    let name: String
+
+    private enum CodingKeys: String, CodingKey {
+        case id = "Id"
+        case name = "Name"
     }
 }
 
@@ -1333,7 +1351,7 @@ actor JellyfinAPIClient: JellyfinAPIService {
     }
 
     private static let trackFields =
-        "Album,AlbumArtist,Artists,AlbumId,AlbumPrimaryImageTag,ImageTags,RunTimeTicks,UserData"
+        "Album,AlbumArtist,Artists,ArtistItems,AlbumId,AlbumPrimaryImageTag,ImageTags,RunTimeTicks,UserData"
     private static let searchFields = trackFields + ",ChildCount"
 
     private func pagedItemQuery(

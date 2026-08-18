@@ -1,3 +1,4 @@
+import Foundation
 import SwiftUI
 
 #if os(macOS)
@@ -10,7 +11,15 @@ struct VelacantoApp: App {
         historyStore: UserDefaultsPlaybackHistoryStore(),
         nowPlayingStateStore: UserDefaultsNowPlayingStateStore()
     )
-    @StateObject private var jellyfin = JellyfinSessionController()
+    @StateObject private var jellyfin: JellyfinSessionController
+
+    init() {
+        _jellyfin = StateObject(
+            wrappedValue: JellyfinSessionController(
+                autoRestore: !ProcessInfo.processInfo.arguments.contains("-uiTesting")
+            )
+        )
+    }
 
     var body: some Scene {
         WindowGroup {
