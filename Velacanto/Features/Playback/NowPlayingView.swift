@@ -223,7 +223,6 @@ struct NowPlayingView: View {
                 alignment: .bottom
             )
             .animation(.smooth(duration: 0.38, extraBounce: 0), value: isShowingQueue)
-            .animation(.smooth(duration: 0.38, extraBounce: 0), value: isShowingLyrics)
         }
     #endif
 
@@ -702,10 +701,8 @@ struct NowPlayingView: View {
                 .accessibilityLabel("Lyrics unavailable")
         case .available:
             Button {
-                withAnimation(.smooth(duration: 0.38, extraBounce: 0)) {
-                    isShowingQueue = false
-                    isShowingLyrics.toggle()
-                }
+                isShowingQueue = false
+                isShowingLyrics.toggle()
             } label: {
                 Image(systemName: isShowingLyrics ? "quote.bubble.fill" : "quote.bubble")
                     .font(.system(size: 22, weight: .medium))
