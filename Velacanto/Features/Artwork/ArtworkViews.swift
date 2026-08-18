@@ -1,3 +1,4 @@
+import ImageIO
 import SwiftUI
 import os
 
@@ -240,25 +241,30 @@ enum ArtworkLoadIntent: Int, Sendable {
     }
 }
 
-/// Starts a deliberately small, cancellable idle window for the next genre
-/// covers. Visible views use `.visible` and always win this work.
+/// Starts a small cancellable, idle prefetch window for likely next genre
+/// covers. Visible artwork can still promote ahead of this near-viewport work.
 @MainActor
-func prefetchGenreArtwork(_ genres: [MusicGenre], jellyfin: JellyfinSessionController) {
-    guard let session = jellyfin.session else { return }
+func prefetchGenreArtwork(
+    _ genres: [MusicGenre],
+    jellyfin: JellyfinSessionController
+) -> Task<Void, Never> {
+    guard let session = jellyfin.session else { return Task {} }
     let references = Array(
         Set(genres.compactMap(\.artwork))
-            .prefix(6)
+            .prefix(4)
     )
-    for artwork in references {
-        let key = ArtworkKey(
-            serverID: session.serverID,
-            userID: session.userID,
-            itemID: artwork.opaqueItemID,
-            imageTag: artwork.imageTag ?? "no-tag",
-            sizeBucket: ArtworkKey.sizeBucket(for: 360)
-        )
-        Task(priority: .background) { @MainActor in
-            _ = await ArtworkRepository.shared.image(for: key, intent: .speculative) {
+    return Task(priority: .utility) { @MainActor in
+        try? await Task.sleep(nanoseconds: 250_000_000)
+        guard !Task.isCancelled else { return }
+        for artwork in references where !Task.isCancelled {
+            let key = ArtworkKey(
+                serverID: session.serverID,
+                userID: session.userID,
+                itemID: artwork.opaqueItemID,
+                imageTag: artwork.imageTag ?? "no-tag",
+                sizeBucket: ArtworkKey.sizeBucket(for: 360)
+            )
+            _ = await ArtworkRepository.shared.image(for: key, intent: .nearViewport) {
                 await jellyfin.artworkRequest(
                     itemID: artwork.opaqueItemID,
                     imageTag: artwork.imageTag,
@@ -308,6 +314,7 @@ actor ArtworkDiskCache {
     private let indexURL: URL
     private let fileManager: FileManager
     private var entries: [String: Entry]
+    private var indexPersistenceTask: Task<Void, Never>?
 
     init(
         fileManager: FileManager = .default,
@@ -361,13 +368,13 @@ actor ArtworkDiskCache {
             data = try Data(contentsOf: fileURL)
         } catch {
             entries[key.identifier] = nil
-            persistIndex()
+            scheduleIndexPersistence()
             Self.logger.error("Could not read cached artwork")
             return nil
         }
         entry.lastAccess = Date()
         entries[key.identifier] = entry
-        persistIndex()
+        scheduleIndexPersistence()
         return data
     }
 
@@ -384,7 +391,7 @@ actor ArtworkDiskCache {
                 userID: key.userID
             )
             evictIfNeeded()
-            persistIndex()
+            scheduleIndexPersistence()
         } catch {
             Self.logger.error("Could not write cached artwork")
             return
@@ -399,7 +406,17 @@ actor ArtworkDiskCache {
             removeCachedFile(named: entry.fileName)
             entries[identifier] = nil
         }
+        scheduleIndexPersistence()
+    }
+
+    func flushIndexPersistence() {
+        indexPersistenceTask?.cancel()
+        indexPersistenceTask = nil
         persistIndex()
+    }
+
+    func hasPendingIndexPersistence() -> Bool {
+        indexPersistenceTask != nil
     }
 
     private func evictIfNeeded() {
@@ -427,6 +444,7 @@ actor ArtworkDiskCache {
     }
 
     private func persistIndex() {
+        indexPersistenceTask = nil
         do {
             try JSONEncoder().encode(entries).write(
                 to: indexURL,
@@ -434,6 +452,15 @@ actor ArtworkDiskCache {
             )
         } catch {
             Self.logger.error("Could not write artwork cache index")
+        }
+    }
+
+    private func scheduleIndexPersistence() {
+        indexPersistenceTask?.cancel()
+        indexPersistenceTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            guard !Task.isCancelled else { return }
+            await self?.persistIndex()
         }
     }
 
@@ -450,6 +477,7 @@ actor ArtworkDiskCache {
 
 actor ArtworkDownloadLimiter {
     private struct Waiter {
+        let id: UUID
         let key: ArtworkKey
         var intent: ArtworkLoadIntent
         let continuation: CheckedContinuation<Void, Never>
@@ -463,14 +491,29 @@ actor ArtworkDownloadLimiter {
     }
 
     func acquire(key: ArtworkKey, intent: ArtworkLoadIntent) async {
+        let waiterID = UUID()
         guard availablePermits == 0 else {
             availablePermits -= 1
             return
         }
 
-        await withCheckedContinuation { continuation in
-            waiters.append(Waiter(key: key, intent: intent, continuation: continuation))
-            waiters.sort { $0.intent.rawValue > $1.intent.rawValue }
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                guard !Task.isCancelled else {
+                    continuation.resume()
+                    return
+                }
+                waiters.append(
+                    Waiter(
+                        id: waiterID,
+                        key: key,
+                        intent: intent,
+                        continuation: continuation
+                    ))
+                waiters.sort { $0.intent.rawValue > $1.intent.rawValue }
+            }
+        } onCancel: {
+            Task { await self.cancelWaiter(id: waiterID) }
         }
     }
 
@@ -484,6 +527,11 @@ actor ArtworkDownloadLimiter {
 
     func hasQueuedRequest(for key: ArtworkKey) -> Bool {
         waiters.contains { $0.key == key }
+    }
+
+    private func cancelWaiter(id: UUID) {
+        guard let index = waiters.firstIndex(where: { $0.id == id }) else { return }
+        waiters.remove(at: index).continuation.resume()
     }
 
     func release() {
@@ -557,6 +605,9 @@ actor ArtworkRepository: ArtworkLoading {
         intent: ArtworkLoadIntent,
         request: @escaping @MainActor @Sendable () async -> URLRequest?
     ) async -> PlatformImage? {
+        if intent == .visible {
+            os_signpost(.event, log: Self.performanceLog, name: "Visible Artwork Requested")
+        }
         if let cached = cachedImage(for: key) {
             Self.logger.debug("Artwork memory cache hit")
             os_signpost(
@@ -564,6 +615,9 @@ actor ArtworkRepository: ArtworkLoading {
                 log: Self.performanceLog,
                 name: "Artwork Cache Hit"
             )
+            if intent == .visible {
+                os_signpost(.event, log: Self.performanceLog, name: "Visible Artwork Ready")
+            }
             return cached
         }
         let consumer = UUID()
@@ -584,6 +638,9 @@ actor ArtworkRepository: ArtworkLoading {
         return await withTaskCancellationHandler {
             let image = await task.value
             releaseConsumer(consumer, for: key)
+            if intent == .visible, image != nil {
+                os_signpost(.event, log: Self.performanceLog, name: "Visible Artwork Ready")
+            }
             return image
         } onCancel: {
             Task { await self.releaseConsumer(consumer, for: key) }
@@ -613,6 +670,7 @@ actor ArtworkRepository: ArtworkLoading {
             return
         }
         if request.consumers.isEmpty {
+            os_signpost(.event, log: Self.performanceLog, name: "Artwork Cancelled")
             request.task.cancel()
             inFlight[key] = nil
         } else {
@@ -629,7 +687,9 @@ actor ArtworkRepository: ArtworkLoading {
         intent: ArtworkLoadIntent,
         request: @escaping @MainActor @Sendable () async -> URLRequest?
     ) async -> PlatformImage? {
-        if let data = await diskCache.data(for: key), let decoded = Self.decode(data) {
+        if let data = await diskCache.data(for: key),
+            let decoded = Self.decode(data, maximumPixelSize: key.sizeBucket)
+        {
             insert(decoded, for: key)
             Self.logger.debug("Artwork disk cache hit")
             os_signpost(.event, log: Self.performanceLog, name: "Artwork Cache Hit")
@@ -649,7 +709,7 @@ actor ArtworkRepository: ArtworkLoading {
                 !Task.isCancelled,
                 let response = response as? HTTPURLResponse,
                 (200...299).contains(response.statusCode),
-                let decoded = Self.decode(data)
+                let decoded = Self.decode(data, maximumPixelSize: key.sizeBucket)
             else { return nil }
             await diskCache.store(data, for: key)
             insert(decoded, for: key)
@@ -659,11 +719,27 @@ actor ArtworkRepository: ArtworkLoading {
         }
     }
 
-    private static func decode(_ data: Data) -> PlatformImage? {
+    private static func decode(
+        _ data: Data,
+        maximumPixelSize: Int
+    ) -> PlatformImage? {
+        guard
+            let source = CGImageSourceCreateWithData(data as CFData, nil),
+            let image = CGImageSourceCreateThumbnailAtIndex(
+                source,
+                0,
+                [
+                    kCGImageSourceCreateThumbnailFromImageAlways: true,
+                    kCGImageSourceCreateThumbnailWithTransform: true,
+                    kCGImageSourceShouldCacheImmediately: false,
+                    kCGImageSourceThumbnailMaxPixelSize: maximumPixelSize,
+                ] as CFDictionary
+            )
+        else { return nil }
         #if os(iOS)
-            UIImage(data: data)
+            return UIImage(cgImage: image)
         #elseif os(macOS)
-            NSImage(data: data)
+            return NSImage(cgImage: image, size: .zero)
         #endif
     }
 }

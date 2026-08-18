@@ -1475,6 +1475,40 @@ final class PlaybackFoundationTests: XCTestCase {
         XCTAssertEqual(finalCancellationCount, 1)
     }
 
+    func testCancelledArtworkLimiterWaiterIsRemovedBeforeRelease() async {
+        let limiter = ArtworkDownloadLimiter(limit: 1)
+        let heldKey = ArtworkKey(
+            serverID: "server",
+            userID: "user",
+            itemID: "held",
+            imageTag: "tag",
+            sizeBucket: 128
+        )
+        let queuedKey = ArtworkKey(
+            serverID: "server",
+            userID: "user",
+            itemID: "queued",
+            imageTag: "tag",
+            sizeBucket: 128
+        )
+        await limiter.acquire(key: heldKey, intent: .visible)
+
+        let queued = Task {
+            await limiter.acquire(key: queuedKey, intent: .nearViewport)
+        }
+        while !(await limiter.hasQueuedRequest(for: queuedKey)) {
+            await Task.yield()
+        }
+
+        queued.cancel()
+        _ = await queued.value
+        while await limiter.hasQueuedRequest(for: queuedKey) {
+            await Task.yield()
+        }
+
+        await limiter.release()
+    }
+
     func testArtworkDiskCacheDiscardsCorruptIndex() async throws {
         let directory = FileManager.default.temporaryDirectory.appending(
             path: "VelacantoArtworkCacheTests-\(UUID().uuidString)",
@@ -1523,6 +1557,42 @@ final class PlaybackFoundationTests: XCTestCase {
 
         let cachedData = await cache.data(for: key)
         XCTAssertNil(cachedData)
+    }
+
+    func testArtworkDiskCacheDefersAndFlushesIndexPersistence() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(
+            path: "VelacantoArtworkCacheTests-\(UUID().uuidString)",
+            directoryHint: .isDirectory
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cache = ArtworkDiskCache(directory: directory)
+        let key = ArtworkKey(
+            serverID: "server",
+            userID: "user",
+            itemID: "item",
+            imageTag: "tag",
+            sizeBucket: 128
+        )
+
+        await cache.store(Data([1, 2, 3]), for: key)
+
+        let hasPendingWrite = await cache.hasPendingIndexPersistence()
+        XCTAssertTrue(hasPendingWrite)
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath: directory.appending(path: "index.json").path
+            )
+        )
+
+        await cache.flushIndexPersistence()
+
+        let hasFlushedWrite = await cache.hasPendingIndexPersistence()
+        XCTAssertFalse(hasFlushedWrite)
+        XCTAssertTrue(
+            FileManager.default.fileExists(
+                atPath: directory.appending(path: "index.json").path
+            )
+        )
     }
 
     private func makePlaybackRequest() async throws -> PlaybackRequest {

@@ -60,6 +60,7 @@ struct MusicGenreGrid: View {
     @State private var errorMessage: String?
     @State private var isLoading = true
     @State private var carouselScrollAnchor: MusicCatalogItemID?
+    @State private var genreArtworkPrefetchTask: Task<Void, Never>?
 
     var body: some View {
         Group {
@@ -77,6 +78,10 @@ struct MusicGenreGrid: View {
         }
         .task(id: jellyfin.playbackAccount) {
             await loadGenres()
+        }
+        .onDisappear {
+            genreArtworkPrefetchTask?.cancel()
+            genreArtworkPrefetchTask = nil
         }
     }
 
@@ -167,14 +172,12 @@ struct MusicGenreGrid: View {
         if !cached.isEmpty {
             genres = cached
             isLoading = false
-            prefetchGenreArtwork(genres, jellyfin: jellyfin)
-            preloadLikelyGenreAlbums(from: genres)
+            scheduleGenreArtworkPrefetch()
         }
         do {
             genres = try await jellyfin.musicGenres(forceRefresh: true)
             errorMessage = nil
-            prefetchGenreArtwork(genres, jellyfin: jellyfin)
-            preloadLikelyGenreAlbums(from: genres)
+            scheduleGenreArtworkPrefetch()
         } catch {
             genres = []
             errorMessage = error.localizedDescription
@@ -182,19 +185,9 @@ struct MusicGenreGrid: View {
         isLoading = false
     }
 
-    private func preloadLikelyGenreAlbums(from genres: [MusicGenre]) {
-        let likelyDestinations = Array(
-            genres.sorted {
-                if $0.albumCount != $1.albumCount {
-                    return $0.albumCount > $1.albumCount
-                }
-                return $0.name.localizedStandardCompare($1.name) == .orderedAscending
-            }
-            .prefix(6)
-        )
-        Task {
-            await jellyfin.preloadGenreAlbums(for: likelyDestinations)
-        }
+    private func scheduleGenreArtworkPrefetch() {
+        genreArtworkPrefetchTask?.cancel()
+        genreArtworkPrefetchTask = prefetchGenreArtwork(genres, jellyfin: jellyfin)
     }
 }
 
