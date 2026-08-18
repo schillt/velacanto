@@ -12,8 +12,17 @@ struct VelacantoApp: App {
         nowPlayingStateStore: UserDefaultsNowPlayingStateStore()
     )
     @StateObject private var jellyfin: JellyfinSessionController
+    @StateObject private var systemMediaSession: PlaybackSystemMediaSession
 
     init() {
+        let playback = AudioPlaybackCoordinator(
+            historyStore: UserDefaultsPlaybackHistoryStore(),
+            nowPlayingStateStore: UserDefaultsNowPlayingStateStore()
+        )
+        _playback = StateObject(wrappedValue: playback)
+        _systemMediaSession = StateObject(
+            wrappedValue: PlaybackSystemMediaSession(playback: playback)
+        )
         _jellyfin = StateObject(
             wrappedValue: JellyfinSessionController(
                 autoRestore: !ProcessInfo.processInfo.arguments.contains("-uiTesting")
@@ -27,6 +36,9 @@ struct VelacantoApp: App {
                 playback: playback,
                 jellyfin: jellyfin
             )
+        }
+        .onChange(of: systemMediaSession.id, initial: true) { _, _ in
+            systemMediaSession.activate()
         }
         #if os(macOS)
             .windowToolbarStyle(.unified(showsTitle: true))

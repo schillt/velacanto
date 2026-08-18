@@ -270,7 +270,6 @@ final class AudioPlaybackCoordinator: ObservableObject {
     @Published private(set) var seekRequestID = UUID()
 
     private let engine: any AudioPlayerEngine
-    private var systemMediaController: (any SystemMediaControlling)?
     private let historyStore: (any PlaybackHistoryStoring)?
     private let nowPlayingStateStore: (any NowPlayingStateStoring)?
     private var resourceLease: (any PlaybackResourceLease)?
@@ -288,8 +287,8 @@ final class AudioPlaybackCoordinator: ObservableObject {
     private var advancesAfterQueueExpansion = false
     private var artworkTask: Task<Void, Never>?
     private var artworkRequestID: UUID?
-    private var nowPlayingArtworkIdentifier: String?
-    private var nowPlayingArtwork: PlatformImage?
+    private(set) var nowPlayingArtworkIdentifier: String?
+    private(set) var nowPlayingArtwork: PlatformImage?
     private var wasPlayingBeforeInterruption = false
     private var isAudioSessionInterrupted = false
     // Keep delayed AVPlayer state observations from undoing an intentional pause
@@ -319,14 +318,12 @@ final class AudioPlaybackCoordinator: ObservableObject {
 
     init(
         engine: any AudioPlayerEngine = AVFoundationAudioPlayerEngine(),
-        systemMediaController: (any SystemMediaControlling)? = nil,
         historyStore: (any PlaybackHistoryStoring)? = nil,
         nowPlayingStateStore: (any NowPlayingStateStoring)? = nil,
         platformEventObserver: (any PlaybackPlatformEventObserving)? = nil,
         audioSessionController: (any PlaybackAudioSessionControlling)? = nil
     ) {
         self.engine = engine
-        self.systemMediaController = systemMediaController
         self.historyStore = historyStore
         self.nowPlayingStateStore = nowPlayingStateStore
         #if os(iOS)
@@ -344,9 +341,6 @@ final class AudioPlaybackCoordinator: ObservableObject {
         recentItems = historyStore?.loadItems() ?? []
         engine.eventHandler = { [weak self] event in
             self?.handle(event)
-        }
-        if systemMediaController != nil {
-            registerSystemMediaCommands()
         }
         installPlatformEventObserver()
     }
@@ -448,7 +442,6 @@ final class AudioPlaybackCoordinator: ObservableObject {
         hasExplicitPlaybackPause = false
         requiresRouteRecovery = false
         beginPlaybackStartupSignpost()
-        prepareSystemMediaController()
         let playerItem = request.asset.makePlayerItem()
 
         reportPlaybackStopped()
@@ -610,7 +603,6 @@ final class AudioPlaybackCoordinator: ObservableObject {
         nowPlayingArtwork = nil
         lifecycleReporter = nil
         nowPlayingStateStore?.clearState()
-        systemMediaController?.update(.empty)
         deactivateAudioSession()
     }
 
@@ -751,51 +743,6 @@ final class AudioPlaybackCoordinator: ObservableObject {
         playbackStartupSignpostID = nil
     }
 
-    private func registerSystemMediaCommands() {
-        systemMediaController?.registerCommands(
-            play: { [weak self] in
-                self?.resumePlayback()
-            },
-            pause: { [weak self] in
-                self?.pausePlayback()
-            },
-            previous: { [weak self] in
-                self?.previousTrack()
-            },
-            next: { [weak self] in
-                self?.nextTrack()
-            },
-            togglePlayPause: { [weak self] in
-                self?.togglePlayback()
-            },
-            seek: { [weak self] time in
-                self?.seek(toTime: time)
-            },
-            changeRepeatMode: { [weak self] mode in
-                self?.setRepeatMode(mode)
-            },
-            shuffle: { [weak self] in
-                self?.shuffleUpcoming()
-            }
-        )
-    }
-
-    private func publishNowPlaying() {
-        systemMediaController?.update(
-            NowPlayingSnapshot(
-                item: currentItem,
-                elapsed: elapsed,
-                duration: duration,
-                isPlaying: isPlaying,
-                artworkIdentifier: nowPlayingArtworkIdentifier,
-                artwork: nowPlayingArtwork,
-                canGoPrevious: canGoPrevious,
-                canGoNext: canGoNext,
-                repeatMode: repeatMode
-            )
-        )
-    }
-
     func setArtwork(
         _ image: PlatformImage?,
         identifier: String?,
@@ -811,6 +758,10 @@ final class AudioPlaybackCoordinator: ObservableObject {
         nowPlayingArtworkIdentifier = identifier
         nowPlayingArtwork = image
         publishNowPlaying()
+    }
+
+    private func publishNowPlaying() {
+        objectWillChange.send()
     }
 
     private func loadNowPlayingArtwork() {
@@ -968,7 +919,6 @@ final class AudioPlaybackCoordinator: ObservableObject {
         errorMessage = nil
         nowPlayingArtworkIdentifier = nil
         nowPlayingArtwork = nil
-        prepareSystemMediaController()
         publishNowPlaying()
         loadNowPlayingArtwork()
     }
@@ -1362,12 +1312,6 @@ final class AudioPlaybackCoordinator: ObservableObject {
         guard currentItem?.source == .jellyfin else { return fallback }
         return
             "The Jellyfin stream stopped unexpectedly. Try playing the track again."
-    }
-
-    private func prepareSystemMediaController() {
-        guard systemMediaController == nil else { return }
-        systemMediaController = MediaPlayerSystemMediaController()
-        registerSystemMediaCommands()
     }
 
     private func startPlaybackAfterAudioSessionActivation() {

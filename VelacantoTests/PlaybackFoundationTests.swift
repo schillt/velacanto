@@ -1,6 +1,6 @@
 import AVFoundation
 import Foundation
-import MediaPlayer
+import NowPlaying
 import XCTest
 
 @testable import Velacanto
@@ -10,14 +10,6 @@ import XCTest
 #elseif os(macOS)
     import AppKit
 #endif
-
-private final class SendableArtworkBox: @unchecked Sendable {
-    let artwork: MPMediaItemArtwork
-
-    init(_ artwork: MPMediaItemArtwork) {
-        self.artwork = artwork
-    }
-}
 
 @MainActor
 final class PlaybackFoundationTests: XCTestCase {
@@ -75,12 +67,10 @@ final class PlaybackFoundationTests: XCTestCase {
         )
     }
 
-    func testPlaybackCoordinatorFollowsEngineEventsAndSystemCommands() async throws {
+    func testPlaybackCoordinatorFollowsEngineEvents() async throws {
         let engine = RecordingAudioPlayerEngine()
-        let systemMediaController = RecordingSystemMediaController()
         let coordinator = AudioPlaybackCoordinator(
-            engine: engine,
-            systemMediaController: systemMediaController
+            engine: engine
         )
         let request = try await makePlaybackRequest()
 
@@ -96,26 +86,17 @@ final class PlaybackFoundationTests: XCTestCase {
 
         engine.send(.stateChanged(.playing))
         XCTAssertTrue(coordinator.isPlaying)
-        XCTAssertEqual(systemMediaController.latestSnapshot?.isPlaying, true)
 
-        systemMediaController.pause?()
+        coordinator.pausePlayback()
         XCTAssertEqual(engine.pauseCallCount, 1)
         engine.send(.stateChanged(.paused))
         XCTAssertFalse(coordinator.isPlaying)
 
-        systemMediaController.play?()
+        coordinator.resumePlayback()
         XCTAssertEqual(engine.playCallCount, 2)
         engine.send(.stateChanged(.playing))
 
-        engine.send(.timeChanged(elapsed: 1, duration: 60))
-        let snapshotCountAfterDurationChange = systemMediaController.snapshots.count
-        engine.send(.timeChanged(elapsed: 1.25, duration: 60))
-        XCTAssertEqual(
-            systemMediaController.snapshots.count,
-            snapshotCountAfterDurationChange
-        )
-
-        systemMediaController.seek?(2.5)
+        coordinator.seek(toTime: 2.5)
         XCTAssertEqual(engine.seekTimes.last, 2.5)
         XCTAssertEqual(coordinator.elapsed, 2.5, accuracy: 0.001)
 
@@ -127,15 +108,12 @@ final class PlaybackFoundationTests: XCTestCase {
         coordinator.stop()
         XCTAssertEqual(engine.stopCallCount, 1)
         XCTAssertNil(coordinator.currentItem)
-        XCTAssertEqual(systemMediaController.latestSnapshot, .empty)
     }
 
     func testPlaybackCoordinatorPublishesEngineFailure() async throws {
         let engine = RecordingAudioPlayerEngine()
-        let systemMediaController = RecordingSystemMediaController()
         let coordinator = AudioPlaybackCoordinator(
-            engine: engine,
-            systemMediaController: systemMediaController
+            engine: engine
         )
 
         coordinator.play(try await makePlaybackRequest())
@@ -144,7 +122,6 @@ final class PlaybackFoundationTests: XCTestCase {
         XCTAssertEqual(coordinator.playbackState, .failed("Stream unavailable"))
         XCTAssertEqual(coordinator.errorMessage, "Stream unavailable")
         XCTAssertFalse(coordinator.isPlaying)
-        XCTAssertEqual(systemMediaController.latestSnapshot?.isPlaying, false)
 
         engine.send(.stateChanged(.paused))
         XCTAssertEqual(coordinator.playbackState, .failed("Stream unavailable"))
@@ -156,7 +133,6 @@ final class PlaybackFoundationTests: XCTestCase {
         let engine = RecordingAudioPlayerEngine()
         let coordinator = AudioPlaybackCoordinator(
             engine: engine,
-            systemMediaController: RecordingSystemMediaController()
         )
         let request = PlaybackRequest(
             item: PlaybackItem(
@@ -190,7 +166,6 @@ final class PlaybackFoundationTests: XCTestCase {
         )
         let coordinator = AudioPlaybackCoordinator(
             engine: engine,
-            systemMediaController: RecordingSystemMediaController()
         )
 
         coordinator.play(
@@ -230,7 +205,6 @@ final class PlaybackFoundationTests: XCTestCase {
         )
         let coordinator = AudioPlaybackCoordinator(
             engine: engine,
-            systemMediaController: RecordingSystemMediaController()
         )
 
         coordinator.play(
@@ -272,7 +246,6 @@ final class PlaybackFoundationTests: XCTestCase {
         )
         let coordinator = AudioPlaybackCoordinator(
             engine: engine,
-            systemMediaController: RecordingSystemMediaController()
         )
         var resolverCallCount = 0
         coordinator.configureRequestResolver { item in
@@ -335,7 +308,6 @@ final class PlaybackFoundationTests: XCTestCase {
         let retryRequest = try makeJellyfinPlaybackRequest()
         let coordinator = AudioPlaybackCoordinator(
             engine: engine,
-            systemMediaController: RecordingSystemMediaController()
         )
         var resolverCallCount = 0
         coordinator.configureRequestResolver { _ in
@@ -374,7 +346,6 @@ final class PlaybackFoundationTests: XCTestCase {
         let audioSession = ControlledAudioSessionController()
         let coordinator = AudioPlaybackCoordinator(
             engine: engine,
-            systemMediaController: RecordingSystemMediaController(),
             audioSessionController: audioSession
         )
 
@@ -396,7 +367,6 @@ final class PlaybackFoundationTests: XCTestCase {
         let audioSession = ControlledAudioSessionController()
         let coordinator = AudioPlaybackCoordinator(
             engine: engine,
-            systemMediaController: RecordingSystemMediaController(),
             audioSessionController: audioSession
         )
 
@@ -427,7 +397,6 @@ final class PlaybackFoundationTests: XCTestCase {
         let audioSession = ControlledAudioSessionController()
         let coordinator = AudioPlaybackCoordinator(
             engine: engine,
-            systemMediaController: RecordingSystemMediaController(),
             audioSessionController: audioSession
         )
 
@@ -455,7 +424,6 @@ final class PlaybackFoundationTests: XCTestCase {
         let stateStore = RecordingNowPlayingStateStore()
         let coordinator = AudioPlaybackCoordinator(
             engine: engine,
-            systemMediaController: RecordingSystemMediaController(),
             nowPlayingStateStore: stateStore,
             platformEventObserver: platformEvents
         )
@@ -486,7 +454,6 @@ final class PlaybackFoundationTests: XCTestCase {
         let platformEvents = RecordingPlaybackPlatformEventObserver()
         let coordinator = AudioPlaybackCoordinator(
             engine: engine,
-            systemMediaController: RecordingSystemMediaController(),
             platformEventObserver: platformEvents
         )
 
@@ -509,7 +476,6 @@ final class PlaybackFoundationTests: XCTestCase {
         let platformEvents = RecordingPlaybackPlatformEventObserver()
         let coordinator = AudioPlaybackCoordinator(
             engine: engine,
-            systemMediaController: RecordingSystemMediaController(),
             platformEventObserver: platformEvents
         )
 
@@ -527,10 +493,8 @@ final class PlaybackFoundationTests: XCTestCase {
     func testRemovedOutputRoutePausesAndSynchronizesNowPlaying() async throws {
         let engine = RecordingAudioPlayerEngine()
         let platformEvents = RecordingPlaybackPlatformEventObserver()
-        let systemMediaController = RecordingSystemMediaController()
         let coordinator = AudioPlaybackCoordinator(
             engine: engine,
-            systemMediaController: systemMediaController,
             platformEventObserver: platformEvents
         )
 
@@ -544,7 +508,6 @@ final class PlaybackFoundationTests: XCTestCase {
 
         XCTAssertEqual(engine.pauseCallCount, 1)
         XCTAssertEqual(coordinator.playbackState, .paused)
-        XCTAssertEqual(systemMediaController.latestSnapshot?.isPlaying, false)
     }
 
     func testRouteRemovalKeepsLatePlayerEventsPausedUntilUserResumes()
@@ -554,7 +517,6 @@ final class PlaybackFoundationTests: XCTestCase {
         let platformEvents = RecordingPlaybackPlatformEventObserver()
         let coordinator = AudioPlaybackCoordinator(
             engine: engine,
-            systemMediaController: RecordingSystemMediaController(),
             platformEventObserver: platformEvents
         )
 
@@ -587,7 +549,6 @@ final class PlaybackFoundationTests: XCTestCase {
         let platformEvents = RecordingPlaybackPlatformEventObserver()
         let coordinator = AudioPlaybackCoordinator(
             engine: engine,
-            systemMediaController: RecordingSystemMediaController(),
             platformEventObserver: platformEvents
         )
 
@@ -609,7 +570,6 @@ final class PlaybackFoundationTests: XCTestCase {
         let engine = RecordingAudioPlayerEngine()
         let coordinator = AudioPlaybackCoordinator(
             engine: engine,
-            systemMediaController: RecordingSystemMediaController()
         )
 
         coordinator.play(try await makePlaybackRequest())
@@ -625,7 +585,6 @@ final class PlaybackFoundationTests: XCTestCase {
         let engine = RecordingAudioPlayerEngine()
         let coordinator = AudioPlaybackCoordinator(
             engine: engine,
-            systemMediaController: RecordingSystemMediaController()
         )
         var resolverCallCount = 0
         var resolverFinished = false
@@ -670,7 +629,6 @@ final class PlaybackFoundationTests: XCTestCase {
         let engine = RecordingAudioPlayerEngine()
         let coordinator = AudioPlaybackCoordinator(
             engine: engine,
-            systemMediaController: RecordingSystemMediaController()
         )
         var lease: RecordingResourceLease? = RecordingResourceLease()
         weak let retainedLease = lease
@@ -701,7 +659,6 @@ final class PlaybackFoundationTests: XCTestCase {
         let history = RecordingPlaybackHistoryStore()
         let coordinator = AudioPlaybackCoordinator(
             engine: engine,
-            systemMediaController: RecordingSystemMediaController(),
             historyStore: history
         )
         let request = try await makePlaybackRequest()
@@ -717,7 +674,6 @@ final class PlaybackFoundationTests: XCTestCase {
         let history = RecordingPlaybackHistoryStore()
         let coordinator = AudioPlaybackCoordinator(
             engine: engine,
-            systemMediaController: RecordingSystemMediaController(),
             historyStore: history
         )
         let request = try await makePlaybackRequest()
@@ -735,116 +691,14 @@ final class PlaybackFoundationTests: XCTestCase {
         XCTAssertTrue(history.savedItems.isEmpty)
     }
 
-    func testNowPlayingMetadataContainsSemanticMediaFields() {
-        let item = PlaybackItem(
-            title: "Night Drive",
-            artist: "Velacanto",
-            albumTitle: "Open Roads",
-            source: .localFiles
-        )
-        let snapshot = NowPlayingSnapshot(
-            item: item,
-            elapsed: 12,
-            duration: 120,
-            isPlaying: true
-        )
-
-        let info = MediaPlayerSystemMediaController.makeNowPlayingInfo(
-            snapshot: snapshot,
-            item: item
-        )
-
-        XCTAssertEqual(info[MPMediaItemPropertyTitle] as? String, "Night Drive")
-        XCTAssertEqual(info[MPMediaItemPropertyArtist] as? String, "Velacanto")
-        XCTAssertEqual(info[MPMediaItemPropertyAlbumTitle] as? String, "Open Roads")
-        XCTAssertEqual(
-            info[MPMediaItemPropertyPlaybackDuration] as? TimeInterval,
-            120
-        )
-        XCTAssertEqual(
-            info[MPNowPlayingInfoPropertyElapsedPlaybackTime] as? TimeInterval,
-            12
-        )
-        XCTAssertEqual(
-            info[MPNowPlayingInfoPropertyPlaybackRate] as? Double,
-            1
-        )
-    }
-
-    func testNowPlayingMetadataContainsResolvedArtwork() {
-        let item = PlaybackItem(
-            title: "Artwork",
-            artist: "Velacanto",
-            source: .jellyfin
-        )
-        #if os(macOS)
-            let image = NSImage(size: NSSize(width: 32, height: 32))
-        #else
-            let image = UIImage()
-        #endif
-        let snapshot = NowPlayingSnapshot(
-            item: item,
-            elapsed: 0,
-            duration: 60,
-            isPlaying: false,
-            artworkIdentifier: "artwork-key",
-            artwork: image
-        )
-
-        let info = MediaPlayerSystemMediaController.makeNowPlayingInfo(
-            snapshot: snapshot,
-            item: item
-        )
-
-        XCTAssertNotNil(info[MPMediaItemPropertyArtwork] as? MPMediaItemArtwork)
-    }
-
-    func testNowPlayingArtworkHandlerCanRunOutsideMainActor() async {
-        let item = PlaybackItem(
-            title: "Artwork",
-            artist: "Velacanto",
-            source: .jellyfin
-        )
-        #if os(macOS)
-            let image = NSImage(size: NSSize(width: 32, height: 32))
-        #else
-            let image = UIImage()
-        #endif
-        let snapshot = NowPlayingSnapshot(
-            item: item,
-            elapsed: 0,
-            duration: 60,
-            isPlaying: false,
-            artworkIdentifier: "artwork-key",
-            artwork: image
-        )
-        let info = MediaPlayerSystemMediaController.makeNowPlayingInfo(
-            snapshot: snapshot,
-            item: item
-        )
-        guard
-            let artwork =
-                info[MPMediaItemPropertyArtwork] as? MPMediaItemArtwork
-        else {
-            XCTFail("Expected resolved system artwork.")
-            return
-        }
-        let artworkBox = SendableArtworkBox(artwork)
-
-        let renderedImageExists = await Task.detached {
-            artworkBox.artwork.image(at: CGSize(width: 16, height: 16)) != nil
-        }.value
-
-        XCTAssertTrue(renderedImageExists)
-    }
-
-    func testPlaybackCoordinatorPublishesResolvedSystemArtwork() async {
+    func testSystemMediaSessionMirrorsSemanticPlaybackContent()
+        async throws
+    {
         let engine = RecordingAudioPlayerEngine()
-        let systemMediaController = RecordingSystemMediaController()
         let coordinator = AudioPlaybackCoordinator(
-            engine: engine,
-            systemMediaController: systemMediaController
+            engine: engine
         )
+        let media = PlaybackSystemMediaSession(playback: coordinator)
         let item = PlaybackItem(
             id: "artwork-track",
             title: "Artwork",
@@ -853,19 +707,6 @@ final class PlaybackFoundationTests: XCTestCase {
             artworkItemID: "artwork-album",
             artworkTag: "image-tag"
         )
-        #if os(macOS)
-            let image = NSImage(size: NSSize(width: 32, height: 32))
-        #else
-            let image = UIImage()
-        #endif
-        coordinator.configureArtworkResolver { resolvedItem in
-            XCTAssertEqual(resolvedItem, item)
-            return ResolvedNowPlayingArtwork(
-                identifier: "resolved-artwork",
-                image: image
-            )
-        }
-
         coordinator.play(
             PlaybackRequest(
                 item: item,
@@ -875,101 +716,19 @@ final class PlaybackFoundationTests: XCTestCase {
                 transportKind: .localFile
             )
         )
-        await waitUntil {
-            systemMediaController.latestSnapshot?.artworkIdentifier
-                == "resolved-artwork"
+        engine.send(.stateChanged(.playing))
+        engine.send(.timeChanged(elapsed: 12, duration: 120))
+        await waitUntil { media.content != nil }
+
+        let content = try XCTUnwrap(media.content as? MusicContent)
+        XCTAssertEqual(content.songTitle, "Artwork")
+        XCTAssertEqual(content.artistName, "Velacanto")
+        guard case .finite(let duration) = content.duration else {
+            return XCTFail("Expected finite media duration.")
         }
-
-        XCTAssertEqual(
-            systemMediaController.latestSnapshot?.artworkIdentifier,
-            "resolved-artwork"
-        )
-        XCTAssertTrue(systemMediaController.latestSnapshot?.artwork === image)
-    }
-
-    func testDelayedArtworkCannotReplaceCurrentTrackArtwork() async {
-        let engine = RecordingAudioPlayerEngine()
-        let systemMediaController = RecordingSystemMediaController()
-        let coordinator = AudioPlaybackCoordinator(
-            engine: engine,
-            systemMediaController: systemMediaController
-        )
-        let firstItem = PlaybackItem(
-            id: "first-track",
-            title: "First",
-            artist: "Velacanto",
-            source: .jellyfin,
-            artworkItemID: "first-album"
-        )
-        let secondItem = PlaybackItem(
-            id: "second-track",
-            title: "Second",
-            artist: "Velacanto",
-            source: .jellyfin,
-            artworkItemID: "second-album"
-        )
-        #if os(macOS)
-            let firstImage = NSImage(size: NSSize(width: 32, height: 32))
-            let secondImage = NSImage(size: NSSize(width: 32, height: 32))
-        #else
-            let firstImage = UIImage()
-            let secondImage = UIImage()
-        #endif
-        var firstContinuation:
-            CheckedContinuation<
-                ResolvedNowPlayingArtwork?, Never
-            >?
-        coordinator.configureArtworkResolver { item in
-            if item == firstItem {
-                return await withCheckedContinuation { continuation in
-                    firstContinuation = continuation
-                }
-            }
-            return ResolvedNowPlayingArtwork(
-                identifier: "second-artwork",
-                image: secondImage
-            )
-        }
-
-        coordinator.play(
-            PlaybackRequest(
-                item: firstItem,
-                asset: PlaybackAsset(
-                    url: URL(fileURLWithPath: "/tmp/first-track.caf")
-                ),
-                transportKind: .localFile
-            )
-        )
-        await waitUntil { firstContinuation != nil }
-        coordinator.play(
-            PlaybackRequest(
-                item: secondItem,
-                asset: PlaybackAsset(
-                    url: URL(fileURLWithPath: "/tmp/second-track.caf")
-                ),
-                transportKind: .localFile
-            )
-        )
-        await waitUntil {
-            systemMediaController.latestSnapshot?.artworkIdentifier
-                == "second-artwork"
-        }
-
-        firstContinuation?.resume(
-            returning: ResolvedNowPlayingArtwork(
-                identifier: "first-artwork",
-                image: firstImage
-            )
-        )
-        await Task.yield()
-
-        XCTAssertEqual(
-            systemMediaController.latestSnapshot?.artworkIdentifier,
-            "second-artwork"
-        )
-        XCTAssertTrue(
-            systemMediaController.latestSnapshot?.artwork === secondImage
-        )
+        XCTAssertEqual(duration, 120)
+        XCTAssertNotNil(media.playbackSnapshot)
+        XCTAssertFalse(media.commands.isEmpty)
     }
 
     func testStaleResolutionCannotReplaceCurrentTransportKind() async {
@@ -993,7 +752,6 @@ final class PlaybackFoundationTests: XCTestCase {
         )
         let coordinator = AudioPlaybackCoordinator(
             engine: RecordingAudioPlayerEngine(),
-            systemMediaController: RecordingSystemMediaController()
         )
         coordinator.play(
             PlaybackRequest(
@@ -1143,7 +901,6 @@ final class PlaybackFoundationTests: XCTestCase {
 
     func testQueueEditsAndPlaybackModesRestoreSafely() {
         let stateStore = RecordingNowPlayingStateStore()
-        let systemMediaController = RecordingSystemMediaController()
         let account = PlaybackAccount(serverID: "server", userID: "user")
         let items = (0..<3).map {
             PlaybackItem(
@@ -1161,7 +918,6 @@ final class PlaybackFoundationTests: XCTestCase {
         )
         let coordinator = AudioPlaybackCoordinator(
             engine: RecordingAudioPlayerEngine(),
-            systemMediaController: systemMediaController,
             nowPlayingStateStore: stateStore
         )
         coordinator.play(
@@ -1178,8 +934,8 @@ final class PlaybackFoundationTests: XCTestCase {
         )
 
         coordinator.playNext(inserted)
-        systemMediaController.changeRepeatMode?(.all)
-        systemMediaController.shuffle?()
+        coordinator.setRepeatMode(.all)
+        coordinator.shuffleUpcoming()
 
         XCTAssertEqual(coordinator.repeatMode, .all)
         XCTAssertEqual(
@@ -1192,7 +948,6 @@ final class PlaybackFoundationTests: XCTestCase {
 
         let restored = AudioPlaybackCoordinator(
             engine: RecordingAudioPlayerEngine(),
-            systemMediaController: RecordingSystemMediaController(),
             nowPlayingStateStore: stateStore
         )
         restored.restoreSavedState(serverID: "server", userID: "user")
@@ -1218,7 +973,6 @@ final class PlaybackFoundationTests: XCTestCase {
         )
         let coordinator = AudioPlaybackCoordinator(
             engine: engine,
-            systemMediaController: RecordingSystemMediaController()
         )
         coordinator.configureRequestResolver { item in
             PlaybackRequest(
@@ -1272,7 +1026,6 @@ final class PlaybackFoundationTests: XCTestCase {
         var expansionContinuation: CheckedContinuation<[PlaybackItem], Never>?
         let coordinator = AudioPlaybackCoordinator(
             engine: engine,
-            systemMediaController: RecordingSystemMediaController()
         )
         coordinator.configureRequestResolver { item in
             PlaybackRequest(
@@ -1338,7 +1091,6 @@ final class PlaybackFoundationTests: XCTestCase {
         var expansionContinuation: CheckedContinuation<[PlaybackItem], Never>?
         let coordinator = AudioPlaybackCoordinator(
             engine: engine,
-            systemMediaController: RecordingSystemMediaController()
         )
         coordinator.configureRequestResolver { item in
             PlaybackRequest(
@@ -1413,7 +1165,6 @@ final class PlaybackFoundationTests: XCTestCase {
         let engine = RecordingAudioPlayerEngine()
         let coordinator = AudioPlaybackCoordinator(
             engine: engine,
-            systemMediaController: RecordingSystemMediaController(),
             nowPlayingStateStore: stateStore
         )
 
@@ -1496,7 +1247,6 @@ final class PlaybackFoundationTests: XCTestCase {
         let engine = RecordingAudioPlayerEngine()
         let coordinator = AudioPlaybackCoordinator(
             engine: engine,
-            systemMediaController: RecordingSystemMediaController(),
             nowPlayingStateStore: store
         )
 
@@ -1515,7 +1265,6 @@ final class PlaybackFoundationTests: XCTestCase {
         let engine = RecordingAudioPlayerEngine()
         let coordinator = AudioPlaybackCoordinator(
             engine: engine,
-            systemMediaController: RecordingSystemMediaController(),
             historyStore: store
         )
         let request = try await makePlaybackRequest()
@@ -1531,7 +1280,6 @@ final class PlaybackFoundationTests: XCTestCase {
         let engine = RecordingAudioPlayerEngine()
         let coordinator = AudioPlaybackCoordinator(
             engine: engine,
-            systemMediaController: RecordingSystemMediaController()
         )
         let state = PlaybackBufferState(
             loadedThrough: 20,
@@ -1847,47 +1595,6 @@ private struct RecordingPlaybackLifecycleReporter: PlaybackLifecycleReporting {
             throw RecordingPlaybackLifecycleError.intentionalFailure
         }
         await recorder.record(.stopped(session: id, position: position))
-    }
-}
-
-@MainActor
-private final class RecordingSystemMediaController: SystemMediaControlling {
-    private(set) var snapshots: [NowPlayingSnapshot] = []
-    private(set) var play: (@MainActor () -> Void)?
-    private(set) var pause: (@MainActor () -> Void)?
-    private(set) var previous: (@MainActor () -> Void)?
-    private(set) var next: (@MainActor () -> Void)?
-    private(set) var togglePlayPause: (@MainActor () -> Void)?
-    private(set) var seek: (@MainActor (TimeInterval) -> Void)?
-    private(set) var changeRepeatMode: (@MainActor (PlaybackRepeatMode) -> Void)?
-    private(set) var shuffle: (@MainActor () -> Void)?
-
-    var latestSnapshot: NowPlayingSnapshot? {
-        snapshots.last
-    }
-
-    func registerCommands(
-        play: @escaping @MainActor () -> Void,
-        pause: @escaping @MainActor () -> Void,
-        previous: @escaping @MainActor () -> Void,
-        next: @escaping @MainActor () -> Void,
-        togglePlayPause: @escaping @MainActor () -> Void,
-        seek: @escaping @MainActor (TimeInterval) -> Void,
-        changeRepeatMode: @escaping @MainActor (PlaybackRepeatMode) -> Void,
-        shuffle: @escaping @MainActor () -> Void
-    ) {
-        self.play = play
-        self.pause = pause
-        self.previous = previous
-        self.next = next
-        self.togglePlayPause = togglePlayPause
-        self.seek = seek
-        self.changeRepeatMode = changeRepeatMode
-        self.shuffle = shuffle
-    }
-
-    func update(_ snapshot: NowPlayingSnapshot) {
-        snapshots.append(snapshot)
     }
 }
 
