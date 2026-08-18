@@ -1105,6 +1105,42 @@ final class PlaybackFoundationTests: XCTestCase {
         XCTAssertEqual(Set(queue.upcomingItems.map(\.id)), ["track-2", "track-3"])
     }
 
+    func testNativeReorderKeepsHistoryAndCurrentItemFixed() {
+        let items = (0..<5).map {
+            PlaybackItem(
+                id: "track-\($0)",
+                title: "Track \($0)",
+                artist: "Velacanto",
+                source: .jellyfin
+            )
+        }
+        var queue = PlaybackQueue(
+            items: items,
+            currentItemID: "track-1",
+            context: .songs
+        )
+
+        XCTAssertTrue(
+            queue.reorderUpcomingItems(
+                withIDs: ["track-4", "track-3"],
+                before: "track-2"
+            )
+        )
+        XCTAssertEqual(
+            queue.items.map(\.id),
+            [
+                "track-0", "track-1", "track-3", "track-4", "track-2",
+            ]
+        )
+        XCTAssertEqual(queue.currentItem?.id, "track-1")
+        XCTAssertFalse(
+            queue.reorderUpcomingItems(
+                withIDs: ["track-0"],
+                before: nil
+            )
+        )
+    }
+
     func testQueueEditsAndPlaybackModesRestoreSafely() {
         let stateStore = RecordingNowPlayingStateStore()
         let systemMediaController = RecordingSystemMediaController()

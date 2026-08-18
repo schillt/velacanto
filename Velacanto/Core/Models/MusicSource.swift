@@ -271,6 +271,35 @@ struct PlaybackQueue: Equatable, Codable, Sendable {
         return true
     }
 
+    /// Applies SwiftUI's native reorder result while keeping history and the
+    /// currently playing item outside the editable collection.
+    @discardableResult
+    mutating func reorderUpcomingItems(
+        withIDs sourceIDs: [PlaybackItem.ID],
+        before destinationID: PlaybackItem.ID?
+    ) -> Bool {
+        let upcomingStart = currentIndex + 1
+        guard items.indices.contains(upcomingStart), !sourceIDs.isEmpty else {
+            return false
+        }
+
+        let sourceIDSet = Set(sourceIDs)
+        let upcoming = Array(items[upcomingStart...])
+        let movedItems = upcoming.filter { sourceIDSet.contains($0.id) }
+        guard movedItems.count == sourceIDSet.count else { return false }
+
+        var reorderedItems = upcoming.filter { !sourceIDSet.contains($0.id) }
+        let destinationIndex =
+            destinationID.flatMap { destinationID in
+                reorderedItems.firstIndex { $0.id == destinationID }
+            } ?? reorderedItems.endIndex
+        reorderedItems.insert(contentsOf: movedItems, at: destinationIndex)
+        guard reorderedItems != upcoming else { return false }
+
+        items.replaceSubrange(upcomingStart..., with: reorderedItems)
+        return true
+    }
+
     @discardableResult
     mutating func shuffleUpcoming(
         randomIndex: (Range<Int>) -> Int = { Int.random(in: $0) }

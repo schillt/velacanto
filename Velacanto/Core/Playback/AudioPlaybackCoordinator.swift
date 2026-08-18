@@ -898,6 +898,18 @@ final class AudioPlaybackCoordinator: ObservableObject {
         editQueue { $0.moveUpcomingItem(from: source, to: destination) }
     }
 
+    func reorderUpcomingItems(
+        withIDs sourceIDs: [PlaybackItem.ID],
+        before destinationID: PlaybackItem.ID?
+    ) {
+        editQueue {
+            $0.reorderUpcomingItems(
+                withIDs: sourceIDs,
+                before: destinationID
+            )
+        }
+    }
+
     func shuffleUpcoming() {
         editQueue { $0.shuffleUpcoming() }
     }

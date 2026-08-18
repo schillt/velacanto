@@ -1,5 +1,4 @@
 import SwiftUI
-import UniformTypeIdentifiers
 
 struct PlaybackQueueView: View {
     @ObservedObject var playback: AudioPlaybackCoordinator
@@ -51,7 +50,7 @@ struct PlaybackQueueView: View {
                                     }
                                 }
                         }
-                        .onMove(perform: moveUpcomingItems)
+                        .reorderable()
                     } header: {
                         HStack {
                             Text("Up Next")
@@ -76,8 +75,10 @@ struct PlaybackQueueView: View {
                 }
             }
             .listStyle(.plain)
+            .reorderContainer(for: PlaybackItem.self) { difference in
+                reorderUpcomingItems(difference)
+            }
             #if os(iOS)
-                .environment(\.editMode, .constant(.active))
                 .scrollContentBackground(.hidden)
             #endif
             .safeAreaInset(edge: .top, spacing: 0) {
@@ -118,10 +119,20 @@ struct PlaybackQueueView: View {
         )
     }
 
-    private func moveUpcomingItems(from source: IndexSet, to destination: Int) {
-        guard let sourceIndex = source.first else { return }
-        let destinationIndex = destination > sourceIndex ? destination - 1 : destination
-        playback.moveUpcomingItem(from: sourceIndex, to: destinationIndex)
+    private func reorderUpcomingItems(
+        _ difference: ReorderDifference<PlaybackItem.ID, ReorderableSingleCollectionIdentifier>
+    ) {
+        let destinationID: PlaybackItem.ID?
+        switch difference.destination.position {
+        case .before(let itemID):
+            destinationID = itemID
+        case .end:
+            destinationID = nil
+        }
+        playback.reorderUpcomingItems(
+            withIDs: difference.sources,
+            before: destinationID
+        )
     }
 
     private func itemKey(_ item: PlaybackItem) -> String {
@@ -146,9 +157,6 @@ private struct QueueTrackRow: View {
     @ObservedObject var jellyfin: JellyfinSessionController
     var isCurrentItem = false
     var showsArtwork = true
-    var reorderItemKey: String?
-    var onReorderDragStart: ((String) -> Void)?
-    @State private var reorderPreviewWidth: CGFloat = 320
 
     var body: some View {
         HStack(spacing: 10) {
@@ -174,40 +182,8 @@ private struct QueueTrackRow: View {
                     .accessibilityLabel("Currently playing")
             }
 
-            if let reorderItemKey {
-                Image(systemName: "line.3.horizontal")
-                    .font(.body.weight(.semibold))
-                    .foregroundStyle(.tertiary)
-                    .frame(width: 32, height: 44)
-                    .contentShape(Rectangle())
-                    .onDrag {
-                        onReorderDragStart?(reorderItemKey)
-                        return NSItemProvider(object: reorderItemKey as NSString)
-                    } preview: {
-                        QueueReorderDragPreview(
-                            item: item,
-                            jellyfin: jellyfin,
-                            width: reorderPreviewWidth
-                        )
-                    }
-                    .accessibilityLabel("Reorder \(item.title)")
-            }
         }
         .padding(.vertical, 1)
-        .background {
-            if reorderItemKey != nil {
-                GeometryReader { geometry in
-                    Color.clear.preference(
-                        key: QueueTrackRowWidthPreferenceKey.self,
-                        value: geometry.size.width
-                    )
-                }
-            }
-        }
-        .onPreferenceChange(QueueTrackRowWidthPreferenceKey.self) { width in
-            guard width > 0 else { return }
-            reorderPreviewWidth = width
-        }
     }
 
     private var queueArtworkContent: some View {
@@ -217,59 +193,6 @@ private struct QueueTrackRow: View {
             cornerRadius: 7,
             maxWidth: 160
         )
-    }
-}
-
-private struct QueueReorderDragPreview: View {
-    let item: PlaybackItem
-    @ObservedObject var jellyfin: JellyfinSessionController
-    let width: CGFloat
-
-    var body: some View {
-        HStack(spacing: 10) {
-            PlaybackArtworkView(
-                item: item,
-                jellyfin: jellyfin,
-                cornerRadius: 7,
-                maxWidth: 160
-            )
-            .frame(width: 46, height: 46)
-
-            VStack(alignment: .leading, spacing: 1) {
-                Text(item.title)
-                    .font(.callout)
-                    .lineLimit(1)
-                Text(item.artist)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-
-            Spacer(minLength: 8)
-
-            Image(systemName: "line.3.horizontal")
-                .font(.body.weight(.semibold))
-                .foregroundStyle(.tertiary)
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 7)
-        .frame(width: width, alignment: .leading)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
-        .overlay {
-            RoundedRectangle(cornerRadius: 14)
-                .stroke(.primary.opacity(0.1), lineWidth: 0.5)
-        }
-        .contentShape(.dragPreview, RoundedRectangle(cornerRadius: 14))
-        .shadow(color: .black.opacity(0.2), radius: 14, y: 7)
-        .scaleEffect(1.015)
-    }
-}
-
-private struct QueueTrackRowWidthPreferenceKey: PreferenceKey {
-    static let defaultValue: CGFloat = 0
-
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = max(value, nextValue())
     }
 }
 
@@ -318,9 +241,6 @@ struct NowPlayingQueueContent: View {
     let showsCurrentItemArtwork: Bool
     let onInitialPositioned: () -> Void
 
-    @State private var draggedUpcomingItemKey: String?
-    @State private var reorderDestinationItemKey: String?
-    @State private var isReorderingAtQueueEnd = false
     @State private var hasPositionedInitialCurrentItem = false
     @State private var currentItemMinY: CGFloat?
     @State private var queueContentBottomY: CGFloat?
@@ -384,82 +304,21 @@ struct NowPlayingQueueContent: View {
                                     .queueScrollSectionHeaderStyle()
 
                                 ForEach(playback.upcomingItems) { item in
-                                    VStack(spacing: 0) {
-                                        if reorderDestinationItemKey == itemKey(item) {
-                                            QueueReorderDestinationGap()
-                                                .transition(
-                                                    .opacity.combined(
-                                                        with: .scale(
-                                                            scale: 0.9,
-                                                            anchor: .top
-                                                        )
-                                                    )
-                                                )
-                                        }
-
-                                        QueueTrackRow(
-                                            item: item,
-                                            jellyfin: jellyfin,
-                                            reorderItemKey: itemKey(item),
-                                            onReorderDragStart: { key in
-                                                draggedUpcomingItemKey = key
-                                            }
-                                        )
-                                        .queueScrollRowStyle()
-                                        .queueContextMenu(
-                                            item: item,
-                                            playback: playback,
-                                            canRemove: true
-                                        )
-                                        .onTapGesture {
-                                            playback.playQueueItem(item)
-                                        }
-                                    }
-                                    .onDrop(
-                                        of: [UTType.plainText.identifier],
-                                        delegate: QueueReorderDropDelegate(
-                                            destinationKey: itemKey(item),
-                                            items: playback.upcomingItems,
-                                            draggedItemKey: $draggedUpcomingItemKey,
-                                            hoveredDestinationKey: $reorderDestinationItemKey,
-                                            isHoveringQueueEnd: $isReorderingAtQueueEnd,
-                                            move: { source, destination in
-                                                moveUpcomingItem(
-                                                    from: source,
-                                                    to: destination
-                                                )
-                                            }
-                                        )
+                                    QueueTrackRow(
+                                        item: item,
+                                        jellyfin: jellyfin
                                     )
-                                }
-
-                                VStack(spacing: 0) {
-                                    if isReorderingAtQueueEnd {
-                                        QueueReorderDestinationGap()
-                                            .transition(
-                                                .opacity.combined(
-                                                    with: .scale(
-                                                        scale: 0.9,
-                                                        anchor: .top
-                                                    )
-                                                )
-                                            )
-                                    }
-
-                                    Color.clear
-                                        .frame(height: 24)
-                                }
-                                .onDrop(
-                                    of: [UTType.plainText.identifier],
-                                    delegate: QueueReorderDropDelegate(
-                                        destinationKey: nil,
-                                        items: playback.upcomingItems,
-                                        draggedItemKey: $draggedUpcomingItemKey,
-                                        hoveredDestinationKey: $reorderDestinationItemKey,
-                                        isHoveringQueueEnd: $isReorderingAtQueueEnd,
-                                        move: moveUpcomingItem(from:to:)
+                                    .queueScrollRowStyle()
+                                    .queueContextMenu(
+                                        item: item,
+                                        playback: playback,
+                                        canRemove: true
                                     )
-                                )
+                                    .onTapGesture {
+                                        playback.playQueueItem(item)
+                                    }
+                                }
+                                .reorderable()
                             }
 
                             Color.clear
@@ -490,6 +349,9 @@ struct NowPlayingQueueContent: View {
                     .padding(.bottom, 12)
                     .frame(minHeight: availableSpace.size.height, alignment: .top)
                     .coordinateSpace(name: "queueContent")
+                    .reorderContainer(for: PlaybackItem.self) { difference in
+                        reorderUpcomingItems(difference)
+                    }
                 }
                 .scrollIndicators(.hidden)
                 .opacity(hasPositionedInitialCurrentItem ? 1 : 0)
@@ -533,8 +395,20 @@ struct NowPlayingQueueContent: View {
         )
     }
 
-    private func moveUpcomingItem(from source: Int, to destination: Int) {
-        playback.moveUpcomingItem(from: source, to: destination)
+    private func reorderUpcomingItems(
+        _ difference: ReorderDifference<PlaybackItem.ID, ReorderableSingleCollectionIdentifier>
+    ) {
+        let destinationID: PlaybackItem.ID?
+        switch difference.destination.position {
+        case .before(let itemID):
+            destinationID = itemID
+        case .end:
+            destinationID = nil
+        }
+        playback.reorderUpcomingItems(
+            withIDs: difference.sources,
+            before: destinationID
+        )
     }
 
     private func itemKey(_ item: PlaybackItem) -> String {
@@ -570,88 +444,6 @@ struct NowPlayingQueueContent: View {
         return min(viewportHeight, max(0, viewportHeight - contentBelowCurrent))
     }
 
-}
-
-private struct QueueReorderDropDelegate: DropDelegate {
-    let destinationKey: String?
-    let items: [PlaybackItem]
-    @Binding var draggedItemKey: String?
-    @Binding var hoveredDestinationKey: String?
-    @Binding var isHoveringQueueEnd: Bool
-    let move: (Int, Int) -> Void
-
-    func dropEntered(info: DropInfo) {
-        guard
-            let draggedItemKey,
-            items.contains(where: { itemKey($0) == draggedItemKey })
-        else {
-            return
-        }
-        withAnimation(.smooth(duration: 0.2, extraBounce: 0)) {
-            hoveredDestinationKey = destinationKey
-            isHoveringQueueEnd = destinationKey == nil
-        }
-    }
-
-    func dropExited(info: DropInfo) {
-        withAnimation(.easeOut(duration: 0.12)) {
-            if hoveredDestinationKey == destinationKey {
-                hoveredDestinationKey = nil
-            }
-            if destinationKey == nil {
-                isHoveringQueueEnd = false
-            }
-        }
-    }
-
-    func dropUpdated(info: DropInfo) -> DropProposal? {
-        DropProposal(operation: .move)
-    }
-
-    func performDrop(info: DropInfo) -> Bool {
-        defer {
-            draggedItemKey = nil
-            hoveredDestinationKey = nil
-            isHoveringQueueEnd = false
-        }
-        guard
-            let draggedItemKey,
-            let source = items.firstIndex(where: { itemKey($0) == draggedItemKey })
-        else {
-            return false
-        }
-
-        let destination =
-            destinationKey.flatMap { key in
-                items.firstIndex(where: { itemKey($0) == key })
-            } ?? items.count
-        let insertionIndex = source < destination ? destination - 1 : destination
-        guard source != insertionIndex else { return false }
-        withAnimation(.smooth(duration: 0.24, extraBounce: 0)) {
-            move(source, insertionIndex)
-        }
-        return true
-    }
-
-    private func itemKey(_ item: PlaybackItem) -> String {
-        "\(item.source.rawValue)|\(item.id)"
-    }
-}
-
-private struct QueueReorderDestinationGap: View {
-    var body: some View {
-        ZStack {
-            Color.clear
-
-            Capsule()
-                .fill(.tint.opacity(0.85))
-                .frame(height: 3)
-                .padding(.leading, 76)
-                .padding(.trailing, 32)
-        }
-        .frame(height: 54)
-        .accessibilityLabel("Move here")
-    }
 }
 
 private struct QueueCurrentItemMinYPreferenceKey: PreferenceKey {
