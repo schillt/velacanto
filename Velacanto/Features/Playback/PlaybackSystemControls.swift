@@ -38,6 +38,15 @@ struct PlaybackRoutePicker: View {
         }
 
         func updateUIView(_ uiView: MPVolumeView, context: Context) {}
+
+        func sizeThatFits(
+            _ proposal: ProposedViewSize,
+            uiView: MPVolumeView,
+            context: Context
+        ) -> CGSize? {
+            guard let width = proposal.width else { return nil }
+            return CGSize(width: max(0, width), height: 34)
+        }
     }
 #elseif os(macOS)
     private struct MacOSRoutePicker: NSViewRepresentable {

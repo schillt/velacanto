@@ -32,19 +32,27 @@ struct NowPlayingView: View {
     @ViewBuilder
     private var nowPlayingContent: some View {
         #if os(iOS)
-            ZStack {
-                if let item = playback.currentItem {
-                    NowPlayingArtworkGradient(
-                        item: item,
-                        jellyfin: jellyfin,
-                        colorScheme: colorScheme
-                    )
-                } else {
-                    Color(uiColor: .systemBackground)
-                }
+            GeometryReader { geometry in
                 playerContent
+                    .frame(
+                        width: geometry.size.width,
+                        height: geometry.size.height
+                    )
+                    .background {
+                        Group {
+                            if let item = playback.currentItem {
+                                NowPlayingArtworkGradient(
+                                    item: item,
+                                    jellyfin: jellyfin,
+                                    colorScheme: colorScheme
+                                )
+                            } else {
+                                Color(uiColor: .systemBackground)
+                            }
+                        }
+                        .ignoresSafeArea()
+                    }
             }
-            .ignoresSafeArea(edges: .bottom)
         #else
             playerContent
         #endif
@@ -55,26 +63,15 @@ struct NowPlayingView: View {
             ScrollView {
                 Group {
                     if let item = playback.currentItem {
-                        ViewThatFits(in: .horizontal) {
-                            HStack(spacing: 32) {
-                                artwork(
-                                    for: item,
-                                    size: horizontalArtworkSize(in: geometry.size)
-                                )
-                                playbackDetails(for: item)
-                                    .frame(minWidth: 260, maxWidth: 420)
+                        #if os(iOS)
+                            if geometry.size.width > geometry.size.height {
+                                landscapePlayer(for: item, in: geometry.size)
+                            } else {
+                                portraitPlayer(for: item, in: geometry.size)
                             }
-                            .frame(maxWidth: 760)
-
-                            VStack(spacing: 24) {
-                                artwork(
-                                    for: item,
-                                    size: verticalArtworkSize(in: geometry.size)
-                                )
-                                playbackDetails(for: item)
-                                    .frame(maxWidth: 520)
-                            }
-                        }
+                        #else
+                            macOSPlayer(for: item, in: geometry.size)
+                        #endif
                     } else {
                         ContentUnavailableView(
                             "Nothing Playing",
@@ -83,11 +80,61 @@ struct NowPlayingView: View {
                         )
                     }
                 }
-                .padding(24)
-                .frame(maxWidth: .infinity, minHeight: geometry.size.height)
+                .padding(.horizontal, 24)
+                .padding(.vertical, 20)
+                .frame(width: geometry.size.width)
+                .frame(minHeight: geometry.size.height)
             }
         }
     }
+
+    #if os(iOS)
+        private func portraitPlayer(
+            for item: PlaybackItem,
+            in availableSize: CGSize
+        ) -> some View {
+            let width = min(520, max(0, availableSize.width - 48))
+            return VStack(spacing: 18) {
+                artwork(
+                    for: item,
+                    size: verticalArtworkSize(in: availableSize)
+                )
+                playbackDetails(for: item, width: width)
+            }
+            .frame(width: width)
+        }
+
+        private func landscapePlayer(
+            for item: PlaybackItem,
+            in availableSize: CGSize
+        ) -> some View {
+            let artworkSize = horizontalArtworkSize(in: availableSize)
+            let detailsWidth = min(
+                420,
+                max(208, availableSize.width - artworkSize - 80)
+            )
+            return HStack(spacing: 32) {
+                artwork(for: item, size: artworkSize)
+                playbackDetails(for: item, width: detailsWidth)
+            }
+            .frame(maxWidth: 760)
+        }
+    #else
+        private func macOSPlayer(
+            for item: PlaybackItem,
+            in availableSize: CGSize
+        ) -> some View {
+            let width = min(520, max(300, availableSize.width - 80))
+            return VStack(spacing: 24) {
+                artwork(
+                    for: item,
+                    size: verticalArtworkSize(in: availableSize)
+                )
+                playbackDetails(for: item, width: width)
+            }
+            .frame(width: width)
+        }
+    #endif
 
     private func artwork(for item: PlaybackItem, size: CGFloat) -> some View {
         NowPlayingArtwork(
@@ -99,7 +146,10 @@ struct NowPlayingView: View {
         .shadow(color: .black.opacity(0.16), radius: 28, y: 14)
     }
 
-    private func playbackDetails(for item: PlaybackItem) -> some View {
+    private func playbackDetails(
+        for item: PlaybackItem,
+        width: CGFloat
+    ) -> some View {
         VStack(spacing: 22) {
             VStack(spacing: 5) {
                 HStack(spacing: 10) {
@@ -172,9 +222,7 @@ struct NowPlayingView: View {
                     .contentTransition(.symbolEffect(.replace))
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel(
-                    playback.showsPauseControl ? "Pause" : "Play"
-                )
+                .accessibilityLabel(playback.showsPauseControl ? "Pause" : "Play")
 
                 Button {
                     playback.nextTrack()
@@ -220,7 +268,7 @@ struct NowPlayingView: View {
 
             #if os(iOS)
                 SystemVolumeControl()
-                    .frame(height: 34)
+                    .frame(width: width, height: 34)
                     .accessibilityLabel("Volume")
 
                 HStack {
@@ -284,6 +332,7 @@ struct NowPlayingView: View {
                     .foregroundStyle(.red)
             }
         }
+        .frame(width: width)
     }
 
     private var repeatAccessibilityLabel: String {
@@ -369,6 +418,8 @@ private struct NowPlayingArtwork: View {
 
         var body: some View {
             ZStack {
+                Color(uiColor: .systemBackground)
+
                 PlaybackArtworkView(
                     item: item,
                     jellyfin: jellyfin,
@@ -380,14 +431,14 @@ private struct NowPlayingArtwork: View {
 
                 LinearGradient(
                     colors: [
-                        .clear,
+                        Color(uiColor: .systemBackground).opacity(0.08),
                         colorScheme == .dark ? .black : .white,
                     ],
                     startPoint: .top,
                     endPoint: .bottom
                 )
             }
-            .ignoresSafeArea()
+            .clipped()
             .accessibilityHidden(true)
         }
     }
