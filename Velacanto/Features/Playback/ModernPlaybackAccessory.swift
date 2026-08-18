@@ -298,7 +298,7 @@ import SwiftUI
 #endif
 
 #if os(iOS)
-    private struct NowPlayingTitleMarquee: View {
+    struct NowPlayingTitleMarquee: View {
         @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
         let text: String

@@ -1,16 +1,12 @@
 import SwiftUI
 
-#if os(iOS)
-    import UIKit
-#endif
-
 struct MusicSearchView: View {
     @ObservedObject var playback: AudioPlaybackCoordinator
     @ObservedObject var jellyfin: JellyfinSessionController
     @Binding var searchText: String
 
     let showProfile: () -> Void
-    var focusRequest = 0
+    var isSearchTabSelected = false
 
     @StateObject private var model = PagedMusicCatalogModel()
     @State private var preparingTrackID: MusicCatalogItemID?
@@ -19,6 +15,7 @@ struct MusicSearchView: View {
     @State private var isSearchPresented = false
     @State private var isRootHeaderVisible = true
     @State private var genreGridScrollAnchor: MusicCatalogItemID?
+    @FocusState private var isSearchFocused: Bool
 
     private var query: String {
         searchText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -68,6 +65,7 @@ struct MusicSearchView: View {
                     .contentShape(Rectangle())
                     .onTapGesture {
                         isSearchPresented = false
+                        isSearchFocused = false
                     }
                 }
                 .revealsRootHeader($isRootHeaderVisible)
@@ -76,6 +74,7 @@ struct MusicSearchView: View {
                 .simultaneousGesture(
                     DragGesture(minimumDistance: 4).onChanged { _ in
                         isSearchPresented = false
+                        isSearchFocused = false
                     }
                 )
             } else if query.count < 2 {
@@ -120,6 +119,7 @@ struct MusicSearchView: View {
                 isPresented: $isSearchPresented,
                 prompt: "Albums, artists, songs, and playlists"
             )
+            .searchFocused($isSearchFocused)
             .toolbar {
                 if isRootHeaderVisible {
                     ToolbarItem(placement: .topBarLeading) {
@@ -138,20 +138,21 @@ struct MusicSearchView: View {
                 }
             }
         #endif
-        #if os(iOS)
-            .background(SearchFieldFocusBridge(focusRequest: focusRequest))
-        #endif
         .task(id: searchTaskID) {
             await search()
         }
-        .task(id: focusRequest) {
-            #if os(iOS)
-                guard focusRequest > 0 else { return }
-                await Task.yield()
-                guard !Task.isCancelled else { return }
+        #if os(iOS)
+            .onChange(of: isSearchTabSelected) { _, isSelected in
+                guard isSelected else { return }
                 isSearchPresented = true
-            #endif
-        }
+                isSearchFocused = true
+            }
+            .task {
+                guard isSearchTabSelected else { return }
+                isSearchPresented = true
+                isSearchFocused = true
+            }
+        #endif
     }
 
     private var resultsList: some View {
@@ -331,55 +332,6 @@ struct MusicSearchView: View {
         }
     }
 }
-
-#if os(iOS)
-    private struct SearchFieldFocusBridge: UIViewRepresentable {
-        let focusRequest: Int
-
-        func makeUIView(context: Context) -> UIView {
-            UIView()
-        }
-
-        func updateUIView(_ uiView: UIView, context: Context) {
-            guard focusRequest > 0, context.coordinator.lastRequest != focusRequest else {
-                return
-            }
-            context.coordinator.lastRequest = focusRequest
-
-            Task { @MainActor [weak uiView] in
-                guard let uiView else { return }
-                for _ in 0..<6 {
-                    try? await Task.sleep(for: .milliseconds(80))
-                    guard !Task.isCancelled else { return }
-                    if let searchField = findSearchField(in: uiView.window ?? uiView) {
-                        searchField.becomeFirstResponder()
-                        return
-                    }
-                }
-            }
-        }
-
-        func makeCoordinator() -> Coordinator {
-            Coordinator()
-        }
-
-        final class Coordinator {
-            var lastRequest = 0
-        }
-
-        private func findSearchField(in view: UIView) -> UISearchTextField? {
-            if let searchField = view as? UISearchTextField {
-                return searchField
-            }
-            for subview in view.subviews {
-                if let searchField = findSearchField(in: subview) {
-                    return searchField
-                }
-            }
-            return nil
-        }
-    }
-#endif
 
 private struct SearchResultRow: View {
     let item: MusicCatalogItem

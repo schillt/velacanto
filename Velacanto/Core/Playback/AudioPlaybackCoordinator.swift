@@ -267,6 +267,7 @@ final class AudioPlaybackCoordinator: ObservableObject {
     @Published private(set) var queue: PlaybackQueue?
     @Published private(set) var bufferState = PlaybackBufferState.empty
     @Published private(set) var transportKind: PlaybackTransportKind?
+    @Published private(set) var seekRequestID = UUID()
 
     private let engine: any AudioPlayerEngine
     private var systemMediaController: (any SystemMediaControlling)?
@@ -393,6 +394,11 @@ final class AudioPlaybackCoordinator: ObservableObject {
         queue?.playedItems ?? []
     }
 
+    var bufferedProgress: Double {
+        guard duration.isFinite, duration > 0 else { return 0 }
+        return min(max(bufferState.loadedThrough / duration, 0), 1)
+    }
+
     var repeatMode: PlaybackRepeatMode {
         queue?.repeatMode ?? .off
     }
@@ -497,6 +503,7 @@ final class AudioPlaybackCoordinator: ObservableObject {
 
         let upperBound = duration.isFinite && duration > 0 ? duration : time
         let target = min(max(time, 0), upperBound)
+        seekRequestID = UUID()
         engine.seek(to: target)
         elapsed = target
         reportPlaybackProgress(isPaused: !isPlaying)

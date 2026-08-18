@@ -1,5 +1,29 @@
 import SwiftUI
 
+private enum NowPlayingExploreDestination: Identifiable {
+    case album(MusicCatalogItem)
+    case artist(MusicCatalogItem)
+
+    var id: String {
+        switch self {
+        case .album(let item): "album-\(item.id.opaqueID)"
+        case .artist(let item): "artist-\(item.id.opaqueID)"
+        }
+    }
+}
+
+private struct UnavailableLyricsIcon: View {
+    var body: some View {
+        ZStack {
+            Image(systemName: "quote.bubble")
+            Rectangle()
+                .frame(width: 25, height: 2)
+                .rotationEffect(.degrees(-45))
+        }
+        .accessibilityHidden(true)
+    }
+}
+
 struct NowPlayingView: View {
     @Environment(\.dismiss) private var dismiss
     #if os(iOS)
@@ -12,44 +36,69 @@ struct NowPlayingView: View {
     @State private var isShowingQueue = false
     @State private var isShowingLyrics = false
     @State private var lyricsState = LyricsLoadState.loading
+    @State private var scrubProgress: Double?
+    @State private var isScrubbing = false
+    @State private var sliderAccent = Color.velacantoAccent
+    @State private var exploreDestination: NowPlayingExploreDestination?
+    @State private var isQueueArtworkTransitionReady = false
+    @State private var isQueueArtworkHandoffComplete = false
+    @State private var isQueueContentVisible = false
+    @State private var queueTransitionGeneration = 0
 
     var body: some View {
-        NavigationStack {
+        #if os(iOS)
             nowPlayingContent
-                .navigationTitle("Now Playing")
-                #if os(iOS)
-                    .navigationBarTitleDisplayMode(.inline)
-                #endif
-                #if os(iOS)
-                    .toolbar {
-                        ToolbarItem(placement: .confirmationAction) {
-                            Button("Done") {
-                                close()
-                            }
-                        }
-                    }
-                #else
-                    .toolbar {
-                        ToolbarItemGroup(placement: .primaryAction) {
-                            lyricsControl
-                            if dismissAction != nil {
-                                Button("Done", action: close)
-                            }
-                        }
-                    }
-                #endif
                 .task(id: lyricsLoadIdentity) {
                     await loadLyrics()
                 }
-        }
-    }
-
-    private func close() {
-        if let dismissAction {
-            dismissAction()
-        } else {
-            dismiss()
-        }
+                .simultaneousGesture(
+                    DragGesture(minimumDistance: 20)
+                        .onEnded { value in
+                            guard
+                                !isShowingQueue,
+                                !isShowingLyrics,
+                                value.translation.height > 120,
+                                abs(value.translation.width) < value.translation.height
+                            else {
+                                return
+                            }
+                            closeNowPlaying()
+                        }
+                )
+                .sheet(item: $exploreDestination) { destination in
+                    NavigationStack {
+                        switch destination {
+                        case .album(let album):
+                            JellyfinTracksView(
+                                album: album,
+                                jellyfin: jellyfin,
+                                playback: playback
+                            )
+                        case .artist(let artist):
+                            MusicArtistView(
+                                artist: artist,
+                                jellyfin: jellyfin,
+                                playback: playback
+                            )
+                        }
+                    }
+                }
+        #elseif os(macOS)
+            nowPlayingContent
+                .task(id: lyricsLoadIdentity) {
+                    await loadLyrics()
+                }
+                .overlay(alignment: .topLeading) {
+                    Button(action: closeNowPlaying) {
+                        Image(systemName: "xmark")
+                            .font(.headline)
+                            .frame(width: 36, height: 36)
+                    }
+                    .buttonStyle(.borderless)
+                    .padding(18)
+                    .accessibilityLabel("Close Now Playing")
+                }
+        #endif
     }
 
     @ViewBuilder
@@ -76,101 +125,299 @@ struct NowPlayingView: View {
                         .ignoresSafeArea()
                     }
             }
+            .task(id: sliderAccentIdentity) {
+                await updateSliderAccent()
+            }
         #else
             playerContent
         #endif
     }
 
     private var playerContent: some View {
-        Group {
-            if isShowingLyrics {
-                LyricsPresentation(
-                    playback: playback,
-                    state: lyricsState,
-                    dismiss: { isShowingLyrics = false },
-                    retry: { Task { await loadLyrics() } }
-                )
-            } else {
-                GeometryReader { geometry in
-                    ScrollView {
-                        Group {
-                            if let item = playback.currentItem {
-                                #if os(iOS)
-                                    if geometry.size.width > geometry.size.height {
-                                        landscapePlayer(for: item, in: geometry.size)
-                                    } else {
-                                        portraitPlayer(for: item, in: geometry.size)
-                                    }
-                                #else
-                                    macOSPlayer(for: item, in: geometry.size)
-                                #endif
-                            } else {
-                                ContentUnavailableView(
-                                    "Nothing Playing",
-                                    systemImage: "music.note",
-                                    description: Text("Choose music from your library to begin.")
-                                )
-                            }
-                        }
-                        .padding(.horizontal, 24)
-                        .padding(.vertical, 20)
-                        .frame(width: geometry.size.width)
-                        .frame(minHeight: geometry.size.height)
-                    }
+        GeometryReader { geometry in
+            #if os(iOS)
+                if let item = playback.currentItem,
+                    geometry.size.width <= geometry.size.height
+                {
+                    mobilePortraitPlayerContent(for: item, in: geometry)
+                } else {
+                    scrollingPlayerContent(in: geometry)
                 }
-            }
+            #else
+                scrollingPlayerContent(in: geometry)
+            #endif
         }
     }
 
     #if os(iOS)
-        private func portraitPlayer(
+        private func mobilePortraitPlayerContent(
             for item: PlaybackItem,
-            in availableSize: CGSize
+            in geometry: GeometryProxy
         ) -> some View {
-            let width = min(520, max(0, availableSize.width - 48))
-            return VStack(spacing: 18) {
-                artwork(
-                    for: item,
-                    size: verticalArtworkSize(in: availableSize)
-                )
-                playbackDetails(for: item, width: width)
-            }
-            .frame(width: width)
-        }
+            let contentWidth = min(520, max(0, geometry.size.width - 48))
+            let artworkSize = portraitArtworkSize(in: geometry.size)
 
-        private func landscapePlayer(
-            for item: PlaybackItem,
-            in availableSize: CGSize
-        ) -> some View {
-            let artworkSize = horizontalArtworkSize(in: availableSize)
-            let detailsWidth = min(
-                420,
-                max(208, availableSize.width - artworkSize - 80)
-            )
-            return HStack(spacing: 32) {
-                artwork(for: item, size: artworkSize)
-                playbackDetails(for: item, width: detailsWidth)
-            }
-            .frame(maxWidth: 760)
-        }
-    #else
-        private func macOSPlayer(
-            for item: PlaybackItem,
-            in availableSize: CGSize
-        ) -> some View {
-            let width = min(520, max(300, availableSize.width - 80))
-            return VStack(spacing: 24) {
-                artwork(
+            return VStack(spacing: 16) {
+                GeometryReader { transitionSpace in
+                    ZStack(alignment: .topLeading) {
+                        if isShowingLyrics {
+                            LyricsPresentation(
+                                playback: playback,
+                                state: lyricsState,
+                                dismiss: { isShowingLyrics = false },
+                                retry: { Task { await loadLyrics() } }
+                            )
+                        } else if isShowingQueue {
+                            ZStack(alignment: .topLeading) {
+                                NowPlayingQueueContent(
+                                    playback: playback,
+                                    jellyfin: jellyfin,
+                                    showsCurrentItemArtwork:
+                                        isQueueArtworkHandoffComplete,
+                                    onInitialPositioned: queueDidFinishInitialPositioning
+                                )
+                                .opacity(isQueueContentVisible ? 1 : 0)
+                                .offset(y: isQueueContentVisible ? 0 : 22)
+
+                                if !isQueueArtworkTransitionReady {
+                                    nowPlayingArtworkAndDetails(
+                                        for: item,
+                                        artworkSize: artworkSize,
+                                        contentWidth: contentWidth
+                                    )
+                                }
+                            }
+                        } else {
+                            nowPlayingArtworkAndDetails(
+                                for: item,
+                                artworkSize: artworkSize,
+                                contentWidth: contentWidth
+                            )
+                        }
+
+                        if !isShowingLyrics,
+                            !isShowingQueue || !isQueueArtworkHandoffComplete
+                        {
+                            sharedQueueArtwork(
+                                for: item,
+                                sourceSize: artworkSize,
+                                containerWidth: transitionSpace.size.width
+                            )
+                            .zIndex(4)
+                        }
+                    }
+                    .frame(
+                        width: transitionSpace.size.width,
+                        height: transitionSpace.size.height,
+                        alignment: .topLeading
+                    )
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+
+                playbackDetails(
                     for: item,
-                    size: verticalArtworkSize(in: availableSize)
+                    width: contentWidth,
+                    showsTrackDetails: false
                 )
-                playbackDetails(for: item, width: width)
             }
-            .frame(width: width)
+            .padding(.horizontal, 24)
+            .padding(.vertical, 20)
+            .frame(
+                width: geometry.size.width,
+                height: geometry.size.height,
+                alignment: .bottom
+            )
+            .animation(.smooth(duration: 0.38, extraBounce: 0), value: isShowingQueue)
+            .animation(.smooth(duration: 0.38, extraBounce: 0), value: isShowingLyrics)
         }
     #endif
 
-    private func artwork(for item: PlaybackItem, size: CGFloat) -> some View {
+    private func scrollingPlayerContent(in geometry: GeometryProxy) -> some View {
+        ScrollView {
+            Group {
+                if let item = playback.currentItem {
+                    #if os(iOS)
+                        if geometry.size.width > geometry.size.height {
+                            HStack(spacing: 28) {
+                                artwork(
+                                    for: item,
+                                    size: landscapeArtworkSize(in: geometry.size)
+                                )
+                                playbackDetails(
+                                    for: item,
+                                    width: min(360, max(220, geometry.size.width * 0.44))
+                                )
+                            }
+                            .frame(maxWidth: 760)
+                        } else {
+                            let contentWidth = min(
+                                520,
+                                max(0, geometry.size.width - 48)
+                            )
+                            VStack(spacing: 24) {
+                                artwork(
+                                    for: item,
+                                    size: portraitArtworkSize(in: geometry.size)
+                                )
+                                playbackDetails(for: item, width: contentWidth)
+                            }
+                            .frame(width: contentWidth)
+                        }
+                    #elseif os(macOS)
+                        VStack(spacing: 28) {
+                            artwork(
+                                for: item,
+                                size: macOSArtworkSize(in: geometry.size)
+                            )
+                            playbackDetails(
+                                for: item,
+                                width: min(480, geometry.size.width - 80)
+                            )
+                        }
+                        .frame(maxWidth: 620)
+                    #endif
+                } else {
+                    ContentUnavailableView(
+                        "Nothing Playing",
+                        systemImage: "music.note",
+                        description: Text("Choose music from your library to begin.")
+                    )
+                }
+            }
+            .padding(.horizontal, 24)
+            .padding(.vertical, 20)
+            .frame(
+                width: geometry.size.width,
+                alignment: .top
+            )
+            .frame(minHeight: geometry.size.height, alignment: .top)
+        }
+    }
+
+    @ViewBuilder
+    private func artwork(
+        for item: PlaybackItem,
+        size: CGFloat
+    ) -> some View {
+        artworkContent(for: item, size: size)
+    }
+
+    #if os(iOS)
+        private func sharedQueueArtwork(
+            for item: PlaybackItem,
+            sourceSize: CGFloat,
+            containerWidth: CGFloat
+        ) -> some View {
+            let isAtQueueRow = isShowingQueue && isQueueArtworkTransitionReady
+            let size = isAtQueueRow ? 46.0 : sourceSize
+            let horizontalOffset =
+                isAtQueueRow
+                ? 20.0
+                : max(0, (containerWidth - sourceSize) / 2)
+
+            return PlaybackArtworkView(
+                item: item,
+                jellyfin: jellyfin,
+                cornerRadius: 0,
+                maxWidth: 1_024
+            )
+            .frame(width: size, height: size)
+            .clipShape(.rect(cornerRadius: isAtQueueRow ? 7 : 18))
+            .shadow(
+                color: .black.opacity(isAtQueueRow ? 0 : 0.16),
+                radius: isAtQueueRow ? 0 : 28,
+                y: isAtQueueRow ? 0 : 14
+            )
+            .offset(
+                x: horizontalOffset,
+                y: isAtQueueRow ? 4 : 0
+            )
+            .allowsHitTesting(false)
+        }
+
+        private func nowPlayingArtworkAndDetails(
+            for item: PlaybackItem,
+            artworkSize: CGFloat,
+            contentWidth: CGFloat
+        ) -> some View {
+            VStack(spacing: 16) {
+                Color.clear
+                    .frame(width: artworkSize, height: artworkSize)
+                    .accessibilityHidden(true)
+                trackDetails(
+                    for: item,
+                    width: contentWidth
+                )
+            }
+        }
+
+        private func queueDidFinishInitialPositioning() {
+            guard isShowingQueue, !isQueueArtworkTransitionReady else { return }
+            let generation = queueTransitionGeneration
+            withAnimation(.smooth(duration: 0.34, extraBounce: 0)) {
+                isQueueArtworkTransitionReady = true
+            }
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(260))
+                guard
+                    generation == queueTransitionGeneration,
+                    isShowingQueue,
+                    isQueueArtworkTransitionReady
+                else {
+                    return
+                }
+                withAnimation(.smooth(duration: 0.22, extraBounce: 0)) {
+                    isQueueContentVisible = true
+                }
+
+                try? await Task.sleep(for: .milliseconds(90))
+                guard
+                    generation == queueTransitionGeneration,
+                    isShowingQueue,
+                    isQueueArtworkTransitionReady
+                else {
+                    return
+                }
+                var handoff = Transaction()
+                handoff.disablesAnimations = true
+                withTransaction(handoff) {
+                    isQueueArtworkHandoffComplete = true
+                }
+            }
+        }
+
+        private func toggleQueueVisibility() {
+            if isShowingQueue {
+                var handoff = Transaction()
+                handoff.disablesAnimations = true
+                withTransaction(handoff) {
+                    queueTransitionGeneration += 1
+                    isQueueArtworkHandoffComplete = false
+                }
+                Task { @MainActor in
+                    await Task.yield()
+                    withAnimation(.smooth(duration: 0.38, extraBounce: 0)) {
+                        isQueueArtworkTransitionReady = false
+                        isShowingQueue = false
+                    }
+                }
+                return
+            }
+
+            var preparation = Transaction()
+            preparation.disablesAnimations = true
+            withTransaction(preparation) {
+                queueTransitionGeneration += 1
+                isShowingLyrics = false
+                isQueueArtworkTransitionReady = false
+                isQueueArtworkHandoffComplete = false
+                isQueueContentVisible = false
+                isShowingQueue = true
+            }
+        }
+    #endif
+
+    private func artworkContent(for item: PlaybackItem, size: CGFloat) -> some View {
         NowPlayingArtwork(
             item: item,
             jellyfin: jellyfin
@@ -182,63 +429,57 @@ struct NowPlayingView: View {
 
     private func playbackDetails(
         for item: PlaybackItem,
-        width: CGFloat
+        width: CGFloat,
+        showsTrackDetails: Bool = true
     ) -> some View {
-        VStack(spacing: 22) {
-            VStack(spacing: 5) {
-                HStack(spacing: 10) {
-                    Text(item.title)
-                        .font(.title2.weight(.semibold))
-                        .multilineTextAlignment(.center)
-                    if let favoriteItemID {
-                        MusicFavoriteIDButton(itemID: favoriteItemID)
-                            .buttonStyle(.borderless)
-                            .frame(width: 44, height: 44)
-                    }
-                }
-                Text(item.artist)
-                    .foregroundStyle(.secondary)
-                if let albumTitle = item.albumTitle {
-                    Text(albumTitle)
-                        .font(.callout)
-                        .foregroundStyle(.tertiary)
-                }
-                if let transportKind = playback.transportKind {
-                    Text(transportKind.displayName)
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(.secondary)
-                        .accessibilityLabel(
-                            "Playback method: \(transportKind.displayName)"
-                        )
-                }
+        VStack(spacing: 18) {
+            if showsTrackDetails {
+                trackDetails(for: item, width: width)
             }
 
             VStack(spacing: 7) {
-                Slider(
+                BufferedPlaybackSlider(
                     value: Binding(
-                        get: { playback.progress },
-                        set: { playback.seek(toProgress: $0) }
+                        get: { scrubProgress ?? playback.progress },
+                        set: { progress in
+                            scrubProgress = progress
+                            playback.seek(toProgress: progress)
+                        }
                     ),
-                    in: 0...1
+                    bufferedProgress: playback.bufferedProgress,
+                    isEnabled: playback.duration > 0,
+                    accent: sliderAccent,
+                    onEditingChanged: updateScrubbing
                 )
-                .disabled(playback.duration <= 0)
-                .accessibilityLabel("Playback position")
+                .frame(maxWidth: .infinity)
+                .onChange(of: playback.elapsed) { _, elapsed in
+                    clearScrubProgressIfConfirmed(elapsed: elapsed)
+                }
+                .onChange(of: playback.seekRequestID) { _, _ in
+                    if !isScrubbing {
+                        scrubProgress = nil
+                    }
+                }
 
                 HStack {
-                    Text(PlaybackTimeFormatter.format(seconds: playback.elapsed))
+                    Text(PlaybackTimeFormatter.format(seconds: displayedElapsed))
                     Spacer()
                     Text(PlaybackTimeFormatter.format(seconds: playback.duration))
                 }
                 .font(.caption.monospacedDigit())
-                .foregroundStyle(.secondary)
+                .foregroundStyle(playbackSecondaryTextColor)
             }
+            .frame(width: width)
 
-            HStack(spacing: 38) {
+            HStack(spacing: 30) {
                 Button {
                     playback.previousTrack()
                 } label: {
                     Image(systemName: "backward.fill")
-                        .frame(width: 44, height: 44)
+                        .font(.system(size: 27, weight: .semibold))
+                        .foregroundStyle(playbackPrimaryTextColor)
+                        .frame(width: 56, height: 56)
+                        .contentShape(Circle())
                 }
                 .buttonStyle(.borderless)
                 .disabled(!playback.canGoPrevious)
@@ -247,118 +488,89 @@ struct NowPlayingView: View {
                 Button {
                     playback.togglePlayback()
                 } label: {
-                    Image(
-                        systemName: playback.showsPauseControl
-                            ? "pause.circle.fill"
-                            : "play.circle.fill"
-                    )
-                    .font(.system(size: 64))
-                    .contentTransition(.symbolEffect(.replace))
+                    if playback.isWaitingForPlayback {
+                        ProgressView()
+                            .controlSize(.large)
+                            .frame(width: 64, height: 64)
+                    } else {
+                        Image(
+                            systemName: playback.showsPauseControl
+                                ? "pause.fill"
+                                : "play.fill"
+                        )
+                        .font(.system(size: 42, weight: .semibold))
+                        .contentTransition(.symbolEffect(.replace))
+                        .frame(width: 64, height: 64)
+                        .contentShape(Circle())
+                    }
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel(playback.showsPauseControl ? "Pause" : "Play")
+                .accessibilityLabel(
+                    playback.isWaitingForPlayback
+                        ? "Loading playback"
+                        : playback.showsPauseControl ? "Pause" : "Play"
+                )
 
                 Button {
                     playback.nextTrack()
                 } label: {
                     Image(systemName: "forward.fill")
-                        .frame(width: 44, height: 44)
+                        .font(.system(size: 27, weight: .semibold))
+                        .foregroundStyle(playbackPrimaryTextColor)
+                        .frame(width: 56, height: 56)
+                        .contentShape(Circle())
                 }
                 .buttonStyle(.borderless)
                 .disabled(!playback.canGoNext)
                 .accessibilityLabel("Next")
             }
 
-            HStack(spacing: 22) {
-                Button {
-                    playback.shuffleUpcoming()
-                } label: {
-                    Label("Shuffle Up Next", systemImage: "shuffle")
-                        .labelStyle(.iconOnly)
-                        .frame(width: 36, height: 36)
-                }
-                .buttonStyle(.borderless)
-                .disabled(playback.upcomingItems.count < 2)
-                .accessibilityLabel("Shuffle Up Next")
-
-                Button {
-                    playback.cycleRepeatMode()
-                } label: {
-                    Label(
-                        repeatAccessibilityLabel,
-                        systemImage: playback.repeatMode == .one
-                            ? "repeat.1" : "repeat"
-                    )
-                    .labelStyle(.iconOnly)
-                    .frame(width: 36, height: 36)
-                }
-                .buttonStyle(.borderless)
-                .foregroundStyle(
-                    playback.repeatMode == .off
-                        ? Color.secondary : Color.cyan
-                )
-                .accessibilityLabel(repeatAccessibilityLabel)
-            }
-
             #if os(iOS)
-                SystemVolumeControl()
-                    .frame(width: width, height: 34)
+                SystemVolumeControl(accentColor: UIColor(sliderAccent))
+                    .frame(width: width, height: 44)
                     .accessibilityLabel("Volume")
 
                 HStack {
                     PlaybackRoutePicker()
-                        .frame(width: 44, height: 44)
+                        .scaleEffect(1.12)
+                        .frame(width: 48, height: 48)
                         .accessibilityLabel("AirPlay")
                     Spacer()
-                    lyricsControl
+                    lyricsButton
                     Spacer()
                     Button {
-                        isShowingQueue.toggle()
+                        toggleQueueVisibility()
                     } label: {
                         Image(systemName: "list.bullet")
-                            .frame(width: 44, height: 44)
+                            .font(.system(size: 22, weight: .medium))
+                            .frame(width: 48, height: 48)
+                            .contentShape(Circle())
+                            .background(
+                                isShowingQueue ? playbackPrimaryTextColor.opacity(0.22) : .clear,
+                                in: Circle()
+                            )
                     }
                     .buttonStyle(.borderless)
                     .accessibilityLabel(
-                        isShowingQueue ? "Hide Up Next" : "Show Up Next"
+                        isShowingQueue ? "Hide Queue" : "Show Queue"
                     )
                 }
-            #endif
-
-            if shouldShowQueue, !playback.upcomingItems.isEmpty {
-                Divider()
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("Up Next")
-                        .font(.headline)
-
-                    ForEach(
-                        Array(playback.upcomingItems.enumerated()),
-                        id: \.element.id
-                    ) { index, queuedItem in
-                        UpNextRow(
-                            item: queuedItem,
-                            canMoveUp: index > 0,
-                            canMoveDown: index < playback.upcomingItems.count - 1,
-                            moveUp: {
-                                playback.moveUpcomingItem(
-                                    from: index,
-                                    to: index - 1
-                                )
-                            },
-                            moveDown: {
-                                playback.moveUpcomingItem(
-                                    from: index,
-                                    to: index + 1
-                                )
-                            },
-                            remove: {
-                                playback.removeUpcomingItem(queuedItem)
-                            }
-                        )
+                .foregroundStyle(playbackPrimaryTextColor)
+                .frame(width: width)
+                .overlay(alignment: .bottom) {
+                    if let transportKind = playback.transportKind {
+                        Text(transportKind.displayName)
+                            .font(.caption2)
+                            .foregroundStyle(playbackTertiaryTextColor)
+                            .frame(width: width, alignment: .center)
+                            .offset(y: 22)
+                            .allowsHitTesting(false)
+                            .accessibilityLabel(
+                                "Playback method: \(transportKind.displayName)"
+                            )
                     }
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
+            #endif
 
             if let errorMessage = playback.errorMessage {
                 Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
@@ -366,26 +578,160 @@ struct NowPlayingView: View {
                     .foregroundStyle(.red)
             }
         }
-        .frame(width: width)
+        .frame(width: width, alignment: .leading)
     }
 
-    private var repeatAccessibilityLabel: String {
-        switch playback.repeatMode {
-        case .off: "Repeat Off"
-        case .all: "Repeat All"
-        case .one: "Repeat One"
+    @ViewBuilder
+    private func trackDetails(
+        for item: PlaybackItem,
+        width: CGFloat
+    ) -> some View {
+        trackDetailsContent(for: item, width: width)
+    }
+
+    private func trackDetailsContent(
+        for item: PlaybackItem,
+        width: CGFloat
+    ) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            VStack(alignment: .leading, spacing: 5) {
+                #if os(iOS)
+                    NowPlayingTitleMarquee(
+                        text: item.title,
+                        color: playbackPrimaryTextColor
+                    )
+                    .frame(height: 31)
+                #else
+                    Text(item.title)
+                        .font(.title2.weight(.semibold))
+                        .foregroundStyle(playbackPrimaryTextColor)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                #endif
+                Text(item.artist)
+                    .foregroundStyle(playbackSecondaryTextColor)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                if let albumTitle = item.albumTitle {
+                    Text(albumTitle)
+                        .font(.callout)
+                        .foregroundStyle(playbackTertiaryTextColor)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            if let favoriteItemID {
+                if hasExploreOptions {
+                    Menu {
+                        if let albumExploreItem {
+                            Button {
+                                exploreDestination = .album(albumExploreItem)
+                            } label: {
+                                Label("View Album", systemImage: "square.stack")
+                            }
+                        }
+
+                        if let artistExploreItem {
+                            Button {
+                                exploreDestination = .artist(artistExploreItem)
+                            } label: {
+                                Label("View Artist", systemImage: "music.mic")
+                            }
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis")
+                            .frame(width: 44, height: 44)
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel("More playback options")
+                }
+
+                MusicFavoriteIDButton(itemID: favoriteItemID)
+                    .buttonStyle(.borderless)
+                    .frame(width: 44, height: 44)
+            }
+        }
+        .frame(width: width, alignment: .leading)
+    }
+
+    private var favoriteItemID: MusicCatalogItemID? {
+        guard
+            itemIsFromJellyfin,
+            let item = playback.currentItem,
+            let session = jellyfin.session
+        else {
+            return nil
+        }
+        return MusicCatalogItemID(
+            source: .jellyfin,
+            accountScope: "\(session.serverID)|\(session.userID)",
+            opaqueID: item.id
+        )
+    }
+
+    @ViewBuilder
+    private var lyricsButton: some View {
+        switch lyricsState {
+        case .loading:
+            ProgressView()
+                .controlSize(.small)
+                .frame(width: 48, height: 48)
+                .accessibilityLabel("Loading lyrics")
+        case .unavailable:
+            UnavailableLyricsIcon()
+                .font(.system(size: 22, weight: .medium))
+                .frame(width: 48, height: 48)
+                .foregroundStyle(.tertiary)
+                .accessibilityLabel("Lyrics unavailable")
+        case .available:
+            Button {
+                withAnimation(.smooth(duration: 0.38, extraBounce: 0)) {
+                    isShowingQueue = false
+                    isShowingLyrics.toggle()
+                }
+            } label: {
+                Image(systemName: isShowingLyrics ? "quote.bubble.fill" : "quote.bubble")
+                    .font(.system(size: 22, weight: .medium))
+                    .frame(width: 48, height: 48)
+                    .contentShape(Circle())
+                    .background(
+                        isShowingLyrics ? playbackPrimaryTextColor.opacity(0.22) : .clear,
+                        in: Circle()
+                    )
+            }
+            .buttonStyle(.borderless)
+            .accessibilityLabel(isShowingLyrics ? "Hide Lyrics" : "Show Lyrics")
+        case .failed:
+            Button {
+                isShowingQueue = false
+                isShowingLyrics = true
+            } label: {
+                ZStack(alignment: .bottomTrailing) {
+                    Image(systemName: "quote.bubble")
+                    Image(systemName: "exclamationmark.circle.fill")
+                        .font(.system(size: 10))
+                }
+                .font(.system(size: 22, weight: .medium))
+                .frame(width: 48, height: 48)
+            }
+            .buttonStyle(.borderless)
+            .accessibilityLabel("Lyrics could not be loaded")
         }
     }
 
-    private var lyricsControl: some View {
-        LyricsControl(
-            state: lyricsState,
-            isPresented: isShowingLyrics,
-            action: {
-                isShowingQueue = false
-                isShowingLyrics.toggle()
+    private var lyricsFailureContent: some View {
+        ContentUnavailableView {
+            Label("Lyrics Could Not Load", systemImage: "exclamationmark.bubble")
+        } description: {
+            Text("Check your connection and try again.")
+        } actions: {
+            Button("Try Again") {
+                Task { await loadLyrics() }
             }
-        )
+        }
+        .foregroundStyle(playbackPrimaryTextColor)
     }
 
     private var lyricsLoadIdentity: String {
@@ -423,46 +769,225 @@ struct NowPlayingView: View {
         }
     }
 
-    private var favoriteItemID: MusicCatalogItemID? {
+    private var hasExploreOptions: Bool {
+        albumExploreItem != nil || artistExploreItem != nil
+    }
+
+    private var albumExploreItem: MusicCatalogItem? {
+        guard let currentItem = playback.currentItem,
+            let albumID = currentItem.albumID ?? albumContextID,
+            let accountScope = playbackAccountScope
+        else {
+            return nil
+        }
+        return exploreItem(
+            id: albumID,
+            name: currentItem.albumTitle ?? "Album",
+            kind: .album,
+            artistName: currentItem.artist,
+            accountScope: accountScope
+        )
+    }
+
+    private var artistExploreItem: MusicCatalogItem? {
+        guard let currentItem = playback.currentItem,
+            let artistID = currentItem.artistID ?? artistContextID,
+            let accountScope = playbackAccountScope
+        else {
+            return nil
+        }
+        return exploreItem(
+            id: artistID,
+            name: currentItem.artist,
+            kind: .artist,
+            artistName: currentItem.artist,
+            accountScope: accountScope
+        )
+    }
+
+    private var albumContextID: String? {
+        guard let context = playback.queue?.context,
+            case .album(let albumID) = context
+        else {
+            return nil
+        }
+        return albumID
+    }
+
+    private var artistContextID: String? {
+        guard let context = playback.queue?.context,
+            case .artist(let artistID) = context
+        else {
+            return nil
+        }
+        return artistID
+    }
+
+    private var playbackAccountScope: String? {
         guard
-            itemIsFromJellyfin,
-            let item = playback.currentItem,
+            playback.currentItem?.source == .jellyfin,
             let session = jellyfin.session
         else {
             return nil
         }
-        return MusicCatalogItemID(
-            source: .jellyfin,
-            accountScope: "\(session.serverID)|\(session.userID)",
-            opaqueID: item.id
+        return "\(session.serverID)|\(session.userID)"
+    }
+
+    private func exploreItem(
+        id: String,
+        name: String,
+        kind: MusicCatalogItem.Kind,
+        artistName: String,
+        accountScope: String
+    ) -> MusicCatalogItem {
+        MusicCatalogItem(
+            id: MusicCatalogItemID(
+                source: .jellyfin,
+                accountScope: accountScope,
+                opaqueID: id
+            ),
+            name: name,
+            kind: kind,
+            sortName: nil,
+            artists: kind == .album ? [artistName] : [],
+            albumArtist: kind == .album ? artistName : nil,
+            album: nil,
+            trackNumber: nil,
+            discNumber: nil,
+            childCount: nil,
+            duration: nil,
+            artwork: nil,
+            isFavorite: false,
+            capabilities: [.navigate, .play, .shuffle, .favorite]
         )
+    }
+
+    private var displayedElapsed: TimeInterval {
+        guard let scrubProgress else { return playback.elapsed }
+        return playback.duration * scrubProgress
+    }
+
+    #if os(iOS)
+        private var sliderAccentIdentity: String {
+            guard let item = playback.currentItem else { return "no-artwork" }
+            return [
+                item.id,
+                item.artworkItemID ?? "no-artwork",
+                item.artworkTag ?? "no-tag",
+            ].joined(separator: "|")
+        }
+
+        @MainActor
+        private func updateSliderAccent() async {
+            guard
+                let item = playback.currentItem,
+                item.source == .jellyfin,
+                let artworkItemID = item.artworkItemID,
+                let session = jellyfin.session
+            else {
+                sliderAccent = .velacantoAccent
+                return
+            }
+
+            let key = ArtworkKey(
+                serverID: session.serverID,
+                userID: session.userID,
+                itemID: artworkItemID,
+                imageTag: item.artworkTag ?? "no-tag",
+                sizeBucket: ArtworkKey.sizeBucket(for: 128)
+            )
+            let image = await ArtworkRepository.shared.image(for: key) {
+                await jellyfin.artworkRequest(
+                    itemID: artworkItemID,
+                    imageTag: item.artworkTag,
+                    maxWidth: key.sizeBucket
+                )
+            }
+            guard let image, playback.currentItem?.id == item.id else {
+                return
+            }
+
+            sliderAccent = Color(
+                uiColor: ArtworkSliderAccent.color(
+                    from: image,
+                    colorScheme: colorScheme
+                )
+            )
+        }
+    #endif
+
+    private func updateScrubbing(_ isScrubbing: Bool) {
+        self.isScrubbing = isScrubbing
+        if isScrubbing {
+            scrubProgress = playback.progress
+        }
+    }
+
+    private func clearScrubProgressIfConfirmed(elapsed: TimeInterval) {
+        guard
+            !isScrubbing,
+            let scrubProgress,
+            abs(elapsed - (playback.duration * scrubProgress)) <= 0.75
+        else {
+            return
+        }
+        self.scrubProgress = nil
     }
 
     private var itemIsFromJellyfin: Bool {
         playback.currentItem?.source == .jellyfin
     }
 
-    private var shouldShowQueue: Bool {
+    private var playbackPrimaryTextColor: Color {
         #if os(iOS)
-            isShowingQueue
+            colorScheme == .dark ? .white : .black
         #else
-            true
+            .primary
         #endif
     }
 
-    private func verticalArtworkSize(in availableSize: CGSize) -> CGFloat {
+    private var playbackSecondaryTextColor: Color {
+        #if os(iOS)
+            playbackPrimaryTextColor.opacity(0.72)
+        #else
+            .secondary
+        #endif
+    }
+
+    private var playbackTertiaryTextColor: Color {
+        #if os(iOS)
+            playbackPrimaryTextColor.opacity(0.5)
+        #else
+            .secondary.opacity(0.7)
+        #endif
+    }
+
+    private func portraitArtworkSize(in availableSize: CGSize) -> CGFloat {
         min(
-            440,
+            360,
             max(
                 160,
-                min(availableSize.width - 48, availableSize.height * 0.48)
+                min(availableSize.width - 48, availableSize.height * 0.38)
             )
         )
     }
 
-    private func horizontalArtworkSize(in availableSize: CGSize) -> CGFloat {
-        min(280, max(140, availableSize.height - 48))
+    private func landscapeArtworkSize(in availableSize: CGSize) -> CGFloat {
+        min(280, max(150, min(availableSize.width * 0.38, availableSize.height - 40)))
     }
+
+    private func macOSArtworkSize(in availableSize: CGSize) -> CGFloat {
+        min(460, max(180, min(availableSize.width - 80, availableSize.height * 0.52)))
+    }
+
+    private func closeNowPlaying() {
+        if let dismissAction {
+            dismissAction()
+        } else {
+            dismiss()
+        }
+    }
+
 }
 
 private struct NowPlayingArtwork: View {
@@ -477,7 +1002,7 @@ private struct NowPlayingArtwork: View {
         )
         .id(artworkIdentity)
         .transition(.opacity)
-        .animation(.easeOut(duration: 0.18), value: artworkIdentity)
+        .animation(.smooth(duration: 0.28, extraBounce: 0), value: artworkIdentity)
     }
 
     private var artworkIdentity: String {

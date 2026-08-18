@@ -312,7 +312,7 @@ private struct PlaybackQueueControls: View {
     }
 }
 
-private struct NowPlayingQueueContent: View {
+struct NowPlayingQueueContent: View {
     @ObservedObject var playback: AudioPlaybackCoordinator
     @ObservedObject var jellyfin: JellyfinSessionController
     let showsCurrentItemArtwork: Bool

@@ -12,7 +12,6 @@ struct VelacantoRootView: View {
 
     @State private var selectedDestination = AppDestination.home
     @State private var globalSearchText = ""
-    @State private var searchFocusRequest = 0
     #if os(macOS)
         @State private var selectedMacDestination = MacDestination.home
     #endif
@@ -233,11 +232,6 @@ struct VelacantoRootView: View {
                 }
             }
             .tabViewStyle(.sidebarAdaptable)
-            .onChange(of: selectedDestination) { _, destination in
-                if destination == .search {
-                    searchFocusRequest &+= 1
-                }
-            }
         }
     #endif
 
@@ -447,7 +441,7 @@ struct VelacantoRootView: View {
             showProfile: {
                 isShowingProfile = true
             },
-            focusRequest: searchFocusRequest
+            isSearchTabSelected: selectedDestination == .search
         )
     }
 
