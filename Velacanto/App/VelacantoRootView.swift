@@ -168,22 +168,20 @@ struct VelacantoRootView: View {
     #if os(iOS)
         @ViewBuilder
         private var iOSRoot: some View {
-            if playback.hasPlayableItem {
-                iOSTabs
-                    .tabViewBottomAccessory {
-                        ModernPlaybackAccessory(
-                            playback: playback,
-                            jellyfin: jellyfin,
-                            showNowPlaying: {
-                                isShowingNowPlaying = true
-                            },
-                            nowPlayingTransitionNamespace: nowPlayingArtworkNamespace
-                        )
-                    }
-                    .tabBarMinimizeBehavior(.onScrollDown)
-            } else {
-                iOSTabs
-            }
+            iOSTabs
+                .tabViewBottomAccessory(
+                    isEnabled: playback.hasPlayableItem && !isShowingNowPlaying
+                ) {
+                    ModernPlaybackAccessory(
+                        playback: playback,
+                        jellyfin: jellyfin,
+                        showNowPlaying: {
+                            isShowingNowPlaying = true
+                        },
+                        nowPlayingTransitionNamespace: nowPlayingArtworkNamespace
+                    )
+                }
+                .tabBarMinimizeBehavior(.onScrollDown)
         }
 
         private var iOSTabs: some View {
