@@ -1,5 +1,8 @@
 import SwiftUI
 
+// Xcode 26.6 does not expose the OS 27 reorder APIs. Keep those references
+// compiled only by the toolchain that ships their SDK, while preserving the
+// native implementation for the OS 27 product build.
 struct PlaybackQueueView: View {
     @ObservedObject var playback: AudioPlaybackCoordinator
     @ObservedObject var jellyfin: JellyfinSessionController
@@ -50,7 +53,9 @@ struct PlaybackQueueView: View {
                                     }
                                 }
                         }
-                        .reorderable()
+                        #if compiler(>=6.4)
+                            .reorderable()
+                        #endif
                     } header: {
                         HStack {
                             Text("Up Next")
@@ -75,9 +80,11 @@ struct PlaybackQueueView: View {
                 }
             }
             .listStyle(.plain)
-            .reorderContainer(for: PlaybackItem.self) { difference in
-                reorderUpcomingItems(difference)
-            }
+            #if compiler(>=6.4)
+                .reorderContainer(for: PlaybackItem.self) { difference in
+                    reorderUpcomingItems(difference)
+                }
+            #endif
             #if os(iOS)
                 .scrollContentBackground(.hidden)
             #endif
@@ -119,21 +126,23 @@ struct PlaybackQueueView: View {
         )
     }
 
-    private func reorderUpcomingItems(
-        _ difference: ReorderDifference<PlaybackItem.ID, ReorderableSingleCollectionIdentifier>
-    ) {
-        let destinationID: PlaybackItem.ID?
-        switch difference.destination.position {
-        case .before(let itemID):
-            destinationID = itemID
-        case .end:
-            destinationID = nil
+    #if compiler(>=6.4)
+        private func reorderUpcomingItems(
+            _ difference: ReorderDifference<PlaybackItem.ID, ReorderableSingleCollectionIdentifier>
+        ) {
+            let destinationID: PlaybackItem.ID?
+            switch difference.destination.position {
+            case .before(let itemID):
+                destinationID = itemID
+            case .end:
+                destinationID = nil
+            }
+            playback.reorderUpcomingItems(
+                withIDs: difference.sources,
+                before: destinationID
+            )
         }
-        playback.reorderUpcomingItems(
-            withIDs: difference.sources,
-            before: destinationID
-        )
-    }
+    #endif
 
     private func itemKey(_ item: PlaybackItem) -> String {
         "\(item.source.rawValue)|\(item.id)"
@@ -318,7 +327,9 @@ struct NowPlayingQueueContent: View {
                                         playback.playQueueItem(item)
                                     }
                                 }
-                                .reorderable()
+                                #if compiler(>=6.4)
+                                    .reorderable()
+                                #endif
                             }
 
                             Color.clear
@@ -349,9 +360,11 @@ struct NowPlayingQueueContent: View {
                     .padding(.bottom, 12)
                     .frame(minHeight: availableSpace.size.height, alignment: .top)
                     .coordinateSpace(name: "queueContent")
-                    .reorderContainer(for: PlaybackItem.self) { difference in
-                        reorderUpcomingItems(difference)
-                    }
+                    #if compiler(>=6.4)
+                        .reorderContainer(for: PlaybackItem.self) { difference in
+                            reorderUpcomingItems(difference)
+                        }
+                    #endif
                 }
                 .scrollIndicators(.hidden)
                 .opacity(hasPositionedInitialCurrentItem ? 1 : 0)
@@ -395,21 +408,23 @@ struct NowPlayingQueueContent: View {
         )
     }
 
-    private func reorderUpcomingItems(
-        _ difference: ReorderDifference<PlaybackItem.ID, ReorderableSingleCollectionIdentifier>
-    ) {
-        let destinationID: PlaybackItem.ID?
-        switch difference.destination.position {
-        case .before(let itemID):
-            destinationID = itemID
-        case .end:
-            destinationID = nil
+    #if compiler(>=6.4)
+        private func reorderUpcomingItems(
+            _ difference: ReorderDifference<PlaybackItem.ID, ReorderableSingleCollectionIdentifier>
+        ) {
+            let destinationID: PlaybackItem.ID?
+            switch difference.destination.position {
+            case .before(let itemID):
+                destinationID = itemID
+            case .end:
+                destinationID = nil
+            }
+            playback.reorderUpcomingItems(
+                withIDs: difference.sources,
+                before: destinationID
+            )
         }
-        playback.reorderUpcomingItems(
-            withIDs: difference.sources,
-            before: destinationID
-        )
-    }
+    #endif
 
     private func itemKey(_ item: PlaybackItem) -> String {
         "\(item.source.rawValue)|\(item.id)"
