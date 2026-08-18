@@ -6,7 +6,9 @@ import os
 /// A repository is a short-lived snapshot of the current session and libraries.
 /// Its cursor is valid only for the query identity recorded in the cursor; callers
 /// must discard it when the query, context, or library list changes.
-actor JellyfinCatalogRepository: MusicLibraryProviding, MusicItemActionProviding {
+actor JellyfinCatalogRepository: MusicLibraryProviding, MusicItemActionProviding,
+    MusicLyricsProviding
+{
     private static let performanceLog = OSLog(
         subsystem: "com.chameleonenterprise.velacanto",
         category: "Performance"
@@ -72,6 +74,28 @@ actor JellyfinCatalogRepository: MusicLibraryProviding, MusicItemActionProviding
             imageTag: imageTag,
             maxWidth: maxWidth
         )
+    }
+
+    // MARK: - Lyrics reads
+
+    func lyrics(for itemID: MusicCatalogItemID) async throws -> MusicLyrics? {
+        guard itemID.source == .jellyfin, itemID.accountScope == accountScope else {
+            throw JellyfinAPIError.invalidResponse
+        }
+        guard let response = try await api.lyrics(itemID: itemID.opaqueID) else {
+            return nil
+        }
+
+        let lines: [MusicLyricLine] = response.lyrics.enumerated().compactMap {
+            index, line in
+            let text = line.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { return nil }
+            let startTime = line.start.map {
+                max(0, TimeInterval($0) / 10_000_000)
+            }
+            return MusicLyricLine(id: index, text: text, startTime: startTime)
+        }
+        return lines.isEmpty ? nil : MusicLyrics(lines: lines)
     }
 
     // MARK: - Paging

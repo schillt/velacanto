@@ -137,6 +137,24 @@ struct JellyfinPlaybackResolution: Equatable, Sendable {
     let playMethod: JellyfinPlaybackMethod
 }
 
+struct JellyfinLyricsResponse: Decodable, Equatable, Sendable {
+    let lyrics: [JellyfinLyricLine]
+
+    private enum CodingKeys: String, CodingKey {
+        case lyrics = "Lyrics"
+    }
+}
+
+struct JellyfinLyricLine: Decodable, Equatable, Sendable {
+    let text: String
+    let start: Int64?
+
+    private enum CodingKeys: String, CodingKey {
+        case text = "Text"
+        case start = "Start"
+    }
+}
+
 struct JellyfinPlaybackInfoResponse: Decodable, Equatable, Sendable {
     let mediaSources: [JellyfinPlaybackMediaSource]
     let playSessionID: String?
@@ -824,6 +842,7 @@ protocol JellyfinAPIService: Sendable {
         itemID: String,
         userID: String
     ) async throws -> JellyfinPlaybackResolution
+    func lyrics(itemID: String) async throws -> JellyfinLyricsResponse?
     func setFavorite(
         _ isFavorite: Bool,
         itemID: String,
@@ -915,6 +934,8 @@ protocol JellyfinAPIService: Sendable {
 }
 
 extension JellyfinAPIService {
+    func lyrics(itemID: String) async throws -> JellyfinLyricsResponse? { nil }
+
     func reportPlaybackStarted(
         itemID: String,
         playSessionID: String,
@@ -994,6 +1015,17 @@ actor JellyfinAPIClient: JellyfinAPIService {
             builder.request(pathComponents: ["Users", "Me"]),
             as: JellyfinUser.self
         )
+    }
+
+    func lyrics(itemID: String) async throws -> JellyfinLyricsResponse? {
+        do {
+            return try await execute(
+                builder.request(pathComponents: ["Audio", itemID, "Lyrics"]),
+                as: JellyfinLyricsResponse.self
+            )
+        } catch JellyfinAPIError.httpStatus(404) {
+            return nil
+        }
     }
 
     func libraries(userID: String) async throws -> [JellyfinItem] {

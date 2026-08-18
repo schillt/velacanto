@@ -21,6 +21,17 @@ enum JellyfinSessionPhase: Equatable, Sendable {
 /// affect presentation. Each asynchronous operation snapshots the active
 /// session before awaiting so stale responses cannot repopulate the UI.
 final class JellyfinSessionController: ObservableObject {
+    private enum CachedLyrics {
+        case available(MusicLyrics)
+        case unavailable
+    }
+
+    private struct ActiveLyricsRequest {
+        let id: UUID
+        let itemID: MusicCatalogItemID
+        let task: Task<MusicLyrics?, Error>
+    }
+
     private static let logger = Logger(
         subsystem: "com.chameleonenterprise.velacanto",
         category: "Session"
@@ -44,6 +55,8 @@ final class JellyfinSessionController: ObservableObject {
     private let deviceID: String
     private var candidateServer: JellyfinServerURL?
     private var client: (any JellyfinAPIService)?
+    private var lyricsCache: [MusicCatalogItemID: CachedLyrics] = [:]
+    private var activeLyricsRequest: ActiveLyricsRequest?
 
     convenience init(autoRestore: Bool = true) {
         self.init(
@@ -115,6 +128,7 @@ final class JellyfinSessionController: ObservableObject {
     // MARK: - Connection lifecycle
 
     func connect(to userInput: String) async {
+        resetLyricsState()
         phase = .connecting
         errorMessage = nil
         serverInfo = nil
@@ -371,6 +385,66 @@ final class JellyfinSessionController: ObservableObject {
         }
     }
 
+    func lyrics(for item: PlaybackItem) async throws -> MusicLyrics? {
+        guard item.source == .jellyfin, let account = playbackAccount else {
+            resetLyricsState()
+            return nil
+        }
+        let itemID = MusicCatalogItemID(
+            source: .jellyfin,
+            accountScope: "\(account.serverID)|\(account.userID)",
+            opaqueID: item.id
+        )
+
+        if let cached = lyricsCache[itemID] {
+            switch cached {
+            case .available(let lyrics):
+                return lyrics
+            case .unavailable:
+                return nil
+            }
+        }
+
+        activeLyricsRequest?.task.cancel()
+        let repository = try catalogRepository()
+        let requestID = UUID()
+        let task = Task {
+            try await repository.lyrics(for: itemID)
+        }
+        activeLyricsRequest = ActiveLyricsRequest(
+            id: requestID,
+            itemID: itemID,
+            task: task
+        )
+
+        do {
+            let lyrics = try await withTaskCancellationHandler {
+                try await task.value
+            } onCancel: {
+                task.cancel()
+            }
+            guard
+                activeLyricsRequest?.id == requestID,
+                activeLyricsRequest?.itemID == itemID,
+                playbackAccount == account
+            else {
+                return nil
+            }
+            activeLyricsRequest = nil
+            lyricsCache[itemID] = lyrics.map(CachedLyrics.available) ?? .unavailable
+            return lyrics
+        } catch {
+            if activeLyricsRequest?.id == requestID {
+                activeLyricsRequest = nil
+            }
+            handleExpiredSessionIfNeeded(error)
+            if error is CancellationError {
+                throw error
+            }
+            throw MusicLyricsError.unavailable
+        }
+    }
+
     // MARK: - Artwork façade
 
     func artworkRequest(
@@ -575,6 +649,7 @@ final class JellyfinSessionController: ObservableObject {
 
     private func clearSession() {
         itemActions.clear()
+        resetLyricsState()
         session = nil
         candidateServer = nil
         serverInfo = nil
@@ -582,6 +657,12 @@ final class JellyfinSessionController: ObservableObject {
         libraries = []
         isRefreshingLibraries = false
         phase = .signedOut
+    }
+
+    private func resetLyricsState() {
+        activeLyricsRequest?.task.cancel()
+        activeLyricsRequest = nil
+        lyricsCache.removeAll(keepingCapacity: false)
     }
 
     private func configureItemActions() {

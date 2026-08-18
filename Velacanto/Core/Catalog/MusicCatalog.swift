@@ -11,6 +11,45 @@ struct MusicArtworkReference: Equatable, Codable, Sendable {
     let imageTag: String?
 }
 
+/// Provider-neutral lyrics for one playable catalog item.
+struct MusicLyrics: Equatable, Sendable {
+    let lines: [MusicLyricLine]
+
+    var hasTimedLines: Bool {
+        lines.contains { $0.startTime != nil }
+    }
+
+    var isFullyTimed: Bool {
+        !lines.isEmpty && lines.allSatisfy { $0.startTime != nil }
+    }
+
+    func activeLine(at playbackTime: TimeInterval) -> MusicLyricLine? {
+        lines.reduce(nil) { activeLine, line in
+            guard let startTime = line.startTime, startTime <= playbackTime else {
+                return activeLine
+            }
+            guard let activeStartTime = activeLine?.startTime else {
+                return line
+            }
+            return startTime >= activeStartTime ? line : activeLine
+        }
+    }
+}
+
+struct MusicLyricLine: Identifiable, Equatable, Sendable {
+    let id: Int
+    let text: String
+    let startTime: TimeInterval?
+}
+
+enum MusicLyricsError: LocalizedError, Equatable, Sendable {
+    case unavailable
+
+    var errorDescription: String? {
+        "Lyrics could not be loaded. Try again."
+    }
+}
+
 struct MusicItemCapabilities: OptionSet, Codable, Sendable {
     let rawValue: UInt16
 
@@ -191,4 +230,8 @@ protocol MusicItemActionProviding: Sendable {
         _ isFavorite: Bool,
         for itemID: MusicCatalogItemID
     ) async throws
+}
+
+protocol MusicLyricsProviding: Sendable {
+    func lyrics(for itemID: MusicCatalogItemID) async throws -> MusicLyrics?
 }

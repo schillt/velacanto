@@ -1340,6 +1340,312 @@ final class JellyfinFoundationTests: XCTestCase {
         XCTAssertNil(mapper.map(unsupportedTransport))
     }
 
+    func testLyricsMappingNormalizesTimedUntimedBlankAndNegativeLines() async throws {
+        let response = try lyricsResponse(
+            """
+            {"Lyrics":[
+              {"Text":" First line ","Start":0},
+              {"Text":"Second line","Start":125000000},
+              {"Text":"Untimed line","Start":null},
+              {"Text":"Negative start","Start":-10},
+              {"Text":"   "}
+            ]}
+            """
+        )
+        let repository = JellyfinCatalogRepository(
+            api: FakeJellyfinAPI(lyricsResponses: ["track": response]),
+            userID: "user",
+            accountScope: "server|user",
+            libraryIDs: []
+        )
+
+        let loadedLyrics = try await repository.lyrics(
+            for: MusicCatalogItemID(
+                source: .jellyfin,
+                accountScope: "server|user",
+                opaqueID: "track"
+            )
+        )
+        let lyrics = try XCTUnwrap(loadedLyrics)
+
+        XCTAssertEqual(
+            lyrics.lines.map(\.text),
+            ["First line", "Second line", "Untimed line", "Negative start"]
+        )
+        XCTAssertEqual(lyrics.lines.map(\.startTime), [0, 12.5, nil, 0])
+        XCTAssertTrue(lyrics.hasTimedLines)
+        XCTAssertFalse(lyrics.isFullyTimed)
+    }
+
+    func testLyricsMappingTreatsEmptyPayloadAsUnavailable() async throws {
+        let repository = JellyfinCatalogRepository(
+            api: FakeJellyfinAPI(
+                lyricsResponses: [
+                    "empty": try lyricsResponse(#"{"Lyrics":[]}"#),
+                    "blank": try lyricsResponse(#"{"Lyrics":[{"Text":"  "}]}"#),
+                ]
+            ),
+            userID: "user",
+            accountScope: "server|user",
+            libraryIDs: []
+        )
+
+        for itemID in ["empty", "blank"] {
+            let lyrics = try await repository.lyrics(
+                for: MusicCatalogItemID(
+                    source: .jellyfin,
+                    accountScope: "server|user",
+                    opaqueID: itemID
+                )
+            )
+            XCTAssertNil(lyrics)
+        }
+    }
+
+    func testLyricsProviderRejectsCrossAccountAndCrossSourceIdentifiers() async throws {
+        let repository = JellyfinCatalogRepository(
+            api: FakeJellyfinAPI(),
+            userID: "user",
+            accountScope: "server|user",
+            libraryIDs: []
+        )
+        let invalidIDs = [
+            MusicCatalogItemID(
+                source: .jellyfin,
+                accountScope: "server|different-user",
+                opaqueID: "track"
+            ),
+            MusicCatalogItemID(
+                source: .localFiles,
+                accountScope: "server|user",
+                opaqueID: "track"
+            ),
+        ]
+
+        for itemID in invalidIDs {
+            do {
+                _ = try await repository.lyrics(for: itemID)
+                XCTFail("Expected an identifier outside the account scope to be rejected.")
+            } catch {
+                XCTAssertEqual(error as? JellyfinAPIError, .invalidResponse)
+            }
+        }
+    }
+
+    func testLyricsActiveLineUsesLatestElapsedTimestamp() throws {
+        let lyrics = MusicLyrics(lines: [
+            MusicLyricLine(id: 0, text: "Untimed", startTime: nil),
+            MusicLyricLine(id: 1, text: "First", startTime: 0),
+            MusicLyricLine(id: 3, text: "Third", startTime: 20),
+            MusicLyricLine(id: 2, text: "Second", startTime: 10),
+        ])
+
+        XCTAssertNil(lyrics.activeLine(at: -0.1))
+        XCTAssertEqual(lyrics.activeLine(at: 0)?.id, 1)
+        XCTAssertEqual(lyrics.activeLine(at: 19.9)?.id, 2)
+        XCTAssertEqual(lyrics.activeLine(at: 20)?.id, 3)
+    }
+
+    func testLyricsSessionCachesResultsAndClearsThemOnLogout() async throws {
+        let response = try lyricsResponse(#"{"Lyrics":[{"Text":"Line","Start":0}]}"#)
+        let api = FakeJellyfinAPI(lyricsResponses: ["available": response])
+        let controller = JellyfinSessionController(
+            tokenStore: RecordingTokenStore(),
+            sessionStore: RecordingSessionStore(),
+            autoRestore: false,
+            makeClient: { _, _, _ in api }
+        )
+        await controller.connect(to: "https://example.com")
+        await controller.signIn(username: "Tyler", password: "correct")
+        let available = PlaybackItem(
+            id: "available", title: "Song", artist: "Artist", source: .jellyfin
+        )
+        let unavailable = PlaybackItem(
+            id: "unavailable", title: "Song", artist: "Artist", source: .jellyfin
+        )
+
+        let firstAvailable = try await controller.lyrics(for: available)
+        let cachedAvailable = try await controller.lyrics(for: available)
+        let firstUnavailable = try await controller.lyrics(for: unavailable)
+        let cachedUnavailable = try await controller.lyrics(for: unavailable)
+        let initialRequestCount = await api.lyricsRequestCount()
+        XCTAssertNotNil(firstAvailable)
+        XCTAssertNotNil(cachedAvailable)
+        XCTAssertNil(firstUnavailable)
+        XCTAssertNil(cachedUnavailable)
+        XCTAssertEqual(initialRequestCount, 2)
+
+        await controller.logout()
+        await controller.connect(to: "https://example.com")
+        await controller.signIn(username: "Tyler", password: "correct")
+
+        let lyricsAfterLogout = try await controller.lyrics(for: available)
+        let requestCountAfterLogout = await api.lyricsRequestCount()
+        XCTAssertNotNil(lyricsAfterLogout)
+        XCTAssertEqual(requestCountAfterLogout, 3)
+    }
+
+    func testLyricsFailureIsPrivateAndRetryable() async throws {
+        let response = try lyricsResponse(#"{"Lyrics":[{"Text":"Line"}]}"#)
+        let api = FakeJellyfinAPI(
+            lyricsResponses: ["private-track-id": response],
+            transientLyricsFailures: 1
+        )
+        let controller = JellyfinSessionController(
+            tokenStore: RecordingTokenStore(),
+            sessionStore: RecordingSessionStore(),
+            autoRestore: false,
+            makeClient: { _, _, _ in api }
+        )
+        await controller.connect(to: "https://private.example.com")
+        await controller.signIn(username: "Tyler", password: "correct")
+        let item = PlaybackItem(
+            id: "private-track-id", title: "Private title", artist: "Private artist",
+            source: .jellyfin
+        )
+
+        do {
+            _ = try await controller.lyrics(for: item)
+            XCTFail("Expected the first lookup to fail.")
+        } catch {
+            XCTAssertEqual(error as? MusicLyricsError, .unavailable)
+            XCTAssertFalse(error.localizedDescription.contains("private"))
+        }
+
+        let retriedLyrics = try await controller.lyrics(for: item)
+        let requestCount = await api.lyricsRequestCount()
+        XCTAssertNotNil(retriedLyrics)
+        XCTAssertEqual(requestCount, 2)
+    }
+
+    func testLyricsTrackReplacementCancelsAndDiscardsTheStaleRequest() async throws {
+        let firstResponse = try lyricsResponse(#"{"Lyrics":[{"Text":"First"}]}"#)
+        let secondResponse = try lyricsResponse(#"{"Lyrics":[{"Text":"Second"}]}"#)
+        let api = FakeJellyfinAPI(
+            lyricsResponses: ["first": firstResponse, "second": secondResponse],
+            lyricsDelay: .milliseconds(50)
+        )
+        let controller = JellyfinSessionController(
+            tokenStore: RecordingTokenStore(),
+            sessionStore: RecordingSessionStore(),
+            autoRestore: false,
+            makeClient: { _, _, _ in api }
+        )
+        await controller.connect(to: "https://example.com")
+        await controller.signIn(username: "Tyler", password: "correct")
+        let first = PlaybackItem(id: "first", title: "First", artist: "A", source: .jellyfin)
+        let second = PlaybackItem(id: "second", title: "Second", artist: "A", source: .jellyfin)
+
+        let staleRequest = Task { try await controller.lyrics(for: first) }
+        while await api.lyricsRequestCount() == 0 {
+            await Task.yield()
+        }
+        let currentLyrics = try await controller.lyrics(for: second)
+
+        do {
+            _ = try await staleRequest.value
+            XCTFail("Expected the replaced request to be cancelled.")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+        XCTAssertEqual(currentLyrics?.lines.map(\.text), ["Second"])
+    }
+
+    func testLyricsSourceChangeCancelsTheActiveProviderRequest() async throws {
+        let response = try lyricsResponse(#"{"Lyrics":[{"Text":"Line"}]}"#)
+        let api = FakeJellyfinAPI(
+            lyricsResponses: ["track": response],
+            lyricsDelay: .milliseconds(50)
+        )
+        let controller = JellyfinSessionController(
+            tokenStore: RecordingTokenStore(),
+            sessionStore: RecordingSessionStore(),
+            autoRestore: false,
+            makeClient: { _, _, _ in api }
+        )
+        await controller.connect(to: "https://example.com")
+        await controller.signIn(username: "Tyler", password: "correct")
+        let providerItem = PlaybackItem(
+            id: "track", title: "Song", artist: "Artist", source: .jellyfin
+        )
+        let localItem = PlaybackItem(
+            id: "local", title: "Local", artist: "Artist", source: .localFiles
+        )
+
+        let providerRequest = Task { try await controller.lyrics(for: providerItem) }
+        while await api.lyricsRequestCount() == 0 {
+            await Task.yield()
+        }
+        let localLyrics = try await controller.lyrics(for: localItem)
+
+        XCTAssertNil(localLyrics)
+        do {
+            _ = try await providerRequest.value
+            XCTFail("Expected the provider request to be cancelled after a source change.")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+    }
+
+    func testLyricsLogoutCancelsTheActiveAccountRequest() async throws {
+        let response = try lyricsResponse(#"{"Lyrics":[{"Text":"Line"}]}"#)
+        let api = FakeJellyfinAPI(
+            lyricsResponses: ["track": response],
+            lyricsDelay: .milliseconds(50)
+        )
+        let controller = JellyfinSessionController(
+            tokenStore: RecordingTokenStore(),
+            sessionStore: RecordingSessionStore(),
+            autoRestore: false,
+            makeClient: { _, _, _ in api }
+        )
+        await controller.connect(to: "https://example.com")
+        await controller.signIn(username: "Tyler", password: "correct")
+        let item = PlaybackItem(
+            id: "track", title: "Song", artist: "Artist", source: .jellyfin
+        )
+
+        let request = Task { try await controller.lyrics(for: item) }
+        while await api.lyricsRequestCount() == 0 {
+            await Task.yield()
+        }
+        await controller.logout()
+
+        do {
+            _ = try await request.value
+            XCTFail("Expected logout to cancel the account-scoped request.")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+    }
+
+    func testLyricsEndpointMapsNotFoundAndMalformedPayloadSafely() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [LyricsURLProtocol.self]
+        let api = JellyfinAPIClient(
+            server: try JellyfinServerURL("https://example.com"),
+            deviceID: "device",
+            accessToken: "token",
+            session: URLSession(configuration: configuration)
+        )
+
+        LyricsURLProtocol.response = (404, Data())
+        let missingLyrics = try await api.lyrics(itemID: "opaque-id")
+        XCTAssertNil(missingLyrics)
+        XCTAssertEqual(LyricsURLProtocol.lastPath, "/Audio/opaque-id/Lyrics")
+
+        LyricsURLProtocol.response = (
+            200,
+            Data(#"{"Lyrics":[{"Text":"Line","Start":"invalid"}]}"#.utf8)
+        )
+        do {
+            _ = try await api.lyrics(itemID: "opaque-id")
+            XCTFail("Expected malformed lyrics to be rejected.")
+        } catch {
+            XCTAssertEqual(error as? JellyfinAPIError, .invalidResponse)
+        }
+    }
+
     func testCatalogCursorCannotCrossAccountScopes() async throws {
         let decoder = JSONDecoder()
         let albums = try ["Alpha", "Bravo"].enumerated().map { index, name in
@@ -1451,6 +1757,10 @@ final class JellyfinFoundationTests: XCTestCase {
     ) throws -> MusicCatalogItem {
         let transport = try JSONDecoder().decode(JellyfinItem.self, from: data)
         return try XCTUnwrap(JellyfinCatalogMapper(accountScope: accountScope).map(transport))
+    }
+
+    private func lyricsResponse(_ json: String) throws -> JellyfinLyricsResponse {
+        try JSONDecoder().decode(JellyfinLyricsResponse.self, from: Data(json.utf8))
     }
 }
 
@@ -1564,8 +1874,12 @@ private actor FakeJellyfinAPI: JellyfinAPIService {
     private let albumsByLibrary: [String: [JellyfinItem]]
     private let favorites: [JellyfinItem]
     private let recentlyAdded: [JellyfinItem]
+    private let lyricsResponses: [String: JellyfinLyricsResponse]
+    private let lyricsDelay: Duration?
     private let albumPageDelay: Duration?
+    private var transientLyricsFailures: Int
     private var transientAlbumPageFailures: Int
+    private var lyricsRequests = 0
     private var albumPageRequests = 0
 
     init(
@@ -1577,6 +1891,9 @@ private actor FakeJellyfinAPI: JellyfinAPIService {
         albumsByLibrary: [String: [JellyfinItem]] = [:],
         favorites: [JellyfinItem] = [],
         recentlyAdded: [JellyfinItem] = [],
+        lyricsResponses: [String: JellyfinLyricsResponse] = [:],
+        lyricsDelay: Duration? = nil,
+        transientLyricsFailures: Int = 0,
         albumPageDelay: Duration? = nil,
         transientAlbumPageFailures: Int = 0
     ) {
@@ -1588,6 +1905,9 @@ private actor FakeJellyfinAPI: JellyfinAPIService {
         self.albumsByLibrary = albumsByLibrary
         self.favorites = favorites
         self.recentlyAdded = recentlyAdded
+        self.lyricsResponses = lyricsResponses
+        self.lyricsDelay = lyricsDelay
+        self.transientLyricsFailures = transientLyricsFailures
         self.albumPageDelay = albumPageDelay
         self.transientAlbumPageFailures = transientAlbumPageFailures
     }
@@ -1745,6 +2065,22 @@ private actor FakeJellyfinAPI: JellyfinAPIService {
         )
     }
 
+    func lyrics(itemID: String) async throws -> JellyfinLyricsResponse? {
+        lyricsRequests += 1
+        if let lyricsDelay {
+            try await Task.sleep(for: lyricsDelay)
+        }
+        if transientLyricsFailures > 0 {
+            transientLyricsFailures -= 1
+            throw JellyfinAPIError.unreachable
+        }
+        return lyricsResponses[itemID]
+    }
+
+    func lyricsRequestCount() -> Int {
+        lyricsRequests
+    }
+
     func setFavorite(
         _ isFavorite: Bool,
         itemID: String,
@@ -1800,4 +2136,38 @@ private actor FakeJellyfinAPI: JellyfinAPIService {
     }
 
     func logout() async throws {}
+}
+
+private final class LyricsURLProtocol: URLProtocol, @unchecked Sendable {
+    nonisolated(unsafe) static var response = (statusCode: 200, data: Data())
+    nonisolated(unsafe) static var lastPath: String?
+
+    override class func canInit(with request: URLRequest) -> Bool {
+        true
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        Self.lastPath = request.url?.path
+        guard
+            let url = request.url,
+            let response = HTTPURLResponse(
+                url: url,
+                statusCode: Self.response.statusCode,
+                httpVersion: nil,
+                headerFields: ["Content-Type": "application/json"]
+            )
+        else {
+            client?.urlProtocol(self, didFailWithError: JellyfinAPIError.invalidResponse)
+            return
+        }
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Self.response.data)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
 }
