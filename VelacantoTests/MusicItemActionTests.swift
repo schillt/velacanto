@@ -92,15 +92,41 @@ final class MusicItemActionTests: XCTestCase {
         XCTAssertFalse(owner.isFavorite(item))
     }
 
-    private func catalogItem(isFavorite: Bool) -> MusicCatalogItem {
+    func testPinsPersistPerAccountAndExcludeSongs() {
+        let store = InMemoryLibraryPinStore()
+        let provider = RecordingFavoriteProvider()
+        let album = catalogItem(isFavorite: false, kind: .album)
+        let song = catalogItem(isFavorite: false, kind: .song)
+        let owner = MusicItemActionStateOwner(pinStore: store)
+        owner.configure(accountScope: album.id.accountScope, provider: provider)
+
+        XCTAssertTrue(owner.canPin(album))
+        XCTAssertFalse(owner.canPin(song))
+
+        owner.togglePin(album)
+        XCTAssertTrue(owner.isPinned(album))
+        XCTAssertEqual(owner.pinnedItems.map(\.id), [album.id])
+
+        let restoredOwner = MusicItemActionStateOwner(pinStore: store)
+        restoredOwner.configure(accountScope: album.id.accountScope, provider: provider)
+        XCTAssertEqual(restoredOwner.pinnedItems.map(\.id), [album.id])
+
+        restoredOwner.togglePin(album)
+        XCTAssertTrue(restoredOwner.pinnedItems.isEmpty)
+    }
+
+    private func catalogItem(
+        isFavorite: Bool,
+        kind: MusicCatalogItem.Kind = .song
+    ) -> MusicCatalogItem {
         MusicCatalogItem(
             id: MusicCatalogItemID(
                 source: .jellyfin,
                 accountScope: "server-id|user-id",
                 opaqueID: "item-id"
             ),
-            name: "Song",
-            kind: .song,
+            name: kind == .album ? "Album" : "Song",
+            kind: kind,
             sortName: nil,
             artists: ["Artist"],
             albumArtist: nil,
@@ -125,6 +151,18 @@ final class MusicItemActionTests: XCTestCase {
             try? await Task.sleep(for: .milliseconds(5))
         }
         XCTFail("Timed out waiting for favorite state", file: file, line: line)
+    }
+}
+
+private final class InMemoryLibraryPinStore: MusicLibraryPinStoring {
+    private var pins: [String: [MusicCatalogItem]] = [:]
+
+    func loadPins(accountScope: String) throws -> [MusicCatalogItem] {
+        pins[accountScope] ?? []
+    }
+
+    func savePins(_ items: [MusicCatalogItem], accountScope: String) throws {
+        pins[accountScope] = items
     }
 }
 

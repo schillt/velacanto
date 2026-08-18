@@ -17,33 +17,25 @@ struct MusicLibraryView: View {
             }
         }
         .progressiveNavigationChrome()
-        .toolbar {
-            if isRootHeaderVisible {
-                #if os(iOS)
-                    if #available(iOS 26.0, *) {
-                        ToolbarItem(placement: .topBarLeading) {
-                            Text("Library")
-                                .font(.title2.weight(.bold))
-                                .fixedSize(horizontal: true, vertical: false)
-                        }
-                        .sharedBackgroundVisibility(.hidden)
-                    } else {
-                        ToolbarItem(placement: .topBarLeading) {
-                            Text("Library")
-                                .font(.title2.weight(.bold))
-                                .fixedSize(horizontal: true, vertical: false)
-                        }
+        #if os(iOS)
+            .toolbar {
+                if isRootHeaderVisible {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Text("Library")
+                        .font(.title2.weight(.bold))
+                        .fixedSize(horizontal: true, vertical: false)
                     }
-                #endif
-                ToolbarItem(placement: .primaryAction) {
-                    Button(action: showProfile) {
-                        AccountAvatar(jellyfin: jellyfin)
+                    .sharedBackgroundVisibility(.hidden)
+                    ToolbarItem(placement: .primaryAction) {
+                        Button(action: showProfile) {
+                            AccountAvatar(jellyfin: jellyfin)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Profile and settings")
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Profile and settings")
                 }
             }
-        }
+        #endif
     }
 
     private var signedInLibrary: some View {
@@ -263,6 +255,8 @@ private struct MusicGenresBrowserView: View {
 }
 
 private struct PinnedLibraryGrid: View {
+    @EnvironmentObject private var actions: MusicItemActionStateOwner
+
     @ObservedObject var playback: AudioPlaybackCoordinator
     @ObservedObject var jellyfin: JellyfinSessionController
 
@@ -271,7 +265,10 @@ private struct PinnedLibraryGrid: View {
             Text("Pinned").font(.title2.weight(.semibold))
 
             LazyVGrid(
-                columns: [GridItem(.adaptive(minimum: 140, maximum: 220), spacing: 10)],
+                columns: Array(
+                    repeating: GridItem(.flexible(), spacing: 10),
+                    count: 3
+                ),
                 spacing: 10
             ) {
                 NavigationLink {
@@ -285,7 +282,31 @@ private struct PinnedLibraryGrid: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityHint("Open Favorites")
+
+                ForEach(actions.pinnedItems) { item in
+                    NavigationLink {
+                        destination(for: item)
+                    } label: {
+                        PinnedCatalogItemTile(item: item, jellyfin: jellyfin)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityHint("Open \(item.name)")
+                }
             }
+        }
+    }
+
+    @ViewBuilder
+    private func destination(for item: MusicCatalogItem) -> some View {
+        switch item.kind {
+        case .album:
+            JellyfinTracksView(album: item, jellyfin: jellyfin, playback: playback)
+        case .artist:
+            MusicArtistView(artist: item, jellyfin: jellyfin, playback: playback)
+        case .playlist:
+            MusicPlaylistView(playlist: item, jellyfin: jellyfin, playback: playback)
+        case .song:
+            EmptyView()
         }
     }
 }
@@ -680,6 +701,7 @@ struct MusicCollectionHero: View {
     let subtitle: String
     let detail: String?
     var metadata: [String] = []
+    let palette: MusicCollectionPalette
     let isPreparing: Bool
     let play: () -> Void
     let shuffle: () -> Void
@@ -700,26 +722,27 @@ struct MusicCollectionHero: View {
                 if let collectionLabel {
                     Text(collectionLabel.uppercased())
                         .font(.caption.weight(.bold))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(palette.secondaryForeground)
                         .tracking(0.8)
                 }
                 Text(item.name)
                     .font(.largeTitle.weight(.bold))
+                    .foregroundStyle(palette.foreground)
                     .lineLimit(2)
                     .multilineTextAlignment(.center)
                     .minimumScaleFactor(0.72)
                 Text(subtitle)
                     .font(.body)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(palette.secondaryForeground)
                 if let detail {
                     Text(detail)
                         .font(.callout)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(palette.secondaryForeground.opacity(0.82))
                 }
                 if !metadata.isEmpty {
                     Text(metadata.joined(separator: " · "))
                         .font(.caption.weight(.medium))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(palette.secondaryForeground)
                         .lineLimit(2)
                 }
             }
@@ -728,6 +751,7 @@ struct MusicCollectionHero: View {
                 item: item,
                 capabilities: item.capabilities,
                 isPreparing: isPreparing,
+                palette: palette,
                 play: play,
                 shuffle: shuffle
             )
@@ -750,6 +774,7 @@ private struct MusicCollectionActionBar: View {
     let item: MusicCatalogItem
     let capabilities: MusicItemCapabilities
     let isPreparing: Bool
+    let palette: MusicCollectionPalette
     let play: () -> Void
     let shuffle: () -> Void
 
@@ -764,6 +789,7 @@ private struct MusicCollectionActionBar: View {
                 }
                 .buttonStyle(.bordered)
                 .buttonBorderShape(.circle)
+                .tint(palette.secondaryForeground)
             } else {
                 Color.clear.frame(width: controlSize, height: controlSize)
             }
@@ -775,14 +801,17 @@ private struct MusicCollectionActionBar: View {
             }
             .buttonStyle(.borderedProminent)
             .buttonBorderShape(.capsule)
+            .tint(palette.foreground)
+            .foregroundStyle(palette.primaryBackground)
 
             MusicFavoriteButton(
                 item: item,
-                presentation: .icon
+                presentation: .icon,
+                iconSize: controlSize
             )
-            .frame(width: controlSize, height: controlSize)
             .buttonStyle(.bordered)
             .buttonBorderShape(.circle)
+            .tint(palette.secondaryForeground)
         }
         .disabled(isPreparing)
         .overlay {

@@ -1,6 +1,12 @@
 import SwiftUI
 import os
 
+#if os(iOS)
+    import UIKit
+#elseif os(macOS)
+    import AppKit
+#endif
+
 struct JellyfinArtworkView: View {
     let item: MusicCatalogItem
     @ObservedObject var jellyfin: JellyfinSessionController
@@ -8,13 +14,244 @@ struct JellyfinArtworkView: View {
     var maxWidth = 640
 
     var body: some View {
-        RemoteArtworkView(
+        JellyfinArtworkReferenceView(
             itemID: item.artworkItemID,
             imageTag: item.primaryImageTag,
             jellyfin: jellyfin,
             cornerRadius: cornerRadius,
             maxWidth: maxWidth
         )
+    }
+}
+
+/// A cover-derived gradient that keeps collection details legible without
+/// rendering the artwork itself behind their controls and metadata.
+struct MusicCollectionArtworkBackdrop: View {
+    let item: MusicCatalogItem
+    @ObservedObject var jellyfin: JellyfinSessionController
+    @Binding var palette: MusicCollectionPalette
+
+    @StateObject private var loader = ArtworkViewLoader()
+
+    var body: some View {
+        ZStack {
+            // Match the Now Playing treatment: the cover supplies the color and
+            // depth, while the system background keeps the content readable.
+            // Starting from a derived solid color made light covers look cloudy.
+            #if os(iOS)
+                Color(uiColor: .systemBackground)
+            #else
+                palette.secondaryBackground
+            #endif
+
+            JellyfinArtworkView(
+                item: item,
+                jellyfin: jellyfin,
+                cornerRadius: 0,
+                maxWidth: 1_024
+            )
+            .scaleEffect(1.5)
+            .blur(radius: 72)
+            .opacity(0.62)
+
+            LinearGradient(
+                gradient: Gradient(stops: contentGradientStops),
+                startPoint: .top,
+                endPoint: .bottom
+            )
+        }
+        .ignoresSafeArea()
+        .accessibilityHidden(true)
+        .task(id: artworkKey?.identifier ?? "signed-out") {
+            guard let artworkKey else { return }
+            await loader.load(key: artworkKey) {
+                await jellyfin.artworkRequest(
+                    itemID: item.artworkItemID,
+                    imageTag: item.primaryImageTag,
+                    maxWidth: artworkKey.sizeBucket
+                )
+            }
+            if let image = loader.image {
+                palette = ArtworkContrast.palette(for: image)
+            }
+        }
+    }
+
+    private var artworkKey: ArtworkKey? {
+        guard let session = jellyfin.session else { return nil }
+        return ArtworkKey(
+            serverID: session.serverID,
+            userID: session.userID,
+            itemID: item.artworkItemID,
+            imageTag: item.primaryImageTag ?? "no-tag",
+            sizeBucket: 1_024
+        )
+    }
+
+    private var contentGradientStops: [Gradient.Stop] {
+        #if os(iOS)
+            let contentBackground = palette.primaryBackground
+            return [
+                .init(
+                    color: Color(uiColor: .systemBackground).opacity(0.05),
+                    location: 0
+                ),
+                .init(color: contentBackground.opacity(0.18), location: 0.42),
+                .init(color: contentBackground.opacity(0.88), location: 0.68),
+                .init(color: contentBackground, location: 1),
+            ]
+        #else
+            return [
+                .init(color: palette.primaryBackground.opacity(0.08), location: 0),
+                .init(color: palette.secondaryBackground.opacity(0.9), location: 1),
+            ]
+        #endif
+    }
+}
+
+struct MusicCollectionPalette {
+    let primaryBackground: Color
+    let secondaryBackground: Color
+    let foreground: Color
+    let secondaryForeground: Color
+    let usesLightForeground: Bool
+
+    var navigationScrim: Color {
+        usesLightForeground ? .black.opacity(0.18) : .white.opacity(0.18)
+    }
+
+    static let fallback = MusicCollectionPalette(
+        primaryBackground: .indigo,
+        secondaryBackground: .blue,
+        foreground: .white,
+        secondaryForeground: .white.opacity(0.72),
+        usesLightForeground: true
+    )
+}
+
+private enum ArtworkContrast {
+    static func palette(for image: PlatformImage) -> MusicCollectionPalette {
+        #if os(iOS)
+            guard let cgImage = image.cgImage else { return .fallback }
+            var pixel = [UInt8](repeating: 0, count: 4)
+            guard
+                let context = CGContext(
+                    data: &pixel,
+                    width: 1,
+                    height: 1,
+                    bitsPerComponent: 8,
+                    bytesPerRow: 4,
+                    space: CGColorSpaceCreateDeviceRGB(),
+                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+                )
+            else {
+                return .fallback
+            }
+            context.draw(cgImage, in: CGRect(x: 0, y: 0, width: 1, height: 1))
+            let luminance =
+                (0.2126 * Double(pixel[0]) + 0.7152 * Double(pixel[1])
+                    + 0.0722 * Double(pixel[2])) / 255
+            let usesLightForeground = luminance < 0.56
+            let sourceColor = UIColor(
+                red: CGFloat(pixel[0]) / 255,
+                green: CGFloat(pixel[1]) / 255,
+                blue: CGFloat(pixel[2]) / 255,
+                alpha: 1
+            )
+            var hue: CGFloat = 0
+            var saturation: CGFloat = 0
+            var brightness: CGFloat = 0
+            var alpha: CGFloat = 0
+            guard
+                sourceColor.getHue(
+                    &hue,
+                    saturation: &saturation,
+                    brightness: &brightness,
+                    alpha: &alpha
+                )
+            else {
+                return .fallback
+            }
+            let adjustedSaturation = max(0.24, saturation * 0.72)
+            let primaryBrightness =
+                usesLightForeground
+                ? min(0.26, max(0.14, brightness * 0.34))
+                : min(0.96, max(0.78, brightness))
+            let secondaryBrightness =
+                usesLightForeground
+                ? max(0.12, primaryBrightness * 0.62)
+                : max(0.5, primaryBrightness * 0.78)
+            return MusicCollectionPalette(
+                primaryBackground: Color(
+                    uiColor: UIColor(
+                        hue: hue,
+                        saturation: adjustedSaturation,
+                        brightness: primaryBrightness,
+                        alpha: 1
+                    )),
+                secondaryBackground: Color(
+                    uiColor: UIColor(
+                        hue: hue,
+                        saturation: adjustedSaturation * 0.76,
+                        brightness: secondaryBrightness,
+                        alpha: 1
+                    )),
+                foreground: usesLightForeground ? .white : .black,
+                secondaryForeground: usesLightForeground
+                    ? .white.opacity(0.72)
+                    : .black.opacity(0.62),
+                usesLightForeground: usesLightForeground
+            )
+        #elseif os(macOS)
+            return .fallback
+        #endif
+    }
+}
+
+struct JellyfinArtworkReferenceView: View {
+    let itemID: String
+    let imageTag: String?
+    @ObservedObject var jellyfin: JellyfinSessionController
+    var cornerRadius: CGFloat = 12
+    var maxWidth = 640
+
+    var body: some View {
+        RemoteArtworkView(
+            itemID: itemID,
+            imageTag: imageTag,
+            jellyfin: jellyfin,
+            cornerRadius: cornerRadius,
+            maxWidth: maxWidth
+        )
+    }
+}
+
+/// Starts bounded background loads for genre artwork so a cached genre list can
+/// also reuse its actual cover images on its next presentation.
+@MainActor
+func prefetchGenreArtwork(_ genres: [MusicGenre], jellyfin: JellyfinSessionController) {
+    guard let session = jellyfin.session else { return }
+    let references = Array(
+        Set(genres.compactMap(\.artwork))
+            .prefix(24)
+    )
+    for artwork in references {
+        let key = ArtworkKey(
+            serverID: session.serverID,
+            userID: session.userID,
+            itemID: artwork.opaqueItemID,
+            imageTag: artwork.imageTag ?? "no-tag",
+            sizeBucket: ArtworkKey.sizeBucket(for: 360)
+        )
+        Task { @MainActor in
+            _ = await ArtworkRepository.shared.image(for: key) {
+                await jellyfin.artworkRequest(
+                    itemID: artwork.opaqueItemID,
+                    imageTag: artwork.imageTag,
+                    maxWidth: key.sizeBucket
+                )
+            }
+        }
     }
 }
 
@@ -510,9 +747,9 @@ private struct ArtworkPlaceholder: View {
         ZStack {
             LinearGradient(
                 colors: [
-                    .cyan.opacity(0.38),
-                    .blue.opacity(0.26),
-                    .indigo.opacity(0.34),
+                    Color.velacantoAccent.opacity(0.48),
+                    .indigo.opacity(0.30),
+                    Color.velacantoAccent.opacity(0.24),
                 ],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing

@@ -23,11 +23,20 @@ struct JellyfinPlaybackAdapter: PlaybackSourceAdapter {
     let source = MusicSourceID.jellyfin
 
     static func playbackItem(for track: MusicCatalogItem) -> PlaybackItem {
+        playbackItem(for: track, fallbackArtistID: nil)
+    }
+
+    static func playbackItem(
+        for track: MusicCatalogItem,
+        fallbackArtistID: String?
+    ) -> PlaybackItem {
         PlaybackItem(
             id: track.id.opaqueID,
             title: track.name,
             artist: track.displayArtist,
             albumTitle: track.album,
+            albumID: track.albumID,
+            artistID: track.artistIDs.first ?? fallbackArtistID,
             source: .jellyfin,
             artworkItemID: track.artworkItemID,
             artworkTag: track.primaryImageTag,

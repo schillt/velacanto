@@ -10,7 +10,7 @@ struct PlaybackAccessory: View {
     @ObservedObject var jellyfin: JellyfinSessionController
     var appearance = PlaybackAccessoryAppearance.floating
     let showNowPlaying: () -> Void
-    var dismiss: (() -> Void)?
+    var showQueue: (() -> Void)?
 
     var body: some View {
         #if os(macOS)
@@ -141,7 +141,7 @@ struct PlaybackAccessory: View {
                             .frame(width: 28, height: 28)
                     }
 
-                    Button(action: showNowPlaying) {
+                    Button(action: showQueue ?? showNowPlaying) {
                         Image(systemName: "list.bullet")
                     }
                     .buttonStyle(.borderless)
@@ -151,14 +151,6 @@ struct PlaybackAccessory: View {
                     PlaybackRoutePicker()
                         .frame(width: 28, height: 28)
 
-                    if let dismiss {
-                        Button(action: dismiss) {
-                            Image(systemName: "xmark")
-                        }
-                        .buttonStyle(.borderless)
-                        .frame(width: 28, height: 28)
-                        .accessibilityLabel("Hide mini player")
-                    }
                 }
 
                 PlaybackProgressBar(playback: playback)
@@ -205,7 +197,7 @@ struct PlaybackAccessory: View {
             jellyfin: JellyfinSessionController,
             isVisible: Bool,
             showNowPlaying: @escaping () -> Void,
-            dismiss: @escaping () -> Void
+            showQueue: @escaping () -> Void
         ) -> some View {
             safeAreaInset(edge: .bottom, spacing: 0) {
                 if isVisible {
@@ -214,7 +206,7 @@ struct PlaybackAccessory: View {
                         jellyfin: jellyfin,
                         appearance: .floating,
                         showNowPlaying: showNowPlaying,
-                        dismiss: dismiss
+                        showQueue: showQueue
                     )
                     .padding(.horizontal, 16)
                     .padding(.bottom, 10)
@@ -255,23 +247,3 @@ private struct PlaybackAccessorySurface: ViewModifier {
         }
     }
 }
-
-#if os(iOS)
-    struct ModernPlaybackAccessory: View {
-        @Environment(\.tabViewBottomAccessoryPlacement) private var placement
-
-        @ObservedObject var playback: AudioPlaybackCoordinator
-        @ObservedObject var jellyfin: JellyfinSessionController
-        let showNowPlaying: () -> Void
-
-        var body: some View {
-            PlaybackAccessory(
-                playback: playback,
-                jellyfin: jellyfin,
-                appearance: .embedded,
-                showNowPlaying: showNowPlaying
-            )
-            .padding(.horizontal, placement == .inline ? 0 : 6)
-        }
-    }
-#endif

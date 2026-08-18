@@ -254,6 +254,7 @@ struct MusicArtistView: View {
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 MusicFavoriteButton(item: artist, presentation: .icon)
+                MusicLibraryPinMenu(item: artist)
             }
         }
         #if os(iOS)
