@@ -1,5 +1,28 @@
 # Velacanto agent guide
 
+## Assign an issue
+
+The canonical assignment prompt is:
+
+> Implement Velacanto issue #`<number>`.
+
+That one sentence is sufficient. The assigned agent must discover the rest of
+the contract instead of asking the project owner to repeat it:
+
+1. Read this entire `AGENTS.md` before acting.
+2. Read the complete GitHub issue, including its latest relevant comments.
+3. Confirm the issue's dependencies are integrated into `origin/alpha` and its
+   owned files do not conflict with another active worktree.
+4. Create or use exactly one isolated local worktree for that issue, based on
+   current `origin/alpha`.
+5. Implement only the issue contract, run its verification, commit locally,
+   and return the required handoff evidence.
+
+If a dependency is incomplete, the issue contract is missing a material
+decision, or the owned files conflict with active work, stop and report the
+specific blocker. Do not invent scope or edit another issue's work. Issue
+agents do not push, merge, update issues, or change Project fields.
+
 ## GitHub access and delivery tracking
 
 Use the authenticated GitHub CLI (`gh`) for repository, issue, milestone, pull
@@ -64,8 +87,10 @@ authentication as invalid only when `gh auth status` itself fails. If the
 remote message and stop rather than changing credentials or retrying blindly.
 
 After the push, remove the clean integration worktree and delete its local
-integration branch. Promotion from `alpha` remains `alpha → beta → preview →
-main` with the documented release gates.
+integration branch. Wait for the hosted Quality Gate on that exact `alpha`
+commit, then update the issue, Project, and 0.3 umbrella only if it passes.
+Promotion from `alpha` remains `alpha → beta → preview → main` with the
+documented release gates.
 
 ### Worktree isolation
 
@@ -131,20 +156,22 @@ gh project item-list <number> --owner <owner> --limit 200 --format json
 gh pr view <number> --json state,mergeStateStatus,statusCheckRollup
 ```
 
-Use focused commits, push a `codex/`-prefixed branch, open a PR against the
-agreed base branch, and wait for required hosted checks before merge. Run
-`./scripts/preflight.sh --skip-xcode`, `git diff --check`, and the relevant
-build/test gate before publishing. Do not change application behavior or
-version/build metadata in a planning-only issue.
+Issue agents create focused local commits and hand them to the integration
+agent; they do not publish branches or open pull requests. The integration
+agent runs `./scripts/preflight.sh --skip-xcode`, `git diff --check`, and the
+relevant build/test gate before pushing the accepted commit to `alpha`, then
+waits for the hosted Quality Gate on that exact commit. Do not change
+application behavior or version/build metadata in a planning-only issue.
 
 ### Branch lifetime
 
-GitHub has exactly four branches: `main`, `alpha`, `beta`, and `preview`.
-All issue and integration branches are local only. All 0.3 implementation lands
-in `alpha` through the single integration-push workflow above; never create or
-push an issue branch to GitHub. Before deleting a local branch, verify its work
-was integrated and it is not checked out in a worktree. Never discard
-unintegrated work to tidy the branch list.
+GitHub's shared branches are `main`, `alpha`, `beta`, and `preview`. All new
+issue and integration branches are local only. A recovery branch explicitly
+documented on an issue may remain remote until its disposition is complete,
+but do not create another remote issue branch. All 0.3 implementation lands in
+`alpha` through the single integration-push workflow above. Before deleting a
+local branch, verify its work was integrated and it is not checked out in a
+worktree. Never discard unintegrated work to tidy the branch list.
 
 ## Product and privacy boundaries
 

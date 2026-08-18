@@ -12,6 +12,8 @@ technical planning. Superseded plans and prototypes live under
 - [Roadmap](roadmap.md) — release history and ordered later milestones.
 - [Known issues](known-issues.md) — current operational limitations.
 - [Architecture](architecture.md) — component boundaries and runtime flows.
+- [Agent assignment prompt](agent-assignment-template.md) — the one-line issue
+  prompt and serial integration handoff.
 
 ## Decisions and design
 
