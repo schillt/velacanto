@@ -6,6 +6,7 @@ struct MusicPlaylistsView: View {
 
     @StateObject private var model = PagedMusicCatalogModel()
     @State private var searchText = ""
+    @Namespace private var playlistTransitionNamespace
 
     private var query: String {
         searchText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -37,7 +38,8 @@ struct MusicPlaylistsView: View {
                         MusicPlaylistView(
                             playlist: playlist,
                             jellyfin: jellyfin,
-                            playback: playback
+                            playback: playback,
+                            transitionNamespace: playlistTransitionNamespace
                         )
                     } label: {
                         HStack(spacing: 14) {
@@ -48,6 +50,10 @@ struct MusicPlaylistsView: View {
                                 maxWidth: 180
                             )
                             .frame(width: 58, height: 58)
+                            .albumArtworkTransitionSource(
+                                id: playlist.artworkTransitionID,
+                                in: playlistTransitionNamespace
+                            )
 
                             VStack(alignment: .leading, spacing: 3) {
                                 Text(playlist.name)
@@ -66,7 +72,7 @@ struct MusicPlaylistsView: View {
                             }
                         }
                     }
-                    .musicFavoriteActions(for: playlist)
+                    .musicItemActions(for: playlist, jellyfin: jellyfin, playback: playback)
                     .onAppear {
                         loadMoreIfNeeded(playlist.id)
                     }
@@ -87,7 +93,7 @@ struct MusicPlaylistsView: View {
                 }
             }
         }
-        .navigationTitle("Playlists")
+        .progressivePageHeader("Playlists")
         #if !os(macOS)
             .searchable(text: $searchText, prompt: "Playlists")
         #endif
@@ -151,98 +157,104 @@ struct MusicPlaylistView: View {
     let playlist: MusicCatalogItem
     @ObservedObject var jellyfin: JellyfinSessionController
     @ObservedObject var playback: AudioPlaybackCoordinator
+    var transitionNamespace: Namespace.ID?
 
     @StateObject private var model = PagedMusicCatalogModel()
     @State private var preparingTrackID: MusicCatalogItemID?
     @State private var playbackErrorMessage: String?
 
     var body: some View {
-        List {
-            if !model.isInitialLoading {
-                Section {
-                    MusicDetailHeader(
+        ScrollView(.vertical, showsIndicators: false) {
+            VStack(spacing: 0) {
+                if !model.isInitialLoading {
+                    MusicCollectionHero(
                         item: playlist,
                         jellyfin: jellyfin,
+                        collectionLabel: "Playlist",
                         subtitle: "Playlist",
                         detail: model.items.isEmpty
                             ? nil
-                            : "\(model.totalRecordCount) \(model.totalRecordCount == 1 ? "song" : "songs")"
-                    )
-
-                    MusicQueuePlaybackControls(
-                        capabilities: playlist.capabilities,
+                            : "\(model.totalRecordCount) \(model.totalRecordCount == 1 ? "song" : "songs")",
                         isPreparing: preparingTrackID != nil,
                         play: { playQueue(shuffled: false) },
                         shuffle: { playQueue(shuffled: true) }
                     )
-                }
-            }
-
-            if model.isInitialLoading {
-                ProgressView("Loading playlist…")
-                    .frame(maxWidth: .infinity)
-            } else if let errorMessage = model.errorMessage, model.items.isEmpty {
-                ErrorMessageView(message: errorMessage)
-                Button("Retry") {
-                    Task {
-                        await retry()
-                    }
-                }
-            } else if model.items.isEmpty {
-                ContentUnavailableView(
-                    "Empty Playlist",
-                    systemImage: "music.note.list",
-                    description: Text("This playlist does not contain any songs.")
-                )
-            } else {
-                ForEach(Array(model.items.enumerated()), id: \.element.id) { index, song in
-                    Button {
-                        play(song)
-                    } label: {
-                        MusicSongRow(
-                            song: song,
-                            leadingNumber: index + 1,
-                            jellyfin: jellyfin,
-                            playback: playback,
-                            isPreparing: preparingTrackID == song.id
-                        )
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(preparingTrackID != nil)
-                    .onAppear {
-                        loadMoreIfNeeded(song.id)
-                    }
+                    .padding(.bottom, 22)
                 }
 
-                if model.isLoadingMore {
-                    HStack {
-                        Spacer()
-                        ProgressView()
-                        Spacer()
-                    }
-                } else if let errorMessage = model.errorMessage {
-                    MusicPaginationErrorView(message: errorMessage) {
-                        Task {
-                            await retry()
+                if model.isInitialLoading {
+                    ProgressView("Loading playlist…")
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 88)
+                } else if let errorMessage = model.errorMessage, model.items.isEmpty {
+                    VStack(spacing: 14) {
+                        ErrorMessageView(message: errorMessage)
+                        Button("Retry") {
+                            Task {
+                                await retry()
+                            }
                         }
                     }
+                    .padding(.vertical, 48)
+                } else if model.items.isEmpty {
+                    ContentUnavailableView(
+                        "Empty Playlist",
+                        systemImage: "music.note.list",
+                        description: Text("This playlist does not contain any songs.")
+                    )
+                    .padding(.vertical, 48)
+                } else {
+                    ForEach(Array(model.items.enumerated()), id: \.element.id) { index, song in
+                        Button {
+                            play(song)
+                        } label: {
+                            MusicSongRow(
+                                song: song,
+                                leadingNumber: index + 1,
+                                jellyfin: jellyfin,
+                                playback: playback,
+                                isPreparing: preparingTrackID == song.id
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(preparingTrackID != nil)
+                        .padding(.vertical, 10)
+                        .onAppear {
+                            loadMoreIfNeeded(song.id)
+                        }
+                        if index < model.items.count - 1 {
+                            Divider()
+                        }
+                    }
+
+                    paginationFooter
+                }
+
+                if let playbackErrorMessage {
+                    ErrorMessageView(message: playbackErrorMessage)
+                        .padding(.top, 18)
                 }
             }
-
-            if let playbackErrorMessage {
-                ErrorMessageView(message: playbackErrorMessage)
-            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 20)
+            .padding(.top, 14)
+            .padding(.bottom, 120)
         }
-        .navigationTitle(playlist.name)
+        .scrollBounceBehavior(.basedOnSize, axes: .vertical)
+        .background(.background)
+        .collectionDetailNavigationChrome()
+        .albumArtworkZoomTransition(
+            sourceID: playlist.artworkTransitionID,
+            in: transitionNamespace
+        )
         .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                MusicFavoriteButton(item: playlist, presentation: .icon)
+            ToolbarItemGroup(placement: .primaryAction) {
+                #if os(macOS)
+                    MusicFavoriteButton(item: playlist, presentation: .icon)
+                #endif
             }
         }
         .task(id: playlist.id) {
-            await reset()
-        }
-        .refreshable {
             await reset()
         }
     }
@@ -266,6 +278,22 @@ struct MusicPlaylistView: View {
             loader: pageLoader,
             cacheWriter: cacheWriter
         )
+    }
+
+    @ViewBuilder
+    private var paginationFooter: some View {
+        if model.isLoadingMore {
+            ProgressView()
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 12)
+        } else if let errorMessage = model.errorMessage {
+            MusicPaginationErrorView(message: errorMessage) {
+                Task {
+                    await retry()
+                }
+            }
+            .padding(.top, 12)
+        }
     }
 
     private func retry() async {

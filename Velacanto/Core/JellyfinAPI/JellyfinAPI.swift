@@ -254,6 +254,9 @@ struct JellyfinItem: Codable, Equatable, Identifiable, Sendable {
     let sortName: String?
     let artists: [String]
     let artistItems: [JellyfinArtistReference]
+    let genres: [String]
+    let genreItems: [JellyfinGenreReference]
+    let productionYear: Int?
     let album: String?
     let indexNumber: Int?
     let parentIndexNumber: Int?
@@ -306,6 +309,9 @@ struct JellyfinItem: Codable, Equatable, Identifiable, Sendable {
         case sortName = "SortName"
         case artists = "Artists"
         case artistItems = "ArtistItems"
+        case genres = "Genres"
+        case genreItems = "GenreItems"
+        case productionYear = "ProductionYear"
         case album = "Album"
         case indexNumber = "IndexNumber"
         case parentIndexNumber = "ParentIndexNumber"
@@ -331,6 +337,13 @@ struct JellyfinItem: Codable, Equatable, Identifiable, Sendable {
                 [JellyfinArtistReference].self,
                 forKey: .artistItems
             ) ?? []
+        genres = try container.decodeIfPresent([String].self, forKey: .genres) ?? []
+        genreItems =
+            try container.decodeIfPresent(
+                [JellyfinGenreReference].self,
+                forKey: .genreItems
+            ) ?? []
+        productionYear = try container.decodeIfPresent(Int.self, forKey: .productionYear)
         album = try container.decodeIfPresent(String.self, forKey: .album)
         indexNumber = try container.decodeIfPresent(Int.self, forKey: .indexNumber)
         parentIndexNumber = try container.decodeIfPresent(Int.self, forKey: .parentIndexNumber)
@@ -357,6 +370,9 @@ struct JellyfinItem: Codable, Equatable, Identifiable, Sendable {
         try container.encodeIfPresent(sortName, forKey: .sortName)
         try container.encode(artists, forKey: .artists)
         try container.encode(artistItems, forKey: .artistItems)
+        try container.encode(genres, forKey: .genres)
+        try container.encode(genreItems, forKey: .genreItems)
+        try container.encodeIfPresent(productionYear, forKey: .productionYear)
         try container.encodeIfPresent(album, forKey: .album)
         try container.encodeIfPresent(indexNumber, forKey: .indexNumber)
         try container.encodeIfPresent(parentIndexNumber, forKey: .parentIndexNumber)
@@ -373,6 +389,16 @@ struct JellyfinItem: Codable, Equatable, Identifiable, Sendable {
 }
 
 struct JellyfinArtistReference: Codable, Equatable, Sendable {
+    let id: String
+    let name: String
+
+    private enum CodingKeys: String, CodingKey {
+        case id = "Id"
+        case name = "Name"
+    }
+}
+
+struct JellyfinGenreReference: Codable, Equatable, Sendable {
     let id: String
     let name: String
 
@@ -459,7 +485,9 @@ struct JellyfinItemPage: Equatable, Sendable {
 
 enum JellyfinHomeCollection: Equatable, Sendable {
     case favorites
+    case mostListened
     case recentlyAdded
+    case recentlyAddedTracks
 }
 
 struct JellyfinRequestBuilder: Sendable {
@@ -889,6 +917,13 @@ protocol JellyfinAPIService: Sendable {
         startIndex: Int,
         limit: Int
     ) async throws -> JellyfinItemPage
+    func musicGenres(userID: String) async throws -> [JellyfinItem]
+    func genreItemsPage(
+        userID: String,
+        genreID: String,
+        startIndex: Int,
+        limit: Int
+    ) async throws -> JellyfinItemPage
     func playlistItemsPage(
         userID: String,
         playlistID: String,
@@ -935,6 +970,17 @@ protocol JellyfinAPIService: Sendable {
 
 extension JellyfinAPIService {
     func lyrics(itemID: String) async throws -> JellyfinLyricsResponse? { nil }
+
+    func musicGenres(userID: String) async throws -> [JellyfinItem] { [] }
+
+    func genreItemsPage(
+        userID: String,
+        genreID: String,
+        startIndex: Int,
+        limit: Int
+    ) async throws -> JellyfinItemPage {
+        JellyfinItemPage(items: [], startIndex: startIndex, totalRecordCount: 0)
+    }
 
     func reportPlaybackStarted(
         itemID: String,
@@ -1061,7 +1107,7 @@ actor JellyfinAPIClient: JellyfinAPIService {
             additional: [URLQueryItem(name: "UserId", value: userID)]
         )
         let response = try await execute(
-            builder.request(pathComponents: ["Artists"], queryItems: query),
+            builder.request(pathComponents: ["Artists", "AlbumArtists"], queryItems: query),
             as: JellyfinItemsResponse.self
         )
         return JellyfinItemPage(response)
@@ -1141,16 +1187,71 @@ actor JellyfinAPIClient: JellyfinAPIService {
                 limit: limit,
                 additional: [URLQueryItem(name: "Filters", value: "IsFavorite")]
             )
+        case .mostListened:
+            query = pagedItemQuery(
+                itemTypes: "MusicAlbum",
+                fields: "AlbumArtist,Artists,ChildCount,Genres,GenreItems,ImageTags,SortName",
+                sortBy: "PlayCount",
+                sortOrder: "Descending",
+                startIndex: startIndex,
+                limit: limit
+            )
         case .recentlyAdded:
             query = pagedItemQuery(
                 itemTypes: "MusicAlbum",
-                fields: "AlbumArtist,Artists,ChildCount,ImageTags,SortName",
+                fields: "AlbumArtist,Artists,ChildCount,Genres,GenreItems,ImageTags,SortName",
+                sortBy: "DateCreated",
+                sortOrder: "Descending",
+                startIndex: startIndex,
+                limit: limit
+            )
+        case .recentlyAddedTracks:
+            query = pagedItemQuery(
+                itemTypes: "Audio",
+                fields: Self.searchFields,
                 sortBy: "DateCreated",
                 sortOrder: "Descending",
                 startIndex: startIndex,
                 limit: limit
             )
         }
+        return JellyfinItemPage(
+            try await itemsResponse(userID: userID, query: query)
+        )
+    }
+
+    func musicGenres(userID: String) async throws -> [JellyfinItem] {
+        let query = [
+            URLQueryItem(name: "UserId", value: userID),
+            URLQueryItem(name: "IncludeItemTypes", value: "MusicAlbum"),
+            URLQueryItem(name: "Fields", value: "ChildCount"),
+            URLQueryItem(name: "EnableImages", value: "true"),
+            URLQueryItem(name: "EnableTotalRecordCount", value: "false"),
+        ]
+        let response = try await execute(
+            builder.request(pathComponents: ["MusicGenres"], queryItems: query),
+            as: JellyfinItemsResponse.self
+        )
+        return response.items
+    }
+
+    func genreItemsPage(
+        userID: String,
+        genreID: String,
+        startIndex: Int,
+        limit: Int
+    ) async throws -> JellyfinItemPage {
+        let query = pagedItemQuery(
+            itemTypes: "MusicAlbum",
+            fields: "AlbumArtist,Artists,ChildCount,ImageTags,SortName",
+            sortBy: "AlbumArtist,SortName",
+            startIndex: startIndex,
+            limit: limit,
+            additional: [
+                URLQueryItem(name: "GenreIds", value: genreID),
+                URLQueryItem(name: "EnableTotalRecordCount", value: "true"),
+            ]
+        )
         return JellyfinItemPage(
             try await itemsResponse(userID: userID, query: query)
         )
@@ -1197,7 +1298,7 @@ actor JellyfinAPIClient: JellyfinAPIService {
         let query = pagedItemQuery(
             parentID: libraryID,
             itemTypes: "MusicAlbum",
-            fields: "AlbumArtist,Artists,ChildCount,ImageTags,SortName",
+            fields: "AlbumArtist,Artists,ArtistItems,ChildCount,ImageTags,SortName",
             sortBy: "AlbumArtist,SortName",
             startIndex: startIndex,
             limit: limit,
@@ -1383,7 +1484,7 @@ actor JellyfinAPIClient: JellyfinAPIService {
     }
 
     private static let trackFields =
-        "Album,AlbumArtist,Artists,ArtistItems,AlbumId,AlbumPrimaryImageTag,ImageTags,RunTimeTicks,UserData"
+        "Album,AlbumArtist,Artists,ArtistItems,AlbumId,AlbumPrimaryImageTag,Genres,GenreItems,ImageTags,RunTimeTicks,UserData"
     private static let searchFields = trackFields + ",ChildCount"
 
     private func pagedItemQuery(

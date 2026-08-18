@@ -51,6 +51,83 @@ actor JellyfinCatalogRepository: MusicLibraryProviding, MusicItemActionProviding
         try await api.libraries(userID: userID)
     }
 
+    func musicGenres() async throws -> [MusicGenre] {
+        let candidates = try await api.musicGenres(userID: userID)
+            .filter { MusicGenre.hasBrowsableName($0.name) }
+        let api = api
+        let userID = userID
+        var pages: [String: JellyfinItemPage] = [:]
+
+        for batchStart in stride(from: 0, to: candidates.count, by: 6) {
+            let batch = candidates[batchStart..<min(batchStart + 6, candidates.count)]
+            await withTaskGroup(of: (String, JellyfinItemPage?).self) { group in
+                for genre in batch {
+                    group.addTask {
+                        let page = try? await api.genreItemsPage(
+                            userID: userID,
+                            genreID: genre.id,
+                            startIndex: 0,
+                            limit: 8
+                        )
+                        return (genre.id, page)
+                    }
+                }
+                for await (genreID, page) in group {
+                    if let page { pages[genreID] = page }
+                }
+            }
+        }
+
+        return candidates.map { genre in
+            let page = pages[genre.id]
+            let cover = page?.items.first { $0.primaryImageTag != nil }
+            return MusicGenre(
+                id: MusicCatalogItemID(
+                    source: .jellyfin,
+                    accountScope: accountScope,
+                    opaqueID: genre.id
+                ),
+                name: genre.name,
+                artwork: cover.map {
+                    MusicArtworkReference(
+                        opaqueItemID: $0.artworkItemID,
+                        imageTag: $0.primaryImageTag
+                    )
+                },
+                albumCount: max(
+                    page?.totalRecordCount ?? 0,
+                    page?.items.count ?? 0,
+                    genre.childCount ?? 0
+                )
+            )
+        }
+        .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    }
+
+    func homeMusicGenres(limit: Int) async throws -> [MusicGenre] {
+        try await api.musicGenres(userID: userID)
+            .filter { MusicGenre.hasBrowsableName($0.name) }
+            .sorted {
+                if $0.childCount != $1.childCount {
+                    return ($0.childCount ?? 0) > ($1.childCount ?? 0)
+                }
+                return $0.name.localizedStandardCompare($1.name) == .orderedAscending
+            }
+            .prefix(limit)
+            .map {
+                MusicGenre(
+                    id: MusicCatalogItemID(
+                        source: .jellyfin,
+                        accountScope: accountScope,
+                        opaqueID: $0.id
+                    ),
+                    name: $0.name,
+                    artwork: nil,
+                    albumCount: $0.childCount ?? 0
+                )
+            }
+    }
+
     // MARK: - Artwork reads
 
     func artworkRequest(
@@ -117,7 +194,7 @@ actor JellyfinCatalogRepository: MusicLibraryProviding, MusicItemActionProviding
                 searchTerm: searchTerm
             )
         case .playlists, .search, .albumTracks, .playlistTracks, .favorites,
-            .recentlyAdded:
+            .mostListened, .recentlyAdded, .recentlyAddedTracks, .genreItems:
             return try await singleSourcePage(
                 kind: kind,
                 contextID: contextID?.opaqueID,
@@ -161,7 +238,7 @@ actor JellyfinCatalogRepository: MusicLibraryProviding, MusicItemActionProviding
                     limit: pageLimit, searchTerm: searchTerm
                 )
             case .playlists, .search, .albumTracks, .playlistTracks, .favorites,
-                .recentlyAdded:
+                .mostListened, .recentlyAdded, .recentlyAddedTracks, .genreItems:
                 preconditionFailure("Multi-library paging only supports music views.")
             }
         }
@@ -208,10 +285,27 @@ actor JellyfinCatalogRepository: MusicLibraryProviding, MusicItemActionProviding
                     userID: userID, collection: .favorites,
                     startIndex: offset, limit: pageLimit
                 )
+            case .mostListened:
+                return try await api.homeItemsPage(
+                    userID: userID, collection: .mostListened,
+                    startIndex: offset, limit: pageLimit
+                )
             case .recentlyAdded:
                 return try await api.homeItemsPage(
                     userID: userID, collection: .recentlyAdded,
                     startIndex: offset, limit: pageLimit
+                )
+            case .recentlyAddedTracks:
+                return try await api.homeItemsPage(
+                    userID: userID, collection: .recentlyAddedTracks,
+                    startIndex: offset, limit: pageLimit
+                )
+            case .genreItems:
+                return try await api.genreItemsPage(
+                    userID: userID,
+                    genreID: contextID ?? "",
+                    startIndex: offset,
+                    limit: pageLimit
                 )
             case .albums, .artists, .songs, .artistTracks:
                 preconditionFailure("Single-source paging only supports global views.")
@@ -274,8 +368,11 @@ actor JellyfinCatalogRepository: MusicLibraryProviding, MusicItemActionProviding
                     return values
                 }
                 for (sourceID, page) in responses {
+                    let items = page.items.filter {
+                        kind != .artists || ($0.childCount ?? 0) > 0
+                    }
                     state.buffers[sourceID, default: []].append(
-                        contentsOf: page.items.compactMap(mapper.map)
+                        contentsOf: items.compactMap(mapper.map)
                     )
                     state.offsets[sourceID] = page.nextStartIndex
                     state.totals[sourceID] = page.totalRecordCount
@@ -341,6 +438,9 @@ struct JellyfinCatalogMapper: Sendable {
             album: item.album,
             albumID: item.albumID,
             artistIDs: item.artistItems.map(\.id),
+            genres: item.genres,
+            genreIDs: item.genreItems.map(\.id),
+            releaseYear: item.productionYear,
             trackNumber: item.indexNumber,
             discNumber: item.parentIndexNumber,
             childCount: item.childCount,
@@ -374,6 +474,69 @@ extension MusicCatalogItem.Kind {
         case .artist: self = .artist
         case .playlist: self = .playlist
         }
+    }
+}
+
+actor JellyfinGenreCache {
+    private static let logger = Logger(
+        subsystem: "com.chameleonenterprise.velacanto",
+        category: "GenreCache"
+    )
+
+    private let directory: URL
+    private let fileManager: FileManager
+    private let encoder = JSONEncoder()
+    private let decoder = JSONDecoder()
+
+    init(fileManager: FileManager = .default, directory: URL? = nil) {
+        let caches =
+            fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first
+            ?? fileManager.temporaryDirectory
+        let defaultDirectory = caches.appending(
+            path: "VelacantoGenres",
+            directoryHint: .isDirectory
+        )
+        self.directory = directory ?? defaultDirectory
+        self.fileManager = fileManager
+    }
+
+    func load(serverID: String, userID: String, key: String) -> [MusicGenre] {
+        let url = fileURL(serverID: serverID, userID: userID, key: key)
+        guard fileManager.fileExists(atPath: url.path) else { return [] }
+        do {
+            return try decoder.decode([MusicGenre].self, from: Data(contentsOf: url))
+        } catch {
+            try? fileManager.removeItem(at: url)
+            Self.logger.error("Could not read cached genres")
+            return []
+        }
+    }
+
+    func save(_ genres: [MusicGenre], serverID: String, userID: String, key: String) {
+        do {
+            try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+            let data = try encoder.encode(genres)
+            try data.write(
+                to: fileURL(serverID: serverID, userID: userID, key: key),
+                options: .atomic
+            )
+        } catch {
+            Self.logger.error("Could not write cached genres")
+        }
+    }
+
+    func clear(serverID: String, userID: String) {
+        for key in ["all", "home"] {
+            let url = fileURL(serverID: serverID, userID: userID, key: key)
+            try? fileManager.removeItem(at: url)
+        }
+    }
+
+    private func fileURL(serverID: String, userID: String, key: String) -> URL {
+        let safeID = "\(serverID)-\(userID)".map {
+            $0.isLetter || $0.isNumber || $0 == "-" ? $0 : "-"
+        }
+        return directory.appending(path: "\(String(safeID))-\(key).json")
     }
 }
 
