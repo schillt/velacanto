@@ -13,7 +13,7 @@ struct MusicSearchView: View {
     @State private var playbackErrorMessage: String?
     @State private var selectedGenre: MusicGenre?
     @State private var isSearchPresented = false
-    @State private var isRootHeaderVisible = true
+    @State private var rootHeaderScrollProgress: CGFloat = 0
     @StateObject private var resultsScrollPosition =
         CatalogScrollPositionState<MusicCatalogItemID>()
     @FocusState private var isSearchFocused: Bool
@@ -69,7 +69,7 @@ struct MusicSearchView: View {
                         isSearchFocused = false
                     }
                 }
-                .revealsRootHeader($isRootHeaderVisible)
+                .progressiveRootHeader($rootHeaderScrollProgress)
                 .scrollDismissesKeyboard(.immediately)
                 .simultaneousGesture(
                     DragGesture(minimumDistance: 4).onChanged { _ in
@@ -105,7 +105,8 @@ struct MusicSearchView: View {
                 resultsList
             }
         }
-        .progressiveNavigationChrome()
+        .progressiveNavigationChrome(scrollProgress: rootHeaderScrollProgress)
+        .progressiveSemanticNavigationTitle("Search")
         .navigationDestination(item: $selectedGenre) { genre in
             MusicGenreCollectionView(
                 genre: genre,
@@ -121,20 +122,18 @@ struct MusicSearchView: View {
             )
             .searchFocused($isSearchFocused)
             .toolbar {
-                if isRootHeaderVisible {
-                    ToolbarItem(placement: .topBarLeading) {
-                        Text("Search")
-                        .font(.title2.weight(.bold))
-                        .fixedSize(horizontal: true, vertical: false)
+                ToolbarItem(placement: .topBarLeading) {
+                    ProgressiveToolbarTitle(
+                        title: "Search",
+                        scrollProgress: rootHeaderScrollProgress
+                    )
+                }
+                ToolbarItem(placement: .primaryAction) {
+                    Button(action: showProfile) {
+                        AccountAvatar(jellyfin: jellyfin)
                     }
-                    .sharedBackgroundVisibility(.hidden)
-                    ToolbarItem(placement: .primaryAction) {
-                        Button(action: showProfile) {
-                            AccountAvatar(jellyfin: jellyfin)
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("Profile and settings")
-                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Profile and settings")
                 }
             }
         #endif
@@ -262,7 +261,7 @@ struct MusicSearchView: View {
             }
         }
         .scrollPosition(id: resultsScrollPosition.binding(identity: searchTaskID))
-        .revealsRootHeader($isRootHeaderVisible)
+        .progressiveRootHeader($rootHeaderScrollProgress)
     }
 
     private var searchTaskID: String {

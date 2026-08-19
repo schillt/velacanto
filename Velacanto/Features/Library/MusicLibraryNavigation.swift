@@ -6,7 +6,7 @@ struct MusicLibraryView: View {
 
     let openLocalFile: () -> Void
     let showProfile: () -> Void
-    @State private var isRootHeaderVisible = true
+    @State private var rootHeaderScrollProgress: CGFloat = 0
 
     var body: some View {
         Group {
@@ -16,23 +16,22 @@ struct MusicLibraryView: View {
                 signedOutLibrary
             }
         }
-        .progressiveNavigationChrome()
+        .progressiveNavigationChrome(scrollProgress: rootHeaderScrollProgress)
+        .progressiveSemanticNavigationTitle("Library")
         #if os(iOS)
             .toolbar {
-                if isRootHeaderVisible {
-                    ToolbarItem(placement: .topBarLeading) {
-                        Text("Library")
-                        .font(.title2.weight(.bold))
-                        .fixedSize(horizontal: true, vertical: false)
+                ToolbarItem(placement: .topBarLeading) {
+                    ProgressiveToolbarTitle(
+                        title: "Library",
+                        scrollProgress: rootHeaderScrollProgress
+                    )
+                }
+                ToolbarItem(placement: .primaryAction) {
+                    Button(action: showProfile) {
+                        AccountAvatar(jellyfin: jellyfin)
                     }
-                    .sharedBackgroundVisibility(.hidden)
-                    ToolbarItem(placement: .primaryAction) {
-                        Button(action: showProfile) {
-                            AccountAvatar(jellyfin: jellyfin)
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("Profile and settings")
-                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Profile and settings")
                 }
             }
         #endif
@@ -86,7 +85,7 @@ struct MusicLibraryView: View {
             .padding(20)
             .frame(maxWidth: .infinity)
         }
-        .revealsRootHeader($isRootHeaderVisible)
+        .progressiveRootHeader($rootHeaderScrollProgress)
     }
 
     private var signedOutLibrary: some View {
@@ -121,7 +120,7 @@ struct MusicLibraryView: View {
             .padding(20)
             .frame(maxWidth: .infinity)
         }
-        .revealsRootHeader($isRootHeaderVisible)
+        .progressiveRootHeader($rootHeaderScrollProgress)
     }
 
     @ViewBuilder

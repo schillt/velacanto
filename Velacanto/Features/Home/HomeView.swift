@@ -31,7 +31,7 @@ struct HomeView: View {
     @State private var preparingCatalogItemID: MusicCatalogItemID?
     @State private var catalogPlaybackError: String?
     @State private var selectedGenre: MusicGenre?
-    @State private var isRootHeaderVisible = true
+    @State private var rootHeaderScrollProgress: CGFloat = 0
     @State private var genreShelfScrollAnchor: MusicCatalogItemID?
     @StateObject private var favoritesScrollPosition =
         CatalogScrollPositionState<MusicCatalogItemID>()
@@ -103,12 +103,9 @@ struct HomeView: View {
             .scrollTargetLayout()
         }
         .scrollPosition(id: $genreShelfScrollAnchor)
-        .revealsRootHeader($isRootHeaderVisible)
-        .progressiveNavigationChrome()
-        .navigationTitle(presentation.title)
-        #if os(iOS)
-            .navigationBarTitleDisplayMode(.inline)
-        #endif
+        .progressiveRootHeader($rootHeaderScrollProgress)
+        .progressiveNavigationChrome(scrollProgress: rootHeaderScrollProgress)
+        .progressiveSemanticNavigationTitle(presentation.title)
         .navigationDestination(item: $selectedGenre) { genre in
             MusicGenreCollectionView(
                 genre: genre,
@@ -118,22 +115,18 @@ struct HomeView: View {
         }
         #if os(iOS)
             .toolbar {
-                if isRootHeaderVisible {
-                    // Occupy the native title position so the progressive
-                    // header does not render beside the semantic title.
-                    ToolbarItem(placement: .principal) {
-                        Text(presentation.title)
-                        .font(.title2.weight(.bold))
-                        .fixedSize(horizontal: true, vertical: false)
+                ToolbarItem(placement: .topBarLeading) {
+                    ProgressiveToolbarTitle(
+                        title: presentation.title,
+                        scrollProgress: rootHeaderScrollProgress
+                    )
+                }
+                ToolbarItem(placement: .primaryAction) {
+                    Button(action: showProfile) {
+                        AccountAvatar(jellyfin: jellyfin)
                     }
-                    .sharedBackgroundVisibility(.hidden)
-                    ToolbarItem(placement: .primaryAction) {
-                        Button(action: showProfile) {
-                            AccountAvatar(jellyfin: jellyfin)
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("Profile and settings")
-                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Profile and settings")
                 }
             }
         #endif
