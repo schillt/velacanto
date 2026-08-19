@@ -559,30 +559,43 @@ private struct ProgressiveScreenHeaderModifier<Accessory: View>: ViewModifier {
                 .toolbarVisibility(.hidden, for: .navigationBar)
                 .contentMargins(.top, headerHeight, for: .scrollContent)
                 .overlay(alignment: .top) {
-                    HStack(spacing: 12) {
-                        Text(title)
-                            .font(.largeTitle.bold())
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.8)
-                            .accessibilityHidden(true)
-
-                        Spacer(minLength: 12)
-
-                        accessory
-                    }
-                    .padding(.horizontal, 16)
-                    .frame(height: headerHeight)
-                    .background {
+                    ZStack(alignment: .top) {
                         Rectangle()
-                            .fill(.ultraThinMaterial)
-                            .mask(
+                            .fill(.regularMaterial)
+                            .overlay {
+                                Color(uiColor: .systemBackground)
+                                    .opacity(0.36)
+                            }
+                            .frame(height: headerHeight + 36)
+                            .mask {
                                 LinearGradient(
-                                    colors: [.black, .black.opacity(0)],
+                                    stops: [
+                                        .init(color: .black, location: 0),
+                                        .init(color: .black, location: 0.58),
+                                        .init(color: .black.opacity(0.72), location: 0.78),
+                                        .init(color: .clear, location: 1),
+                                    ],
                                     startPoint: .top,
                                     endPoint: .bottom
                                 )
-                            )
+                            }
+                            .ignoresSafeArea(edges: .top)
+
+                        HStack(spacing: 12) {
+                            Text(title)
+                                .font(.largeTitle.bold())
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.8)
+                                .accessibilityHidden(true)
+
+                            Spacer(minLength: 12)
+
+                            accessory
+                        }
+                        .padding(.horizontal, 16)
+                        .frame(height: headerHeight)
                     }
+                    .frame(height: headerHeight + 36, alignment: .top)
                     .opacity(presentation.isVisible ? 1 : 0)
                     .allowsHitTesting(presentation.isVisible)
                     .accessibilityHidden(!presentation.isVisible)
