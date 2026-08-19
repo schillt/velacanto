@@ -71,6 +71,9 @@ final class VelacantoUITests: XCTestCase {
         continueAfterFailure = false
         launchSignedInFixture()
         XCTAssertTrue(app.buttons["Show Now Playing"].waitForExistence(timeout: 5))
+        let compactMetadata = app.buttons["Now Playing"]
+        XCTAssertTrue(compactMetadata.waitForExistence(timeout: 2))
+        XCTAssertEqual(compactMetadata.value as? String, "Test Track, Test Artist")
         app.buttons["Show Now Playing"].tap()
 
         XCTAssertTrue(app.buttons["Show Lyrics"].waitForExistence(timeout: 3))

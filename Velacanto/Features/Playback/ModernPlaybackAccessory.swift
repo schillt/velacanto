@@ -114,6 +114,8 @@ import SwiftUI
                 if playback.isWaitingForPlayback {
                     ProgressView()
                         .controlSize(.small)
+                        .scaleEffect(0.75)
+                        .frame(width: 16, height: 16)
                         .frame(width: 36, height: 36)
                 } else {
                     Image(
@@ -173,16 +175,17 @@ import SwiftUI
         @State private var isVisible = false
 
         private let initialDwell: Duration = .seconds(1)
-        private let trailingDwell: Duration = .milliseconds(700)
         private let pointsPerSecond: CGFloat = 24
+        private let loopGap: CGFloat = 32
+        private let loopCount = 12
 
         var body: some View {
             ScrollView(.horizontal) {
-                Text(text)
-                    .font(font)
-                    .foregroundStyle(color)
-                    .lineLimit(1)
-                    .fixedSize(horizontal: true, vertical: false)
+                // Matching endpoints let a finite native repeat loop without a visible snap.
+                HStack(spacing: loopGap) {
+                    marqueeText
+                    marqueeText
+                }
             }
             .scrollDisabled(true)
             .scrollIndicators(.hidden)
@@ -190,7 +193,7 @@ import SwiftUI
             .onScrollGeometryChange(for: Measurement.self) { geometry in
                 Measurement(
                     availableWidth: geometry.containerSize.width,
-                    textWidth: geometry.contentSize.width
+                    textWidth: max((geometry.contentSize.width - loopGap) / 2, 0)
                 )
             } action: { _, measurement in
                 self.measurement = measurement
@@ -225,6 +228,18 @@ import SwiftUI
             max(measurement.overflow / pointsPerSecond, 0.5)
         }
 
+        private var loopDistance: CGFloat {
+            measurement.textWidth + loopGap
+        }
+
+        private var marqueeText: some View {
+            Text(text)
+                .font(font)
+                .foregroundStyle(color)
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
+        }
+
         @MainActor
         private func runCycle() async {
             resetScrollPosition()
@@ -234,17 +249,12 @@ import SwiftUI
                 try await Task.sleep(for: initialDwell)
                 guard canScroll else { return }
 
-                withAnimation(.linear(duration: scrollDuration)) {
-                    scrollPosition.scrollTo(x: measurement.overflow)
+                withAnimation(
+                    .linear(duration: scrollDuration)
+                        .repeatCount(loopCount, autoreverses: false)
+                ) {
+                    scrollPosition.scrollTo(x: loopDistance)
                 }
-
-                try await Task.sleep(for: .milliseconds(Int64((scrollDuration * 1_000).rounded())))
-                guard canScroll else { return }
-
-                try await Task.sleep(for: trailingDwell)
-                guard canScroll else { return }
-
-                resetScrollPosition()
             } catch is CancellationError {
                 return
             } catch {
