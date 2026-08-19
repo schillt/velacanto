@@ -545,14 +545,15 @@ private struct ProgressiveScreenHeaderModifier<Accessory: View>: ViewModifier {
     let title: String
     let accessory: Accessory
 
-    @State private var presentation = ProgressiveHeaderPresentation()
+    @StateObject private var scrollTracker = ProgressiveHeaderScrollTracker()
 
     func body(content: Content) -> some View {
         #if os(iOS)
+            let presentation = scrollTracker.presentation
+
             content
                 .navigationTitle(title)
                 .navigationBarTitleDisplayMode(.inline)
-                .toolbarBackground(.hidden, for: .navigationBar)
                 // An empty principal item preserves the navigation bar's
                 // semantic title without allowing it to draw a centered one.
                 .toolbar {
@@ -561,19 +562,25 @@ private struct ProgressiveScreenHeaderModifier<Accessory: View>: ViewModifier {
                             .frame(width: 1, height: 1)
                             .accessibilityHidden(true)
                     }
-                }
-                // The navigation bar already reserves one compact row. Draw
-                // the visible title in that row instead of reserving another
-                // header-sized region in the scroll content.
-                .contentMargins(.top, 4, for: .scrollContent)
-                .overlay(alignment: .top) {
-                    ProgressiveScreenHeader(
-                        title: title,
-                        accessory: accessory,
-                        expandedPresentation: presentation.expandedPresentation,
-                        compactPresentation: presentation.compactPresentation
-                    )
-                    .offset(y: -44)
+                    ToolbarItem(placement: .topBarLeading) {
+                        Text(title)
+                            .font(
+                                .system(
+                                    size: 22 + (6 * presentation.expandedPresentation),
+                                    weight: .bold
+                                )
+                            )
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.78)
+                            .opacity(presentation.rowPresentation)
+                            .accessibilityHidden(true)
+                    }
+                    ToolbarItem(placement: .topBarTrailing) {
+                        accessory
+                            .opacity(presentation.rowPresentation)
+                            .allowsHitTesting(presentation.rowPresentation > 0.01)
+                            .accessibilityHidden(presentation.rowPresentation <= 0.01)
+                    }
                 }
                 .onScrollGeometryChange(
                     for: CGFloat.self,
@@ -588,7 +595,7 @@ private struct ProgressiveScreenHeaderModifier<Accessory: View>: ViewModifier {
                         return (offset / 4).rounded() * 4
                     },
                     action: { _, offset in
-                        presentation.update(for: offset)
+                        scrollTracker.update(for: offset)
                     }
                 )
         #else
@@ -601,16 +608,12 @@ private struct ProgressiveScreenHeaderModifier<Accessory: View>: ViewModifier {
 /// presentation. Unlike a toolbar visibility toggle, reverse scrolling
 /// accumulates directly into the compact presentation, so there is no
 /// insertion/removal pop while the title returns.
-struct ProgressiveHeaderPresentation {
-    private let transitionDistance: CGFloat = 72
-    private let reverseRevealDistance: CGFloat = 28
+struct ProgressiveHeaderPresentation: Equatable {
+    private static let transitionDistance: CGFloat = 72
+    private static let reverseRevealDistance: CGFloat = 28
 
-    private(set) var offset: CGFloat = 0
+    private(set) var expandedPresentation: CGFloat = 1
     private(set) var compactVisibility: CGFloat = 0
-
-    var expandedPresentation: CGFloat {
-        1 - min(offset / transitionDistance, 1)
-    }
 
     var compactPresentation: CGFloat {
         // A compact header is only useful away from the top. The same
@@ -619,76 +622,46 @@ struct ProgressiveHeaderPresentation {
         min(compactVisibility, 1 - expandedPresentation)
     }
 
-    mutating func update(for newOffset: CGFloat) {
+    var rowPresentation: CGFloat {
+        max(expandedPresentation, compactPresentation)
+    }
+
+    @discardableResult
+    mutating func update(for newOffset: CGFloat, delta: CGFloat) -> Bool {
+        let previous = self
         let clampedOffset = max(0, newOffset)
-        let delta = clampedOffset - offset
-        offset = clampedOffset
+        expandedPresentation = 1 - min(clampedOffset / Self.transitionDistance, 1)
 
         // Each point of reverse travel progressively restores the compact
         // row. Downward travel fades it at the same rate, keeping the
         // header absent while the catalog moves forward.
         compactVisibility = min(
-            max(compactVisibility - (delta / reverseRevealDistance), 0),
+            max(compactVisibility - (delta / Self.reverseRevealDistance), 0),
             1
         )
+        if clampedOffset == 0 {
+            compactVisibility = 0
+        }
+
+        return self != previous
     }
 }
 
-#if os(iOS)
-    private struct ProgressiveScreenHeader<Accessory: View>: View {
-        let title: String
-        let accessory: Accessory
-        let expandedPresentation: CGFloat
-        let compactPresentation: CGFloat
+@MainActor
+final class ProgressiveHeaderScrollTracker: ObservableObject {
+    @Published private(set) var presentation = ProgressiveHeaderPresentation()
+    private var previousOffset: CGFloat = 0
 
-        private var rowOpacity: CGFloat {
-            max(expandedPresentation, compactPresentation)
-        }
+    func update(for offset: CGFloat) {
+        let clampedOffset = max(0, offset)
+        let delta = clampedOffset - previousOffset
+        previousOffset = clampedOffset
 
-        private var materialOpacity: CGFloat {
-            compactPresentation
-        }
-
-        var body: some View {
-            ZStack(alignment: .top) {
-                Rectangle()
-                    .fill(.ultraThinMaterial)
-                    .mask {
-                        LinearGradient(
-                            colors: [.black, .black.opacity(0.82), .clear],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        )
-                    }
-                    .opacity(materialOpacity)
-                    .ignoresSafeArea(edges: .top)
-                    .allowsHitTesting(false)
-
-                HStack(alignment: .center, spacing: 12) {
-                    Text(title)
-                        .font(
-                            .system(
-                                size: 22 + (8 * expandedPresentation),
-                                weight: .bold
-                            )
-                        )
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.7)
-                        .accessibilityHidden(true)
-
-                    Spacer(minLength: 12)
-
-                    accessory
-                }
-                .padding(.horizontal, 16)
-                .frame(height: 44)
-                .opacity(rowOpacity)
-                .offset(y: -6 * (1 - rowOpacity))
-            }
-            .frame(height: 44, alignment: .top)
-        }
+        var nextPresentation = presentation
+        guard nextPresentation.update(for: clampedOffset, delta: delta) else { return }
+        presentation = nextPresentation
     }
-#endif
+}
 
 private struct ProgressivePageHeaderModifier: ViewModifier {
     let title: String?

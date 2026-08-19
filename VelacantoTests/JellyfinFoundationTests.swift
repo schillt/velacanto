@@ -10,26 +10,75 @@ final class JellyfinFoundationTests: XCTestCase {
         XCTAssertEqual(presentation.expandedPresentation, 1)
         XCTAssertEqual(presentation.compactPresentation, 0)
 
-        presentation.update(for: 80)
+        presentation.update(for: 80, delta: 80)
         XCTAssertEqual(presentation.expandedPresentation, 0)
         XCTAssertEqual(presentation.compactPresentation, 0)
 
-        presentation.update(for: 52)
+        presentation.update(for: 52, delta: -28)
         XCTAssertEqual(presentation.expandedPresentation, 0.277, accuracy: 0.001)
         XCTAssertEqual(presentation.compactPresentation, 0.723, accuracy: 0.001)
 
-        presentation.update(for: 0)
+        presentation.update(for: 0, delta: -52)
         XCTAssertEqual(presentation.expandedPresentation, 1)
         XCTAssertEqual(presentation.compactPresentation, 0)
 
-        presentation.update(for: 40)
+        presentation.update(for: 40, delta: 40)
         XCTAssertEqual(presentation.compactPresentation, 0)
     }
 
-    func testQueuePresentationAnchorsCurrentAndPreservesEmptyUpcoming() {
-        XCTAssertEqual(QueuePresentation.initialAnchorID, "queue-current")
-        XCTAssertTrue(QueuePresentation.showsEmptyUpcoming(upcomingCount: 0))
-        XCTAssertFalse(QueuePresentation.showsEmptyUpcoming(upcomingCount: 1))
+    func testProgressiveHeaderDoesNotPublishSettledForwardTravel() {
+        var presentation = ProgressiveHeaderPresentation()
+
+        XCTAssertTrue(presentation.update(for: 80, delta: 80))
+        let settledPresentation = presentation
+
+        var previousOffset: CGFloat = 80
+        for offset: CGFloat in [160, 400, 1_000] {
+            XCTAssertFalse(
+                presentation.update(
+                    for: offset,
+                    delta: offset - previousOffset
+                )
+            )
+            previousOffset = offset
+        }
+        XCTAssertEqual(presentation, settledPresentation)
+
+        XCTAssertTrue(presentation.update(for: 996, delta: -4))
+        XCTAssertGreaterThan(presentation.compactPresentation, 0)
+    }
+
+    func testQueueViewportAnchorsCurrentAboveIntentionalEmptyState() {
+        let composition = QueueViewportComposition(
+            historyCount: 3,
+            upcomingCount: 0,
+            viewportHeight: 812
+        )
+
+        XCTAssertEqual(QueueViewportComposition.initialAnchorID, "queue-current")
+        XCTAssertEqual(
+            composition.sections,
+            [.history, .current, .controls, .upNextEmpty]
+        )
+        XCTAssertEqual(composition.initialAnchorSectionIndex, 1)
+        XCTAssertTrue(composition.historyIsAboveInitialAnchor)
+        XCTAssertEqual(composition.minimumAnchoredHeight, 812)
+    }
+
+    func testQueueViewportKeepsShortUpcomingInsideAnchoredComposition() {
+        let composition = QueueViewportComposition(
+            historyCount: 0,
+            upcomingCount: 1,
+            viewportHeight: 744
+        )
+
+        XCTAssertEqual(
+            composition.sections,
+            [.current, .controls, .upNextItems]
+        )
+        XCTAssertEqual(composition.initialAnchorSectionIndex, 0)
+        XCTAssertTrue(composition.historyIsAboveInitialAnchor)
+        XCTAssertEqual(composition.minimumAnchoredHeight, 744)
     }
 
     func testMarqueeOverflowClassificationUsesTolerance() {

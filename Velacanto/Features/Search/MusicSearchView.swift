@@ -14,6 +14,7 @@ struct MusicSearchView: View {
     @State private var selectedGenre: MusicGenre?
     @StateObject private var resultsScrollPosition =
         CatalogScrollPositionState<MusicCatalogItemID>()
+    @State private var isSearchPresented = false
     @FocusState private var isSearchFocused: Bool
 
     private var query: String {
@@ -102,13 +103,6 @@ struct MusicSearchView: View {
                 resultsList
             }
         }
-        #if os(iOS)
-            .safeAreaInset(edge: .top, spacing: 0) {
-                searchField
-                .padding(.horizontal, 16)
-                .padding(.bottom, 8)
-            }
-        #endif
         .progressiveScreenHeader("Search") {
             Button(action: showProfile) {
                 AccountAvatar(jellyfin: jellyfin)
@@ -116,6 +110,15 @@ struct MusicSearchView: View {
             .buttonStyle(.plain)
             .accessibilityLabel("Profile and settings")
         }
+        #if os(iOS)
+            .searchable(
+                text: $searchText,
+                isPresented: $isSearchPresented,
+                placement: .navigationBarDrawer(displayMode: .always),
+                prompt: "Albums, artists, songs, and playlists"
+            )
+            .searchFocused($isSearchFocused)
+        #endif
         .navigationDestination(item: $selectedGenre) { genre in
             MusicGenreCollectionView(
                 genre: genre,
@@ -129,49 +132,16 @@ struct MusicSearchView: View {
         #if os(iOS)
             .onChange(of: isSearchTabSelected) { _, isSelected in
                 guard isSelected else { return }
+                isSearchPresented = true
                 isSearchFocused = true
             }
             .task {
                 guard isSearchTabSelected else { return }
+                isSearchPresented = true
                 isSearchFocused = true
             }
         #endif
     }
-
-    #if os(iOS)
-        private var searchField: some View {
-            HStack(spacing: 8) {
-                Image(systemName: "magnifyingglass")
-                    .foregroundStyle(.secondary)
-                    .accessibilityHidden(true)
-
-                TextField(
-                    "Albums, artists, songs, and playlists",
-                    text: $searchText
-                )
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-                .submitLabel(.search)
-                .focused($isSearchFocused)
-
-                if !searchText.isEmpty {
-                    Button {
-                        searchText = ""
-                        isSearchFocused = true
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .foregroundStyle(.secondary)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Clear search")
-                }
-            }
-            .padding(.horizontal, 12)
-            .frame(minHeight: 38)
-            .background(.quaternary, in: .rect(cornerRadius: 12))
-            .accessibilityElement(children: .contain)
-        }
-    #endif
 
     private var resultsList: some View {
         List {

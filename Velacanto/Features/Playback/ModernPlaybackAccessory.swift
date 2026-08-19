@@ -215,6 +215,8 @@ import SwiftUI
             .overlay(alignment: .leading) {
                 marqueeText
                     .hidden()
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
                     .onGeometryChange(for: CGFloat.self) { proxy in
                         proxy.size.width
                     } action: { width in
