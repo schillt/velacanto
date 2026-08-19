@@ -258,74 +258,85 @@ struct NowPlayingQueueContent: View {
     let onCurrentItemArtworkFrameChange: (CGRect?) -> Void
 
     var body: some View {
-        ScrollView {
-            LazyVStack(
-                alignment: .leading,
-                spacing: 0,
-                pinnedViews: [.sectionHeaders]
-            ) {
-                if !historyItems.isEmpty {
-                    QueueSectionHeader("History")
-                        .queueScrollSectionHeaderStyle()
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(
+                    alignment: .leading,
+                    spacing: 0,
+                    pinnedViews: [.sectionHeaders]
+                ) {
+                    if !historyItems.isEmpty {
+                        QueueSectionHeader("History")
+                            .queueScrollSectionHeaderStyle()
 
-                    ForEach(historyItems) { item in
-                        QueueTrackRow(item: item, jellyfin: jellyfin)
-                            .foregroundStyle(.secondary)
-                            .queueScrollRowStyle()
-                            .onTapGesture {
-                                playback.playQueueItem(item)
-                            }
-                    }
-                }
-
-                currentItemSummary
-
-                Section {
-                    if playback.upcomingItems.isEmpty {
-                        Text("End of Queue")
-                            .font(.caption.weight(.medium))
-                            .foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity, alignment: .center)
-                            .padding(.top, 18)
-                    } else {
-                        ForEach(playback.upcomingItems, id: \.queueIdentity) { item in
+                        ForEach(historyItems) { item in
                             QueueTrackRow(item: item, jellyfin: jellyfin)
+                                .foregroundStyle(.secondary)
                                 .queueScrollRowStyle()
-                                .queueContextMenu(
-                                    item: item,
-                                    playback: playback,
-                                    canRemove: true
-                                )
                                 .onTapGesture {
                                     playback.playQueueItem(item)
                                 }
                         }
-                        #if compiler(>=6.4)
-                            .reorderable()
-                        #endif
                     }
-                } header: {
-                    modeControls
+
+                    currentItemSummary
+
+                    Section {
+                        QueueSectionHeader("Up Next")
+                            .queueScrollSectionHeaderStyle()
+
+                        if playback.upcomingItems.isEmpty {
+                            Text("End of Queue")
+                                .font(.caption.weight(.medium))
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .center)
+                                .padding(.top, 18)
+                        } else {
+                            ForEach(playback.upcomingItems, id: \.queueIdentity) { item in
+                                QueueTrackRow(item: item, jellyfin: jellyfin)
+                                    .queueScrollRowStyle()
+                                    .queueContextMenu(
+                                        item: item,
+                                        playback: playback,
+                                        canRemove: true
+                                    )
+                                    .onTapGesture {
+                                        playback.playQueueItem(item)
+                                    }
+                            }
+                            #if compiler(>=6.4)
+                                .reorderable()
+                            #endif
+                        }
+                    } header: {
+                        modeControls
+                    }
                 }
+                .padding(.bottom, 12)
+                #if compiler(>=6.4)
+                    .reorderContainer(
+                        for: PlaybackItem.self,
+                        itemID: \.queueIdentity
+                    ) { difference in
+                        reorderUpcomingItems(difference)
+                    }
+                #endif
             }
-            .padding(.bottom, 12)
-            #if compiler(>=6.4)
-                .reorderContainer(
-                    for: PlaybackItem.self,
-                    itemID: \.queueIdentity
-                ) { difference in
-                    reorderUpcomingItems(difference)
-                }
-            #endif
-        }
-        .scrollIndicators(.hidden)
-        .scrollEdgeEffectStyle(.soft, for: .top)
-        .accessibilityLabel("Playback queue")
-        .onPreferenceChange(QueueCurrentArtworkFramePreferenceKey.self) {
-            onCurrentItemArtworkFrameChange($0)
-        }
-        .onDisappear {
-            onCurrentItemArtworkFrameChange(nil)
+            .scrollIndicators(.hidden)
+            .scrollEdgeEffectStyle(.soft, for: .top)
+            .accessibilityLabel("Playback queue")
+            .onAppear {
+                scrollToCurrentItem(using: proxy)
+            }
+            .onChange(of: playback.currentItem?.queueIdentity) { _, _ in
+                scrollToCurrentItem(using: proxy)
+            }
+            .onPreferenceChange(QueueCurrentArtworkFramePreferenceKey.self) {
+                onCurrentItemArtworkFrameChange($0)
+            }
+            .onDisappear {
+                onCurrentItemArtworkFrameChange(nil)
+            }
         }
     }
 
@@ -341,6 +352,7 @@ struct NowPlayingQueueContent: View {
                     isCurrentItem: true,
                     showsArtwork: false
                 )
+                .id(currentItemScrollID)
                 .queueScrollRowStyle()
                 .background {
                     GeometryReader { geometry in
@@ -358,23 +370,15 @@ struct NowPlayingQueueContent: View {
     }
 
     private var modeControls: some View {
-        HStack(spacing: 12) {
-            Text("Up Next")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-
-            Spacer(minLength: 0)
-
-            QueueModeControlPills(playback: playback)
-        }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 10)
-        .frame(maxWidth: .infinity)
-        .background(QueuePinnedControlSurface())
-        .overlay(alignment: .bottom) {
-            Divider()
-                .opacity(0.65)
-        }
+        QueueModeControlPills(playback: playback)
+            .padding(.horizontal, 20)
+            .padding(.vertical, 8)
+            .frame(maxWidth: .infinity)
+            .background(QueuePinnedControlSurface())
+            .overlay(alignment: .bottom) {
+                Divider()
+                    .opacity(0.8)
+            }
     }
 
     private var historyItems: [PlaybackItem] {
@@ -412,6 +416,18 @@ struct NowPlayingQueueContent: View {
 
     private func itemKey(_ item: PlaybackItem) -> String {
         "\(item.source.rawValue)|\(item.id)"
+    }
+
+    private var currentItemScrollID: String {
+        guard let currentItem = playback.currentItem else { return "queue-current" }
+        return "queue-current-\(itemKey(currentItem))"
+    }
+
+    private func scrollToCurrentItem(using proxy: ScrollViewProxy) {
+        guard playback.currentItem != nil else { return }
+        DispatchQueue.main.async {
+            proxy.scrollTo(currentItemScrollID, anchor: .top)
+        }
     }
 
     private func artworkFrame(in geometry: GeometryProxy) -> CGRect {
@@ -461,7 +477,7 @@ private struct QueueModeControlPills: View {
         .buttonStyle(.bordered)
         .buttonBorderShape(.capsule)
         .controlSize(.small)
-        .tint(.secondary)
+        .tint(.secondary.opacity(0.35))
     }
 
     private var repeatTitle: String {
@@ -483,8 +499,13 @@ private struct QueueModeControlPills: View {
 
 private struct QueuePinnedControlSurface: View {
     var body: some View {
-        Rectangle()
-            .fill(.background)
+        #if os(iOS)
+            Rectangle()
+                .fill(Color(uiColor: .secondarySystemBackground))
+        #elseif os(macOS)
+            Rectangle()
+                .fill(Color(nsColor: .windowBackgroundColor))
+        #endif
     }
 }
 
