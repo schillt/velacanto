@@ -26,6 +26,33 @@ final class JellyfinFoundationTests: XCTestCase {
         XCTAssertEqual(presentation.compactPresentation, 0)
     }
 
+    func testQueuePresentationAnchorsCurrentAndPreservesEmptyUpcoming() {
+        XCTAssertEqual(QueuePresentation.initialAnchorID, "queue-current")
+        XCTAssertTrue(QueuePresentation.showsEmptyUpcoming(upcomingCount: 0))
+        XCTAssertFalse(QueuePresentation.showsEmptyUpcoming(upcomingCount: 1))
+    }
+
+    func testMarqueeOverflowClassificationUsesTolerance() {
+        XCTAssertFalse(
+            MarqueeOverflowClassification.needsMarquee(
+                textWidth: 200,
+                availableWidth: 200
+            )
+        )
+        XCTAssertFalse(
+            MarqueeOverflowClassification.needsMarquee(
+                textWidth: 201.5,
+                availableWidth: 200
+            )
+        )
+        XCTAssertTrue(
+            MarqueeOverflowClassification.needsMarquee(
+                textWidth: 203,
+                availableWidth: 200
+            )
+        )
+    }
+
     func testServerURLNormalizesHTTPSAndKeepsReverseProxyPath() throws {
         let server = try JellyfinServerURL("  HTTPS://Music.Example.com/jellyfin/  ")
 

@@ -154,8 +154,11 @@ import SwiftUI
             let availableWidth: CGFloat
             let textWidth: CGFloat
 
-            var overflow: CGFloat {
-                max(textWidth - availableWidth, 0)
+            var needsMarquee: Bool {
+                MarqueeOverflowClassification.needsMarquee(
+                    textWidth: textWidth,
+                    availableWidth: availableWidth
+                )
             }
         }
 
@@ -182,23 +185,41 @@ import SwiftUI
         private let loopCount = 24
 
         var body: some View {
-            ScrollView(.horizontal) {
-                // Matching endpoints let a bounded native loop wrap without a visible snap.
-                HStack(spacing: loopGap) {
-                    marqueeText
-                    marqueeText
+            Group {
+                if measurement.needsMarquee {
+                    ScrollView(.horizontal) {
+                        // Matching endpoints let a bounded native loop wrap
+                        // without a visible snap.
+                        HStack(spacing: loopGap) {
+                            marqueeText
+                            marqueeText
+                        }
+                    }
+                    .scrollDisabled(true)
+                    .scrollIndicators(.hidden)
+                    .scrollPosition($scrollPosition)
+                } else {
+                    Text(text)
+                        .font(font)
+                        .foregroundStyle(color)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
-            .scrollDisabled(true)
-            .scrollIndicators(.hidden)
-            .scrollPosition($scrollPosition)
-            .onScrollGeometryChange(for: Measurement.self) { geometry in
-                Measurement(
-                    availableWidth: geometry.containerSize.width,
-                    textWidth: max((geometry.contentSize.width - loopGap) / 2, 0)
-                )
-            } action: { _, measurement in
-                self.measurement = measurement
+            .onGeometryChange(for: CGFloat.self) { proxy in
+                proxy.size.width
+            } action: { width in
+                updateMeasurement(availableWidth: width)
+            }
+            .overlay(alignment: .leading) {
+                marqueeText
+                    .hidden()
+                    .onGeometryChange(for: CGFloat.self) { proxy in
+                        proxy.size.width
+                    } action: { width in
+                        updateMeasurement(textWidth: width)
+                    }
             }
             .onAppear {
                 isVisible = true
@@ -223,7 +244,7 @@ import SwiftUI
         }
 
         private var canScroll: Bool {
-            isVisible && !reduceMotion && measurement.overflow > 0
+            isVisible && !reduceMotion && measurement.needsMarquee
         }
 
         private var scrollDuration: TimeInterval {
@@ -278,6 +299,18 @@ import SwiftUI
                 scrollPosition.scrollTo(x: 0)
             }
         }
+
+        private func updateMeasurement(
+            availableWidth: CGFloat? = nil,
+            textWidth: CGFloat? = nil
+        ) {
+            let updated = Measurement(
+                availableWidth: availableWidth ?? measurement.availableWidth,
+                textWidth: textWidth ?? measurement.textWidth
+            )
+            guard updated != measurement else { return }
+            measurement = updated
+        }
     }
 
     extension View {
@@ -297,6 +330,17 @@ import SwiftUI
     }
 
 #endif
+
+struct MarqueeOverflowClassification {
+    static let tolerance: CGFloat = 2
+
+    static func needsMarquee(
+        textWidth: CGFloat,
+        availableWidth: CGFloat
+    ) -> Bool {
+        availableWidth > 0 && textWidth > availableWidth + tolerance
+    }
+}
 
 #if os(iOS)
     struct NowPlayingTitleMarquee: View {

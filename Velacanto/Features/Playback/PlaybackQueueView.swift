@@ -259,7 +259,7 @@ struct NowPlayingQueueContent: View {
     @ObservedObject var jellyfin: JellyfinSessionController
     let artworkTransitionNamespace: Namespace.ID
     @State private var scrollPosition = ScrollPosition(
-        id: "queue-current",
+        id: QueuePresentation.initialAnchorID,
         anchor: .top
     )
 
@@ -267,8 +267,7 @@ struct NowPlayingQueueContent: View {
         ScrollView {
             LazyVStack(
                 alignment: .leading,
-                spacing: 0,
-                pinnedViews: [.sectionHeaders]
+                spacing: 0
             ) {
                 if !historyItems.isEmpty {
                     QueueSectionHeader("History")
@@ -286,35 +285,47 @@ struct NowPlayingQueueContent: View {
 
                 currentItemSummary
 
-                Section {
-                    QueueSectionHeader("Up Next")
-                        .queueScrollSectionHeaderStyle()
+                modeControls
 
-                    if playback.upcomingItems.isEmpty {
-                        Text("End of Queue")
-                            .font(.caption.weight(.medium))
-                            .foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity, alignment: .center)
-                            .padding(.top, 18)
-                    } else {
-                        ForEach(playback.upcomingItems, id: \.queueIdentity) { item in
-                            QueueTrackRow(item: item, jellyfin: jellyfin)
-                                .queueScrollRowStyle()
-                                .queueContextMenu(
-                                    item: item,
-                                    playback: playback,
-                                    canRemove: true
-                                )
-                                .onTapGesture {
-                                    playback.playQueueItem(item)
-                                }
-                        }
-                        #if compiler(>=6.4)
-                            .reorderable()
-                        #endif
+                QueueSectionHeader("Up Next")
+                    .queueScrollSectionHeaderStyle()
+
+                if QueuePresentation.showsEmptyUpcoming(
+                    upcomingCount: playback.upcomingItems.count
+                ) {
+                    ContentUnavailableView(
+                        "Nothing Up Next",
+                        systemImage: "text.line.last.and.arrowtriangle.forward",
+                        description: Text("Add music to keep the queue going.")
+                    )
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    // Keep enough content below the initial anchor for the
+                    // current item to remain at the top even when Up Next is empty.
+                    .containerRelativeFrame(.vertical)
+                } else {
+                    ForEach(playback.upcomingItems, id: \.queueIdentity) { item in
+                        QueueTrackRow(item: item, jellyfin: jellyfin)
+                            .queueScrollRowStyle()
+                            .queueContextMenu(
+                                item: item,
+                                playback: playback,
+                                canRemove: true
+                            )
+                            .onTapGesture {
+                                playback.playQueueItem(item)
+                            }
                     }
-                } header: {
-                    modeControls
+                    #if compiler(>=6.4)
+                        .reorderable()
+                    #endif
+
+                    // A short queue still needs enough trailing scroll range
+                    // for the current-item anchor to sit at the top on open.
+                    Color.clear
+                        .containerRelativeFrame(.vertical) { length, _ in
+                            max(length - 180, 0)
+                        }
+                        .accessibilityHidden(true)
                 }
             }
             .padding(.bottom, 12)
@@ -346,7 +357,7 @@ struct NowPlayingQueueContent: View {
                     isCurrentItem: true,
                     artworkTransitionNamespace: artworkTransitionNamespace
                 )
-                .id("queue-current")
+                .id(QueuePresentation.initialAnchorID)
                 .queueScrollRowStyle()
                 .onTapGesture {
                     playback.playQueueItem(currentItem)
@@ -358,13 +369,8 @@ struct NowPlayingQueueContent: View {
     private var modeControls: some View {
         QueueModeControlPills(playback: playback)
             .padding(.horizontal, 20)
-            .padding(.vertical, 8)
+            .padding(.vertical, 10)
             .frame(maxWidth: .infinity)
-            .background(QueuePinnedControlSurface())
-            .overlay(alignment: .bottom) {
-                Divider()
-                    .opacity(0.8)
-            }
     }
 
     private var historyItems: [PlaybackItem] {
@@ -415,6 +421,7 @@ private struct QueueModeControlPills: View {
                 playback.shuffleUpcoming()
             } label: {
                 Label("Shuffle", systemImage: "shuffle")
+                    .padding(.vertical, 7)
                     .frame(maxWidth: .infinity)
             }
             .disabled(playback.upcomingItems.count < 2)
@@ -424,16 +431,23 @@ private struct QueueModeControlPills: View {
                 playback.cycleRepeatMode()
             } label: {
                 Label(repeatTitle, systemImage: repeatSymbol)
+                    .padding(.vertical, 7)
                     .frame(maxWidth: .infinity)
+                    .foregroundStyle(
+                        playback.repeatMode == .off
+                            ? Color.secondary : Color.velacantoAccent
+                    )
+                    .background(
+                        playback.repeatMode == .off
+                            ? Color.clear : Color.velacantoAccent.opacity(0.12),
+                        in: .capsule
+                    )
             }
             .accessibilityLabel(repeatAccessibilityLabel)
         }
         .font(.callout.weight(.medium))
         .labelStyle(.titleAndIcon)
-        .buttonStyle(.bordered)
-        .buttonBorderShape(.capsule)
-        .controlSize(.small)
-        .tint(.secondary.opacity(0.18))
+        .buttonStyle(.plain)
     }
 
     private var repeatTitle: String {
@@ -453,10 +467,11 @@ private struct QueueModeControlPills: View {
     }
 }
 
-private struct QueuePinnedControlSurface: View {
-    var body: some View {
-        Rectangle()
-            .fill(.thinMaterial)
+struct QueuePresentation {
+    static let initialAnchorID = "queue-current"
+
+    static func showsEmptyUpcoming(upcomingCount: Int) -> Bool {
+        upcomingCount == 0
     }
 }
 

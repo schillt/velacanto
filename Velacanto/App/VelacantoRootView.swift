@@ -562,10 +562,10 @@ private struct ProgressiveScreenHeaderModifier<Accessory: View>: ViewModifier {
                             .accessibilityHidden(true)
                     }
                 }
-                // The expanded row occupies scroll content space at rest, then
-                // naturally travels away with that content. The compact row is
-                // the only fixed chrome that returns during reverse scrolling.
-                .contentMargins(.top, 52, for: .scrollContent)
+                // The navigation bar already reserves one compact row. Draw
+                // the visible title in that row instead of reserving another
+                // header-sized region in the scroll content.
+                .contentMargins(.top, 4, for: .scrollContent)
                 .overlay(alignment: .top) {
                     ProgressiveScreenHeader(
                         title: title,
@@ -573,6 +573,7 @@ private struct ProgressiveScreenHeaderModifier<Accessory: View>: ViewModifier {
                         expandedPresentation: presentation.expandedPresentation,
                         compactPresentation: presentation.compactPresentation
                     )
+                    .offset(y: -44)
                 }
                 .onScrollGeometryChange(
                     for: CGFloat.self,
@@ -581,7 +582,10 @@ private struct ProgressiveScreenHeaderModifier<Accessory: View>: ViewModifier {
                             0,
                             geometry.contentOffset.y + geometry.contentInsets.top
                         )
-                        return (offset * 2).rounded() / 2
+                        // Avoid invalidating the entire lazy catalog for every
+                        // sub-point scroll sample while retaining a smooth,
+                        // directly scroll-derived transition.
+                        return (offset / 4).rounded() * 4
                     },
                     action: { _, offset in
                         presentation.update(for: offset)
@@ -664,7 +668,7 @@ struct ProgressiveHeaderPresentation {
                     Text(title)
                         .font(
                             .system(
-                                size: 24 + (10 * expandedPresentation),
+                                size: 22 + (8 * expandedPresentation),
                                 weight: .bold
                             )
                         )
@@ -677,11 +681,11 @@ struct ProgressiveHeaderPresentation {
                     accessory
                 }
                 .padding(.horizontal, 16)
-                .frame(height: 52)
+                .frame(height: 44)
                 .opacity(rowOpacity)
-                .offset(y: -8 * (1 - rowOpacity))
+                .offset(y: -6 * (1 - rowOpacity))
             }
-            .frame(height: 52, alignment: .top)
+            .frame(height: 44, alignment: .top)
         }
     }
 #endif

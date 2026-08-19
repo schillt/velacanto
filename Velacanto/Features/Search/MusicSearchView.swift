@@ -12,7 +12,6 @@ struct MusicSearchView: View {
     @State private var preparingTrackID: MusicCatalogItemID?
     @State private var playbackErrorMessage: String?
     @State private var selectedGenre: MusicGenre?
-    @State private var isSearchPresented = false
     @StateObject private var resultsScrollPosition =
         CatalogScrollPositionState<MusicCatalogItemID>()
     @FocusState private var isSearchFocused: Bool
@@ -66,14 +65,12 @@ struct MusicSearchView: View {
                     .padding(.vertical, 20)
                     .contentShape(Rectangle())
                     .onTapGesture {
-                        isSearchPresented = false
                         isSearchFocused = false
                     }
                 }
                 .scrollDismissesKeyboard(.immediately)
                 .simultaneousGesture(
                     DragGesture(minimumDistance: 4).onChanged { _ in
-                        isSearchPresented = false
                         isSearchFocused = false
                     }
                 )
@@ -105,6 +102,13 @@ struct MusicSearchView: View {
                 resultsList
             }
         }
+        #if os(iOS)
+            .safeAreaInset(edge: .top, spacing: 0) {
+                searchField
+                .padding(.horizontal, 16)
+                .padding(.bottom, 8)
+            }
+        #endif
         .progressiveScreenHeader("Search") {
             Button(action: showProfile) {
                 AccountAvatar(jellyfin: jellyfin)
@@ -119,30 +123,55 @@ struct MusicSearchView: View {
                 jellyfin: jellyfin
             )
         }
-        #if os(iOS)
-            .searchable(
-                text: $searchText,
-                isPresented: $isSearchPresented,
-                prompt: "Albums, artists, songs, and playlists"
-            )
-            .searchFocused($isSearchFocused)
-        #endif
         .task(id: searchTaskID) {
             await search()
         }
         #if os(iOS)
             .onChange(of: isSearchTabSelected) { _, isSelected in
                 guard isSelected else { return }
-                isSearchPresented = true
                 isSearchFocused = true
             }
             .task {
                 guard isSearchTabSelected else { return }
-                isSearchPresented = true
                 isSearchFocused = true
             }
         #endif
     }
+
+    #if os(iOS)
+        private var searchField: some View {
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundStyle(.secondary)
+                    .accessibilityHidden(true)
+
+                TextField(
+                    "Albums, artists, songs, and playlists",
+                    text: $searchText
+                )
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .submitLabel(.search)
+                .focused($isSearchFocused)
+
+                if !searchText.isEmpty {
+                    Button {
+                        searchText = ""
+                        isSearchFocused = true
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Clear search")
+                }
+            }
+            .padding(.horizontal, 12)
+            .frame(minHeight: 38)
+            .background(.quaternary, in: .rect(cornerRadius: 12))
+            .accessibilityElement(children: .contain)
+        }
+    #endif
 
     private var resultsList: some View {
         List {
