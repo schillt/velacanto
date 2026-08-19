@@ -547,21 +547,46 @@ private struct ProgressiveScreenHeaderModifier<Accessory: View>: ViewModifier {
 
     @StateObject private var scrollTracker = ProgressiveHeaderScrollTracker()
 
+    private let headerHeight: CGFloat = 56
+
     func body(content: Content) -> some View {
         #if os(iOS)
             let presentation = scrollTracker.presentation
 
             content
                 .navigationTitle(title)
-                .navigationBarTitleDisplayMode(.large)
-                .toolbarVisibility(
-                    presentation.isVisible ? .visible : .hidden,
-                    for: .navigationBar
-                )
-                .toolbar {
-                    ToolbarItem(placement: .topBarTrailing) {
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbarVisibility(.hidden, for: .navigationBar)
+                .contentMargins(.top, headerHeight, for: .scrollContent)
+                .overlay(alignment: .top) {
+                    HStack(spacing: 12) {
+                        Text(title)
+                            .font(.largeTitle.bold())
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
+                            .accessibilityHidden(true)
+
+                        Spacer(minLength: 12)
+
                         accessory
                     }
+                    .padding(.horizontal, 16)
+                    .frame(height: headerHeight)
+                    .background {
+                        Rectangle()
+                            .fill(.ultraThinMaterial)
+                            .mask(
+                                LinearGradient(
+                                    colors: [.black, .black.opacity(0)],
+                                    startPoint: .top,
+                                    endPoint: .bottom
+                                )
+                            )
+                    }
+                    .opacity(presentation.isVisible ? 1 : 0)
+                    .allowsHitTesting(presentation.isVisible)
+                    .accessibilityHidden(!presentation.isVisible)
+                    .animation(.easeOut(duration: 0.18), value: presentation)
                 }
                 .onScrollGeometryChange(
                     for: CGFloat.self,
