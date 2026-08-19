@@ -548,6 +548,7 @@ private struct ProgressiveScreenHeaderModifier<Accessory: View>: ViewModifier {
     @StateObject private var scrollTracker = ProgressiveHeaderScrollTracker()
 
     private let headerHeight: CGFloat = 56
+    private let headerBackdropExtension: CGFloat = 64
 
     func body(content: Content) -> some View {
         #if os(iOS)
@@ -566,13 +567,13 @@ private struct ProgressiveScreenHeaderModifier<Accessory: View>: ViewModifier {
                                 Color(uiColor: .systemBackground)
                                     .opacity(0.36)
                             }
-                            .frame(height: headerHeight + 36)
+                            .frame(height: headerHeight + headerBackdropExtension)
                             .mask {
                                 LinearGradient(
                                     stops: [
                                         .init(color: .black, location: 0),
-                                        .init(color: .black, location: 0.58),
-                                        .init(color: .black.opacity(0.72), location: 0.78),
+                                        .init(color: .black, location: 0.64),
+                                        .init(color: .black.opacity(0.72), location: 0.84),
                                         .init(color: .clear, location: 1),
                                     ],
                                     startPoint: .top,
@@ -595,7 +596,10 @@ private struct ProgressiveScreenHeaderModifier<Accessory: View>: ViewModifier {
                         .padding(.horizontal, 16)
                         .frame(height: headerHeight)
                     }
-                    .frame(height: headerHeight + 36, alignment: .top)
+                    .frame(
+                        height: headerHeight + headerBackdropExtension,
+                        alignment: .top
+                    )
                     .opacity(presentation.isVisible ? 1 : 0)
                     .allowsHitTesting(presentation.isVisible)
                     .accessibilityHidden(!presentation.isVisible)
