@@ -33,6 +33,11 @@ import SwiftUI
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
+            .contentShape(Rectangle())
+            .gesture(
+                TapGesture().onEnded { showNowPlaying() },
+                including: .gesture
+            )
         }
 
         private var inlineAccessory: some View {
@@ -43,6 +48,11 @@ import SwiftUI
             }
             .padding(.horizontal, 6)
             .padding(.vertical, 4)
+            .contentShape(Rectangle())
+            .gesture(
+                TapGesture().onEnded { showNowPlaying() },
+                including: .gesture
+            )
         }
 
         @ViewBuilder

@@ -344,16 +344,12 @@ struct NowPlayingView: View {
         }
 
         private func toggleQueueVisibility() {
-            var preparation = Transaction()
-            preparation.disablesAnimations = true
-            withTransaction(preparation) {
-                if !isShowingQueue {
-                    isShowingLyrics = false
-                    isLyricsForegroundVisible = false
-                    queueCurrentArtworkFrame = nil
-                }
-                isShowingQueue.toggle()
+            if !isShowingQueue {
+                isShowingLyrics = false
+                isLyricsForegroundVisible = false
+                queueCurrentArtworkFrame = nil
             }
+            isShowingQueue.toggle()
         }
 
         private func currentArtworkFrame(
