@@ -115,9 +115,9 @@ import SwiftUI
             } label: {
                 if playback.isWaitingForPlayback {
                     ProgressView()
+                        .progressViewStyle(.circular)
                         .controlSize(.small)
-                        .scaleEffect(0.75)
-                        .frame(width: 16, height: 16)
+                        .fixedSize()
                         .frame(width: 36, height: 36)
                 } else {
                     Image(
@@ -179,11 +179,11 @@ import SwiftUI
         private let initialDwell: Duration = .seconds(1)
         private let pointsPerSecond: CGFloat = 24
         private let loopGap: CGFloat = 32
-        private let loopCount = 12
+        private let loopCount = 24
 
         var body: some View {
             ScrollView(.horizontal) {
-                // Matching endpoints let a finite native repeat loop without a visible snap.
+                // Matching endpoints let a bounded native loop wrap without a visible snap.
                 HStack(spacing: loopGap) {
                     marqueeText
                     marqueeText
@@ -227,7 +227,7 @@ import SwiftUI
         }
 
         private var scrollDuration: TimeInterval {
-            max(measurement.overflow / pointsPerSecond, 0.5)
+            max(loopDistance / pointsPerSecond, 0.5)
         }
 
         private var loopDistance: CGFloat {
@@ -248,14 +248,20 @@ import SwiftUI
             guard canScroll else { return }
 
             do {
-                try await Task.sleep(for: initialDwell)
-                guard canScroll else { return }
+                for _ in 0..<loopCount {
+                    try await Task.sleep(for: initialDwell)
+                    guard canScroll else { return }
 
-                withAnimation(
-                    .linear(duration: scrollDuration)
-                        .repeatCount(loopCount, autoreverses: false)
-                ) {
-                    scrollPosition.scrollTo(x: loopDistance)
+                    withAnimation(.linear(duration: scrollDuration)) {
+                        scrollPosition.scrollTo(x: loopDistance)
+                    }
+                    try await Task.sleep(for: .seconds(scrollDuration))
+                    guard canScroll else { return }
+
+                    // At this point the second copy is pixel-aligned with the
+                    // first copy's starting position, so resetting without an
+                    // animation is visually seamless and restores the dwell.
+                    resetScrollPosition()
                 }
             } catch is CancellationError {
                 return

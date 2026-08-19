@@ -43,32 +43,15 @@ struct NowPlayingView: View {
     @State private var exploreDestination: NowPlayingExploreDestination?
     @State private var lyricsTransitionGeneration = 0
     #if os(iOS)
-        @GestureState private var interactiveDismissalOffset: CGFloat = 0
-        @State private var queueCurrentArtworkFrame: CGRect?
-        @State private var queueArtworkTransitionTarget: CGRect?
-        @State private var queueArtworkTransitionGeneration = 0
+        @Namespace private var queueArtworkNamespace
     #endif
 
     var body: some View {
         #if os(iOS)
             nowPlayingContent
-                .offset(y: interactiveDismissalOffset)
                 .task(id: lyricsLoadIdentity) {
                     await loadLyrics()
                 }
-                .simultaneousGesture(
-                    DragGesture(minimumDistance: 10)
-                        .updating($interactiveDismissalOffset) { value, state, _ in
-                            guard canInteractivelyDismiss(with: value) else { return }
-                            state = max(0, value.translation.height)
-                        }
-                        .onEnded { value in
-                            guard canInteractivelyDismiss(with: value),
-                                value.translation.height > 120
-                            else { return }
-                            closeNowPlaying()
-                        }
-                )
                 .sheet(item: $exploreDestination) { destination in
                     NavigationStack {
                         switch destination {
@@ -167,7 +150,7 @@ struct NowPlayingView: View {
                             NowPlayingQueueContent(
                                 playback: playback,
                                 jellyfin: jellyfin,
-                                onCurrentItemArtworkFrameChange: updateQueueCurrentArtworkFrame
+                                artworkTransitionNamespace: queueArtworkNamespace
                             )
                         } else {
                             nowPlayingArtworkAndDetails(
@@ -177,21 +160,12 @@ struct NowPlayingView: View {
                             )
                         }
 
-                        if !isShowingLyrics {
-                            sharedQueueArtwork(
-                                for: item,
-                                sourceSize: artworkSize,
-                                containerSize: transitionSpace.size
-                            )
-                            .zIndex(4)
-                        }
                     }
                     .frame(
                         width: transitionSpace.size.width,
                         height: transitionSpace.size.height,
                         alignment: .topLeading
                     )
-                    .coordinateSpace(name: "now-playing-artwork-space")
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
 
@@ -294,44 +268,17 @@ struct NowPlayingView: View {
     }
 
     #if os(iOS)
-        private func sharedQueueArtwork(
-            for item: PlaybackItem,
-            sourceSize: CGFloat,
-            containerSize: CGSize
-        ) -> some View {
-            let artworkFrame = currentArtworkFrame(
-                sourceSize: sourceSize,
-                containerSize: containerSize
-            )
-            return PlaybackArtworkView(
-                item: item,
-                jellyfin: jellyfin,
-                cornerRadius: 0,
-                maxWidth: 1_024
-            )
-            .frame(width: artworkFrame.width, height: artworkFrame.height)
-            .clipShape(.rect(cornerRadius: isShowingQueue ? 7 : 18))
-            .shadow(
-                color: .black.opacity(isShowingQueue ? 0 : 0.16),
-                radius: isShowingQueue ? 0 : 28,
-                y: isShowingQueue ? 0 : 14
-            )
-            .position(
-                x: artworkFrame.midX,
-                y: artworkFrame.midY
-            )
-            .allowsHitTesting(false)
-        }
-
         private func nowPlayingArtworkAndDetails(
             for item: PlaybackItem,
             artworkSize: CGFloat,
             contentWidth: CGFloat
         ) -> some View {
             VStack(spacing: 16) {
-                Color.clear
-                    .frame(width: artworkSize, height: artworkSize)
-                    .accessibilityHidden(true)
+                artworkContent(for: item, size: artworkSize)
+                    .matchedGeometryEffect(
+                        id: "now-playing-queue-artwork",
+                        in: queueArtworkNamespace
+                    )
                 trackDetails(
                     for: item,
                     width: contentWidth
@@ -340,104 +287,20 @@ struct NowPlayingView: View {
         }
 
         private func toggleQueueVisibility() {
-            if !isShowingQueue {
+            let willShowQueue = !isShowingQueue
+            if willShowQueue {
                 isShowingLyrics = false
                 isLyricsForegroundVisible = false
-                queueCurrentArtworkFrame = nil
-                queueArtworkTransitionTarget = nil
-                queueArtworkTransitionGeneration += 1
-                isShowingQueue = true
-                return
             }
-
-            queueArtworkTransitionGeneration += 1
             withAnimation(queueArtworkTransitionAnimation) {
-                isShowingQueue = false
+                isShowingQueue = willShowQueue
             }
-        }
-
-        private func currentArtworkFrame(
-            sourceSize: CGFloat,
-            containerSize: CGSize
-        ) -> CGRect {
-            if isShowingQueue {
-                if let queueArtworkTransitionTarget {
-                    return queueArtworkTransitionTarget
-                }
-                if let queueCurrentArtworkFrame {
-                    return queueCurrentArtworkFrame
-                }
-            }
-            return CGRect(
-                x: (containerSize.width - sourceSize) / 2,
-                y: 0,
-                width: sourceSize,
-                height: sourceSize
-            )
         }
 
         private var queueArtworkTransitionAnimation: Animation? {
             reduceMotion ? nil : .smooth(duration: 0.32, extraBounce: 0)
         }
 
-        private func updateQueueCurrentArtworkFrame(_ frame: CGRect?) {
-            guard queueCurrentArtworkFrame != frame else { return }
-
-            guard
-                isShowingQueue,
-                queueCurrentArtworkFrame == nil,
-                queueArtworkTransitionTarget == nil,
-                let frame
-            else {
-                updateQueueArtworkFrameWithoutAnimation(frame)
-                return
-            }
-
-            guard let queueArtworkTransitionAnimation else {
-                updateQueueArtworkFrameWithoutAnimation(frame)
-                return
-            }
-
-            let transitionGeneration = queueArtworkTransitionGeneration
-            withAnimation(
-                queueArtworkTransitionAnimation,
-                completionCriteria: .logicallyComplete
-            ) {
-                queueArtworkTransitionTarget = frame
-            } completion: {
-                guard
-                    queueArtworkTransitionGeneration == transitionGeneration,
-                    isShowingQueue
-                else { return }
-                settleQueueArtworkTransition()
-            }
-            updateQueueArtworkFrameWithoutAnimation(frame)
-        }
-
-        private func updateQueueArtworkFrameWithoutAnimation(_ frame: CGRect?) {
-            guard queueCurrentArtworkFrame != frame else { return }
-            var transaction = Transaction()
-            transaction.animation = nil
-            withTransaction(transaction) {
-                queueCurrentArtworkFrame = frame
-            }
-        }
-
-        private func settleQueueArtworkTransition() {
-            guard queueArtworkTransitionTarget != nil else { return }
-            var transaction = Transaction()
-            transaction.animation = nil
-            withTransaction(transaction) {
-                queueArtworkTransitionTarget = nil
-            }
-        }
-
-        private func canInteractivelyDismiss(with value: DragGesture.Value) -> Bool {
-            !isShowingQueue
-                && !isShowingLyrics
-                && value.translation.height > 0
-                && abs(value.translation.width) < value.translation.height
-        }
     #endif
 
     private func artworkContent(for item: PlaybackItem, size: CGFloat) -> some View {

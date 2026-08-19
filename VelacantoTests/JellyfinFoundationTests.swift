@@ -4,6 +4,28 @@ import XCTest
 
 @MainActor
 final class JellyfinFoundationTests: XCTestCase {
+    func testProgressiveHeaderRevealsCompactRowOnlyOnReverseScroll() {
+        var presentation = ProgressiveHeaderPresentation()
+
+        XCTAssertEqual(presentation.expandedPresentation, 1)
+        XCTAssertEqual(presentation.compactPresentation, 0)
+
+        presentation.update(for: 80)
+        XCTAssertEqual(presentation.expandedPresentation, 0)
+        XCTAssertEqual(presentation.compactPresentation, 0)
+
+        presentation.update(for: 52)
+        XCTAssertEqual(presentation.expandedPresentation, 0.277, accuracy: 0.001)
+        XCTAssertEqual(presentation.compactPresentation, 0.723, accuracy: 0.001)
+
+        presentation.update(for: 0)
+        XCTAssertEqual(presentation.expandedPresentation, 1)
+        XCTAssertEqual(presentation.compactPresentation, 0)
+
+        presentation.update(for: 40)
+        XCTAssertEqual(presentation.compactPresentation, 0)
+    }
+
     func testServerURLNormalizesHTTPSAndKeepsReverseProxyPath() throws {
         let server = try JellyfinServerURL("  HTTPS://Music.Example.com/jellyfin/  ")
 

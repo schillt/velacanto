@@ -169,12 +169,14 @@ private struct QueueTrackRow: View {
     @ObservedObject var jellyfin: JellyfinSessionController
     var isCurrentItem = false
     var showsArtwork = true
+    var artworkTransitionNamespace: Namespace.ID?
 
     var body: some View {
         HStack(spacing: 10) {
             if showsArtwork {
                 queueArtworkContent
                     .frame(width: 46, height: 46)
+                    .queueArtworkTransition(in: artworkTransitionNamespace)
             } else {
                 Color.clear
                     .frame(width: 46, height: 46)
@@ -255,89 +257,81 @@ private struct PlaybackQueueControls: View {
 struct NowPlayingQueueContent: View {
     @ObservedObject var playback: AudioPlaybackCoordinator
     @ObservedObject var jellyfin: JellyfinSessionController
-    let onCurrentItemArtworkFrameChange: (CGRect?) -> Void
+    let artworkTransitionNamespace: Namespace.ID
+    @State private var scrollPosition = ScrollPosition(
+        id: "queue-current",
+        anchor: .top
+    )
 
     var body: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(
-                    alignment: .leading,
-                    spacing: 0,
-                    pinnedViews: [.sectionHeaders]
-                ) {
-                    if !historyItems.isEmpty {
-                        QueueSectionHeader("History")
-                            .queueScrollSectionHeaderStyle()
+        ScrollView {
+            LazyVStack(
+                alignment: .leading,
+                spacing: 0,
+                pinnedViews: [.sectionHeaders]
+            ) {
+                if !historyItems.isEmpty {
+                    QueueSectionHeader("History")
+                        .queueScrollSectionHeaderStyle()
 
-                        ForEach(historyItems) { item in
+                    ForEach(historyItems) { item in
+                        QueueTrackRow(item: item, jellyfin: jellyfin)
+                            .foregroundStyle(.secondary)
+                            .queueScrollRowStyle()
+                            .onTapGesture {
+                                playback.playQueueItem(item)
+                            }
+                    }
+                }
+
+                currentItemSummary
+
+                Section {
+                    QueueSectionHeader("Up Next")
+                        .queueScrollSectionHeaderStyle()
+
+                    if playback.upcomingItems.isEmpty {
+                        Text("End of Queue")
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .center)
+                            .padding(.top, 18)
+                    } else {
+                        ForEach(playback.upcomingItems, id: \.queueIdentity) { item in
                             QueueTrackRow(item: item, jellyfin: jellyfin)
-                                .foregroundStyle(.secondary)
                                 .queueScrollRowStyle()
+                                .queueContextMenu(
+                                    item: item,
+                                    playback: playback,
+                                    canRemove: true
+                                )
                                 .onTapGesture {
                                     playback.playQueueItem(item)
                                 }
                         }
+                        #if compiler(>=6.4)
+                            .reorderable()
+                        #endif
                     }
-
-                    currentItemSummary
-
-                    Section {
-                        QueueSectionHeader("Up Next")
-                            .queueScrollSectionHeaderStyle()
-
-                        if playback.upcomingItems.isEmpty {
-                            Text("End of Queue")
-                                .font(.caption.weight(.medium))
-                                .foregroundStyle(.secondary)
-                                .frame(maxWidth: .infinity, alignment: .center)
-                                .padding(.top, 18)
-                        } else {
-                            ForEach(playback.upcomingItems, id: \.queueIdentity) { item in
-                                QueueTrackRow(item: item, jellyfin: jellyfin)
-                                    .queueScrollRowStyle()
-                                    .queueContextMenu(
-                                        item: item,
-                                        playback: playback,
-                                        canRemove: true
-                                    )
-                                    .onTapGesture {
-                                        playback.playQueueItem(item)
-                                    }
-                            }
-                            #if compiler(>=6.4)
-                                .reorderable()
-                            #endif
-                        }
-                    } header: {
-                        modeControls
-                    }
+                } header: {
+                    modeControls
                 }
-                .padding(.bottom, 12)
-                #if compiler(>=6.4)
-                    .reorderContainer(
-                        for: PlaybackItem.self,
-                        itemID: \.queueIdentity
-                    ) { difference in
-                        reorderUpcomingItems(difference)
-                    }
-                #endif
             }
-            .scrollIndicators(.hidden)
-            .scrollEdgeEffectStyle(.soft, for: .top)
-            .accessibilityLabel("Playback queue")
-            .onAppear {
-                scrollToCurrentItem(using: proxy)
-            }
-            .onChange(of: playback.currentItem?.queueIdentity) { _, _ in
-                scrollToCurrentItem(using: proxy)
-            }
-            .onPreferenceChange(QueueCurrentArtworkFramePreferenceKey.self) {
-                onCurrentItemArtworkFrameChange($0)
-            }
-            .onDisappear {
-                onCurrentItemArtworkFrameChange(nil)
-            }
+            .padding(.bottom, 12)
+            .scrollTargetLayout()
+            #if compiler(>=6.4)
+                .reorderContainer(
+                    for: PlaybackItem.self,
+                    itemID: \.queueIdentity
+                ) { difference in
+                    reorderUpcomingItems(difference)
+                }
+            #endif
         }
+        .scrollPosition($scrollPosition)
+        .scrollIndicators(.hidden)
+        .scrollEdgeEffectStyle(.soft, for: .top)
+        .accessibilityLabel("Playback queue")
     }
 
     @ViewBuilder
@@ -350,18 +344,10 @@ struct NowPlayingQueueContent: View {
                     item: currentItem,
                     jellyfin: jellyfin,
                     isCurrentItem: true,
-                    showsArtwork: false
+                    artworkTransitionNamespace: artworkTransitionNamespace
                 )
-                .id(currentItemScrollID)
+                .id("queue-current")
                 .queueScrollRowStyle()
-                .background {
-                    GeometryReader { geometry in
-                        Color.clear.preference(
-                            key: QueueCurrentArtworkFramePreferenceKey.self,
-                            value: artworkFrame(in: geometry)
-                        )
-                    }
-                }
                 .onTapGesture {
                     playback.playQueueItem(currentItem)
                 }
@@ -418,36 +404,6 @@ struct NowPlayingQueueContent: View {
         "\(item.source.rawValue)|\(item.id)"
     }
 
-    private var currentItemScrollID: String {
-        guard let currentItem = playback.currentItem else { return "queue-current" }
-        return "queue-current-\(itemKey(currentItem))"
-    }
-
-    private func scrollToCurrentItem(using proxy: ScrollViewProxy) {
-        guard playback.currentItem != nil else { return }
-        DispatchQueue.main.async {
-            proxy.scrollTo(currentItemScrollID, anchor: .top)
-        }
-    }
-
-    private func artworkFrame(in geometry: GeometryProxy) -> CGRect {
-        let rowFrame = geometry.frame(in: .named("now-playing-artwork-space"))
-        return CGRect(
-            x: rowFrame.minX + 20,
-            y: rowFrame.midY - 23,
-            width: 46,
-            height: 46
-        )
-    }
-
-}
-
-private struct QueueCurrentArtworkFramePreferenceKey: PreferenceKey {
-    static let defaultValue: CGRect? = nil
-
-    static func reduce(value: inout CGRect?, nextValue: () -> CGRect?) {
-        value = nextValue() ?? value
-    }
 }
 
 private struct QueueModeControlPills: View {
@@ -477,7 +433,7 @@ private struct QueueModeControlPills: View {
         .buttonStyle(.bordered)
         .buttonBorderShape(.capsule)
         .controlSize(.small)
-        .tint(.secondary.opacity(0.35))
+        .tint(.secondary.opacity(0.18))
     }
 
     private var repeatTitle: String {
@@ -499,13 +455,8 @@ private struct QueueModeControlPills: View {
 
 private struct QueuePinnedControlSurface: View {
     var body: some View {
-        #if os(iOS)
-            Rectangle()
-                .fill(Color(uiColor: .secondarySystemBackground))
-        #elseif os(macOS)
-            Rectangle()
-                .fill(Color(nsColor: .windowBackgroundColor))
-        #endif
+        Rectangle()
+            .fill(.thinMaterial)
     }
 }
 
@@ -526,6 +477,20 @@ private struct QueueSectionHeader: View {
 }
 
 extension View {
+    @ViewBuilder
+    fileprivate func queueArtworkTransition(
+        in namespace: Namespace.ID?
+    ) -> some View {
+        if let namespace {
+            matchedGeometryEffect(
+                id: "now-playing-queue-artwork",
+                in: namespace
+            )
+        } else {
+            self
+        }
+    }
+
     fileprivate func queueListRowStyle() -> some View {
         listRowBackground(Color.clear)
             .listRowSeparator(.hidden)

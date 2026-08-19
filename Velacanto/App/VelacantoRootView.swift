@@ -562,7 +562,10 @@ private struct ProgressiveScreenHeaderModifier<Accessory: View>: ViewModifier {
                             .accessibilityHidden(true)
                     }
                 }
-                .safeAreaPadding(.top, 52)
+                // The expanded row occupies scroll content space at rest, then
+                // naturally travels away with that content. The compact row is
+                // the only fixed chrome that returns during reverse scrolling.
+                .contentMargins(.top, 52, for: .scrollContent)
                 .overlay(alignment: .top) {
                     ProgressiveScreenHeader(
                         title: title,
@@ -574,7 +577,11 @@ private struct ProgressiveScreenHeaderModifier<Accessory: View>: ViewModifier {
                 .onScrollGeometryChange(
                     for: CGFloat.self,
                     of: { geometry in
-                        max(0, geometry.contentOffset.y + geometry.contentInsets.top)
+                        let offset = max(
+                            0,
+                            geometry.contentOffset.y + geometry.contentInsets.top
+                        )
+                        return (offset * 2).rounded() / 2
                     },
                     action: { _, offset in
                         presentation.update(for: offset)
@@ -590,7 +597,7 @@ private struct ProgressiveScreenHeaderModifier<Accessory: View>: ViewModifier {
 /// presentation. Unlike a toolbar visibility toggle, reverse scrolling
 /// accumulates directly into the compact presentation, so there is no
 /// insertion/removal pop while the title returns.
-private struct ProgressiveHeaderPresentation {
+struct ProgressiveHeaderPresentation {
     private let transitionDistance: CGFloat = 72
     private let reverseRevealDistance: CGFloat = 28
 
@@ -670,13 +677,11 @@ private struct ProgressiveHeaderPresentation {
                     accessory
                 }
                 .padding(.horizontal, 16)
-                .frame(height: 44)
-                .safeAreaPadding(.top, 6)
-                .padding(.bottom, 6)
+                .frame(height: 52)
                 .opacity(rowOpacity)
-                .offset(y: -12 * (1 - rowOpacity))
+                .offset(y: -8 * (1 - rowOpacity))
             }
-            .frame(height: 112)
+            .frame(height: 52, alignment: .top)
         }
     }
 #endif
