@@ -258,8 +258,6 @@ struct NowPlayingQueueContent: View {
                 spacing: 0,
                 pinnedViews: [.sectionHeaders]
             ) {
-                currentItemSummary
-
                 if !historyItems.isEmpty {
                     QueueSectionHeader("History")
                         .queueScrollSectionHeaderStyle()
@@ -273,6 +271,8 @@ struct NowPlayingQueueContent: View {
                             }
                     }
                 }
+
+                currentItemSummary
 
                 Section {
                     QueueSectionHeader("Up Next")
@@ -316,6 +316,7 @@ struct NowPlayingQueueContent: View {
             #endif
         }
         .scrollIndicators(.hidden)
+        .scrollEdgeEffectStyle(.soft, for: .top)
         .accessibilityLabel("Playback queue")
     }
 
@@ -343,10 +344,10 @@ struct NowPlayingQueueContent: View {
             .padding(.horizontal, 20)
             .padding(.vertical, 10)
             .frame(maxWidth: .infinity)
-            .background(.bar)
+            .background(QueuePinnedControlSurface())
             .overlay(alignment: .bottom) {
                 Divider()
-                    .opacity(0.5)
+                    .opacity(0.65)
             }
     }
 
@@ -413,7 +414,10 @@ private struct QueueModeControlPills: View {
         }
         .font(.callout.weight(.medium))
         .labelStyle(.titleAndIcon)
-        .buttonStyle(.plain)
+        .buttonStyle(.bordered)
+        .buttonBorderShape(.capsule)
+        .controlSize(.small)
+        .tint(.gray.opacity(0.35))
         .foregroundStyle(.primary)
     }
 
@@ -431,6 +435,22 @@ private struct QueueModeControlPills: View {
         case .all: "Repeat All"
         case .one: "Repeat One"
         }
+    }
+}
+
+private struct QueuePinnedControlSurface: View {
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        ZStack {
+            baseColor
+            Rectangle()
+                .fill(.regularMaterial)
+        }
+    }
+
+    private var baseColor: Color {
+        colorScheme == .dark ? .black.opacity(0.84) : .white.opacity(0.9)
     }
 }
 
