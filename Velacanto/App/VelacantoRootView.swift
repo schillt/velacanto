@@ -553,29 +553,14 @@ private struct ProgressiveScreenHeaderModifier<Accessory: View>: ViewModifier {
 
             content
                 .navigationTitle(title)
-                .navigationBarTitleDisplayMode(.inline)
+                .navigationBarTitleDisplayMode(.large)
+                .toolbarVisibility(
+                    presentation.isVisible ? .visible : .hidden,
+                    for: .navigationBar
+                )
                 .toolbar {
-                    if presentation.isVisible {
-                        ToolbarItem(placement: .principal) {
-                            HStack(spacing: 12) {
-                                Text(title)
-                                    .font(
-                                        .system(
-                                            size: presentation.titleSize,
-                                            weight: .bold
-                                        )
-                                    )
-                                    .lineLimit(1)
-                                    .fixedSize(horizontal: true, vertical: false)
-                                    .accessibilityHidden(true)
-
-                                Spacer(minLength: 12)
-
-                                accessory
-                            }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                        .sharedBackgroundVisibility(.hidden)
+                    ToolbarItem(placement: .topBarTrailing) {
+                        accessory
                     }
                 }
                 .onScrollGeometryChange(
@@ -600,23 +585,18 @@ private struct ProgressiveScreenHeaderModifier<Accessory: View>: ViewModifier {
 }
 
 enum ProgressiveHeaderPresentation: Equatable {
-    case expanded
+    case visible
     case hidden
-    case compact
 
     var isVisible: Bool {
         self != .hidden
     }
-
-    var titleSize: CGFloat {
-        self == .expanded ? 28 : 22
-    }
 }
 
-/// Keeps high-frequency scroll distance private and reports only the three
-/// visual states that can change the navigation chrome.
+/// Keeps high-frequency scroll distance private and reports only whether the
+/// native navigation header should be visible for the current scroll direction.
 struct ProgressiveHeaderScrollState {
-    private(set) var presentation = ProgressiveHeaderPresentation.expanded
+    private(set) var presentation = ProgressiveHeaderPresentation.visible
     private var previousOffset: CGFloat = 0
 
     @discardableResult
@@ -627,9 +607,9 @@ struct ProgressiveHeaderScrollState {
         previousOffset = clampedOffset
 
         if clampedOffset == 0 {
-            presentation = .expanded
+            presentation = .visible
         } else if delta < 0 {
-            presentation = .compact
+            presentation = .visible
         } else if delta > 0 {
             presentation = .hidden
         }
@@ -640,7 +620,7 @@ struct ProgressiveHeaderScrollState {
 
 @MainActor
 final class ProgressiveHeaderScrollTracker: ObservableObject {
-    @Published private(set) var presentation = ProgressiveHeaderPresentation.expanded
+    @Published private(set) var presentation = ProgressiveHeaderPresentation.visible
     private var scrollState = ProgressiveHeaderScrollState()
 
     func update(for offset: CGFloat) {

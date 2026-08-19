@@ -8,30 +8,28 @@ final class JellyfinFoundationTests: XCTestCase {
     func testProgressiveHeaderFollowsScrollDirectionImmediately() {
         var state = ProgressiveHeaderScrollState()
 
-        XCTAssertEqual(state.presentation, .expanded)
+        XCTAssertEqual(state.presentation, .visible)
         XCTAssertTrue(state.presentation.isVisible)
-        XCTAssertEqual(state.presentation.titleSize, 28)
 
         XCTAssertTrue(state.update(for: 4))
         XCTAssertEqual(state.presentation, .hidden)
         XCTAssertFalse(state.presentation.isVisible)
 
         XCTAssertTrue(state.update(for: 0))
-        XCTAssertEqual(state.presentation, .expanded)
+        XCTAssertEqual(state.presentation, .visible)
 
         XCTAssertTrue(state.update(for: 80))
         XCTAssertEqual(state.presentation, .hidden)
 
         XCTAssertTrue(state.update(for: 76))
-        XCTAssertEqual(state.presentation, .compact)
+        XCTAssertEqual(state.presentation, .visible)
         XCTAssertTrue(state.presentation.isVisible)
-        XCTAssertEqual(state.presentation.titleSize, 22)
 
         XCTAssertTrue(state.update(for: 80))
         XCTAssertEqual(state.presentation, .hidden)
 
         XCTAssertTrue(state.update(for: 0))
-        XCTAssertEqual(state.presentation, .expanded)
+        XCTAssertEqual(state.presentation, .visible)
     }
 
     func testProgressiveHeaderDoesNotPublishSettledForwardTravel() {
@@ -46,7 +44,7 @@ final class JellyfinFoundationTests: XCTestCase {
         }
 
         XCTAssertTrue(state.update(for: 996))
-        XCTAssertEqual(state.presentation, .compact)
+        XCTAssertEqual(state.presentation, .visible)
     }
 
     func testHomeRootHasNoVerticalScrollTargetFeedbackBinding() throws {
