@@ -84,11 +84,13 @@ import SwiftUI
                         font: .callout.weight(.medium),
                         color: .primary
                     )
-                    CompactPlaybackMetadataMarquee(
-                        text: playback.currentItem?.artist ?? "",
-                        font: .caption,
-                        color: .secondary
-                    )
+                    Text(playback.currentItem?.artist ?? "")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .accessibilityHidden(true)
                 }
                 .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
             }
@@ -114,8 +116,6 @@ import SwiftUI
                 if playback.isWaitingForPlayback {
                     ProgressView()
                         .controlSize(.small)
-                        .scaleEffect(0.75)
-                        .frame(width: 16, height: 16)
                         .frame(width: 36, height: 36)
                 } else {
                     Image(
