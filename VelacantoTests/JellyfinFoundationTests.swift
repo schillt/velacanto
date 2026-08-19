@@ -1,3 +1,4 @@
+import Foundation
 import XCTest
 
 @testable import Velacanto
@@ -5,47 +6,69 @@ import XCTest
 @MainActor
 final class JellyfinFoundationTests: XCTestCase {
     func testProgressiveHeaderRevealsCompactRowOnlyOnReverseScroll() {
-        var presentation = ProgressiveHeaderPresentation()
+        var state = ProgressiveHeaderScrollState()
 
-        XCTAssertEqual(presentation.expandedPresentation, 1)
-        XCTAssertEqual(presentation.compactPresentation, 0)
+        XCTAssertEqual(state.presentation, .expanded)
+        XCTAssertTrue(state.presentation.isVisible)
+        XCTAssertEqual(state.presentation.titleSize, 28)
 
-        presentation.update(for: 80, delta: 80)
-        XCTAssertEqual(presentation.expandedPresentation, 0)
-        XCTAssertEqual(presentation.compactPresentation, 0)
+        XCTAssertFalse(state.update(for: 40))
+        XCTAssertEqual(state.presentation, .expanded)
 
-        presentation.update(for: 52, delta: -28)
-        XCTAssertEqual(presentation.expandedPresentation, 0.277, accuracy: 0.001)
-        XCTAssertEqual(presentation.compactPresentation, 0.723, accuracy: 0.001)
+        XCTAssertTrue(state.update(for: 80))
+        XCTAssertEqual(state.presentation, .hidden)
+        XCTAssertFalse(state.presentation.isVisible)
 
-        presentation.update(for: 0, delta: -52)
-        XCTAssertEqual(presentation.expandedPresentation, 1)
-        XCTAssertEqual(presentation.compactPresentation, 0)
+        XCTAssertFalse(state.update(for: 56))
+        XCTAssertEqual(state.presentation, .hidden)
 
-        presentation.update(for: 40, delta: 40)
-        XCTAssertEqual(presentation.compactPresentation, 0)
+        XCTAssertTrue(state.update(for: 52))
+        XCTAssertEqual(state.presentation, .compact)
+        XCTAssertTrue(state.presentation.isVisible)
+        XCTAssertEqual(state.presentation.titleSize, 22)
+
+        XCTAssertTrue(state.update(for: 60))
+        XCTAssertEqual(state.presentation, .hidden)
+
+        XCTAssertTrue(state.update(for: 0))
+        XCTAssertEqual(state.presentation, .expanded)
     }
 
     func testProgressiveHeaderDoesNotPublishSettledForwardTravel() {
-        var presentation = ProgressiveHeaderPresentation()
+        var state = ProgressiveHeaderScrollState()
 
-        XCTAssertTrue(presentation.update(for: 80, delta: 80))
-        let settledPresentation = presentation
+        XCTAssertTrue(state.update(for: 80))
+        XCTAssertEqual(state.presentation, .hidden)
 
-        var previousOffset: CGFloat = 80
         for offset: CGFloat in [160, 400, 1_000] {
-            XCTAssertFalse(
-                presentation.update(
-                    for: offset,
-                    delta: offset - previousOffset
-                )
-            )
-            previousOffset = offset
+            XCTAssertFalse(state.update(for: offset))
+            XCTAssertEqual(state.presentation, .hidden)
         }
-        XCTAssertEqual(presentation, settledPresentation)
 
-        XCTAssertTrue(presentation.update(for: 996, delta: -4))
-        XCTAssertGreaterThan(presentation.compactPresentation, 0)
+        XCTAssertFalse(state.update(for: 976))
+        XCTAssertTrue(state.update(for: 972))
+        XCTAssertEqual(state.presentation, .compact)
+    }
+
+    func testHomeRootHasNoVerticalScrollTargetFeedbackBinding() throws {
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf:
+                repositoryRoot
+                .appendingPathComponent("Velacanto/Features/Home/HomeView.swift"),
+            encoding: .utf8
+        )
+        let rootViewDeclaration = try XCTUnwrap(
+            source.components(
+                separatedBy: "    @ViewBuilder\n    private var continueListening"
+            ).first
+        )
+
+        XCTAssertFalse(rootViewDeclaration.contains("genreShelfScrollAnchor"))
+        XCTAssertFalse(rootViewDeclaration.contains(".scrollPosition("))
+        XCTAssertFalse(rootViewDeclaration.contains(".scrollTargetLayout()"))
     }
 
     func testQueueViewportAnchorsCurrentAboveIntentionalEmptyState() {

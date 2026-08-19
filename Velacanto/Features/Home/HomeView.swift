@@ -31,7 +31,6 @@ struct HomeView: View {
     @State private var preparingCatalogItemID: MusicCatalogItemID?
     @State private var catalogPlaybackError: String?
     @State private var selectedGenre: MusicGenre?
-    @State private var genreShelfScrollAnchor: MusicCatalogItemID?
     @StateObject private var favoritesScrollPosition =
         CatalogScrollPositionState<MusicCatalogItemID>()
     @StateObject private var recentlyAddedScrollPosition =
@@ -99,9 +98,7 @@ struct HomeView: View {
             .padding(.horizontal, 16)
             .padding(.vertical, 18)
             .frame(maxWidth: .infinity)
-            .scrollTargetLayout()
         }
-        .scrollPosition(id: $genreShelfScrollAnchor)
         .progressiveScreenHeader(presentation.title) {
             Button(action: showProfile) {
                 AccountAvatar(jellyfin: jellyfin)
