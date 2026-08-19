@@ -172,9 +172,14 @@ private struct QueueTrackRow: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            queueArtworkContent
-                .frame(width: 46, height: 46)
-                .opacity(showsArtwork ? 1 : 0)
+            if showsArtwork {
+                queueArtworkContent
+                    .frame(width: 46, height: 46)
+            } else {
+                Color.clear
+                    .frame(width: 46, height: 46)
+                    .accessibilityHidden(true)
+            }
 
             VStack(alignment: .leading, spacing: 1) {
                 Text(item.title)
@@ -250,6 +255,7 @@ private struct PlaybackQueueControls: View {
 struct NowPlayingQueueContent: View {
     @ObservedObject var playback: AudioPlaybackCoordinator
     @ObservedObject var jellyfin: JellyfinSessionController
+    let onCurrentItemArtworkFrameChange: (CGRect?) -> Void
 
     var body: some View {
         ScrollView {
@@ -318,6 +324,12 @@ struct NowPlayingQueueContent: View {
         .scrollIndicators(.hidden)
         .scrollEdgeEffectStyle(.soft, for: .top)
         .accessibilityLabel("Playback queue")
+        .onPreferenceChange(QueueCurrentArtworkFramePreferenceKey.self) {
+            onCurrentItemArtworkFrameChange($0)
+        }
+        .onDisappear {
+            onCurrentItemArtworkFrameChange(nil)
+        }
     }
 
     @ViewBuilder
@@ -329,9 +341,18 @@ struct NowPlayingQueueContent: View {
                 QueueTrackRow(
                     item: currentItem,
                     jellyfin: jellyfin,
-                    isCurrentItem: true
+                    isCurrentItem: true,
+                    showsArtwork: false
                 )
                 .queueScrollRowStyle()
+                .background {
+                    GeometryReader { geometry in
+                        Color.clear.preference(
+                            key: QueueCurrentArtworkFramePreferenceKey.self,
+                            value: artworkFrame(in: geometry)
+                        )
+                    }
+                }
                 .onTapGesture {
                     playback.playQueueItem(currentItem)
                 }
@@ -388,6 +409,24 @@ struct NowPlayingQueueContent: View {
         "\(item.source.rawValue)|\(item.id)"
     }
 
+    private func artworkFrame(in geometry: GeometryProxy) -> CGRect {
+        let rowFrame = geometry.frame(in: .named("now-playing-artwork-space"))
+        return CGRect(
+            x: rowFrame.minX + 20,
+            y: rowFrame.midY - 23,
+            width: 46,
+            height: 46
+        )
+    }
+
+}
+
+private struct QueueCurrentArtworkFramePreferenceKey: PreferenceKey {
+    static let defaultValue: CGRect? = nil
+
+    static func reduce(value: inout CGRect?, nextValue: () -> CGRect?) {
+        value = nextValue() ?? value
+    }
 }
 
 private struct QueueModeControlPills: View {

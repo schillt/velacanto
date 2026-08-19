@@ -50,7 +50,7 @@ struct VelacantoRootView: View {
                 NowPlayingView(playback: playback, jellyfin: jellyfin)
                 .navigationTransition(
                     .zoom(
-                        sourceID: "now-playing-surface",
+                        sourceID: "now-playing-artwork",
                         in: nowPlayingArtworkNamespace
                     )
                 )
@@ -170,7 +170,9 @@ struct VelacantoRootView: View {
         private var iOSRoot: some View {
             iOSTabs
                 .tabViewBottomAccessory(
-                    isEnabled: playback.hasPlayableItem && !isShowingNowPlaying
+                    // Keep the source available behind the cover for both directions
+                    // of the native transition.
+                    isEnabled: playback.hasPlayableItem
                 ) {
                     ModernPlaybackAccessory(
                         playback: playback,

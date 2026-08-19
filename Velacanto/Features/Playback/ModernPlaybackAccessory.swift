@@ -12,14 +12,7 @@ import SwiftUI
 
         @ViewBuilder
         var body: some View {
-            if let nowPlayingTransitionNamespace {
-                accessoryContent.matchedTransitionSource(
-                    id: "now-playing-surface",
-                    in: nowPlayingTransitionNamespace
-                )
-            } else {
-                accessoryContent
-            }
+            accessoryContent
         }
 
         @ViewBuilder
@@ -63,6 +56,9 @@ import SwiftUI
                         maxWidth: 128
                     )
                     .frame(width: size, height: size)
+                    .matchedNowPlayingArtworkSource(
+                        in: nowPlayingTransitionNamespace
+                    )
                 }
             }
             .frame(width: 36, height: 36)
@@ -137,6 +133,22 @@ import SwiftUI
             .buttonStyle(.plain)
             .disabled(!playback.canGoNext)
             .accessibilityLabel("Next")
+        }
+    }
+
+    extension View {
+        @ViewBuilder
+        fileprivate func matchedNowPlayingArtworkSource(
+            in namespace: Namespace.ID?
+        ) -> some View {
+            if let namespace {
+                matchedTransitionSource(
+                    id: "now-playing-artwork",
+                    in: namespace
+                )
+            } else {
+                self
+            }
         }
     }
 

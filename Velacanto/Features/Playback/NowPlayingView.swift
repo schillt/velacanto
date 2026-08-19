@@ -42,24 +42,28 @@ struct NowPlayingView: View {
     @State private var isScrubbing = false
     @State private var exploreDestination: NowPlayingExploreDestination?
     @State private var lyricsTransitionGeneration = 0
+    #if os(iOS)
+        @GestureState private var interactiveDismissalOffset: CGFloat = 0
+        @State private var queueCurrentArtworkFrame: CGRect?
+    #endif
 
     var body: some View {
         #if os(iOS)
             nowPlayingContent
+                .offset(y: interactiveDismissalOffset)
                 .task(id: lyricsLoadIdentity) {
                     await loadLyrics()
                 }
                 .simultaneousGesture(
-                    DragGesture(minimumDistance: 20)
+                    DragGesture(minimumDistance: 10)
+                        .updating($interactiveDismissalOffset) { value, state, _ in
+                            guard canInteractivelyDismiss(with: value) else { return }
+                            state = max(0, value.translation.height)
+                        }
                         .onEnded { value in
-                            guard
-                                !isShowingQueue,
-                                !isShowingLyrics,
-                                value.translation.height > 120,
-                                abs(value.translation.width) < value.translation.height
-                            else {
-                                return
-                            }
+                            guard canInteractivelyDismiss(with: value),
+                                value.translation.height > 120
+                            else { return }
                             closeNowPlaying()
                         }
                 )
@@ -160,7 +164,10 @@ struct NowPlayingView: View {
                         } else if isShowingQueue {
                             NowPlayingQueueContent(
                                 playback: playback,
-                                jellyfin: jellyfin
+                                jellyfin: jellyfin,
+                                onCurrentItemArtworkFrameChange: {
+                                    queueCurrentArtworkFrame = $0
+                                }
                             )
                         } else {
                             nowPlayingArtworkAndDetails(
@@ -170,11 +177,11 @@ struct NowPlayingView: View {
                             )
                         }
 
-                        if !isShowingLyrics, !isShowingQueue {
+                        if !isShowingLyrics {
                             sharedQueueArtwork(
                                 for: item,
                                 sourceSize: artworkSize,
-                                containerWidth: transitionSpace.size.width
+                                containerSize: transitionSpace.size
                             )
                             .zIndex(4)
                         }
@@ -184,6 +191,7 @@ struct NowPlayingView: View {
                         height: transitionSpace.size.height,
                         alignment: .topLeading
                     )
+                    .coordinateSpace(name: "now-playing-artwork-space")
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
 
@@ -289,25 +297,34 @@ struct NowPlayingView: View {
         private func sharedQueueArtwork(
             for item: PlaybackItem,
             sourceSize: CGFloat,
-            containerWidth: CGFloat
+            containerSize: CGSize
         ) -> some View {
+            let artworkFrame = currentArtworkFrame(
+                sourceSize: sourceSize,
+                containerSize: containerSize
+            )
             return PlaybackArtworkView(
                 item: item,
                 jellyfin: jellyfin,
                 cornerRadius: 0,
                 maxWidth: 1_024
             )
-            .frame(width: sourceSize, height: sourceSize)
-            .clipShape(.rect(cornerRadius: 18))
+            .frame(width: artworkFrame.width, height: artworkFrame.height)
+            .clipShape(.rect(cornerRadius: isShowingQueue ? 7 : 18))
             .shadow(
-                color: .black.opacity(0.16),
-                radius: 28,
-                y: 14
+                color: .black.opacity(isShowingQueue ? 0 : 0.16),
+                radius: isShowingQueue ? 0 : 28,
+                y: isShowingQueue ? 0 : 14
             )
-            .offset(
-                x: max(0, (containerWidth - sourceSize) / 2)
+            .position(
+                x: artworkFrame.midX,
+                y: artworkFrame.midY
             )
             .allowsHitTesting(false)
+            .animation(
+                reduceMotion ? nil : .smooth(duration: 0.32, extraBounce: 0),
+                value: artworkFrame
+            )
         }
 
         private func nowPlayingArtworkAndDetails(
@@ -333,9 +350,32 @@ struct NowPlayingView: View {
                 if !isShowingQueue {
                     isShowingLyrics = false
                     isLyricsForegroundVisible = false
+                    queueCurrentArtworkFrame = nil
                 }
                 isShowingQueue.toggle()
             }
+        }
+
+        private func currentArtworkFrame(
+            sourceSize: CGFloat,
+            containerSize: CGSize
+        ) -> CGRect {
+            guard isShowingQueue, let queueCurrentArtworkFrame else {
+                return CGRect(
+                    x: (containerSize.width - sourceSize) / 2,
+                    y: 0,
+                    width: sourceSize,
+                    height: sourceSize
+                )
+            }
+            return queueCurrentArtworkFrame
+        }
+
+        private func canInteractivelyDismiss(with value: DragGesture.Value) -> Bool {
+            !isShowingQueue
+                && !isShowingLyrics
+                && value.translation.height > 0
+                && abs(value.translation.width) < value.translation.height
         }
     #endif
 
@@ -939,18 +979,6 @@ private struct NowPlayingArtwork: View {
             jellyfin: jellyfin,
             maxWidth: 1_024
         )
-        .id(artworkIdentity)
-        .transition(.opacity)
-        .animation(.smooth(duration: 0.28, extraBounce: 0), value: artworkIdentity)
-    }
-
-    private var artworkIdentity: String {
-        [
-            item.id,
-            item.artworkItemID ?? "no-artwork",
-            item.artworkTag ?? "no-tag",
-            "1024",
-        ].joined(separator: "|")
     }
 }
 
