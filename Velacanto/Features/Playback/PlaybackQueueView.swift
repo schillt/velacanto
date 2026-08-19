@@ -538,7 +538,7 @@ private struct QueueModePillButtonStyle: ButtonStyle {
             .foregroundStyle(.primary)
             .padding(.horizontal, 12)
             .frame(height: 40)
-            .background(.ultraThinMaterial, in: Capsule())
+            .background(.thinMaterial, in: Capsule())
             .overlay {
                 Capsule()
                     .fill(.primary.opacity(configuration.isPressed ? 0.12 : 0.05))

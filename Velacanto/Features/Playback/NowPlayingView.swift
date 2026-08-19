@@ -40,7 +40,6 @@ struct NowPlayingView: View {
     @State private var lyricsState = LyricsLoadState.loading
     @State private var scrubProgress: Double?
     @State private var isScrubbing = false
-    @State private var sliderAccent = Color.velacantoAccent
     @State private var exploreDestination: NowPlayingExploreDestination?
     @State private var isQueueArtworkTransitionReady = false
     @State private var isQueueArtworkHandoffComplete = false
@@ -127,9 +126,6 @@ struct NowPlayingView: View {
                         }
                         .ignoresSafeArea()
                     }
-            }
-            .task(id: sliderAccentIdentity) {
-                await updateSliderAccent()
             }
         #else
             playerContent
@@ -464,7 +460,7 @@ struct NowPlayingView: View {
                     ),
                     bufferedProgress: playback.bufferedProgress,
                     isEnabled: playback.duration > 0,
-                    accent: sliderAccent,
+                    accent: .velacantoAccent,
                     onEditingChanged: updateScrubbing
                 )
                 .frame(maxWidth: .infinity)
@@ -542,7 +538,7 @@ struct NowPlayingView: View {
             }
 
             #if os(iOS)
-                SystemVolumeControl(accentColor: UIColor(sliderAccent))
+                SystemVolumeControl(accent: .velacantoAccent)
                     .frame(width: width, height: 44)
                     .accessibilityLabel("Volume")
 
@@ -902,55 +898,6 @@ struct NowPlayingView: View {
         guard let scrubProgress else { return playback.elapsed }
         return playback.duration * scrubProgress
     }
-
-    #if os(iOS)
-        private var sliderAccentIdentity: String {
-            guard let item = playback.currentItem else { return "no-artwork" }
-            return [
-                item.id,
-                item.artworkItemID ?? "no-artwork",
-                item.artworkTag ?? "no-tag",
-            ].joined(separator: "|")
-        }
-
-        @MainActor
-        private func updateSliderAccent() async {
-            guard
-                let item = playback.currentItem,
-                item.source == .jellyfin,
-                let artworkItemID = item.artworkItemID,
-                let session = jellyfin.session
-            else {
-                sliderAccent = .velacantoAccent
-                return
-            }
-
-            let key = ArtworkKey(
-                serverID: session.serverID,
-                userID: session.userID,
-                itemID: artworkItemID,
-                imageTag: item.artworkTag ?? "no-tag",
-                sizeBucket: ArtworkKey.sizeBucket(for: 128)
-            )
-            let image = await ArtworkRepository.shared.image(for: key) {
-                await jellyfin.artworkRequest(
-                    itemID: artworkItemID,
-                    imageTag: item.artworkTag,
-                    maxWidth: key.sizeBucket
-                )
-            }
-            guard let image, playback.currentItem?.id == item.id else {
-                return
-            }
-
-            sliderAccent = Color(
-                uiColor: ArtworkSliderAccent.color(
-                    from: image,
-                    colorScheme: colorScheme
-                )
-            )
-        }
-    #endif
 
     private func updateScrubbing(_ isScrubbing: Bool) {
         self.isScrubbing = isScrubbing

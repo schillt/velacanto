@@ -102,7 +102,7 @@ struct PlaybackRoutePicker: View {
     }
 
     struct SystemVolumeControl: UIViewRepresentable {
-        let accentColor: UIColor
+        let accent: Color
 
         func makeCoordinator() -> Coordinator {
             Coordinator()
@@ -148,7 +148,7 @@ struct PlaybackRoutePicker: View {
             slider.isContinuous = true
             slider.minimumValueImage = nil
             slider.maximumValueImage = nil
-            slider.minimumTrackTintColor = accentColor
+            slider.minimumTrackTintColor = UIColor(accent)
             slider.maximumTrackTintColor = UIColor.secondaryLabel.withAlphaComponent(0.22)
             slider.setThumbImage(UIImage(), for: .normal)
             slider.setThumbImage(UIImage(), for: .highlighted)
@@ -247,164 +247,6 @@ struct PlaybackRoutePicker: View {
         }
     }
 
-    enum ArtworkSliderAccent {
-        private static let sampleSide = 24
-        private static let hueBucketCount = 12
-
-        private struct Sample {
-            let hue: CGFloat
-            let saturation: CGFloat
-            let brightness: CGFloat
-        }
-
-        private struct HueBucket {
-            var score: CGFloat = 0
-            var count = 0
-
-            var meanScore: CGFloat {
-                guard count > 0 else { return 0 }
-                return score / CGFloat(count)
-            }
-        }
-
-        static func color(from image: UIImage, colorScheme: ColorScheme) -> UIColor {
-            guard let samples = vividSamples(from: image), !samples.isEmpty else {
-                return .systemCyan
-            }
-
-            let hueCounts = samples.reduce(
-                into: [Int](repeating: 0, count: hueBucketCount)
-            ) { counts, sample in
-                counts[hueBucket(for: sample.hue)] += 1
-            }
-            let dominantHue =
-                hueCounts.indices.max {
-                    hueCounts[$0] < hueCounts[$1]
-                } ?? 0
-            let totalBrightness = samples.reduce(0) { $0 + $1.brightness }
-            let dominantBrightness = totalBrightness / CGFloat(samples.count)
-
-            var buckets = [HueBucket](repeating: HueBucket(), count: hueBucketCount)
-            for sample in samples {
-                let hueDistance = circularHueDistance(
-                    sample.hue,
-                    CGFloat(dominantHue) / CGFloat(hueBucketCount)
-                )
-                let brightnessContrast = abs(sample.brightness - dominantBrightness)
-                let contrast = hueDistance * 1.5 + brightnessContrast * 0.25
-                let score = sample.saturation * (0.4 + contrast)
-                let index = hueBucket(for: sample.hue)
-                buckets[index].score += score
-                buckets[index].count += 1
-            }
-
-            guard
-                let selected = buckets.enumerated()
-                    .filter({ $0.element.count >= 3 })
-                    .max(by: { $0.element.meanScore < $1.element.meanScore })
-            else {
-                return .systemCyan
-            }
-
-            let matchingSamples = samples.filter {
-                hueBucket(for: $0.hue) == selected.offset
-            }
-            let totalSaturation = matchingSamples.reduce(0) { $0 + $1.saturation }
-            let saturation = totalSaturation / CGFloat(matchingSamples.count)
-            let totalSelectedBrightness = matchingSamples.reduce(0) { $0 + $1.brightness }
-            let brightness = totalSelectedBrightness / CGFloat(matchingSamples.count)
-            let hue = (CGFloat(selected.offset) + 0.5) / CGFloat(hueBucketCount)
-
-            return UIColor(
-                hue: hue,
-                saturation: max(0.72, saturation),
-                brightness: normalizedBrightness(
-                    brightness,
-                    for: colorScheme
-                ),
-                alpha: 1
-            )
-        }
-
-        private static func vividSamples(from image: UIImage) -> [Sample]? {
-            guard let cgImage = image.cgImage else { return nil }
-            let pixelCount = sampleSide * sampleSide
-            var pixels = [UInt8](repeating: 0, count: pixelCount * 4)
-            let alphaInfo = CGImageAlphaInfo.premultipliedLast.rawValue
-            let byteOrder = CGBitmapInfo.byteOrder32Big.rawValue
-            let bitmapInfo = alphaInfo | byteOrder
-            let context = CGContext(
-                data: &pixels,
-                width: sampleSide,
-                height: sampleSide,
-                bitsPerComponent: 8,
-                bytesPerRow: sampleSide * 4,
-                space: CGColorSpaceCreateDeviceRGB(),
-                bitmapInfo: bitmapInfo
-            )
-            guard let context else {
-                return nil
-            }
-
-            context.interpolationQuality = .medium
-            context.draw(
-                cgImage,
-                in: CGRect(x: 0, y: 0, width: sampleSide, height: sampleSide)
-            )
-
-            var samples: [Sample] = []
-            for offset in stride(from: 0, to: pixels.count, by: 4) {
-                let color = UIColor(
-                    red: CGFloat(pixels[offset]) / 255,
-                    green: CGFloat(pixels[offset + 1]) / 255,
-                    blue: CGFloat(pixels[offset + 2]) / 255,
-                    alpha: CGFloat(pixels[offset + 3]) / 255
-                )
-                var hue: CGFloat = 0
-                var saturation: CGFloat = 0
-                var brightness: CGFloat = 0
-                var alpha: CGFloat = 0
-                let hasHue = color.getHue(
-                    &hue,
-                    saturation: &saturation,
-                    brightness: &brightness,
-                    alpha: &alpha
-                )
-                guard hasHue, alpha > 0.5, saturation >= 0.35 else {
-                    continue
-                }
-                samples.append(
-                    Sample(
-                        hue: hue,
-                        saturation: saturation,
-                        brightness: brightness
-                    )
-                )
-            }
-            return samples
-        }
-
-        private static func hueBucket(for hue: CGFloat) -> Int {
-            min(hueBucketCount - 1, Int(hue * CGFloat(hueBucketCount)))
-        }
-
-        private static func circularHueDistance(_ lhs: CGFloat, _ rhs: CGFloat) -> CGFloat {
-            let difference = abs(lhs - rhs)
-            return min(difference, 1 - difference)
-        }
-
-        private static func normalizedBrightness(
-            _ brightness: CGFloat,
-            for colorScheme: ColorScheme
-        ) -> CGFloat {
-            switch colorScheme {
-            case .dark:
-                max(0.8, brightness)
-            default:
-                min(0.65, max(0.42, brightness))
-            }
-        }
-    }
 #elseif os(macOS)
     private struct MacOSRoutePicker: NSViewRepresentable {
         func makeNSView(context: Context) -> AVRoutePickerView {
