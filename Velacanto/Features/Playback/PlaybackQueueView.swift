@@ -281,9 +281,6 @@ struct NowPlayingQueueContent: View {
                 currentItemSummary
 
                 Section {
-                    QueueSectionHeader("Up Next")
-                        .queueScrollSectionHeaderStyle()
-
                     if playback.upcomingItems.isEmpty {
                         Text("End of Queue")
                             .font(.caption.weight(.medium))
@@ -361,15 +358,23 @@ struct NowPlayingQueueContent: View {
     }
 
     private var modeControls: some View {
-        QueueModeControlPills(playback: playback)
-            .padding(.horizontal, 20)
-            .padding(.vertical, 10)
-            .frame(maxWidth: .infinity)
-            .background(QueuePinnedControlSurface())
-            .overlay(alignment: .bottom) {
-                Divider()
-                    .opacity(0.65)
-            }
+        HStack(spacing: 12) {
+            Text("Up Next")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+
+            Spacer(minLength: 0)
+
+            QueueModeControlPills(playback: playback)
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity)
+        .background(QueuePinnedControlSurface())
+        .overlay(alignment: .bottom) {
+            Divider()
+                .opacity(0.65)
+        }
     }
 
     private var historyItems: [PlaybackItem] {
@@ -456,8 +461,7 @@ private struct QueueModeControlPills: View {
         .buttonStyle(.bordered)
         .buttonBorderShape(.capsule)
         .controlSize(.small)
-        .tint(.gray.opacity(0.35))
-        .foregroundStyle(.primary)
+        .tint(.secondary)
     }
 
     private var repeatTitle: String {
@@ -478,18 +482,9 @@ private struct QueueModeControlPills: View {
 }
 
 private struct QueuePinnedControlSurface: View {
-    @Environment(\.colorScheme) private var colorScheme
-
     var body: some View {
-        ZStack {
-            baseColor
-            Rectangle()
-                .fill(.regularMaterial)
-        }
-    }
-
-    private var baseColor: Color {
-        colorScheme == .dark ? .black.opacity(0.84) : .white.opacity(0.9)
+        Rectangle()
+            .fill(.background)
     }
 }
 
