@@ -7,6 +7,10 @@ struct MusicLibraryView: View {
     let openLocalFile: () -> Void
     let showProfile: () -> Void
 
+    @StateObject private var mostListened = PagedMusicCatalogModel()
+    @StateObject private var scrollPosition = CatalogScrollPositionState<MusicCatalogItemID>()
+    @State private var selectedMostListenedItem: MostListenedDestination?
+
     var body: some View {
         Group {
             if jellyfin.isSignedIn {
@@ -16,6 +20,9 @@ struct MusicLibraryView: View {
             }
         }
         .progressiveSemanticNavigationTitle("Library")
+        .navigationDestination(item: $selectedMostListenedItem) { route in
+            destination(for: route.item)
+        }
         #if os(iOS)
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
@@ -71,12 +78,23 @@ struct MusicLibraryView: View {
                     }
                 }
 
-                MostListenedLibraryGrid(playback: playback, jellyfin: jellyfin)
+                MostListenedLibraryGrid(
+                    model: mostListened,
+                    playback: playback,
+                    jellyfin: jellyfin,
+                    selectedItem: $selectedMostListenedItem
+                )
             }
             .frame(maxWidth: 1_050, alignment: .leading)
             .padding(.horizontal, 16)
             .padding(.vertical, 20)
             .frame(maxWidth: .infinity)
+            .scrollTargetLayout()
+        }
+        .scrollPosition(id: scrollPosition.binding(identity: libraryIdentity))
+        .task(id: libraryIdentity) {
+            guard scrollPosition.begin(identity: libraryIdentity) else { return }
+            await loadMostListened()
         }
     }
 
@@ -121,6 +139,38 @@ struct MusicLibraryView: View {
             category: category,
             playback: playback,
             jellyfin: jellyfin
+        )
+    }
+
+    @ViewBuilder
+    private func destination(for item: MusicCatalogItem) -> some View {
+        switch item.kind {
+        case .album:
+            JellyfinTracksView(album: item, jellyfin: jellyfin, playback: playback)
+        case .artist:
+            MusicArtistView(artist: item, jellyfin: jellyfin, playback: playback)
+        case .playlist:
+            MusicPlaylistView(playlist: item, jellyfin: jellyfin, playback: playback)
+        case .song:
+            EmptyView()
+        }
+    }
+
+    private var libraryIdentity: String {
+        "\(jellyfin.playbackAccount?.serverID ?? "signed-out")|\(jellyfin.playbackAccount?.userID ?? "none")|library"
+    }
+
+    private func loadMostListened() async {
+        await mostListened.reset(
+            cachedItems: {
+                await jellyfin.cachedCatalogItems(kind: .mostListened)
+            },
+            loader: { cursor in
+                try await jellyfin.homeMostListenedPage(cursor: cursor, limit: 12)
+            },
+            cacheWriter: { items in
+                await jellyfin.cacheCatalogItems(items, kind: .mostListened)
+            }
         )
     }
 }
@@ -387,11 +437,24 @@ extension MusicCatalogItem {
     }
 }
 
+private struct MostListenedDestination: Hashable {
+    let item: MusicCatalogItem
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.item.id == rhs.item.id
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(item.id)
+    }
+}
+
 private struct MostListenedLibraryGrid: View {
+    @ObservedObject var model: PagedMusicCatalogModel
     @ObservedObject var playback: AudioPlaybackCoordinator
     @ObservedObject var jellyfin: JellyfinSessionController
+    @Binding var selectedItem: MostListenedDestination?
 
-    @StateObject private var model = PagedMusicCatalogModel()
     @State private var preparingItemID: MusicCatalogItemID?
 
     var body: some View {
@@ -409,9 +472,6 @@ private struct MostListenedLibraryGrid: View {
                 }
             }
         }
-        .task(id: jellyfin.playbackAccount) {
-            await model.reset(loader: pageLoader)
-        }
     }
 
     @ViewBuilder
@@ -425,34 +485,17 @@ private struct MostListenedLibraryGrid: View {
             .buttonStyle(.plain)
             .disabled(preparingItemID != nil)
             .musicItemActions(for: item, jellyfin: jellyfin, playback: playback)
+            .id(item.id)
         } else {
-            NavigationLink {
-                destination(for: item)
+            Button {
+                selectedItem = MostListenedDestination(item: item)
             } label: {
                 MusicAlbumCard(album: item, jellyfin: jellyfin)
             }
             .buttonStyle(.plain)
+            .accessibilityHint("Open \(item.name)")
             .musicItemActions(for: item, jellyfin: jellyfin, playback: playback)
-        }
-    }
-
-    @ViewBuilder
-    private func destination(for item: MusicCatalogItem) -> some View {
-        switch item.kind {
-        case .album:
-            JellyfinTracksView(album: item, jellyfin: jellyfin, playback: playback)
-        case .artist:
-            MusicArtistView(artist: item, jellyfin: jellyfin, playback: playback)
-        case .playlist:
-            MusicPlaylistView(playlist: item, jellyfin: jellyfin, playback: playback)
-        case .song:
-            EmptyView()
-        }
-    }
-
-    private var pageLoader: PagedMusicCatalogModel.Loader {
-        { cursor in
-            try await jellyfin.homeMostListenedPage(cursor: cursor, limit: 12)
+            .id(item.id)
         }
     }
 

@@ -1798,6 +1798,9 @@ final class JellyfinFoundationTests: XCTestCase {
         XCTAssertFalse(state.begin(identity: "account|albums"))
         XCTAssertEqual(state.anchor, anchor.id)
 
+        state.record(nil, identity: "account|albums")
+        XCTAssertEqual(state.anchor, anchor.id)
+
         XCTAssertNil(state.restorationAnchor(in: []))
         XCTAssertEqual(state.anchor, anchor.id)
         XCTAssertEqual(state.restorationAnchor(in: [anchor.id]), anchor.id)

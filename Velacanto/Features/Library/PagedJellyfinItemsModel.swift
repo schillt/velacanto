@@ -244,7 +244,9 @@ final class CatalogScrollPositionState<Anchor: Hashable>: ObservableObject {
     }
 
     func record(_ visibleAnchor: Anchor?, identity: String) {
-        guard self.identity == identity else { return }
+        // A transient empty target layout (for example, while a detail route is
+        // popping) must not erase the last logical position. Identities reset it.
+        guard self.identity == identity, let visibleAnchor else { return }
         anchor = visibleAnchor
     }
 
