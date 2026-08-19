@@ -579,7 +579,10 @@ private struct ProgressivePageHeaderModifier: ViewModifier {
             #if os(iOS)
                 .toolbar {
                     if isVisible, let title {
-                        ToolbarItem(placement: .topBarLeading) {
+                        // A principal toolbar item takes the navigation title's
+                        // visual slot while retaining `navigationTitle` for
+                        // VoiceOver and navigation UI tests.
+                        ToolbarItem(placement: .principal) {
                             Text(title)
                             .font(.title2.weight(.bold))
                             .fixedSize(horizontal: true, vertical: false)

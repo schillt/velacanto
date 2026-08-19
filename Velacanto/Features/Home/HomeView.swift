@@ -103,6 +103,9 @@ struct HomeView: View {
         .revealsRootHeader($isRootHeaderVisible)
         .progressiveNavigationChrome()
         .navigationTitle(presentation.title)
+        #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+        #endif
         .navigationDestination(item: $selectedGenre) { genre in
             MusicGenreCollectionView(
                 genre: genre,
@@ -113,7 +116,9 @@ struct HomeView: View {
         #if os(iOS)
             .toolbar {
                 if isRootHeaderVisible {
-                    ToolbarItem(placement: .topBarLeading) {
+                    // Occupy the native title position so the progressive
+                    // header does not render beside the semantic title.
+                    ToolbarItem(placement: .principal) {
                         Text(presentation.title)
                         .font(.title2.weight(.bold))
                         .fixedSize(horizontal: true, vertical: false)
