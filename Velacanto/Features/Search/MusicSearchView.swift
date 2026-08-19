@@ -3,7 +3,6 @@ import SwiftUI
 struct MusicSearchView: View {
     @ObservedObject var playback: AudioPlaybackCoordinator
     @ObservedObject var jellyfin: JellyfinSessionController
-    @Binding var searchText: String
 
     let showProfile: () -> Void
     var isSearchTabSelected = false
@@ -12,9 +11,9 @@ struct MusicSearchView: View {
     @State private var preparingTrackID: MusicCatalogItemID?
     @State private var playbackErrorMessage: String?
     @State private var selectedGenre: MusicGenre?
+    @State private var searchText = ""
     @StateObject private var resultsScrollPosition =
         CatalogScrollPositionState<MusicCatalogItemID>()
-    @State private var isSearchPresented = false
     @FocusState private var isSearchFocused: Bool
 
     private var query: String {
@@ -103,22 +102,21 @@ struct MusicSearchView: View {
                 resultsList
             }
         }
-        .progressiveScreenHeader("Search") {
-            Button(action: showProfile) {
-                AccountAvatar(jellyfin: jellyfin)
+        .progressiveScreenHeader(
+            "Search",
+            supplementaryHeight: 52,
+            keepsHeaderVisible: isSearchFocused,
+            accessory: {
+                Button(action: showProfile) {
+                    AccountAvatar(jellyfin: jellyfin)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Profile and settings")
+            },
+            supplementary: {
+                searchField
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Profile and settings")
-        }
-        #if os(iOS)
-            .searchable(
-                text: $searchText,
-                isPresented: $isSearchPresented,
-                placement: .navigationBarDrawer(displayMode: .always),
-                prompt: "Albums, artists, songs, and playlists"
-            )
-            .searchFocused($isSearchFocused)
-        #endif
+        )
         .navigationDestination(item: $selectedGenre) { genre in
             MusicGenreCollectionView(
                 genre: genre,
@@ -132,15 +130,48 @@ struct MusicSearchView: View {
         #if os(iOS)
             .onChange(of: isSearchTabSelected) { _, isSelected in
                 guard isSelected else { return }
-                isSearchPresented = true
                 isSearchFocused = true
             }
             .task {
                 guard isSearchTabSelected else { return }
-                isSearchPresented = true
                 isSearchFocused = true
             }
         #endif
+    }
+
+    private var searchField: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
+
+            TextField(
+                "Albums, artists, songs, and playlists",
+                text: $searchText
+            )
+            .focused($isSearchFocused)
+            .searchInputBehavior()
+            .accessibilityLabel("Search music")
+
+            if !searchText.isEmpty {
+                Button {
+                    searchText = ""
+                    isSearchFocused = true
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Clear search")
+            }
+        }
+        .padding(.horizontal, 14)
+        .frame(maxWidth: .infinity, minHeight: 44)
+        .background(.thinMaterial, in: Capsule())
+        .overlay {
+            Capsule()
+                .stroke(.secondary.opacity(0.25), lineWidth: 0.5)
+        }
     }
 
     private var resultsList: some View {
@@ -323,6 +354,19 @@ struct MusicSearchView: View {
             }
             preparingTrackID = nil
         }
+    }
+}
+
+extension View {
+    @ViewBuilder
+    fileprivate func searchInputBehavior() -> some View {
+        #if os(iOS)
+            textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .submitLabel(.search)
+        #else
+            self
+        #endif
     }
 }
 

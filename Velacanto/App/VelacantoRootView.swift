@@ -11,8 +11,8 @@ struct VelacantoRootView: View {
     @ObservedObject var jellyfin: JellyfinSessionController
 
     @State private var selectedDestination = AppDestination.home
-    @State private var globalSearchText = ""
     #if os(macOS)
+        @State private var globalSearchText = ""
         @State private var selectedMacDestination = MacDestination.home
     #endif
     @State private var isChoosingLocalFile = false
@@ -415,7 +415,6 @@ struct VelacantoRootView: View {
         MusicSearchView(
             playback: playback,
             jellyfin: jellyfin,
-            searchText: $globalSearchText,
             showProfile: {
                 isShowingProfile = true
             },
@@ -514,7 +513,28 @@ extension View {
         modifier(
             ProgressiveScreenHeaderModifier(
                 title: title,
-                accessory: accessory()
+                accessory: accessory(),
+                supplementary: EmptyView(),
+                supplementaryHeight: 0,
+                keepsHeaderVisible: false
+            )
+        )
+    }
+
+    func progressiveScreenHeader<Accessory: View, Supplementary: View>(
+        _ title: String,
+        supplementaryHeight: CGFloat,
+        keepsHeaderVisible: Bool = false,
+        @ViewBuilder accessory: () -> Accessory,
+        @ViewBuilder supplementary: () -> Supplementary
+    ) -> some View {
+        modifier(
+            ProgressiveScreenHeaderModifier(
+                title: title,
+                accessory: accessory(),
+                supplementary: supplementary(),
+                supplementaryHeight: supplementaryHeight,
+                keepsHeaderVisible: keepsHeaderVisible
             )
         )
     }
@@ -541,24 +561,34 @@ extension View {
     }
 }
 
-private struct ProgressiveScreenHeaderModifier<Accessory: View>: ViewModifier {
+private struct ProgressiveScreenHeaderModifier<Accessory: View, Supplementary: View>:
+    ViewModifier
+{
     let title: String
     let accessory: Accessory
+    let supplementary: Supplementary
+    let supplementaryHeight: CGFloat
+    let keepsHeaderVisible: Bool
 
     @StateObject private var scrollTracker = ProgressiveHeaderScrollTracker()
 
     private let headerHeight: CGFloat = 56
     private let headerBackdropExtension: CGFloat = 84
 
+    private var visibleHeaderHeight: CGFloat {
+        headerHeight + supplementaryHeight
+    }
+
     func body(content: Content) -> some View {
         #if os(iOS)
             let presentation = scrollTracker.presentation
+            let isHeaderVisible = keepsHeaderVisible || presentation.isVisible
 
             content
                 .navigationTitle(title)
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbarVisibility(.hidden, for: .navigationBar)
-                .contentMargins(.top, headerHeight, for: .scrollContent)
+                .contentMargins(.top, visibleHeaderHeight, for: .scrollContent)
                 .overlay(alignment: .top) {
                     ZStack(alignment: .top) {
                         Rectangle()
@@ -567,7 +597,7 @@ private struct ProgressiveScreenHeaderModifier<Accessory: View>: ViewModifier {
                                 Color(uiColor: .systemBackground)
                                     .opacity(0.24)
                             }
-                            .frame(height: headerHeight + headerBackdropExtension)
+                            .frame(height: visibleHeaderHeight + headerBackdropExtension)
                             .mask {
                                 LinearGradient(
                                     stops: [
@@ -595,15 +625,20 @@ private struct ProgressiveScreenHeaderModifier<Accessory: View>: ViewModifier {
                         }
                         .padding(.horizontal, 16)
                         .frame(height: headerHeight)
+
+                        supplementary
+                            .frame(height: supplementaryHeight)
+                            .padding(.horizontal, 16)
+                            .offset(y: headerHeight)
                     }
                     .frame(
-                        height: headerHeight + headerBackdropExtension,
+                        height: visibleHeaderHeight + headerBackdropExtension,
                         alignment: .top
                     )
-                    .opacity(presentation.isVisible ? 1 : 0)
-                    .allowsHitTesting(presentation.isVisible)
-                    .accessibilityHidden(!presentation.isVisible)
-                    .animation(.easeOut(duration: 0.18), value: presentation)
+                    .opacity(isHeaderVisible ? 1 : 0)
+                    .allowsHitTesting(isHeaderVisible)
+                    .accessibilityHidden(!isHeaderVisible)
+                    .animation(.easeOut(duration: 0.18), value: isHeaderVisible)
                 }
                 .onScrollGeometryChange(
                     for: CGFloat.self,
