@@ -548,7 +548,7 @@ private struct ProgressiveScreenHeaderModifier<Accessory: View>: ViewModifier {
     @StateObject private var scrollTracker = ProgressiveHeaderScrollTracker()
 
     private let headerHeight: CGFloat = 56
-    private let headerBackdropExtension: CGFloat = 64
+    private let headerBackdropExtension: CGFloat = 84
 
     func body(content: Content) -> some View {
         #if os(iOS)
@@ -565,15 +565,15 @@ private struct ProgressiveScreenHeaderModifier<Accessory: View>: ViewModifier {
                             .fill(.regularMaterial)
                             .overlay {
                                 Color(uiColor: .systemBackground)
-                                    .opacity(0.36)
+                                    .opacity(0.24)
                             }
                             .frame(height: headerHeight + headerBackdropExtension)
                             .mask {
                                 LinearGradient(
                                     stops: [
                                         .init(color: .black, location: 0),
-                                        .init(color: .black, location: 0.64),
-                                        .init(color: .black.opacity(0.72), location: 0.84),
+                                        .init(color: .black, location: 0.58),
+                                        .init(color: .black.opacity(0.62), location: 0.84),
                                         .init(color: .clear, location: 1),
                                     ],
                                     startPoint: .top,
