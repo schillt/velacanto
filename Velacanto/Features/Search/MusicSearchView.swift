@@ -13,7 +13,6 @@ struct MusicSearchView: View {
     @State private var playbackErrorMessage: String?
     @State private var selectedGenre: MusicGenre?
     @State private var isSearchPresented = false
-    @State private var rootHeaderScrollProgress: CGFloat = 0
     @StateObject private var resultsScrollPosition =
         CatalogScrollPositionState<MusicCatalogItemID>()
     @FocusState private var isSearchFocused: Bool
@@ -62,14 +61,14 @@ struct MusicSearchView: View {
                             presentation: .collection
                         )
                     }
-                    .padding(20)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 20)
                     .contentShape(Rectangle())
                     .onTapGesture {
                         isSearchPresented = false
                         isSearchFocused = false
                     }
                 }
-                .progressiveRootHeader($rootHeaderScrollProgress)
                 .scrollDismissesKeyboard(.immediately)
                 .simultaneousGesture(
                     DragGesture(minimumDistance: 4).onChanged { _ in
@@ -105,7 +104,6 @@ struct MusicSearchView: View {
                 resultsList
             }
         }
-        .progressiveNavigationChrome(scrollProgress: rootHeaderScrollProgress)
         .progressiveSemanticNavigationTitle("Search")
         .navigationDestination(item: $selectedGenre) { genre in
             MusicGenreCollectionView(
@@ -122,12 +120,6 @@ struct MusicSearchView: View {
             )
             .searchFocused($isSearchFocused)
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    ProgressiveToolbarTitle(
-                        title: "Search",
-                        scrollProgress: rootHeaderScrollProgress
-                    )
-                }
                 ToolbarItem(placement: .primaryAction) {
                     Button(action: showProfile) {
                         AccountAvatar(jellyfin: jellyfin)
@@ -261,7 +253,6 @@ struct MusicSearchView: View {
             }
         }
         .scrollPosition(id: resultsScrollPosition.binding(identity: searchTaskID))
-        .progressiveRootHeader($rootHeaderScrollProgress)
     }
 
     private var searchTaskID: String {

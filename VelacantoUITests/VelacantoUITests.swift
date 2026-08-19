@@ -26,12 +26,14 @@ final class VelacantoUITests: XCTestCase {
         assertPlaybackAccessoryIsHidden()
 
         app.tabBars.buttons["Library"].tap()
+        XCTAssertTrue(app.navigationBars["Library"].waitForExistence(timeout: 2))
         XCTAssertTrue(
             app.staticTexts["Connect Your Music Library"].waitForExistence(timeout: 2)
         )
         assertPlaybackAccessoryIsHidden()
 
         app.tabBars.buttons["Search"].tap()
+        XCTAssertTrue(app.navigationBars["Search"].waitForExistence(timeout: 2))
         XCTAssertTrue(
             app.staticTexts["Search Needs a Music Server"].waitForExistence(timeout: 2)
         )

@@ -509,69 +509,24 @@ struct VelacantoRootView: View {
 
 }
 
-/// Lets root-tab content scroll beneath the navigation controls without the
-/// abrupt opaque edge of the standard navigation bar.
-struct ProgressiveNavigationChrome: ViewModifier {
-    let scrollProgress: CGFloat
-
-    func body(content: Content) -> some View {
-        #if os(iOS)
-            content
-                .toolbarBackgroundVisibility(.hidden, for: .navigationBar)
-                .overlay(alignment: .top) {
-                    // Keep one compact material mounted throughout the
-                    // gesture. Changing its opacity with the exact scroll
-                    // position avoids a separate sticky band or threshold
-                    // material swap.
-                    Rectangle()
-                        .fill(.ultraThinMaterial)
-                        .opacity(scrollProgress)
-                        .frame(height: 64)
-                        .ignoresSafeArea(edges: .top)
-                        .allowsHitTesting(false)
-                }
-        #else
-            content
-        #endif
-    }
-}
-
 extension View {
-    func progressiveNavigationChrome(scrollProgress: CGFloat = 0) -> some View {
-        modifier(ProgressiveNavigationChrome(scrollProgress: scrollProgress))
-    }
-
-    func progressiveRootHeader(_ scrollProgress: Binding<CGFloat>) -> some View {
-        modifier(RootHeaderPresentationModifier(scrollProgress: scrollProgress))
-    }
-
     func progressivePageHeader(_ title: String?) -> some View {
         modifier(ProgressivePageHeaderModifier(title: title))
     }
 
     /// Collection detail pages provide their own artwork-backed navigation
-    /// treatment, so they do not need the root header's scroll observer.
+    /// treatment.
     func collectionDetailNavigationChrome() -> some View {
         scrollContentBackground(.hidden)
-            .progressiveNavigationChrome()
     }
 
-    /// Preserves the system navigation title as the screen's semantic label,
-    /// while reserving its visible inline slot for a single custom title.
+    /// A navigation title is both the semantic screen label and the single
+    /// visible title. The system performs its large-to-inline title and
+    /// material transition as the scroll view moves.
     func progressiveSemanticNavigationTitle(_ title: String) -> some View {
         #if os(iOS)
             navigationTitle(title)
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar {
-                    ToolbarItem(placement: .principal) {
-                        // A mounted but inaccessible placeholder suppresses
-                        // the default centered title without removing the
-                        // navigation title exposed to VoiceOver and UI tests.
-                        Text(title)
-                            .hidden()
-                            .accessibilityHidden(true)
-                    }
-                }
+                .navigationBarTitleDisplayMode(.large)
         #else
             navigationTitle(title)
         #endif
@@ -580,69 +535,13 @@ extension View {
 
 private struct ProgressivePageHeaderModifier: ViewModifier {
     let title: String?
-    @State private var scrollProgress: CGFloat = 0
 
     func body(content: Content) -> some View {
         content
-            .progressiveRootHeader($scrollProgress)
             .scrollContentBackground(.hidden)
-            .progressiveNavigationChrome(scrollProgress: scrollProgress)
             .progressiveSemanticNavigationTitle(title ?? "")
-            #if os(iOS)
-                .toolbar {
-                    if let title {
-                        ToolbarItem(placement: .topBarLeading) {
-                            ProgressiveToolbarTitle(
-                                title: title,
-                                scrollProgress: scrollProgress
-                            )
-                        }
-                    }
-                }
-            #endif
     }
 }
-
-private struct RootHeaderPresentationModifier: ViewModifier {
-    @Binding var scrollProgress: CGFloat
-
-    private let transitionDistance: CGFloat = 52
-
-    func body(content: Content) -> some View {
-        #if os(iOS)
-            content.onScrollGeometryChange(
-                for: CGFloat.self,
-                of: { $0.contentOffset.y },
-                action: { _, offset in
-                    scrollProgress = min(max(offset / transitionDistance, 0), 1)
-                }
-            )
-        #else
-            content
-        #endif
-    }
-
-}
-
-#if os(iOS)
-    struct ProgressiveToolbarTitle: View {
-        let title: String
-        let scrollProgress: CGFloat
-
-        var body: some View {
-            Text(title)
-                .font(.title2.weight(.bold))
-                .lineLimit(1)
-                .minimumScaleFactor(0.8)
-                .scaleEffect(1 - (0.08 * scrollProgress), anchor: .leading)
-                // Native leading toolbar placement is 16 points. This makes
-                // the visible title line up with the shared 20-point content
-                // inset without moving trailing actions.
-                .padding(.leading, 4)
-                .accessibilityHidden(true)
-        }
-    }
-#endif
 
 #if os(iOS)
     /// Public SF Symbols do not include Apple Music's private rounded Home

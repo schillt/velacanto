@@ -31,7 +31,6 @@ struct HomeView: View {
     @State private var preparingCatalogItemID: MusicCatalogItemID?
     @State private var catalogPlaybackError: String?
     @State private var selectedGenre: MusicGenre?
-    @State private var rootHeaderScrollProgress: CGFloat = 0
     @State private var genreShelfScrollAnchor: MusicCatalogItemID?
     @StateObject private var favoritesScrollPosition =
         CatalogScrollPositionState<MusicCatalogItemID>()
@@ -97,14 +96,12 @@ struct HomeView: View {
                 }
             }
             .frame(maxWidth: 1_050, alignment: .leading)
-            .padding(.horizontal, 20)
+            .padding(.horizontal, 16)
             .padding(.vertical, 18)
             .frame(maxWidth: .infinity)
             .scrollTargetLayout()
         }
         .scrollPosition(id: $genreShelfScrollAnchor)
-        .progressiveRootHeader($rootHeaderScrollProgress)
-        .progressiveNavigationChrome(scrollProgress: rootHeaderScrollProgress)
         .progressiveSemanticNavigationTitle(presentation.title)
         .navigationDestination(item: $selectedGenre) { genre in
             MusicGenreCollectionView(
@@ -115,12 +112,6 @@ struct HomeView: View {
         }
         #if os(iOS)
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    ProgressiveToolbarTitle(
-                        title: presentation.title,
-                        scrollProgress: rootHeaderScrollProgress
-                    )
-                }
                 ToolbarItem(placement: .primaryAction) {
                     Button(action: showProfile) {
                         AccountAvatar(jellyfin: jellyfin)

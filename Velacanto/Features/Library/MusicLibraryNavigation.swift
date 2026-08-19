@@ -6,7 +6,6 @@ struct MusicLibraryView: View {
 
     let openLocalFile: () -> Void
     let showProfile: () -> Void
-    @State private var rootHeaderScrollProgress: CGFloat = 0
 
     var body: some View {
         Group {
@@ -16,16 +15,9 @@ struct MusicLibraryView: View {
                 signedOutLibrary
             }
         }
-        .progressiveNavigationChrome(scrollProgress: rootHeaderScrollProgress)
         .progressiveSemanticNavigationTitle("Library")
         #if os(iOS)
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    ProgressiveToolbarTitle(
-                        title: "Library",
-                        scrollProgress: rootHeaderScrollProgress
-                    )
-                }
                 ToolbarItem(placement: .primaryAction) {
                     Button(action: showProfile) {
                         AccountAvatar(jellyfin: jellyfin)
@@ -82,10 +74,10 @@ struct MusicLibraryView: View {
                 MostListenedLibraryGrid(playback: playback, jellyfin: jellyfin)
             }
             .frame(maxWidth: 1_050, alignment: .leading)
-            .padding(20)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 20)
             .frame(maxWidth: .infinity)
         }
-        .progressiveRootHeader($rootHeaderScrollProgress)
     }
 
     private var signedOutLibrary: some View {
@@ -117,10 +109,10 @@ struct MusicLibraryView: View {
                 .buttonStyle(.plain)
             }
             .frame(maxWidth: 640)
-            .padding(20)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 20)
             .frame(maxWidth: .infinity)
         }
-        .progressiveRootHeader($rootHeaderScrollProgress)
     }
 
     @ViewBuilder
