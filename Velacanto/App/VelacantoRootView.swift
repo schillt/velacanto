@@ -61,17 +61,9 @@ struct VelacantoRootView: View {
                 ProfileView(
                     jellyfin: jellyfin,
                     isPreparingPlaybackCheck: isPreparingTestTone,
-                    runPlaybackCheck: playTestTone
+                    runPlaybackCheck: playTestTone,
+                    dismiss: { isShowingProfile = false }
                 )
-                #if os(iOS)
-                    .toolbar {
-                        ToolbarItem(placement: .confirmationAction) {
-                            Button("Done") {
-                                isShowingProfile = false
-                            }
-                        }
-                    }
-                #endif
             }
             #if os(macOS)
                 .frame(minWidth: 500, minHeight: 480)
@@ -512,6 +504,21 @@ struct VelacantoRootView: View {
 }
 
 extension View {
+    /// Provides the root catalog chrome without asking the system navigation
+    /// bar to render a second title. `navigationTitle` remains the single
+    /// semantic title for VoiceOver, UI tests, and the window title.
+    func progressiveScreenHeader<Accessory: View>(
+        _ title: String,
+        @ViewBuilder accessory: () -> Accessory
+    ) -> some View {
+        modifier(
+            ProgressiveScreenHeaderModifier(
+                title: title,
+                accessory: accessory()
+            )
+        )
+    }
+
     func progressivePageHeader(_ title: String?) -> some View {
         modifier(ProgressivePageHeaderModifier(title: title))
     }
@@ -522,9 +529,8 @@ extension View {
         scrollContentBackground(.hidden)
     }
 
-    /// A navigation title is both the semantic screen label and the single
-    /// visible title. The system performs its large-to-inline title and
-    /// material transition as the scroll view moves.
+    /// Detail pages use the system title treatment; root screens provide their
+    /// own visible title with `progressiveScreenHeader`.
     func progressiveSemanticNavigationTitle(_ title: String) -> some View {
         #if os(iOS)
             navigationTitle(title)
@@ -534,6 +540,126 @@ extension View {
         #endif
     }
 }
+
+private struct ProgressiveScreenHeaderModifier<Accessory: View>: ViewModifier {
+    let title: String
+    let accessory: Accessory
+
+    @State private var expandedPresentation: CGFloat = 1
+    @State private var showsCompactHeader = false
+    @State private var lastDirectionOffset: CGFloat = 0
+
+    private let transitionDistance: CGFloat = 72
+    private let directionTolerance: CGFloat = 1
+
+    func body(content: Content) -> some View {
+        #if os(iOS)
+            content
+                .navigationTitle(title)
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbarBackground(.hidden, for: .navigationBar)
+                // An empty principal item preserves the navigation bar's
+                // semantic title without allowing it to draw a centered one.
+                .toolbar {
+                    ToolbarItem(placement: .principal) {
+                        Color.clear
+                            .frame(width: 1, height: 1)
+                            .accessibilityHidden(true)
+                    }
+                }
+                .safeAreaPadding(.top, 52)
+                .overlay(alignment: .top) {
+                    ProgressiveScreenHeader(
+                        title: title,
+                        accessory: accessory,
+                        expandedPresentation: expandedPresentation,
+                        showsCompactHeader: showsCompactHeader
+                    )
+                }
+                .onScrollGeometryChange(
+                    for: CGFloat.self,
+                    of: { geometry in
+                        max(0, geometry.contentOffset.y + geometry.contentInsets.top)
+                    },
+                    action: { _, offset in
+                        expandedPresentation = 1 - min(offset / transitionDistance, 1)
+
+                        if offset <= directionTolerance {
+                            lastDirectionOffset = offset
+                            showsCompactHeader = false
+                            return
+                        }
+
+                        let delta = offset - lastDirectionOffset
+                        guard abs(delta) >= directionTolerance else { return }
+
+                        lastDirectionOffset = offset
+                        showsCompactHeader = delta < 0
+                    }
+                )
+        #else
+            content.navigationTitle(title)
+        #endif
+    }
+}
+
+#if os(iOS)
+    private struct ProgressiveScreenHeader<Accessory: View>: View {
+        let title: String
+        let accessory: Accessory
+        let expandedPresentation: CGFloat
+        let showsCompactHeader: Bool
+
+        private var rowOpacity: CGFloat {
+            showsCompactHeader ? 1 : expandedPresentation
+        }
+
+        private var materialOpacity: CGFloat {
+            rowOpacity * (1 - expandedPresentation)
+        }
+
+        var body: some View {
+            ZStack(alignment: .top) {
+                Rectangle()
+                    .fill(.ultraThinMaterial)
+                    .mask {
+                        LinearGradient(
+                            colors: [.black, .black.opacity(0.82), .clear],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    }
+                    .opacity(materialOpacity)
+                    .ignoresSafeArea(edges: .top)
+                    .allowsHitTesting(false)
+
+                HStack(alignment: .center, spacing: 12) {
+                    Text(title)
+                        .font(
+                            .system(
+                                size: 24 + (10 * expandedPresentation),
+                                weight: .bold
+                            )
+                        )
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
+                        .accessibilityHidden(true)
+
+                    Spacer(minLength: 12)
+
+                    accessory
+                }
+                .padding(.horizontal, 16)
+                .safeAreaPadding(.top, 8)
+                .padding(.bottom, 8)
+                .opacity(rowOpacity)
+                .offset(y: showsCompactHeader ? 0 : -24 * (1 - expandedPresentation))
+                .animation(.easeInOut(duration: 0.16), value: showsCompactHeader)
+            }
+            .frame(height: 60)
+        }
+    }
+#endif
 
 private struct ProgressivePageHeaderModifier: ViewModifier {
     let title: String?

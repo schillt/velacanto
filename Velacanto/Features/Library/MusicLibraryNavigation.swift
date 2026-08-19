@@ -19,21 +19,16 @@ struct MusicLibraryView: View {
                 signedOutLibrary
             }
         }
-        .progressiveSemanticNavigationTitle("Library")
+        .progressiveScreenHeader("Library") {
+            Button(action: showProfile) {
+                AccountAvatar(jellyfin: jellyfin)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Profile and settings")
+        }
         .navigationDestination(item: $selectedMostListenedItem) { route in
             destination(for: route.item)
         }
-        #if os(iOS)
-            .toolbar {
-                ToolbarItem(placement: .primaryAction) {
-                    Button(action: showProfile) {
-                        AccountAvatar(jellyfin: jellyfin)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Profile and settings")
-                }
-            }
-        #endif
     }
 
     private var signedInLibrary: some View {

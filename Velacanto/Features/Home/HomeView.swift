@@ -102,7 +102,13 @@ struct HomeView: View {
             .scrollTargetLayout()
         }
         .scrollPosition(id: $genreShelfScrollAnchor)
-        .progressiveSemanticNavigationTitle(presentation.title)
+        .progressiveScreenHeader(presentation.title) {
+            Button(action: showProfile) {
+                AccountAvatar(jellyfin: jellyfin)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Profile and settings")
+        }
         .navigationDestination(item: $selectedGenre) { genre in
             MusicGenreCollectionView(
                 genre: genre,
@@ -110,17 +116,6 @@ struct HomeView: View {
                 jellyfin: jellyfin
             )
         }
-        #if os(iOS)
-            .toolbar {
-                ToolbarItem(placement: .primaryAction) {
-                    Button(action: showProfile) {
-                        AccountAvatar(jellyfin: jellyfin)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Profile and settings")
-                }
-            }
-        #endif
         .task(id: jellyfin.playbackAccount) {
             guard jellyfin.isSignedIn else {
                 await clearProviderShelves()

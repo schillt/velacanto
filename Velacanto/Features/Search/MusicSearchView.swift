@@ -104,7 +104,13 @@ struct MusicSearchView: View {
                 resultsList
             }
         }
-        .progressiveSemanticNavigationTitle("Search")
+        .progressiveScreenHeader("Search") {
+            Button(action: showProfile) {
+                AccountAvatar(jellyfin: jellyfin)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Profile and settings")
+        }
         .navigationDestination(item: $selectedGenre) { genre in
             MusicGenreCollectionView(
                 genre: genre,
@@ -119,15 +125,6 @@ struct MusicSearchView: View {
                 prompt: "Albums, artists, songs, and playlists"
             )
             .searchFocused($isSearchFocused)
-            .toolbar {
-                ToolbarItem(placement: .primaryAction) {
-                    Button(action: showProfile) {
-                        AccountAvatar(jellyfin: jellyfin)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Profile and settings")
-                }
-            }
         #endif
         .task(id: searchTaskID) {
             await search()

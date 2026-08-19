@@ -5,6 +5,7 @@ struct ProfileView: View {
 
     let isPreparingPlaybackCheck: Bool
     let runPlaybackCheck: () -> Void
+    let dismiss: () -> Void
 
     var body: some View {
         Form {
@@ -69,7 +70,9 @@ struct ProfileView: View {
             }
         }
         .formStyle(.grouped)
-        .progressivePageHeader("Profile & Settings")
+        .progressiveScreenHeader("Profile & Settings") {
+            Button("Done", action: dismiss)
+        }
     }
 
     private var jellyfinStatus: String {
