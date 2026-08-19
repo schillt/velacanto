@@ -1021,6 +1021,63 @@ final class PlaybackFoundationTests: XCTestCase {
         )
     }
 
+    func testSelectingUpcomingItemMovesItToCurrentWithoutChangingHistory()
+        async throws
+    {
+        let current = PlaybackItem(
+            id: "current",
+            title: "Current",
+            artist: "Velacanto",
+            source: .jellyfin
+        )
+        let firstUpcoming = PlaybackItem(
+            id: "first-upcoming",
+            title: "First Upcoming",
+            artist: "Velacanto",
+            source: .jellyfin
+        )
+        let selectedUpcoming = PlaybackItem(
+            id: "selected-upcoming",
+            title: "Selected Upcoming",
+            artist: "Velacanto",
+            source: .localFiles
+        )
+        let engine = RecordingAudioPlayerEngine()
+        let coordinator = AudioPlaybackCoordinator(
+            engine: engine,
+            audioSessionController: ImmediateAudioSessionController()
+        )
+        coordinator.configureRequestResolver { item in
+            PlaybackRequest(
+                item: item,
+                asset: PlaybackAsset(
+                    url: URL(fileURLWithPath: "/tmp/\(item.id).caf")
+                ),
+                transportKind: .directPlay
+            )
+        }
+        coordinator.play(
+            PlaybackRequest(
+                item: current,
+                asset: PlaybackAsset(
+                    url: URL(fileURLWithPath: "/tmp/current.caf")
+                ),
+                transportKind: .directPlay
+            ),
+            queueItems: [current, firstUpcoming, selectedUpcoming],
+            context: .songs
+        )
+        await waitUntil { engine.playCallCount == 1 }
+
+        coordinator.playQueueItem(selectedUpcoming)
+
+        await waitUntil { coordinator.currentItem == selectedUpcoming }
+        await waitUntil { engine.playCallCount == 2 }
+        XCTAssertEqual(coordinator.playedQueueItems, [current])
+        XCTAssertEqual(coordinator.upcomingItems, [firstUpcoming])
+        XCTAssertEqual(engine.playCallCount, 2)
+    }
+
     func testQueueEditsAndPlaybackModesRestoreSafely() {
         let stateStore = RecordingNowPlayingStateStore()
         let account = PlaybackAccount(serverID: "server", userID: "user")

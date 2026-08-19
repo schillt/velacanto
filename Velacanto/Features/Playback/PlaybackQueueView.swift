@@ -253,7 +253,6 @@ struct NowPlayingQueueContent: View {
     let showsCurrentItemArtwork: Bool
     let onInitialPositioned: () -> Void
 
-    @State private var hasPositionedInitialCurrentItem = false
     @State private var currentItemMinY: CGFloat?
     @State private var queueContentBottomY: CGFloat?
 
@@ -373,7 +372,6 @@ struct NowPlayingQueueContent: View {
                     #endif
                 }
                 .scrollIndicators(.hidden)
-                .opacity(hasPositionedInitialCurrentItem ? 1 : 0)
                 .onPreferenceChange(QueueCurrentItemMinYPreferenceKey.self) { minY in
                     currentItemMinY = minY
                 }
@@ -381,13 +379,8 @@ struct NowPlayingQueueContent: View {
                     queueContentBottomY = maxY
                 }
                 .task(id: currentItemScrollID) {
-                    hasPositionedInitialCurrentItem = false
                     await Task.yield()
                     scrollToCurrentItem(using: scrollProxy)
-                    try? await Task.sleep(for: .milliseconds(50))
-                    scrollToCurrentItem(using: scrollProxy)
-                    hasPositionedInitialCurrentItem = true
-                    try? await Task.sleep(for: .milliseconds(20))
                     onInitialPositioned()
                 }
             }
@@ -400,6 +393,11 @@ struct NowPlayingQueueContent: View {
             .padding(.horizontal, 20)
             .padding(.vertical, 8)
             .frame(maxWidth: .infinity)
+            .background(.regularMaterial)
+            .overlay(alignment: .bottom) {
+                Divider()
+                    .opacity(0.35)
+            }
     }
 
     private var historyItems: [PlaybackItem] {

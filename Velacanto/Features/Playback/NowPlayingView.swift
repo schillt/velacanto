@@ -42,7 +42,6 @@ struct NowPlayingView: View {
     @State private var exploreDestination: NowPlayingExploreDestination?
     @State private var isQueueArtworkTransitionReady = false
     @State private var isQueueArtworkHandoffComplete = false
-    @State private var isQueueContentVisible = false
     @State private var queueTransitionGeneration = 0
 
     var body: some View {
@@ -171,8 +170,6 @@ struct NowPlayingView: View {
                                         isQueueArtworkHandoffComplete,
                                     onInitialPositioned: queueDidFinishInitialPositioning
                                 )
-                                .opacity(isQueueContentVisible ? 1 : 0)
-                                .offset(y: isQueueContentVisible ? 0 : 22)
 
                                 if !isQueueArtworkTransitionReady {
                                     nowPlayingArtworkAndDetails(
@@ -364,19 +361,7 @@ struct NowPlayingView: View {
                 isQueueArtworkTransitionReady = true
             }
             Task { @MainActor in
-                try? await Task.sleep(for: .milliseconds(260))
-                guard
-                    generation == queueTransitionGeneration,
-                    isShowingQueue,
-                    isQueueArtworkTransitionReady
-                else {
-                    return
-                }
-                withAnimation(.smooth(duration: 0.22, extraBounce: 0)) {
-                    isQueueContentVisible = true
-                }
-
-                try? await Task.sleep(for: .milliseconds(90))
+                await Task.yield()
                 guard
                     generation == queueTransitionGeneration,
                     isShowingQueue,
@@ -417,7 +402,6 @@ struct NowPlayingView: View {
                 isShowingLyrics = false
                 isQueueArtworkTransitionReady = false
                 isQueueArtworkHandoffComplete = false
-                isQueueContentVisible = false
                 isShowingQueue = true
             }
         }
