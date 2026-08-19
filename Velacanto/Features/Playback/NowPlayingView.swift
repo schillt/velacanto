@@ -45,6 +45,8 @@ struct NowPlayingView: View {
     #if os(iOS)
         @GestureState private var interactiveDismissalOffset: CGFloat = 0
         @State private var queueCurrentArtworkFrame: CGRect?
+        @State private var queueArtworkTransitionTarget: CGRect?
+        @State private var queueArtworkTransitionGeneration = 0
     #endif
 
     var body: some View {
@@ -165,9 +167,7 @@ struct NowPlayingView: View {
                             NowPlayingQueueContent(
                                 playback: playback,
                                 jellyfin: jellyfin,
-                                onCurrentItemArtworkFrameChange: {
-                                    queueCurrentArtworkFrame = $0
-                                }
+                                onCurrentItemArtworkFrameChange: updateQueueCurrentArtworkFrame
                             )
                         } else {
                             nowPlayingArtworkAndDetails(
@@ -321,10 +321,6 @@ struct NowPlayingView: View {
                 y: artworkFrame.midY
             )
             .allowsHitTesting(false)
-            .animation(
-                reduceMotion ? nil : .smooth(duration: 0.32, extraBounce: 0),
-                value: artworkFrame
-            )
         }
 
         private func nowPlayingArtworkAndDetails(
@@ -348,23 +344,92 @@ struct NowPlayingView: View {
                 isShowingLyrics = false
                 isLyricsForegroundVisible = false
                 queueCurrentArtworkFrame = nil
+                queueArtworkTransitionTarget = nil
+                queueArtworkTransitionGeneration += 1
+                isShowingQueue = true
+                return
             }
-            isShowingQueue.toggle()
+
+            queueArtworkTransitionGeneration += 1
+            withAnimation(queueArtworkTransitionAnimation) {
+                isShowingQueue = false
+            }
         }
 
         private func currentArtworkFrame(
             sourceSize: CGFloat,
             containerSize: CGSize
         ) -> CGRect {
-            guard isShowingQueue, let queueCurrentArtworkFrame else {
-                return CGRect(
-                    x: (containerSize.width - sourceSize) / 2,
-                    y: 0,
-                    width: sourceSize,
-                    height: sourceSize
-                )
+            if isShowingQueue {
+                if let queueArtworkTransitionTarget {
+                    return queueArtworkTransitionTarget
+                }
+                if let queueCurrentArtworkFrame {
+                    return queueCurrentArtworkFrame
+                }
             }
-            return queueCurrentArtworkFrame
+            return CGRect(
+                x: (containerSize.width - sourceSize) / 2,
+                y: 0,
+                width: sourceSize,
+                height: sourceSize
+            )
+        }
+
+        private var queueArtworkTransitionAnimation: Animation? {
+            reduceMotion ? nil : .smooth(duration: 0.32, extraBounce: 0)
+        }
+
+        private func updateQueueCurrentArtworkFrame(_ frame: CGRect?) {
+            guard queueCurrentArtworkFrame != frame else { return }
+
+            guard
+                isShowingQueue,
+                queueCurrentArtworkFrame == nil,
+                queueArtworkTransitionTarget == nil,
+                let frame
+            else {
+                updateQueueArtworkFrameWithoutAnimation(frame)
+                return
+            }
+
+            guard let queueArtworkTransitionAnimation else {
+                updateQueueArtworkFrameWithoutAnimation(frame)
+                return
+            }
+
+            let transitionGeneration = queueArtworkTransitionGeneration
+            withAnimation(
+                queueArtworkTransitionAnimation,
+                completionCriteria: .logicallyComplete
+            ) {
+                queueArtworkTransitionTarget = frame
+            } completion: {
+                guard
+                    queueArtworkTransitionGeneration == transitionGeneration,
+                    isShowingQueue
+                else { return }
+                settleQueueArtworkTransition()
+            }
+            updateQueueArtworkFrameWithoutAnimation(frame)
+        }
+
+        private func updateQueueArtworkFrameWithoutAnimation(_ frame: CGRect?) {
+            guard queueCurrentArtworkFrame != frame else { return }
+            var transaction = Transaction()
+            transaction.animation = nil
+            withTransaction(transaction) {
+                queueCurrentArtworkFrame = frame
+            }
+        }
+
+        private func settleQueueArtworkTransition() {
+            guard queueArtworkTransitionTarget != nil else { return }
+            var transaction = Transaction()
+            transaction.animation = nil
+            withTransaction(transaction) {
+                queueArtworkTransitionTarget = nil
+            }
         }
 
         private func canInteractivelyDismiss(with value: DragGesture.Value) -> Bool {
