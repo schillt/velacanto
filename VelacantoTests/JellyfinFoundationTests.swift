@@ -5,29 +5,29 @@ import XCTest
 
 @MainActor
 final class JellyfinFoundationTests: XCTestCase {
-    func testProgressiveHeaderRevealsCompactRowOnlyOnReverseScroll() {
+    func testProgressiveHeaderFollowsScrollDirectionImmediately() {
         var state = ProgressiveHeaderScrollState()
 
         XCTAssertEqual(state.presentation, .expanded)
         XCTAssertTrue(state.presentation.isVisible)
         XCTAssertEqual(state.presentation.titleSize, 28)
 
-        XCTAssertFalse(state.update(for: 40))
+        XCTAssertTrue(state.update(for: 4))
+        XCTAssertEqual(state.presentation, .hidden)
+        XCTAssertFalse(state.presentation.isVisible)
+
+        XCTAssertTrue(state.update(for: 0))
         XCTAssertEqual(state.presentation, .expanded)
 
         XCTAssertTrue(state.update(for: 80))
         XCTAssertEqual(state.presentation, .hidden)
-        XCTAssertFalse(state.presentation.isVisible)
 
-        XCTAssertFalse(state.update(for: 56))
-        XCTAssertEqual(state.presentation, .hidden)
-
-        XCTAssertTrue(state.update(for: 52))
+        XCTAssertTrue(state.update(for: 76))
         XCTAssertEqual(state.presentation, .compact)
         XCTAssertTrue(state.presentation.isVisible)
         XCTAssertEqual(state.presentation.titleSize, 22)
 
-        XCTAssertTrue(state.update(for: 60))
+        XCTAssertTrue(state.update(for: 80))
         XCTAssertEqual(state.presentation, .hidden)
 
         XCTAssertTrue(state.update(for: 0))
@@ -45,8 +45,7 @@ final class JellyfinFoundationTests: XCTestCase {
             XCTAssertEqual(state.presentation, .hidden)
         }
 
-        XCTAssertFalse(state.update(for: 976))
-        XCTAssertTrue(state.update(for: 972))
+        XCTAssertTrue(state.update(for: 996))
         XCTAssertEqual(state.presentation, .compact)
     }
 

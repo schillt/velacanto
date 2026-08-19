@@ -565,6 +565,7 @@ private struct ProgressiveScreenHeaderModifier<Accessory: View>: ViewModifier {
                                             weight: .bold
                                         )
                                     )
+                                    .lineLimit(1)
                                     .fixedSize(horizontal: true, vertical: false)
                                     .accessibilityHidden(true)
 
@@ -572,7 +573,7 @@ private struct ProgressiveScreenHeaderModifier<Accessory: View>: ViewModifier {
 
                                 accessory
                             }
-                            .frame(maxWidth: .infinity)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                         }
                         .sharedBackgroundVisibility(.hidden)
                     }
@@ -615,14 +616,8 @@ enum ProgressiveHeaderPresentation: Equatable {
 /// Keeps high-frequency scroll distance private and reports only the three
 /// visual states that can change the navigation chrome.
 struct ProgressiveHeaderScrollState {
-    private static let forwardHideDistance: CGFloat = 72
-    private static let reverseRevealDistance: CGFloat = 28
-    private static let resumedForwardHideDistance: CGFloat = 8
-
     private(set) var presentation = ProgressiveHeaderPresentation.expanded
     private var previousOffset: CGFloat = 0
-    private var reverseTravel: CGFloat = 0
-    private var resumedForwardTravel: CGFloat = 0
 
     @discardableResult
     mutating func update(for newOffset: CGFloat) -> Bool {
@@ -632,25 +627,11 @@ struct ProgressiveHeaderScrollState {
         previousOffset = clampedOffset
 
         if clampedOffset == 0 {
-            reverseTravel = 0
-            resumedForwardTravel = 0
             presentation = .expanded
         } else if delta < 0 {
-            reverseTravel += -delta
-            resumedForwardTravel = 0
-            if reverseTravel >= Self.reverseRevealDistance {
-                presentation = .compact
-            }
+            presentation = .compact
         } else if delta > 0 {
-            reverseTravel = 0
-            if presentation == .compact {
-                resumedForwardTravel += delta
-                if resumedForwardTravel >= Self.resumedForwardHideDistance {
-                    presentation = .hidden
-                }
-            } else if clampedOffset >= Self.forwardHideDistance {
-                presentation = .hidden
-            }
+            presentation = .hidden
         }
 
         return presentation != previousPresentation
