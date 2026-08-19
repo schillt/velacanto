@@ -1815,6 +1815,24 @@ final class JellyfinFoundationTests: XCTestCase {
         XCTAssertNil(state.anchor)
     }
 
+    func testCatalogScrollPositionCapturesSelectionOnlyWhenNoVisibleAnchorExists() throws {
+        let state = CatalogScrollPositionState<MusicCatalogItemID>()
+        let selected = try catalogItem(
+            from: Data(#"{"Id":"selected","Name":"Selected","Type":"MusicAlbum"}"#.utf8)
+        )
+        let visible = try catalogItem(
+            from: Data(#"{"Id":"visible","Name":"Visible","Type":"MusicAlbum"}"#.utf8)
+        )
+
+        XCTAssertTrue(state.begin(identity: "account|library"))
+        state.capture(fallback: selected.id, identity: "account|library")
+        XCTAssertEqual(state.restorationAnchor(in: [selected.id]), selected.id)
+
+        state.record(visible.id, identity: "account|library")
+        state.capture(fallback: selected.id, identity: "account|library")
+        XCTAssertEqual(state.restorationAnchor(in: [selected.id, visible.id]), visible.id)
+    }
+
     private func catalogItem(
         from data: Data,
         accountScope: String = "server-id|user-id"

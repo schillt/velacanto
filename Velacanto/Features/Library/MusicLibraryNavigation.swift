@@ -10,6 +10,7 @@ struct MusicLibraryView: View {
     @StateObject private var mostListened = PagedMusicCatalogModel()
     @StateObject private var scrollPosition = CatalogScrollPositionState<MusicCatalogItemID>()
     @State private var selectedMostListenedItem: MostListenedDestination?
+    @State private var mostListenedSnapshot: [MusicCatalogItem] = []
 
     var body: some View {
         Group {
@@ -32,64 +33,88 @@ struct MusicLibraryView: View {
     }
 
     private var signedInLibrary: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 28) {
-                PinnedLibraryGrid(
-                    playback: playback,
-                    jellyfin: jellyfin
-                )
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 28) {
+                    PinnedLibraryGrid(
+                        playback: playback,
+                        jellyfin: jellyfin
+                    )
 
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Your Music").font(.title2.weight(.semibold))
-                    ForEach(MusicLibraryCategory.allCases) { category in
-                        NavigationLink {
-                            destination(for: category)
-                        } label: {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Your Music").font(.title2.weight(.semibold))
+                        ForEach(MusicLibraryCategory.allCases) { category in
+                            NavigationLink {
+                                destination(for: category)
+                            } label: {
+                                MusicLibraryNavigationRow(
+                                    title: category.title,
+                                    subtitle: category.subtitle,
+                                    symbolName: category.symbolName
+                                )
+                            }
+                            .buttonStyle(.plain)
+                        }
+
+                        Button(action: openLocalFile) {
                             MusicLibraryNavigationRow(
-                                title: category.title,
-                                subtitle: category.subtitle,
-                                symbolName: category.symbolName
+                                title: "Open Audio File",
+                                subtitle: "Play audio directly from this device",
+                                symbolName: "folder"
                             )
                         }
                         .buttonStyle(.plain)
+
+                        if let session = jellyfin.session {
+                            Text(
+                                "Music from every library available to \(session.username) is combined here."
+                            )
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .padding(.top, 4)
+                        }
                     }
 
-                    Button(action: openLocalFile) {
-                        MusicLibraryNavigationRow(
-                            title: "Open Audio File",
-                            subtitle: "Play audio directly from this device",
-                            symbolName: "folder"
-                        )
-                    }
-                    .buttonStyle(.plain)
-
-                    if let session = jellyfin.session {
-                        Text(
-                            "Music from every library available to \(session.username) is combined here."
-                        )
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .padding(.top, 4)
-                    }
+                    MostListenedLibraryGrid(
+                        items: mostListenedSnapshot,
+                        playback: playback,
+                        jellyfin: jellyfin,
+                        openItem: openMostListened
+                    )
+                }
+                .frame(maxWidth: 1_050, alignment: .leading)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 20)
+                .frame(maxWidth: .infinity)
+                .scrollTargetLayout()
+            }
+            .scrollPosition(id: scrollPosition.binding(identity: libraryIdentity))
+            .onChange(of: selectedMostListenedItem) { previousItem, currentItem in
+                guard
+                    previousItem != nil,
+                    currentItem == nil,
+                    let anchor = scrollPosition.restorationAnchor(
+                        in: mostListenedSnapshot.map(\.id)
+                    )
+                else {
+                    return
                 }
 
-                MostListenedLibraryGrid(
-                    model: mostListened,
-                    playback: playback,
-                    jellyfin: jellyfin,
-                    selectedItem: $selectedMostListenedItem
-                )
+                var transaction = Transaction()
+                transaction.disablesAnimations = true
+                withTransaction(transaction) {
+                    proxy.scrollTo(anchor, anchor: .center)
+                }
             }
-            .frame(maxWidth: 1_050, alignment: .leading)
-            .padding(.horizontal, 16)
-            .padding(.vertical, 20)
-            .frame(maxWidth: .infinity)
-            .scrollTargetLayout()
         }
-        .scrollPosition(id: scrollPosition.binding(identity: libraryIdentity))
         .task(id: libraryIdentity) {
             guard scrollPosition.begin(identity: libraryIdentity) else { return }
+            mostListenedSnapshot = []
             await loadMostListened()
+        }
+        .onReceive(mostListened.$items) { items in
+            guard selectedMostListenedItem == nil else { return }
+            mostListenedSnapshot = items
         }
     }
 
@@ -167,6 +192,11 @@ struct MusicLibraryView: View {
                 await jellyfin.cacheCatalogItems(items, kind: .mostListened)
             }
         )
+    }
+
+    private func openMostListened(_ item: MusicCatalogItem) {
+        scrollPosition.capture(fallback: item.id, identity: libraryIdentity)
+        selectedMostListenedItem = MostListenedDestination(item: item)
     }
 }
 
@@ -445,23 +475,23 @@ private struct MostListenedDestination: Hashable {
 }
 
 private struct MostListenedLibraryGrid: View {
-    @ObservedObject var model: PagedMusicCatalogModel
+    let items: [MusicCatalogItem]
     @ObservedObject var playback: AudioPlaybackCoordinator
     @ObservedObject var jellyfin: JellyfinSessionController
-    @Binding var selectedItem: MostListenedDestination?
+    let openItem: (MusicCatalogItem) -> Void
 
     @State private var preparingItemID: MusicCatalogItemID?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            if !model.items.isEmpty {
+            if !items.isEmpty {
                 Text("Most Listened To").font(.title2.weight(.semibold))
                 LazyVGrid(
                     columns: MusicArtworkGridLayout.columns,
                     alignment: .leading,
                     spacing: MusicArtworkGridLayout.verticalSpacing
                 ) {
-                    ForEach(Array(model.items.prefix(12))) { item in
+                    ForEach(Array(items.prefix(12))) { item in
                         itemView(item)
                     }
                 }
@@ -483,7 +513,7 @@ private struct MostListenedLibraryGrid: View {
             .id(item.id)
         } else {
             Button {
-                selectedItem = MostListenedDestination(item: item)
+                openItem(item)
             } label: {
                 MusicAlbumCard(album: item, jellyfin: jellyfin)
             }

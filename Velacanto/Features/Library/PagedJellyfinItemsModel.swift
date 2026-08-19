@@ -250,6 +250,13 @@ final class CatalogScrollPositionState<Anchor: Hashable>: ObservableObject {
         anchor = visibleAnchor
     }
 
+    /// Preserves the position known at selection time when SwiftUI has not yet
+    /// reported a visible target for the current catalog snapshot.
+    func capture(fallback: Anchor, identity: String) {
+        guard self.identity == identity else { return }
+        anchor = anchor ?? fallback
+    }
+
     func binding(identity: String) -> Binding<Anchor?> {
         Binding(
             get: { self.anchor },
