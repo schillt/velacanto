@@ -41,10 +41,6 @@ struct NowPlayingView: View {
     @State private var scrubProgress: Double?
     @State private var isScrubbing = false
     @State private var exploreDestination: NowPlayingExploreDestination?
-    @State private var isQueueArtworkTransitionReady = false
-    @State private var isQueueArtworkHandoffComplete = false
-    @State private var isQueueControlsVisible = false
-    @State private var queueTransitionGeneration = 0
     @State private var lyricsTransitionGeneration = 0
 
     var body: some View {
@@ -162,24 +158,10 @@ struct NowPlayingView: View {
                         if isShowingLyrics {
                             lyricsPresentation
                         } else if isShowingQueue {
-                            ZStack(alignment: .topLeading) {
-                                NowPlayingQueueContent(
-                                    playback: playback,
-                                    jellyfin: jellyfin,
-                                    showsCurrentItemArtwork:
-                                        isQueueArtworkHandoffComplete,
-                                    showsModeControls: isQueueControlsVisible,
-                                    onInitialPositioned: queueDidFinishInitialPositioning
-                                )
-
-                                if !isQueueArtworkTransitionReady {
-                                    nowPlayingArtworkAndDetails(
-                                        for: item,
-                                        artworkSize: artworkSize,
-                                        contentWidth: contentWidth
-                                    )
-                                }
-                            }
+                            NowPlayingQueueContent(
+                                playback: playback,
+                                jellyfin: jellyfin
+                            )
                         } else {
                             nowPlayingArtworkAndDetails(
                                 for: item,
@@ -188,9 +170,7 @@ struct NowPlayingView: View {
                             )
                         }
 
-                        if !isShowingLyrics,
-                            !isShowingQueue || !isQueueArtworkHandoffComplete
-                        {
+                        if !isShowingLyrics, !isShowingQueue {
                             sharedQueueArtwork(
                                 for: item,
                                 sourceSize: artworkSize,
@@ -311,29 +291,21 @@ struct NowPlayingView: View {
             sourceSize: CGFloat,
             containerWidth: CGFloat
         ) -> some View {
-            let isAtQueueRow = isShowingQueue && isQueueArtworkTransitionReady
-            let size = isAtQueueRow ? 46.0 : sourceSize
-            let horizontalOffset =
-                isAtQueueRow
-                ? 20.0
-                : max(0, (containerWidth - sourceSize) / 2)
-
             return PlaybackArtworkView(
                 item: item,
                 jellyfin: jellyfin,
                 cornerRadius: 0,
                 maxWidth: 1_024
             )
-            .frame(width: size, height: size)
-            .clipShape(.rect(cornerRadius: isAtQueueRow ? 7 : 18))
+            .frame(width: sourceSize, height: sourceSize)
+            .clipShape(.rect(cornerRadius: 18))
             .shadow(
-                color: .black.opacity(isAtQueueRow ? 0 : 0.16),
-                radius: isAtQueueRow ? 0 : 28,
-                y: isAtQueueRow ? 0 : 14
+                color: .black.opacity(0.16),
+                radius: 28,
+                y: 14
             )
             .offset(
-                x: horizontalOffset,
-                y: isAtQueueRow ? 4 : 0
+                x: max(0, (containerWidth - sourceSize) / 2)
             )
             .allowsHitTesting(false)
         }
@@ -354,78 +326,16 @@ struct NowPlayingView: View {
             }
         }
 
-        private func queueDidFinishInitialPositioning() {
-            guard isShowingQueue, !isQueueArtworkTransitionReady else { return }
-            let generation = queueTransitionGeneration
-            withAnimation(queueArtworkTransition) {
-                isQueueArtworkTransitionReady = true
-            }
-            Task { @MainActor in
-                await Task.yield()
-                guard
-                    generation == queueTransitionGeneration,
-                    isShowingQueue,
-                    isQueueArtworkTransitionReady
-                else {
-                    return
-                }
-                var handoff = Transaction()
-                handoff.disablesAnimations = true
-                withTransaction(handoff) {
-                    isQueueArtworkHandoffComplete = true
-                }
-                await Task.yield()
-                guard
-                    generation == queueTransitionGeneration,
-                    isShowingQueue,
-                    isQueueArtworkHandoffComplete
-                else {
-                    return
-                }
-                withAnimation(queueControlsTransition) {
-                    isQueueControlsVisible = true
-                }
-            }
-        }
-
         private func toggleQueueVisibility() {
-            if isShowingQueue {
-                var handoff = Transaction()
-                handoff.disablesAnimations = true
-                withTransaction(handoff) {
-                    queueTransitionGeneration += 1
-                    isQueueControlsVisible = false
-                    isQueueArtworkHandoffComplete = false
-                }
-                Task { @MainActor in
-                    await Task.yield()
-                    withAnimation(queueArtworkTransition) {
-                        isQueueArtworkTransitionReady = false
-                        isShowingQueue = false
-                    }
-                }
-                return
-            }
-
             var preparation = Transaction()
             preparation.disablesAnimations = true
             withTransaction(preparation) {
-                queueTransitionGeneration += 1
-                isShowingLyrics = false
-                isLyricsForegroundVisible = false
-                isQueueArtworkTransitionReady = false
-                isQueueArtworkHandoffComplete = false
-                isQueueControlsVisible = false
-                isShowingQueue = true
+                if !isShowingQueue {
+                    isShowingLyrics = false
+                    isLyricsForegroundVisible = false
+                }
+                isShowingQueue.toggle()
             }
-        }
-
-        private var queueArtworkTransition: Animation? {
-            reduceMotion ? nil : .smooth(duration: 0.34, extraBounce: 0)
-        }
-
-        private var queueControlsTransition: Animation? {
-            reduceMotion ? nil : .easeOut(duration: 0.18)
         }
     #endif
 
