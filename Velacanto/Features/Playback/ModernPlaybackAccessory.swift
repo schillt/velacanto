@@ -79,17 +79,16 @@ import SwiftUI
         private var trackMetadata: some View {
             Button(action: showNowPlaying) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(playback.currentItem?.title ?? "Nothing Playing")
-                        .font(.callout.weight(.medium))
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    Text(playback.currentItem?.artist ?? "")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                    CompactPlaybackMetadataMarquee(
+                        text: playback.currentItem?.title ?? "Nothing Playing",
+                        font: .callout.weight(.medium),
+                        color: .primary
+                    )
+                    CompactPlaybackMetadataMarquee(
+                        text: playback.currentItem?.artist ?? "",
+                        font: .caption,
+                        color: .secondary
+                    )
                 }
                 .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
             }
@@ -143,6 +142,123 @@ import SwiftUI
             .buttonStyle(.plain)
             .disabled(!playback.canGoNext)
             .accessibilityLabel("Next")
+        }
+    }
+
+    private struct CompactPlaybackMetadataMarquee: View {
+        private struct Measurement: Hashable {
+            let availableWidth: CGFloat
+            let textWidth: CGFloat
+
+            var overflow: CGFloat {
+                max(textWidth - availableWidth, 0)
+            }
+        }
+
+        private struct CycleID: Hashable {
+            let text: String
+            let measurement: Measurement
+            let isVisible: Bool
+            let reduceMotion: Bool
+        }
+
+        @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+        let text: String
+        let font: Font
+        let color: Color
+
+        @State private var scrollPosition = ScrollPosition()
+        @State private var measurement = Measurement(availableWidth: 0, textWidth: 0)
+        @State private var isVisible = false
+
+        private let initialDwell: Duration = .seconds(1)
+        private let trailingDwell: Duration = .milliseconds(700)
+        private let pointsPerSecond: CGFloat = 24
+
+        var body: some View {
+            ScrollView(.horizontal) {
+                Text(text)
+                    .font(font)
+                    .foregroundStyle(color)
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+            }
+            .scrollDisabled(true)
+            .scrollIndicators(.hidden)
+            .scrollPosition($scrollPosition)
+            .onScrollGeometryChange(for: Measurement.self) { geometry in
+                Measurement(
+                    availableWidth: geometry.containerSize.width,
+                    textWidth: geometry.contentSize.width
+                )
+            } action: { _, measurement in
+                self.measurement = measurement
+            }
+            .onAppear {
+                isVisible = true
+            }
+            .onDisappear {
+                isVisible = false
+                resetScrollPosition()
+            }
+            .task(id: cycleID) {
+                await runCycle()
+            }
+            .accessibilityHidden(true)
+        }
+
+        private var cycleID: CycleID {
+            CycleID(
+                text: text,
+                measurement: measurement,
+                isVisible: isVisible,
+                reduceMotion: reduceMotion
+            )
+        }
+
+        private var canScroll: Bool {
+            isVisible && !reduceMotion && measurement.overflow > 0
+        }
+
+        private var scrollDuration: TimeInterval {
+            max(measurement.overflow / pointsPerSecond, 0.5)
+        }
+
+        @MainActor
+        private func runCycle() async {
+            resetScrollPosition()
+            guard canScroll else { return }
+
+            do {
+                try await Task.sleep(for: initialDwell)
+                guard canScroll else { return }
+
+                withAnimation(.linear(duration: scrollDuration)) {
+                    scrollPosition.scrollTo(x: measurement.overflow)
+                }
+
+                try await Task.sleep(for: .milliseconds(Int64((scrollDuration * 1_000).rounded())))
+                guard canScroll else { return }
+
+                try await Task.sleep(for: trailingDwell)
+                guard canScroll else { return }
+
+                resetScrollPosition()
+            } catch is CancellationError {
+                return
+            } catch {
+                return
+            }
+        }
+
+        @MainActor
+        private func resetScrollPosition() {
+            var transaction = Transaction()
+            transaction.animation = nil
+            withTransaction(transaction) {
+                scrollPosition.scrollTo(x: 0)
+            }
         }
     }
 
