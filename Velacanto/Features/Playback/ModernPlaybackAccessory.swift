@@ -116,6 +116,8 @@ import SwiftUI
                 if playback.isWaitingForPlayback {
                     ProgressView()
                         .controlSize(.small)
+                        .scaleEffect(0.75)
+                        .frame(width: 16, height: 16)
                         .frame(width: 36, height: 36)
                 } else {
                     Image(
