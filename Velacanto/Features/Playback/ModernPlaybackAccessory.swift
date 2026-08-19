@@ -299,119 +299,17 @@ import SwiftUI
 
 #if os(iOS)
     struct NowPlayingTitleMarquee: View {
-        @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
         let text: String
         let color: Color
 
-        @State private var containerWidth: CGFloat = 0
-        @State private var textWidth: CGFloat = 0
-        @State private var offset: CGFloat = 0
-        @State private var isScrolling = false
-
-        private let loopSpacing: CGFloat = 24
-
         var body: some View {
-            GeometryReader { geometry in
-                ZStack(alignment: .leading) {
-                    truncatedTitle
-                        .opacity(isScrolling ? 0 : 1)
-
-                    HStack(spacing: loopSpacing) {
-                        fullTitle
-                        fullTitle
-                            .accessibilityHidden(true)
-                    }
-                    .fixedSize(horizontal: true, vertical: false)
-                    .opacity(isScrolling ? 1 : 0)
-                    .offset(x: offset)
-                }
-                .frame(
-                    width: geometry.size.width,
-                    height: geometry.size.height,
-                    alignment: .leading
-                )
-                .clipped()
-                .onAppear {
-                    containerWidth = geometry.size.width
-                }
-                .onChange(of: geometry.size.width) { _, width in
-                    containerWidth = width
-                }
-            }
-            .clipped()
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel(text)
-            .onPreferenceChange(NowPlayingTitleWidthPreferenceKey.self) { width in
-                textWidth = width
-            }
-            .task(id: animationID) {
-                await animateTitle()
-            }
-        }
-
-        private var truncatedTitle: some View {
             Text(text)
                 .font(.title2.weight(.semibold))
                 .foregroundStyle(color)
                 .lineLimit(1)
                 .truncationMode(.tail)
                 .frame(maxWidth: .infinity, alignment: .leading)
-        }
-
-        private var fullTitle: some View {
-            Text(text)
-                .font(.title2.weight(.semibold))
-                .foregroundStyle(color)
-                .lineLimit(1)
-                .fixedSize(horizontal: true, vertical: false)
-                .background {
-                    GeometryReader { geometry in
-                        Color.clear.preference(
-                            key: NowPlayingTitleWidthPreferenceKey.self,
-                            value: geometry.size.width
-                        )
-                    }
-                }
-        }
-
-        private var shouldScroll: Bool {
-            textWidth > containerWidth && !reduceMotion
-        }
-
-        private var animationID: String {
-            "\(text)|\(textWidth)|\(containerWidth)|\(reduceMotion)"
-        }
-
-        @MainActor
-        private func animateTitle() async {
-            offset = 0
-            isScrolling = false
-            guard shouldScroll else { return }
-
-            do {
-                try await Task.sleep(for: .seconds(1))
-            } catch {
-                return
-            }
-
-            guard !Task.isCancelled else { return }
-
-            isScrolling = true
-            withAnimation(
-                .linear(duration: max((textWidth + loopSpacing) / 12, 0.5))
-                    .repeatForever(autoreverses: false)
-            ) {
-                offset = -(textWidth + loopSpacing)
-            }
-        }
-    }
-
-    private struct NowPlayingTitleWidthPreferenceKey: PreferenceKey {
-        static let defaultValue: CGFloat = 0
-
-        static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-            value = max(value, nextValue())
+                .accessibilityLabel(text)
         }
     }
 #endif
