@@ -8,10 +8,13 @@ enum LyricsLoadState: Equatable {
 }
 
 struct LyricsPresentation: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     @ObservedObject var playback: AudioPlaybackCoordinator
     let state: LyricsLoadState
     let primaryColor: Color
     let secondaryColor: Color
+    let isForegroundVisible: Bool
     let retry: () -> Void
 
     var body: some View {
@@ -48,6 +51,14 @@ struct LyricsPresentation: View {
         }
         .foregroundStyle(primaryColor)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .opacity(isForegroundVisible ? 1 : 0)
+        .offset(y: isForegroundVisible ? 0 : 12)
+        .animation(
+            reduceMotion ? nil : .easeOut(duration: 0.18),
+            value: isForegroundVisible
+        )
+        .allowsHitTesting(isForegroundVisible)
+        .accessibilityHidden(!isForegroundVisible)
         .accessibilityElement(children: .contain)
     }
 }

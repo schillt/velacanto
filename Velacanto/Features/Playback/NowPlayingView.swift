@@ -26,6 +26,7 @@ private struct UnavailableLyricsIcon: View {
 
 struct NowPlayingView: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     #if os(iOS)
         @Environment(\.colorScheme) private var colorScheme
     #endif
@@ -35,6 +36,7 @@ struct NowPlayingView: View {
     var dismissAction: (() -> Void)?
     @State private var isShowingQueue = false
     @State private var isShowingLyrics = false
+    @State private var isLyricsForegroundVisible = false
     @State private var lyricsState = LyricsLoadState.loading
     @State private var scrubProgress: Double?
     @State private var isScrubbing = false
@@ -43,6 +45,7 @@ struct NowPlayingView: View {
     @State private var isQueueArtworkTransitionReady = false
     @State private var isQueueArtworkHandoffComplete = false
     @State private var queueTransitionGeneration = 0
+    @State private var lyricsTransitionGeneration = 0
 
     var body: some View {
         #if os(iOS)
@@ -400,6 +403,7 @@ struct NowPlayingView: View {
             withTransaction(preparation) {
                 queueTransitionGeneration += 1
                 isShowingLyrics = false
+                isLyricsForegroundVisible = false
                 isQueueArtworkTransitionReady = false
                 isQueueArtworkHandoffComplete = false
                 isShowingQueue = true
@@ -688,11 +692,12 @@ struct NowPlayingView: View {
                 .accessibilityLabel("Lyrics unavailable")
         case .available:
             Button {
-                isShowingQueue = false
-                isShowingLyrics.toggle()
+                toggleLyricsPresentation()
             } label: {
                 Image(systemName: isShowingLyrics ? "quote.bubble.fill" : "quote.bubble")
                     .font(.system(size: 22, weight: .medium))
+                    .contentTransition(.symbolEffect(.replace))
+                    .symbolEffect(.bounce, value: isShowingLyrics)
                     .frame(width: 48, height: 48)
                     .contentShape(Circle())
                     .background(
@@ -704,8 +709,7 @@ struct NowPlayingView: View {
             .accessibilityLabel(isShowingLyrics ? "Hide Lyrics" : "Show Lyrics")
         case .failed:
             Button {
-                isShowingQueue = false
-                isShowingLyrics = true
+                presentLyrics()
             } label: {
                 ZStack(alignment: .bottomTrailing) {
                     Image(systemName: "quote.bubble")
@@ -726,6 +730,7 @@ struct NowPlayingView: View {
             state: lyricsState,
             primaryColor: playbackPrimaryTextColor,
             secondaryColor: playbackSecondaryTextColor,
+            isForegroundVisible: isLyricsForegroundVisible,
             retry: { Task { await loadLyrics() } }
         )
     }
@@ -752,7 +757,7 @@ struct NowPlayingView: View {
     private func loadLyrics() async {
         guard let item = playback.currentItem else {
             lyricsState = .unavailable
-            isShowingLyrics = false
+            dismissLyricsImmediately()
             return
         }
 
@@ -766,7 +771,7 @@ struct NowPlayingView: View {
                 lyricsState = .available(lyrics)
             } else {
                 lyricsState = .unavailable
-                isShowingLyrics = false
+                dismissLyricsImmediately()
             }
         } catch is CancellationError {
             return
@@ -995,6 +1000,52 @@ struct NowPlayingView: View {
         } else {
             dismiss()
         }
+    }
+
+    private func toggleLyricsPresentation() {
+        isShowingQueue = false
+        lyricsTransitionGeneration += 1
+        let transitionGeneration = lyricsTransitionGeneration
+
+        if isShowingLyrics {
+            isLyricsForegroundVisible = false
+
+            guard !reduceMotion else {
+                isShowingLyrics = false
+                return
+            }
+
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(180))
+                guard transitionGeneration == lyricsTransitionGeneration else { return }
+                isShowingLyrics = false
+            }
+        } else {
+            presentLyrics(transitionGeneration: transitionGeneration)
+        }
+    }
+
+    private func presentLyrics(transitionGeneration: Int? = nil) {
+        isShowingQueue = false
+        isShowingLyrics = true
+
+        guard !reduceMotion else {
+            isLyricsForegroundVisible = true
+            return
+        }
+
+        let transitionGeneration = transitionGeneration ?? lyricsTransitionGeneration
+        Task { @MainActor in
+            await Task.yield()
+            guard transitionGeneration == lyricsTransitionGeneration else { return }
+            isLyricsForegroundVisible = true
+        }
+    }
+
+    private func dismissLyricsImmediately() {
+        lyricsTransitionGeneration += 1
+        isLyricsForegroundVisible = false
+        isShowingLyrics = false
     }
 
 }
