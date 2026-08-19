@@ -77,5 +77,7 @@ final class VelacantoUITests: XCTestCase {
         app.buttons["Hide Lyrics"].tap()
         app.buttons["Show Queue"].tap()
         XCTAssertTrue(app.staticTexts["Up Next"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.buttons["Shuffle Up Next"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.buttons["Repeat Off"].exists)
     }
 }

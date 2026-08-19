@@ -251,6 +251,7 @@ struct NowPlayingQueueContent: View {
     @ObservedObject var playback: AudioPlaybackCoordinator
     @ObservedObject var jellyfin: JellyfinSessionController
     let showsCurrentItemArtwork: Bool
+    let showsModeControls: Bool
     let onInitialPositioned: () -> Void
 
     @State private var currentItemMinY: CGFloat?
@@ -355,8 +356,11 @@ struct NowPlayingQueueContent: View {
                                 )
                                 .accessibilityHidden(true)
                         } header: {
-                            modeControls
-                                .zIndex(2)
+                            if showsModeControls {
+                                modeControls
+                                    .zIndex(2)
+                                    .transition(.opacity)
+                            }
                         }
                     }
                     .padding(.bottom, 12)

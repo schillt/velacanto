@@ -44,6 +44,7 @@ struct NowPlayingView: View {
     @State private var exploreDestination: NowPlayingExploreDestination?
     @State private var isQueueArtworkTransitionReady = false
     @State private var isQueueArtworkHandoffComplete = false
+    @State private var isQueueControlsVisible = false
     @State private var queueTransitionGeneration = 0
     @State private var lyricsTransitionGeneration = 0
 
@@ -171,6 +172,7 @@ struct NowPlayingView: View {
                                     jellyfin: jellyfin,
                                     showsCurrentItemArtwork:
                                         isQueueArtworkHandoffComplete,
+                                    showsModeControls: isQueueControlsVisible,
                                     onInitialPositioned: queueDidFinishInitialPositioning
                                 )
 
@@ -222,7 +224,6 @@ struct NowPlayingView: View {
                 height: geometry.size.height,
                 alignment: .bottom
             )
-            .animation(.smooth(duration: 0.38, extraBounce: 0), value: isShowingQueue)
         }
     #endif
 
@@ -360,7 +361,7 @@ struct NowPlayingView: View {
         private func queueDidFinishInitialPositioning() {
             guard isShowingQueue, !isQueueArtworkTransitionReady else { return }
             let generation = queueTransitionGeneration
-            withAnimation(.smooth(duration: 0.34, extraBounce: 0)) {
+            withAnimation(queueArtworkTransition) {
                 isQueueArtworkTransitionReady = true
             }
             Task { @MainActor in
@@ -377,6 +378,17 @@ struct NowPlayingView: View {
                 withTransaction(handoff) {
                     isQueueArtworkHandoffComplete = true
                 }
+                await Task.yield()
+                guard
+                    generation == queueTransitionGeneration,
+                    isShowingQueue,
+                    isQueueArtworkHandoffComplete
+                else {
+                    return
+                }
+                withAnimation(queueControlsTransition) {
+                    isQueueControlsVisible = true
+                }
             }
         }
 
@@ -386,11 +398,12 @@ struct NowPlayingView: View {
                 handoff.disablesAnimations = true
                 withTransaction(handoff) {
                     queueTransitionGeneration += 1
+                    isQueueControlsVisible = false
                     isQueueArtworkHandoffComplete = false
                 }
                 Task { @MainActor in
                     await Task.yield()
-                    withAnimation(.smooth(duration: 0.38, extraBounce: 0)) {
+                    withAnimation(queueArtworkTransition) {
                         isQueueArtworkTransitionReady = false
                         isShowingQueue = false
                     }
@@ -406,8 +419,17 @@ struct NowPlayingView: View {
                 isLyricsForegroundVisible = false
                 isQueueArtworkTransitionReady = false
                 isQueueArtworkHandoffComplete = false
+                isQueueControlsVisible = false
                 isShowingQueue = true
             }
+        }
+
+        private var queueArtworkTransition: Animation? {
+            reduceMotion ? nil : .smooth(duration: 0.34, extraBounce: 0)
+        }
+
+        private var queueControlsTransition: Animation? {
+            reduceMotion ? nil : .easeOut(duration: 0.18)
         }
     #endif
 
