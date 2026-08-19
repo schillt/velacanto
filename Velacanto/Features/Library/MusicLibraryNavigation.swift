@@ -478,6 +478,7 @@ private struct MusicLibraryCollectionView: View {
     @ObservedObject var jellyfin: JellyfinSessionController
 
     @StateObject private var model = PagedMusicCatalogModel()
+    @StateObject private var scrollPosition = CatalogScrollPositionState<MusicCatalogItemID>()
     @State private var preparingItemID: MusicCatalogItemID?
 
     var body: some View {
@@ -505,17 +506,24 @@ private struct MusicLibraryCollectionView: View {
                 ) {
                     ForEach(model.items) { item in
                         itemView(item)
+                            .id(item.id)
                             .onAppear { loadMoreIfNeeded(item.id) }
                     }
                 }
                 .padding(20)
+                .scrollTargetLayout()
             }
         }
+        .scrollPosition(id: scrollPosition.binding(identity: taskID))
         .progressivePageHeader(title)
-        .task(id: jellyfin.playbackAccount) {
+        .task(id: taskID) {
+            guard scrollPosition.begin(identity: taskID) else { return }
             await reset()
         }
-        .refreshable { await reset() }
+        .refreshable {
+            _ = scrollPosition.begin(identity: taskID, forceReset: true)
+            await reset()
+        }
     }
 
     @ViewBuilder
@@ -564,6 +572,10 @@ private struct MusicLibraryCollectionView: View {
 
     private func loadMoreIfNeeded(_ itemID: MusicCatalogItemID) {
         model.loadMoreIfNeeded(itemID: itemID, loader: pageLoader)
+    }
+
+    private var taskID: String {
+        "\(jellyfin.playbackAccount?.serverID ?? "signed-out")|\(jellyfin.playbackAccount?.userID ?? "none")|\(title)"
     }
 
     private var pageLoader: PagedMusicCatalogModel.Loader {

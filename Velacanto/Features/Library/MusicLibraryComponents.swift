@@ -59,7 +59,8 @@ struct MusicGenreGrid: View {
     @State private var genres: [MusicGenre] = []
     @State private var errorMessage: String?
     @State private var isLoading = true
-    @State private var carouselScrollAnchor: MusicCatalogItemID?
+    @StateObject private var carouselScrollPosition =
+        CatalogScrollPositionState<MusicCatalogItemID>()
     @State private var genreArtworkPrefetchTask: Task<Void, Never>?
 
     var body: some View {
@@ -108,7 +109,10 @@ struct MusicGenreGrid: View {
                 .scrollTargetLayout()
                 .padding(.leading, 20)
             }
-            .scrollPosition(id: $carouselScrollAnchor, anchor: .leading)
+            .scrollPosition(
+                id: carouselScrollPosition.binding(identity: carouselIdentity),
+                anchor: .leading
+            )
             .carouselToDeviceEdges()
         } else {
             LazyVGrid(
@@ -161,6 +165,7 @@ struct MusicGenreGrid: View {
     }
 
     private func loadGenres() async {
+        _ = carouselScrollPosition.begin(identity: carouselIdentity, forceReset: true)
         guard jellyfin.isSignedIn else {
             genres = []
             errorMessage = nil
@@ -183,6 +188,26 @@ struct MusicGenreGrid: View {
             errorMessage = error.localizedDescription
         }
         isLoading = false
+    }
+
+    private var carouselIdentity: String {
+        let filterIDKey = (filterIDs ?? []).sorted().joined(separator: ",")
+        let filterNameKey = (filterNames ?? []).sorted().joined(separator: ",")
+        let presentationKey: String
+        switch presentation {
+        case .carousel:
+            presentationKey = "carousel"
+        case .collection:
+            presentationKey = "collection"
+        }
+        return [
+            jellyfin.playbackAccount?.serverID ?? "signed-out",
+            jellyfin.playbackAccount?.userID ?? "none",
+            presentationKey,
+            filterIDKey,
+            filterNameKey,
+            limit.map(String.init) ?? "all",
+        ].joined(separator: "|")
     }
 
     private func scheduleGenreArtworkPrefetch() {

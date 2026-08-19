@@ -6,7 +6,7 @@ struct MusicAlbumsView: View {
 
     @StateObject private var model = PagedMusicCatalogModel()
     @State private var searchText = ""
-    @StateObject private var gridPosition = AlbumGridPositionState()
+    @StateObject private var scrollPosition = CatalogScrollPositionState<MusicCatalogItemID>()
     @Namespace private var albumTransitionNamespace
 
     private var query: String {
@@ -81,17 +81,17 @@ struct MusicAlbumsView: View {
                 }
             }
         }
-        .scrollPosition(id: scrollPositionBinding)
+        .scrollPosition(id: scrollPosition.binding(identity: taskID))
         .progressivePageHeader("Albums")
         #if !os(macOS)
             .searchable(text: $searchText, prompt: "Albums and artists")
         #endif
         .task(id: taskID) {
-            guard gridPosition.begin(identity: taskID) else { return }
+            guard scrollPosition.begin(identity: taskID) else { return }
             await reset()
         }
         .refreshable {
-            _ = gridPosition.begin(identity: taskID, forceReset: true)
+            _ = scrollPosition.begin(identity: taskID, forceReset: true)
             await reset()
         }
     }
@@ -99,13 +99,6 @@ struct MusicAlbumsView: View {
     private var taskID: String {
         let account = jellyfin.playbackAccount
         return "\(account?.serverID ?? "signed-out")|\(account?.userID ?? "none")|\(query)"
-    }
-
-    private var scrollPositionBinding: Binding<MusicCatalogItemID?> {
-        Binding(
-            get: { gridPosition.anchor },
-            set: { gridPosition.record($0, identity: taskID) }
-        )
     }
 
     private func reset() async {

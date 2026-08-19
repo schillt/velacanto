@@ -1787,8 +1787,8 @@ final class JellyfinFoundationTests: XCTestCase {
         XCTAssertEqual(recentlyAdded.items.first?.id.accountScope, "server|user")
     }
 
-    func testAlbumGridPositionRetainsAnchorUntilRefreshOrQueryChange() throws {
-        let state = AlbumGridPositionState()
+    func testCatalogScrollPositionRetainsAnchorUntilRefreshOrQueryChange() throws {
+        let state = CatalogScrollPositionState<MusicCatalogItemID>()
         let anchor = try catalogItem(
             from: Data(#"{"Id":"anchor","Name":"Anchor","Type":"MusicAlbum"}"#.utf8)
         )
@@ -1800,7 +1800,7 @@ final class JellyfinFoundationTests: XCTestCase {
 
         XCTAssertNil(state.restorationAnchor(in: []))
         XCTAssertEqual(state.anchor, anchor.id)
-        XCTAssertEqual(state.restorationAnchor(in: [anchor]), anchor.id)
+        XCTAssertEqual(state.restorationAnchor(in: [anchor.id]), anchor.id)
 
         state.record(nil, identity: "stale-account|albums")
         XCTAssertEqual(state.anchor, anchor.id)

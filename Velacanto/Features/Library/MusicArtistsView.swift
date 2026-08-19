@@ -5,6 +5,7 @@ struct MusicArtistsView: View {
     @ObservedObject var playback: AudioPlaybackCoordinator
 
     @StateObject private var model = PagedMusicCatalogModel()
+    @StateObject private var scrollPosition = CatalogScrollPositionState<MusicCatalogItemID>()
     @State private var searchText = ""
 
     private var query: String {
@@ -55,6 +56,7 @@ struct MusicArtistsView: View {
                         }
                     }
                     .musicItemActions(for: artist, jellyfin: jellyfin, playback: playback)
+                    .id(artist.id)
                     .onAppear {
                         loadMoreIfNeeded(artist.id)
                     }
@@ -75,14 +77,17 @@ struct MusicArtistsView: View {
                 }
             }
         }
+        .scrollPosition(id: scrollPosition.binding(identity: taskID))
         .progressivePageHeader("Artists")
         #if !os(macOS)
             .searchable(text: $searchText, prompt: "Artists")
         #endif
         .task(id: taskID) {
+            guard scrollPosition.begin(identity: taskID) else { return }
             await reset()
         }
         .refreshable {
+            _ = scrollPosition.begin(identity: taskID, forceReset: true)
             await reset()
         }
     }

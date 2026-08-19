@@ -226,9 +226,14 @@ final class PagedMusicCatalogModel: ObservableObject {
     }
 }
 
+/// Keeps a SwiftUI scroll target only for the currently displayed catalog snapshot.
+///
+/// Views retain this object while navigating to detail, so `scrollPosition` can
+/// restore the visible target on Back. A changed source, query, or explicit
+/// refresh starts a new identity and intentionally discards the old target.
 @MainActor
-final class AlbumGridPositionState: ObservableObject {
-    @Published private(set) var anchor: MusicCatalogItemID?
+final class CatalogScrollPositionState<Anchor: Hashable>: ObservableObject {
+    @Published private(set) var anchor: Anchor?
     private(set) var identity: String?
 
     func begin(identity newIdentity: String, forceReset: Bool = false) -> Bool {
@@ -238,13 +243,20 @@ final class AlbumGridPositionState: ObservableObject {
         return true
     }
 
-    func record(_ visibleAnchor: MusicCatalogItemID?, identity: String) {
+    func record(_ visibleAnchor: Anchor?, identity: String) {
         guard self.identity == identity else { return }
         anchor = visibleAnchor
     }
 
-    func restorationAnchor(in items: [MusicCatalogItem]) -> MusicCatalogItemID? {
-        guard let anchor, items.contains(where: { $0.id == anchor }) else { return nil }
+    func binding(identity: String) -> Binding<Anchor?> {
+        Binding(
+            get: { self.anchor },
+            set: { self.record($0, identity: identity) }
+        )
+    }
+
+    func restorationAnchor(in anchors: [Anchor]) -> Anchor? {
+        guard let anchor, anchors.contains(anchor) else { return nil }
         return anchor
     }
 }

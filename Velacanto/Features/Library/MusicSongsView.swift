@@ -5,6 +5,7 @@ struct MusicSongsView: View {
     @ObservedObject var playback: AudioPlaybackCoordinator
 
     @StateObject private var model = PagedMusicCatalogModel()
+    @StateObject private var scrollPosition = CatalogScrollPositionState<MusicCatalogItemID>()
     @State private var preparingTrackID: MusicCatalogItemID?
     @State private var playbackErrorMessage: String?
     @State private var searchText = ""
@@ -48,6 +49,7 @@ struct MusicSongsView: View {
                         }
                         .buttonStyle(.plain)
                         .disabled(preparingTrackID != nil)
+                        .id(song.id)
                         .onAppear {
                             loadMoreIfNeeded(song.id)
                         }
@@ -75,14 +77,17 @@ struct MusicSongsView: View {
                 ErrorMessageView(message: playbackErrorMessage)
             }
         }
+        .scrollPosition(id: scrollPosition.binding(identity: taskID))
         .progressivePageHeader("Songs")
         #if !os(macOS)
             .searchable(text: $searchText, prompt: "Songs, artists, and albums")
         #endif
         .task(id: taskID) {
+            guard scrollPosition.begin(identity: taskID) else { return }
             await reset()
         }
         .refreshable {
+            _ = scrollPosition.begin(identity: taskID, forceReset: true)
             await reset()
         }
     }

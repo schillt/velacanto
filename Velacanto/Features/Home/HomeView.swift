@@ -34,6 +34,10 @@ struct HomeView: View {
     @State private var selectedGenre: MusicGenre?
     @State private var isRootHeaderVisible = true
     @State private var genreShelfScrollAnchor: MusicCatalogItemID?
+    @StateObject private var favoritesScrollPosition =
+        CatalogScrollPositionState<MusicCatalogItemID>()
+    @StateObject private var recentlyAddedScrollPosition =
+        CatalogScrollPositionState<MusicCatalogItemID>()
     @Namespace private var albumTransitionNamespace
 
     var body: some View {
@@ -56,6 +60,8 @@ struct HomeView: View {
                         catalogShelf(
                             title: "Favorites",
                             model: favorites,
+                            scrollPosition: favoritesScrollPosition,
+                            identity: homeShelfIdentity("favorites"),
                             retry: loadFavorites
                         )
                     }
@@ -63,6 +69,8 @@ struct HomeView: View {
                     catalogShelf(
                         title: "Recently Added",
                         model: recentlyAdded,
+                        scrollPosition: recentlyAddedScrollPosition,
+                        identity: homeShelfIdentity("recently-added"),
                         retry: loadRecentlyAdded
                     )
 
@@ -310,6 +318,8 @@ struct HomeView: View {
     private func catalogShelf(
         title: String,
         model: PagedMusicCatalogModel,
+        scrollPosition: CatalogScrollPositionState<MusicCatalogItemID>,
+        identity: String,
         retry: @escaping @MainActor () async -> Void
     ) -> some View {
         let visibleItems =
@@ -335,10 +345,13 @@ struct HomeView: View {
                     LazyHStack(spacing: 14) {
                         ForEach(cappedItems) { item in
                             catalogItem(item, shelfItems: cappedItems)
+                                .id(item.id)
                         }
                     }
+                    .scrollTargetLayout()
                     .padding(.leading, 20)
                 }
+                .scrollPosition(id: scrollPosition.binding(identity: identity), anchor: .leading)
                 .carouselToDeviceEdges()
 
                 if let errorMessage = model.errorMessage {
@@ -442,6 +455,10 @@ struct HomeView: View {
     }
 
     private func loadFavorites() async {
+        _ = favoritesScrollPosition.begin(
+            identity: homeShelfIdentity("favorites"),
+            forceReset: true
+        )
         await favorites.reset(
             cachedItems: {
                 await jellyfin.cachedCatalogItems(kind: .favorites)
@@ -456,6 +473,10 @@ struct HomeView: View {
     }
 
     private func loadRecentlyAdded() async {
+        _ = recentlyAddedScrollPosition.begin(
+            identity: homeShelfIdentity("recently-added"),
+            forceReset: true
+        )
         await recentlyAdded.reset(
             cachedItems: {
                 await jellyfin.cachedCatalogItems(kind: .recentlyAdded)
@@ -522,6 +543,10 @@ struct HomeView: View {
         await recentlyAddedTracks.reset(loader: emptyLoader)
         homeGenres = []
         isLoadingHomeGenres = false
+    }
+
+    private func homeShelfIdentity(_ shelf: String) -> String {
+        "\(presentation.title)|\(jellyfin.playbackAccount?.serverID ?? "signed-out")|\(jellyfin.playbackAccount?.userID ?? "none")|\(shelf)"
     }
 
     private func play(
@@ -719,6 +744,7 @@ private struct HomeGenreAlbumShelf: View {
     let showAll: () -> Void
 
     @StateObject private var model = PagedMusicCatalogModel()
+    @StateObject private var scrollPosition = CatalogScrollPositionState<MusicCatalogItemID>()
 
     private var albums: [MusicCatalogItem] {
         Array(model.items.filter { $0.kind == .album }.prefix(8))
@@ -764,10 +790,16 @@ private struct HomeGenreAlbumShelf: View {
                                 jellyfin: jellyfin,
                                 playback: playback
                             )
+                            .id(album.id)
                         }
                     }
+                    .scrollTargetLayout()
                     .padding(.leading, 20)
                 }
+                .scrollPosition(
+                    id: scrollPosition.binding(identity: shelfIdentity),
+                    anchor: .leading
+                )
                 .carouselToDeviceEdges()
             } else if let errorMessage = model.errorMessage {
                 MusicPaginationErrorView(message: errorMessage) {
@@ -776,6 +808,7 @@ private struct HomeGenreAlbumShelf: View {
             }
         }
         .task(id: genre.id) {
+            _ = scrollPosition.begin(identity: shelfIdentity, forceReset: true)
             await model.reset(
                 cachedItems: {
                     await jellyfin.cachedCatalogItems(kind: .genreItems, contextID: genre.id)
@@ -784,6 +817,10 @@ private struct HomeGenreAlbumShelf: View {
                 cacheWriter: cacheWriter
             )
         }
+    }
+
+    private var shelfIdentity: String {
+        "\(jellyfin.playbackAccount?.serverID ?? "signed-out")|\(jellyfin.playbackAccount?.userID ?? "none")|\(genre.id.opaqueID)"
     }
 
     private var pageLoader: PagedMusicCatalogModel.Loader {

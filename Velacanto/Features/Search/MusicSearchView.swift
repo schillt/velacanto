@@ -14,7 +14,8 @@ struct MusicSearchView: View {
     @State private var selectedGenre: MusicGenre?
     @State private var isSearchPresented = false
     @State private var isRootHeaderVisible = true
-    @State private var genreGridScrollAnchor: MusicCatalogItemID?
+    @StateObject private var resultsScrollPosition =
+        CatalogScrollPositionState<MusicCatalogItemID>()
     @FocusState private var isSearchFocused: Bool
 
     private var query: String {
@@ -69,7 +70,6 @@ struct MusicSearchView: View {
                     }
                 }
                 .revealsRootHeader($isRootHeaderVisible)
-                .scrollPosition(id: $genreGridScrollAnchor)
                 .scrollDismissesKeyboard(.immediately)
                 .simultaneousGesture(
                     DragGesture(minimumDistance: 4).onChanged { _ in
@@ -170,6 +170,7 @@ struct MusicSearchView: View {
                             SearchResultRow(item: album, jellyfin: jellyfin)
                         }
                         .musicItemActions(for: album, jellyfin: jellyfin, playback: playback)
+                        .id(album.id)
                         .onAppear {
                             loadMoreIfNeeded(album.id)
                         }
@@ -190,6 +191,7 @@ struct MusicSearchView: View {
                             SearchResultRow(item: artist, jellyfin: jellyfin)
                         }
                         .musicItemActions(for: artist, jellyfin: jellyfin, playback: playback)
+                        .id(artist.id)
                         .onAppear {
                             loadMoreIfNeeded(artist.id)
                         }
@@ -212,6 +214,7 @@ struct MusicSearchView: View {
                         .buttonStyle(.plain)
                         .disabled(preparingTrackID != nil)
                         .musicItemActions(for: song, jellyfin: jellyfin, playback: playback)
+                        .id(song.id)
                         .onAppear {
                             loadMoreIfNeeded(song.id)
                         }
@@ -232,6 +235,7 @@ struct MusicSearchView: View {
                             SearchResultRow(item: playlist, jellyfin: jellyfin)
                         }
                         .musicItemActions(for: playlist, jellyfin: jellyfin, playback: playback)
+                        .id(playlist.id)
                         .onAppear {
                             loadMoreIfNeeded(playlist.id)
                         }
@@ -257,6 +261,7 @@ struct MusicSearchView: View {
                 ErrorMessageView(message: playbackErrorMessage)
             }
         }
+        .scrollPosition(id: resultsScrollPosition.binding(identity: searchTaskID))
         .revealsRootHeader($isRootHeaderVisible)
     }
 
@@ -266,6 +271,7 @@ struct MusicSearchView: View {
 
     @MainActor
     private func search() async {
+        _ = resultsScrollPosition.begin(identity: searchTaskID)
         guard jellyfin.isSignedIn, query.count >= 2 else {
             await model.reset(
                 loader: { _ in
