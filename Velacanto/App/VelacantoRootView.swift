@@ -545,12 +545,7 @@ private struct ProgressiveScreenHeaderModifier<Accessory: View>: ViewModifier {
     let title: String
     let accessory: Accessory
 
-    @State private var expandedPresentation: CGFloat = 1
-    @State private var showsCompactHeader = false
-    @State private var lastDirectionOffset: CGFloat = 0
-
-    private let transitionDistance: CGFloat = 72
-    private let directionTolerance: CGFloat = 1
+    @State private var presentation = ProgressiveHeaderPresentation()
 
     func body(content: Content) -> some View {
         #if os(iOS)
@@ -572,8 +567,8 @@ private struct ProgressiveScreenHeaderModifier<Accessory: View>: ViewModifier {
                     ProgressiveScreenHeader(
                         title: title,
                         accessory: accessory,
-                        expandedPresentation: expandedPresentation,
-                        showsCompactHeader: showsCompactHeader
+                        expandedPresentation: presentation.expandedPresentation,
+                        compactPresentation: presentation.compactPresentation
                     )
                 }
                 .onScrollGeometryChange(
@@ -582,19 +577,7 @@ private struct ProgressiveScreenHeaderModifier<Accessory: View>: ViewModifier {
                         max(0, geometry.contentOffset.y + geometry.contentInsets.top)
                     },
                     action: { _, offset in
-                        expandedPresentation = 1 - min(offset / transitionDistance, 1)
-
-                        if offset <= directionTolerance {
-                            lastDirectionOffset = offset
-                            showsCompactHeader = false
-                            return
-                        }
-
-                        let delta = offset - lastDirectionOffset
-                        guard abs(delta) >= directionTolerance else { return }
-
-                        lastDirectionOffset = offset
-                        showsCompactHeader = delta < 0
+                        presentation.update(for: offset)
                     }
                 )
         #else
@@ -603,19 +586,56 @@ private struct ProgressiveScreenHeaderModifier<Accessory: View>: ViewModifier {
     }
 }
 
+/// Keeps the root header mounted and lets scroll travel control its visual
+/// presentation. Unlike a toolbar visibility toggle, reverse scrolling
+/// accumulates directly into the compact presentation, so there is no
+/// insertion/removal pop while the title returns.
+private struct ProgressiveHeaderPresentation {
+    private let transitionDistance: CGFloat = 72
+    private let reverseRevealDistance: CGFloat = 28
+
+    private(set) var offset: CGFloat = 0
+    private(set) var compactVisibility: CGFloat = 0
+
+    var expandedPresentation: CGFloat {
+        1 - min(offset / transitionDistance, 1)
+    }
+
+    var compactPresentation: CGFloat {
+        // A compact header is only useful away from the top. The same
+        // continuous value returns the expanded row as the scroll reaches
+        // its resting position.
+        min(compactVisibility, 1 - expandedPresentation)
+    }
+
+    mutating func update(for newOffset: CGFloat) {
+        let clampedOffset = max(0, newOffset)
+        let delta = clampedOffset - offset
+        offset = clampedOffset
+
+        // Each point of reverse travel progressively restores the compact
+        // row. Downward travel fades it at the same rate, keeping the
+        // header absent while the catalog moves forward.
+        compactVisibility = min(
+            max(compactVisibility - (delta / reverseRevealDistance), 0),
+            1
+        )
+    }
+}
+
 #if os(iOS)
     private struct ProgressiveScreenHeader<Accessory: View>: View {
         let title: String
         let accessory: Accessory
         let expandedPresentation: CGFloat
-        let showsCompactHeader: Bool
+        let compactPresentation: CGFloat
 
         private var rowOpacity: CGFloat {
-            showsCompactHeader ? 1 : expandedPresentation
+            max(expandedPresentation, compactPresentation)
         }
 
         private var materialOpacity: CGFloat {
-            rowOpacity * (1 - expandedPresentation)
+            compactPresentation
         }
 
         var body: some View {
@@ -650,13 +670,13 @@ private struct ProgressiveScreenHeaderModifier<Accessory: View>: ViewModifier {
                     accessory
                 }
                 .padding(.horizontal, 16)
-                .safeAreaPadding(.top, 8)
-                .padding(.bottom, 8)
+                .frame(height: 44)
+                .safeAreaPadding(.top, 6)
+                .padding(.bottom, 6)
                 .opacity(rowOpacity)
-                .offset(y: showsCompactHeader ? 0 : -24 * (1 - expandedPresentation))
-                .animation(.easeInOut(duration: 0.16), value: showsCompactHeader)
+                .offset(y: -12 * (1 - rowOpacity))
             }
-            .frame(height: 60)
+            .frame(height: 112)
         }
     }
 #endif
