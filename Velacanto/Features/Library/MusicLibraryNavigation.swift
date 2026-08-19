@@ -52,10 +52,24 @@ struct MusicLibraryView: View {
                         NavigationLink {
                             destination(for: category)
                         } label: {
-                            MusicLibraryCategoryRow(category: category)
+                            MusicLibraryNavigationRow(
+                                title: category.title,
+                                subtitle: category.subtitle,
+                                symbolName: category.symbolName
+                            )
                         }
                         .buttonStyle(.plain)
                     }
+
+                    Button(action: openLocalFile) {
+                        MusicLibraryNavigationRow(
+                            title: "Open Audio File",
+                            subtitle: "Play audio directly from this device",
+                            symbolName: "folder"
+                        )
+                    }
+                    .buttonStyle(.plain)
+
                     if let session = jellyfin.session {
                         Text(
                             "Music from every library available to \(session.username) is combined here."
@@ -67,17 +81,6 @@ struct MusicLibraryView: View {
                 }
 
                 MostListenedLibraryGrid(playback: playback, jellyfin: jellyfin)
-
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("Local Music").font(.title2.weight(.semibold))
-                    Button(action: openLocalFile) {
-                        Label("Open Audio File", systemImage: "folder")
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(14)
-                            .background(.quaternary, in: .rect(cornerRadius: 14))
-                    }
-                    .buttonStyle(.plain)
-                }
             }
             .frame(maxWidth: 1_050, alignment: .leading)
             .padding(20)
@@ -596,20 +599,22 @@ private struct MusicLibraryCollectionView: View {
     }
 }
 
-private struct MusicLibraryCategoryRow: View {
-    let category: MusicLibraryCategory
+private struct MusicLibraryNavigationRow: View {
+    let title: String
+    let subtitle: String
+    let symbolName: String
 
     var body: some View {
         Label {
             VStack(alignment: .leading, spacing: 3) {
-                Text(category.title)
+                Text(title)
                     .foregroundStyle(.primary)
-                Text(category.subtitle)
+                Text(subtitle)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
         } icon: {
-            Image(systemName: category.symbolName)
+            Image(systemName: symbolName)
                 .font(.body.weight(.medium))
                 .foregroundStyle(Color.velacantoAccent)
                 .frame(width: 36, height: 36)

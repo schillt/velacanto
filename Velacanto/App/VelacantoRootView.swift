@@ -382,13 +382,6 @@ struct VelacantoRootView: View {
             },
             showNowPlaying: {
                 isShowingNowPlaying = true
-            },
-            showLibrary: {
-                #if os(macOS)
-                    selectedMacDestination = .library(.albums)
-                #else
-                    selectedDestination = .library
-                #endif
             }
         )
     }
@@ -406,13 +399,6 @@ struct VelacantoRootView: View {
             },
             showNowPlaying: {
                 isShowingNowPlaying = true
-            },
-            showLibrary: {
-                #if os(macOS)
-                    selectedMacDestination = .library(.albums)
-                #else
-                    selectedDestination = .library
-                #endif
             },
             presentation: .new
         )

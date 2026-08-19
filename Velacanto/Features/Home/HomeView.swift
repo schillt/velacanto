@@ -21,7 +21,6 @@ struct HomeView: View {
     let playRecentItem: (PlaybackItem) -> Void
     let showProfile: () -> Void
     let showNowPlaying: () -> Void
-    let showLibrary: () -> Void
     var presentation = Presentation.home
 
     @StateObject private var favorites = PagedMusicCatalogModel()
@@ -95,10 +94,6 @@ struct HomeView: View {
                             )
                         }
                     }
-                }
-
-                if presentation == .home {
-                    librarySources
                 }
             }
             .frame(maxWidth: 1_050, alignment: .leading)
@@ -573,30 +568,6 @@ struct HomeView: View {
         }
     }
 
-    private var librarySources: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("From Your Library").font(.title2.weight(.semibold))
-            VStack(spacing: 0) {
-                if let session = jellyfin.session {
-                    Button(action: showLibrary) {
-                        SourceRow(
-                            title: "Jellyfin", subtitle: "Browse music on \(session.serverName)",
-                            symbolName: "server.rack")
-                    }
-                    .buttonStyle(.plain)
-                    Divider().padding(.leading, 58)
-                }
-                Button(action: openLocalFile) {
-                    SourceRow(
-                        title: "Local Files", subtitle: "Play audio directly from this device",
-                        symbolName: "folder")
-                }
-                .buttonStyle(.plain)
-            }
-            .background(Color.secondary.opacity(0.06), in: .rect(cornerRadius: 18))
-        }
-    }
-
     private var emptyStateDescription: String {
         jellyfin.isSignedIn
             ? "Choose music from your library or open a local audio file."
@@ -655,28 +626,6 @@ private struct HomeCatalogCard: View {
             item.childCount.map { "\($0) \($0 == 1 ? "song" : "songs")" }
                 ?? "Playlist"
         }
-    }
-}
-
-private struct SourceRow: View {
-    let title: String
-    let subtitle: String
-    let symbolName: String
-
-    var body: some View {
-        HStack(spacing: 12) {
-            SourceIcon(symbolName: symbolName)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(title).foregroundStyle(.primary)
-                Text(subtitle).font(.caption).foregroundStyle(.secondary)
-            }
-            Spacer()
-            Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(
-                .tertiary)
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 12)
-        .contentShape(Rectangle())
     }
 }
 

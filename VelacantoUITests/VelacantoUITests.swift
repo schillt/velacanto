@@ -58,6 +58,8 @@ final class VelacantoUITests: XCTestCase {
         app.tabBars.buttons["Library"].tap()
         XCTAssertTrue(app.staticTexts["Your Music"].waitForExistence(timeout: 3))
         XCTAssertTrue(app.staticTexts["Albums"].exists)
+        XCTAssertTrue(app.staticTexts["Genres"].exists)
+        XCTAssertTrue(app.staticTexts["Open Audio File"].exists)
 
         app.tabBars.buttons["Search"].tap()
         XCTAssertTrue(app.staticTexts["Browse Genres"].waitForExistence(timeout: 3))
