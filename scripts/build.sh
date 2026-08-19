@@ -52,6 +52,17 @@ test_macos() {
     test
 }
 
+test_macos_when_host_supported() {
+  host_macos_major=$(sw_vers -productVersion | awk -F. '{print $1}')
+
+  if [ "$host_macos_major" -lt 27 ]; then
+    printf 'Skipping macOS tests: runner host macOS %s cannot launch the macOS 27 test bundle; iOS 27 simulator tests remain required.\n' "$host_macos_major"
+    return
+  fi
+
+  test_macos
+}
+
 build_ios_simulator() {
   "$xcodebuild_path" \
     -project "$project_path" \
@@ -153,7 +164,7 @@ case "$build_mode" in
     "$project_root/scripts/preflight.sh"
     lint_swift
     build_macos
-    test_macos
+    test_macos_when_host_supported
     build_ios_simulator
     test_ios_simulator
     build_macos_release

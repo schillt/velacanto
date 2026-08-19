@@ -40,8 +40,9 @@ jobs:
         run: ./scripts/build.sh pr-hosted
 
   os27-preview:
-    name: OS 27 Preview Verification
+    name: OS 27 Preview Advisory Verification
     runs-on: xcode-27
+    continue-on-error: true
     timeout-minutes: 60
     env:
       DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
@@ -61,6 +62,7 @@ jobs:
 
       - name: Run OS 27 preview verification
         # The xcode-27 image is a public preview. This job verifies native OS 27
-        # paths, macOS units, and iOS simulator tests for 0.3; it is not v1
-        # stable-release evidence and does not replace the Xcode 26.6 gate.
+        # paths and iOS simulator tests for 0.3. It is visible advisory evidence,
+        # not a required alpha gate or v1 stable-release evidence; local OS 27
+        # and physical-device acceptance remain required release evidence.
         run: ./scripts/build.sh pr-os27-preview
