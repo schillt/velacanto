@@ -58,7 +58,8 @@ struct MusicSearchView: View {
                             selectGenre: { genre in
                                 selectedGenre = genre
                             },
-                            presentation: .collection
+                            presentation: .collection,
+                            collectionColumnCount: 2
                         )
                     }
                     .padding(.horizontal, 16)

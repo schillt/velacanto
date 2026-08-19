@@ -55,6 +55,9 @@ struct MusicGenreGrid: View {
     var filterIDs: Set<String>?
     var filterNames: Set<String>?
     var limit: Int?
+    /// Allows a caller to opt into a stable collection column count while the
+    /// default adaptive layout remains unchanged for Library and Home.
+    var collectionColumnCount: Int?
 
     @State private var genres: [MusicGenre] = []
     @State private var errorMessage: String?
@@ -116,15 +119,7 @@ struct MusicGenreGrid: View {
             .carouselToDeviceEdges()
         } else {
             LazyVGrid(
-                columns: [
-                    GridItem(
-                        .adaptive(
-                            minimum: MusicGenreCardLayout.collectionMinimumWidth,
-                            maximum: MusicGenreCardLayout.collectionMaximumWidth
-                        ),
-                        spacing: MusicGenreCardLayout.spacing
-                    )
-                ],
+                columns: collectionColumns,
                 alignment: .leading,
                 spacing: MusicGenreCardLayout.spacing
             ) {
@@ -148,6 +143,31 @@ struct MusicGenreGrid: View {
         }
         if let limit { result = Array(result.prefix(limit)) }
         return result
+    }
+
+    private var collectionColumns: [GridItem] {
+        if let collectionColumnCount {
+            return Array(
+                repeating: GridItem(
+                    .flexible(
+                        minimum: MusicGenreCardLayout.collectionMinimumWidth,
+                        maximum: MusicGenreCardLayout.collectionMaximumWidth
+                    ),
+                    spacing: MusicGenreCardLayout.spacing
+                ),
+                count: collectionColumnCount
+            )
+        }
+
+        return [
+            GridItem(
+                .adaptive(
+                    minimum: MusicGenreCardLayout.collectionMinimumWidth,
+                    maximum: MusicGenreCardLayout.collectionMaximumWidth
+                ),
+                spacing: MusicGenreCardLayout.spacing
+            )
+        ]
     }
 
     @ViewBuilder
