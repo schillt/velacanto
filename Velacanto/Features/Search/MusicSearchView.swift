@@ -37,7 +37,8 @@ struct MusicSearchView: View {
     }
 
     var body: some View {
-        Group {
+        // Keep the overlay-hosted field mounted while search result states change.
+        ZStack {
             if !jellyfin.isSignedIn {
                 ContentUnavailableView {
                     Label("Search Needs a Music Server", systemImage: "magnifyingglass")

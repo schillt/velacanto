@@ -67,6 +67,35 @@ final class VelacantoUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Browse Genres"].waitForExistence(timeout: 3))
     }
 
+    func testSignedInSearchRetainsKeyboardFocusWhileTyping() throws {
+        continueAfterFailure = false
+        launchSignedInFixture()
+
+        let searchTab = app.tabBars.buttons["Search"]
+        XCTAssertTrue(searchTab.waitForExistence(timeout: 5))
+        searchTab.tap()
+        XCTAssertTrue(app.staticTexts["Browse Genres"].waitForExistence(timeout: 3))
+        let searchField = app.textFields["Search music"]
+        XCTAssertTrue(searchField.waitForExistence(timeout: 3))
+        searchField.tap()
+
+        searchField.typeText("t")
+        XCTAssertEqual(searchField.value as? String, "t")
+        XCTAssertTrue(app.keyboards.firstMatch.exists)
+        XCTAssertTrue(
+            app.staticTexts["Enter at least two characters to find music."].exists
+        )
+
+        searchField.typeText("e")
+        XCTAssertEqual(searchField.value as? String, "te")
+        XCTAssertTrue(app.keyboards.firstMatch.exists)
+
+        searchField.typeText("s")
+        XCTAssertEqual(searchField.value as? String, "tes")
+        XCTAssertTrue(app.keyboards.firstMatch.exists)
+        XCTAssertTrue(app.staticTexts["Test Album"].waitForExistence(timeout: 3))
+    }
+
     func testSignedInPlaybackSurfaceExposesLyricsQueueAndFavorite() throws {
         continueAfterFailure = false
         launchSignedInFixture()
