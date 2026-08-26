@@ -13,45 +13,59 @@ struct PlaybackQueueView: View {
             List {
                 if !historyItems.isEmpty {
                     Section("History") {
-                        ForEach(historyItems) { item in
-                            QueueTrackRow(item: item, jellyfin: jellyfin)
+                        ForEach(historyItems, id: \.queueIdentity) { item in
+                            Button {
+                                playback.playHistoryItem(item)
+                            } label: {
+                                QueueTrackRow(
+                                    item: item,
+                                    jellyfin: jellyfin,
+                                    isPreparing: isPreparing(item)
+                                )
                                 .foregroundStyle(.secondary)
-                                .onTapGesture {
-                                    playback.playQueueItem(item)
-                                }
+                            }
+                            .buttonStyle(.plain)
                         }
                     }
                 }
 
                 if let currentItem = playback.currentItem {
                     Section("Now Playing") {
-                        QueueTrackRow(
-                            item: currentItem,
-                            jellyfin: jellyfin,
-                            isCurrentItem: true
-                        )
-                        .id(currentItemScrollID)
-                        .onTapGesture {
+                        Button {
                             playback.playQueueItem(currentItem)
+                        } label: {
+                            QueueTrackRow(
+                                item: currentItem,
+                                jellyfin: jellyfin,
+                                isCurrentItem: true
+                            )
                         }
+                        .buttonStyle(.plain)
+                        .id(currentItemScrollID)
                     }
                 }
 
                 if !playback.upcomingItems.isEmpty {
                     Section {
                         ForEach(playback.upcomingItems, id: \.queueIdentity) { item in
-                            QueueTrackRow(item: item, jellyfin: jellyfin)
-                                .queueContextMenu(item: item, playback: playback)
-                                .onTapGesture {
-                                    playback.playQueueItem(item)
+                            Button {
+                                playback.playQueueItem(item)
+                            } label: {
+                                QueueTrackRow(
+                                    item: item,
+                                    jellyfin: jellyfin,
+                                    isPreparing: isPreparing(item)
+                                )
+                            }
+                            .buttonStyle(.plain)
+                            .queueContextMenu(item: item, playback: playback)
+                            .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                                Button(role: .destructive) {
+                                    playback.removeUpcomingItem(item)
+                                } label: {
+                                    Label("Remove from Queue", systemImage: "trash")
                                 }
-                                .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                                    Button(role: .destructive) {
-                                        playback.removeUpcomingItem(item)
-                                    } label: {
-                                        Label("Remove from Queue", systemImage: "trash")
-                                    }
-                                }
+                            }
                         }
                         #if compiler(>=6.4)
                             .reorderable()
@@ -115,15 +129,7 @@ struct PlaybackQueueView: View {
     }
 
     private var historyItems: [PlaybackItem] {
-        if !playback.playedQueueItems.isEmpty {
-            return playback.playedQueueItems
-        }
-        let currentKey = playback.currentItem.map(itemKey)
-        return Array(
-            playback.recentItems
-                .filter { itemKey($0) != currentKey }
-                .reversed()
-        )
+        playback.historyItems
     }
 
     #if compiler(>=6.4)
@@ -156,6 +162,10 @@ struct PlaybackQueueView: View {
         return "queue-current-\(itemKey(currentItem))"
     }
 
+    private func isPreparing(_ item: PlaybackItem) -> Bool {
+        playback.preparingQueueItemIdentity == item.queueIdentity
+    }
+
     private func scrollToCurrentItem(using proxy: ScrollViewProxy) {
         guard playback.currentItem != nil else { return }
         DispatchQueue.main.async {
@@ -168,6 +178,7 @@ private struct QueueTrackRow: View {
     let item: PlaybackItem
     @ObservedObject var jellyfin: JellyfinSessionController
     var isCurrentItem = false
+    var isPreparing = false
     var showsArtwork = true
     var artworkTransitionNamespace: Namespace.ID?
 
@@ -195,7 +206,11 @@ private struct QueueTrackRow: View {
 
             Spacer(minLength: 8)
 
-            if isCurrentItem {
+            if isPreparing {
+                ProgressView()
+                    .controlSize(.small)
+                    .accessibilityLabel("Preparing \(item.title)")
+            } else if isCurrentItem {
                 Image(systemName: "speaker.wave.2.fill")
                     .foregroundStyle(.tint)
                     .accessibilityLabel("Currently playing")
@@ -304,13 +319,19 @@ struct NowPlayingQueueContent: View {
             QueueSectionHeader("History")
                 .queueScrollSectionHeaderStyle()
 
-            ForEach(historyItems) { item in
-                QueueTrackRow(item: item, jellyfin: jellyfin)
+            ForEach(historyItems, id: \.queueIdentity) { item in
+                Button {
+                    playback.playHistoryItem(item)
+                } label: {
+                    QueueTrackRow(
+                        item: item,
+                        jellyfin: jellyfin,
+                        isPreparing: isPreparing(item)
+                    )
                     .foregroundStyle(.secondary)
-                    .queueScrollRowStyle()
-                    .onTapGesture {
-                        playback.playQueueItem(item)
-                    }
+                }
+                .buttonStyle(.plain)
+                .queueScrollRowStyle()
             }
         }
     }
@@ -335,16 +356,20 @@ struct NowPlayingQueueContent: View {
                 .frame(maxWidth: .infinity, minHeight: 220, alignment: .center)
             } else {
                 ForEach(playback.upcomingItems, id: \.queueIdentity) { item in
-                    QueueTrackRow(item: item, jellyfin: jellyfin)
-                        .queueScrollRowStyle()
-                        .queueContextMenu(
-                            item: item,
-                            playback: playback,
-                            canRemove: true
-                        )
-                        .onTapGesture {
-                            playback.playQueueItem(item)
-                        }
+                    QueueTrackRow(
+                        item: item,
+                        jellyfin: jellyfin,
+                        isPreparing: isPreparing(item)
+                    )
+                    .queueScrollRowStyle()
+                    .queueContextMenu(
+                        item: item,
+                        playback: playback,
+                        canRemove: true
+                    )
+                    .onTapGesture {
+                        playback.playQueueItem(item)
+                    }
                 }
                 #if compiler(>=6.4)
                     .reorderable()
@@ -387,15 +412,11 @@ struct NowPlayingQueueContent: View {
     }
 
     private var historyItems: [PlaybackItem] {
-        if !playback.playedQueueItems.isEmpty {
-            return playback.playedQueueItems
-        }
-        let currentKey = playback.currentItem.map(itemKey)
-        return Array(
-            playback.recentItems
-                .filter { itemKey($0) != currentKey }
-                .reversed()
-        )
+        playback.historyItems
+    }
+
+    private func isPreparing(_ item: PlaybackItem) -> Bool {
+        playback.preparingQueueItemIdentity == item.queueIdentity
     }
 
     #if compiler(>=6.4)

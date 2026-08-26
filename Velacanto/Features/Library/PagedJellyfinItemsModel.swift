@@ -11,10 +11,9 @@ import SwiftUI
 /// paged collection. New pages preserve the existing server order, then append
 /// only first-seen item IDs in page order.
 ///
-/// Transient failures retry twice with a short backoff; terminal failures become
-/// `errorMessage` for the view to present. Cancellation is expected during view
-/// changes and leaves no error state. See `docs/architecture.md` for the
-/// catalog snapshot and paging boundary.
+/// Failures become `errorMessage` for the view to present and retry explicitly.
+/// Cancellation is expected during view changes and leaves no error state. See
+/// `docs/architecture.md` for the catalog snapshot and paging boundary.
 @MainActor
 final class PagedMusicCatalogModel: ObservableObject {
     typealias Loader = (MusicCatalogCursor?) async throws -> MusicCatalogPage
@@ -152,66 +151,34 @@ final class PagedMusicCatalogModel: ObservableObject {
             }
         }
 
-        var retryCount = 0
-        while true {
-            do {
-                let page = try await loader(replacing ? nil : cursor)
-                try Task.checkCancellation()
-                guard generation == currentGeneration else { return }
+        do {
+            let page = try await loader(replacing ? nil : cursor)
+            try Task.checkCancellation()
+            guard generation == currentGeneration else { return }
 
-                if replacing {
-                    items = mergedInitialPage(page.items, with: items)
-                } else {
-                    var seen = Set(items.map(\.id))
-                    items.append(
-                        contentsOf: page.items.filter {
-                            seen.insert($0.id).inserted
-                        }
-                    )
-                }
-                cursor = page.cursor
-                hasMore = page.hasMore
-                totalRecordCount = max(page.totalRecordCount, items.count)
-                if let cacheWriter {
-                    await cacheWriter(items)
-                }
-                return
-            } catch is CancellationError {
-                return
-            } catch {
-                guard generation == currentGeneration, !Task.isCancelled else {
-                    return
-                }
-                guard retryCount < 2, Self.isTransient(error) else {
-                    errorMessage = error.localizedDescription
-                    return
-                }
-                retryCount += 1
-                do {
-                    try await Task.sleep(
-                        for: .milliseconds(250 * retryCount)
-                    )
-                } catch {
-                    return
-                }
+            if replacing {
+                items = mergedInitialPage(page.items, with: items)
+            } else {
+                var seen = Set(items.map(\.id))
+                items.append(
+                    contentsOf: page.items.filter {
+                        seen.insert($0.id).inserted
+                    }
+                )
             }
-        }
-    }
-
-    private static func isTransient(_ error: Error) -> Bool {
-        guard let error = error as? JellyfinAPIError else {
-            return error is URLError
-        }
-        switch error {
-        case .unreachable, .offline, .network:
-            return true
-        case .httpStatus(let status):
-            return status == 408
-                || status == 425
-                || status == 429
-                || (500...504).contains(status)
-        case .unauthorized, .transportSecurity, .invalidResponse:
-            return false
+            cursor = page.cursor
+            hasMore = page.hasMore
+            totalRecordCount = max(page.totalRecordCount, items.count)
+            if let cacheWriter {
+                await cacheWriter(items)
+            }
+        } catch is CancellationError {
+            return
+        } catch {
+            guard generation == currentGeneration, !Task.isCancelled else {
+                return
+            }
+            errorMessage = error.localizedDescription
         }
     }
 

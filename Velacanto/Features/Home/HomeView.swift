@@ -22,6 +22,7 @@ struct HomeView: View {
     let showProfile: () -> Void
     let showNowPlaying: () -> Void
     var presentation = Presentation.home
+    var isActive = true
 
     @StateObject private var favorites = PagedMusicCatalogModel()
     @StateObject private var recentlyAdded = PagedMusicCatalogModel()
@@ -88,7 +89,8 @@ struct HomeView: View {
                                 selectGenre: { selectedGenre = $0 },
                                 presentation: .carousel,
                                 filterIDs: recentGenreIDs,
-                                filterNames: recentGenreNames
+                                filterNames: recentGenreNames,
+                                isActive: isActive
                             )
                         }
                     }
@@ -113,16 +115,28 @@ struct HomeView: View {
                 jellyfin: jellyfin
             )
         }
-        .task(id: jellyfin.playbackAccount) {
+        .task(
+            id: ProviderShelfLoadIdentity(
+                serverID: jellyfin.playbackAccount?.serverID,
+                userID: jellyfin.playbackAccount?.userID,
+                isActive: isActive
+            )
+        ) {
+            guard isActive else { return }
             guard jellyfin.isSignedIn else {
                 await clearProviderShelves()
                 return
             }
-            async let favoriteLoad: Void = loadFavorites()
-            async let recentLoad: Void = loadRecentlyAdded()
-            async let recentTracksLoad: Void = loadRecentlyAddedTracks()
-            async let genreLoad: Void = loadHomeGenres()
-            _ = await (favoriteLoad, recentLoad, recentTracksLoad, genreLoad)
+            // The API lane is deliberately serialized to protect playback and
+            // constrained private-network routes. Preserve that ordering here
+            // so a failed route probe cannot leave three more requests queued.
+            await loadHomeGenres()
+            guard !Task.isCancelled else { return }
+            await loadRecentlyAdded()
+            guard !Task.isCancelled else { return }
+            await loadFavorites()
+            guard !Task.isCancelled else { return }
+            await loadRecentlyAddedTracks()
         }
         .alert(
             "Couldn’t Play Music",
@@ -137,6 +151,12 @@ struct HomeView: View {
         } message: {
             Text(catalogPlaybackError ?? "An unknown playback error occurred.")
         }
+    }
+
+    private struct ProviderShelfLoadIdentity: Hashable {
+        let serverID: String?
+        let userID: String?
+        let isActive: Bool
     }
 
     @ViewBuilder
@@ -203,7 +223,10 @@ struct HomeView: View {
             Text("Recently Played").font(.title2.weight(.semibold))
             ScrollView(.horizontal, showsIndicators: false) {
                 LazyHStack(spacing: 14) {
-                    ForEach(playback.recentItems.prefix(8)) { item in
+                    ForEach(
+                        playback.recentlyPlayedItems.prefix(8),
+                        id: \.queueIdentity
+                    ) { item in
                         RecentItemCard(
                             item: item,
                             jellyfin: jellyfin,
@@ -476,20 +499,42 @@ struct HomeView: View {
     }
 
     private func loadHomeGenres() async {
+        let cachedHome = await jellyfin.cachedHomeMusicGenres(limit: 5)
         let cachedAll = await jellyfin.cachedMusicGenres()
-        if !cachedAll.isEmpty {
-            homeGenres = rankedHomeGenres(cachedAll)
+        let cached =
+            cachedHome.isEmpty ? rankedHomeGenres(cachedAll) : cachedHome
+        if !cached.isEmpty {
+            homeGenres = cached
         }
 
         isLoadingHomeGenres = homeGenres.isEmpty
-        let available = (try? await jellyfin.musicGenres(forceRefresh: true)) ?? cachedAll
+        let refreshed =
+            (try? await jellyfin.homeMusicGenres(limit: 5)) ?? cached
         guard jellyfin.isSignedIn else {
             homeGenres = []
             isLoadingHomeGenres = false
             return
         }
-        homeGenres = rankedHomeGenres(available)
+        homeGenres = mergingCachedArtwork(into: refreshed, cached: cached)
         isLoadingHomeGenres = false
+    }
+
+    private func mergingCachedArtwork(
+        into refreshed: [MusicGenre],
+        cached: [MusicGenre]
+    ) -> [MusicGenre] {
+        let cachedByID = Dictionary(uniqueKeysWithValues: cached.map { ($0.id, $0) })
+        return refreshed.map { genre in
+            guard genre.artwork == nil, let cachedGenre = cachedByID[genre.id] else {
+                return genre
+            }
+            return MusicGenre(
+                id: genre.id,
+                name: genre.name,
+                artwork: cachedGenre.artwork,
+                albumCount: genre.albumCount
+            )
+        }
     }
 
     private func rankedHomeGenres(_ genres: [MusicGenre]) -> [MusicGenre] {

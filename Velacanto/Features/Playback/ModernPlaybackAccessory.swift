@@ -84,13 +84,27 @@ import SwiftUI
                         font: .callout.weight(.medium),
                         color: .primary
                     )
-                    Text(playback.currentItem?.artist ?? "")
+                    if let pendingItem = playback.preparingQueueItem {
+                        HStack(spacing: 5) {
+                            ProgressView()
+                                .controlSize(.mini)
+                            Text("Loading \(pendingItem.title)…")
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                        }
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .accessibilityHidden(true)
+                    } else {
+                        Text(playback.currentItem?.artist ?? "")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .accessibilityHidden(true)
+                    }
                 }
                 .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
             }
@@ -104,6 +118,9 @@ import SwiftUI
         }
 
         private var trackAccessibilityValue: String {
+            if let pendingItem = playback.preparingQueueItem {
+                return "Loading \(pendingItem.title)"
+            }
             let title = playback.currentItem?.title ?? "Nothing Playing"
             let artist = playback.currentItem?.artist ?? ""
             return artist.isEmpty ? title : "\(title), \(artist)"

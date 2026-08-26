@@ -1,3 +1,4 @@
+import AVFoundation
 import Foundation
 import XCTest
 
@@ -352,14 +353,33 @@ final class JellyfinFoundationTests: XCTestCase {
         )
 
         XCTAssertEqual(request.httpMethod, "POST")
+        XCTAssertEqual(request.timeoutInterval, 8)
+        XCTAssertEqual(request.networkServiceType, .responsiveData)
         XCTAssertEqual(request.url?.path, "/Items/track-id/PlaybackInfo")
         XCTAssertEqual(payload["UserId"] as? String, "user-id")
-        XCTAssertEqual(payload["MaxStreamingBitrate"] as? Int, 320_000)
-        XCTAssertEqual(directProfiles.count, 9)
+        XCTAssertEqual(payload["MaxStreamingBitrate"] as? Int, 100_000_000)
+        XCTAssertEqual(profile["MaxStreamingBitrate"] as? Int, 100_000_000)
+        XCTAssertEqual(profile["MaxStaticBitrate"] as? Int, 100_000_000)
+        XCTAssertEqual(profile["MaxStaticMusicBitrate"] as? Int, 100_000_000)
+        XCTAssertEqual(
+            profile["MusicStreamingTranscodingBitrate"] as? Int,
+            320_000
+        )
+        XCTAssertEqual(directProfiles.count, 6)
         XCTAssertEqual(directProfiles.first?["Container"] as? String, "mp3")
         XCTAssertTrue(
             directProfiles.allSatisfy { $0["Type"] as? String == "Audio" }
         )
+        let directContainers = Set(
+            directProfiles.compactMap { $0["Container"] as? String }
+        )
+        XCTAssertEqual(
+            directContainers,
+            ["mp3", "aac", "m4a", "m4b", "flac", "wav"]
+        )
+        XCTAssertFalse(directContainers.contains("webm"))
+        XCTAssertFalse(directContainers.contains("webma"))
+        XCTAssertFalse(directContainers.contains("ogg"))
         XCTAssertEqual(transcodeProfiles.first?["Container"] as? String, "mp3")
         XCTAssertEqual(transcodeProfiles.first?["AudioCodec"] as? String, "mp3")
         XCTAssertEqual(transcodeProfiles.first?["Protocol"] as? String, "http")
@@ -375,6 +395,8 @@ final class JellyfinFoundationTests: XCTestCase {
             mediaSources: [
                 JellyfinPlaybackMediaSource(
                     id: "source-id",
+                    container: "mp4, m4a",
+                    supportsDirectPlay: true,
                     supportsDirectStream: true,
                     supportsTranscoding: true,
                     transcodingURL: "/jellyfin/Audio/track-id/stream.mp3"
@@ -402,12 +424,71 @@ final class JellyfinFoundationTests: XCTestCase {
 
         XCTAssertEqual(resolution.playMethod, .directPlay)
         XCTAssertEqual(resolution.playSessionID, "negotiated-session")
-        XCTAssertEqual(components.path, "/jellyfin/Audio/track-id/stream")
+        XCTAssertEqual(components.path, "/jellyfin/Audio/track-id/stream.m4a")
         XCTAssertEqual(query["Static"], "true")
         XCTAssertEqual(query["MediaSourceId"], "source-id")
         XCTAssertEqual(query["DeviceId"], "stable-device")
         XCTAssertEqual(query["PlaySessionId"], "negotiated-session")
         XCTAssertEqual(query["api_key"], "access-token")
+    }
+
+    func testDirectFileResolutionKeepsPlaySessionOutOfMediaURL() throws {
+        let builder = JellyfinRequestBuilder(
+            server: try JellyfinServerURL("https://example.com/jellyfin"),
+            deviceID: "stable-device",
+            accessToken: "access-token"
+        )
+
+        let resolution = try XCTUnwrap(
+            builder.directFileResolution(
+                itemID: "track-id",
+                container: "flac"
+            )
+        )
+        let components = try XCTUnwrap(
+            URLComponents(
+                url: resolution.streamURL,
+                resolvingAgainstBaseURL: false
+            )
+        )
+        let query = Dictionary(
+            uniqueKeysWithValues: (components.queryItems ?? []).compactMap { item in
+                item.value.map { (item.name, $0) }
+            }
+        )
+
+        XCTAssertEqual(components.path, "/jellyfin/Items/track-id/File")
+        XCTAssertEqual(query["DeviceId"], "stable-device")
+        XCTAssertEqual(query["api_key"], "access-token")
+        XCTAssertNil(query["PlaySessionId"])
+        XCTAssertFalse(resolution.playSessionID.isEmpty)
+        XCTAssertEqual(resolution.playMethod, .directPlay)
+    }
+
+    func testDirectFileResolutionUsesStableMediaURLAcrossReportingSessions()
+        throws
+    {
+        let builder = JellyfinRequestBuilder(
+            server: try JellyfinServerURL("https://example.com/jellyfin"),
+            deviceID: "stable-device",
+            accessToken: "access-token"
+        )
+
+        let first = try XCTUnwrap(
+            builder.directFileResolution(
+                itemID: "track-id",
+                container: "flac"
+            )
+        )
+        let second = try XCTUnwrap(
+            builder.directFileResolution(
+                itemID: "track-id",
+                container: "flac"
+            )
+        )
+
+        XCTAssertNotEqual(first.playSessionID, second.playSessionID)
+        XCTAssertEqual(first.streamURL, second.streamURL)
     }
 
     func testPlaybackResolutionUsesAuthenticatedServerTranscodeURL() throws {
@@ -420,7 +501,9 @@ final class JellyfinFoundationTests: XCTestCase {
             mediaSources: [
                 JellyfinPlaybackMediaSource(
                     id: "source-id",
-                    supportsDirectStream: false,
+                    container: "webm",
+                    supportsDirectPlay: false,
+                    supportsDirectStream: true,
                     supportsTranscoding: true,
                     transcodingURL:
                         "/jellyfin/Audio/track-id/stream.mp3?PlaySessionId=server-value"
@@ -463,6 +546,8 @@ final class JellyfinFoundationTests: XCTestCase {
             mediaSources: [
                 JellyfinPlaybackMediaSource(
                     id: "source-id",
+                    container: "mp3",
+                    supportsDirectPlay: false,
                     supportsDirectStream: false,
                     supportsTranscoding: true,
                     transcodingURL: "https://attacker.example/Audio/track-id/stream.mp3"
@@ -479,6 +564,37 @@ final class JellyfinFoundationTests: XCTestCase {
             )
         ) { error in
             XCTAssertEqual(error as? JellyfinAPIError, .invalidResponse)
+        }
+    }
+
+    func testPlaybackResolutionReportsUnsupportedMediaDisposition() throws {
+        let builder = JellyfinRequestBuilder(
+            server: try JellyfinServerURL("https://example.com"),
+            deviceID: "stable-device",
+            accessToken: "access-token"
+        )
+        let response = JellyfinPlaybackInfoResponse(
+            mediaSources: [
+                JellyfinPlaybackMediaSource(
+                    id: "source-id",
+                    container: "webm",
+                    supportsDirectPlay: false,
+                    supportsDirectStream: false,
+                    supportsTranscoding: false,
+                    transcodingURL: nil
+                )
+            ],
+            playSessionID: "negotiated-session",
+            errorCode: nil
+        )
+
+        XCTAssertThrowsError(
+            try builder.playbackResolution(
+                itemID: "track-id",
+                response: response
+            )
+        ) { error in
+            XCTAssertEqual(error as? JellyfinAPIError, .unsupportedMedia)
         }
     }
 
@@ -513,6 +629,10 @@ final class JellyfinFoundationTests: XCTestCase {
         XCTAssertEqual(payload["IsPaused"] as? Bool, true)
         XCTAssertEqual(payload["CanSeek"] as? Bool, true)
         XCTAssertEqual(payload["PlayMethod"] as? String, "Transcode")
+        // Velacanto's queue is local player state. Jellyfin's optional
+        // NowPlayingQueue payload is intentionally omitted so rapid queue edits
+        // cannot amplify reporting traffic or expose stale queue generations.
+        XCTAssertNil(payload["NowPlayingQueue"])
     }
 
     func testJellyfinModelsDecodeCurrentServerShapes() throws {
@@ -555,6 +675,20 @@ final class JellyfinFoundationTests: XCTestCase {
             }
             """.utf8
         )
+        let playbackInfoData = Data(
+            """
+            {
+              "MediaSources": [{
+                "Id": "source-id",
+                "Container": "mp4,m4a",
+                "SupportsDirectPlay": true,
+                "SupportsDirectStream": true,
+                "SupportsTranscoding": true
+              }],
+              "PlaySessionId": "play-session"
+            }
+            """.utf8
+        )
 
         let decoder = JSONDecoder()
         let server = try decoder.decode(JellyfinServerInfo.self, from: serverData)
@@ -563,6 +697,10 @@ final class JellyfinFoundationTests: XCTestCase {
             from: authenticationData
         )
         let items = try decoder.decode(JellyfinItemsResponse.self, from: itemsData)
+        let playbackInfo = try decoder.decode(
+            JellyfinPlaybackInfoResponse.self,
+            from: playbackInfoData
+        )
 
         XCTAssertEqual(server.serverName, "Home")
         XCTAssertEqual(server.startupWizardCompleted, true)
@@ -575,6 +713,8 @@ final class JellyfinFoundationTests: XCTestCase {
         XCTAssertEqual(items.items.first?.primaryImageTag, "album-image-tag")
         XCTAssertEqual(items.items.first?.kind, .album)
         XCTAssertEqual(items.items.first?.isMusicLibrary, true)
+        XCTAssertEqual(playbackInfo.mediaSources.first?.container, "mp4,m4a")
+        XCTAssertEqual(playbackInfo.mediaSources.first?.supportsDirectPlay, true)
     }
 
     func testArtworkURLUsesAuthenticatedJellyfinImageEndpoint() throws {
@@ -899,7 +1039,7 @@ final class JellyfinFoundationTests: XCTestCase {
         XCTAssertFalse(page.hasMore)
     }
 
-    func testFastScrollPaginationSurvivesViewTaskCancellationAndRetries() async throws {
+    func testFastScrollPaginationDoesNotAmplifyFailureAndRetriesExplicitly() async throws {
         let decoder = JSONDecoder()
         let library = try decoder.decode(
             JellyfinItem.self,
@@ -948,10 +1088,17 @@ final class JellyfinFoundationTests: XCTestCase {
         viewTask.cancel()
         await paginationTask.value
 
+        XCTAssertEqual(model.items.count, 50)
+        XCTAssertNotNil(model.errorMessage)
+        var requestCount = await api.albumPageRequestCount()
+        XCTAssertEqual(requestCount, 2)
+
+        await model.retry(loader: loader)
+
         XCTAssertEqual(model.items.count, 60)
         XCTAssertNil(model.errorMessage)
-        let requestCount = await api.albumPageRequestCount()
-        XCTAssertGreaterThanOrEqual(requestCount, 3)
+        requestCount = await api.albumPageRequestCount()
+        XCTAssertEqual(requestCount, 3)
     }
 
     func testCachedCatalogSnapshotDoesNotShrinkWhenInitialPageRefreshes() async throws {
@@ -1116,6 +1263,107 @@ final class JellyfinFoundationTests: XCTestCase {
         XCTAssertEqual(try tokenStore.loadToken(), "access-token")
     }
 
+    func testRestorePublishesSavedShellBeforeValidationFinishes() async throws {
+        let tokenStore = RecordingTokenStore(token: "saved-token")
+        let sessionStore = RecordingSessionStore(
+            session: JellyfinSession(
+                serverURL: try XCTUnwrap(URL(string: "https://example.com")),
+                serverID: "server-id",
+                serverName: "Home",
+                userID: "user-id",
+                username: "Saved User"
+            ),
+            deviceID: "stable-device"
+        )
+        let api = FakeJellyfinAPI(currentUserDelay: .milliseconds(100))
+        let controller = JellyfinSessionController(
+            tokenStore: tokenStore,
+            sessionStore: sessionStore,
+            makeClient: { _, _, _ in api }
+        )
+
+        for _ in 0..<1_000 where await api.currentUserRequestCount() == 0 {
+            await Task.yield()
+        }
+
+        let currentUserRequestCount = await api.currentUserRequestCount()
+        XCTAssertEqual(currentUserRequestCount, 1)
+        XCTAssertEqual(controller.phase, .restoring)
+        XCTAssertEqual(controller.session?.username, "Saved User")
+        XCTAssertFalse(controller.isRemoteAccessReady)
+
+        for _ in 0..<2_000 where controller.phase == .restoring {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        XCTAssertEqual(controller.phase, .signedIn)
+        XCTAssertEqual(controller.session?.username, "Saved User")
+        XCTAssertTrue(controller.isRemoteAccessReady)
+    }
+
+    func testOfflineRestoreKeepsSavedShellAndCredentialsUnavailableRemotely()
+        async throws
+    {
+        let tokenStore = RecordingTokenStore(token: "saved-token")
+        let sessionStore = RecordingSessionStore(
+            session: JellyfinSession(
+                serverURL: try XCTUnwrap(URL(string: "https://example.com")),
+                serverID: "server-id",
+                serverName: "Home",
+                userID: "user-id",
+                username: "Saved User"
+            ),
+            deviceID: "stable-device"
+        )
+        let controller = JellyfinSessionController(
+            tokenStore: tokenStore,
+            sessionStore: sessionStore,
+            makeClient: { _, _, _ in
+                FakeJellyfinAPI(currentUserError: .offline)
+            }
+        )
+
+        for _ in 0..<100 where controller.errorMessage == nil {
+            await Task.yield()
+        }
+
+        XCTAssertEqual(controller.phase, .restoring)
+        XCTAssertEqual(controller.session?.username, "Saved User")
+        XCTAssertFalse(controller.isRemoteAccessReady)
+        XCTAssertEqual(tokenStore.token, "saved-token")
+        XCTAssertNotNil(sessionStore.session)
+    }
+
+    func testStaleRestoreValidationCannotRepublishAfterLogout() async throws {
+        let tokenStore = RecordingTokenStore(token: "saved-token")
+        let sessionStore = RecordingSessionStore(
+            session: JellyfinSession(
+                serverURL: try XCTUnwrap(URL(string: "https://example.com")),
+                serverID: "server-id",
+                serverName: "Home",
+                userID: "user-id",
+                username: "Saved User"
+            ),
+            deviceID: "stable-device"
+        )
+        let api = FakeJellyfinAPI(currentUserDelay: .milliseconds(100))
+        let controller = JellyfinSessionController(
+            tokenStore: tokenStore,
+            sessionStore: sessionStore,
+            makeClient: { _, _, _ in api }
+        )
+
+        for _ in 0..<1_000 where await api.currentUserRequestCount() == 0 {
+            await Task.yield()
+        }
+        await controller.logout()
+        try await Task.sleep(for: .milliseconds(150))
+
+        XCTAssertEqual(controller.phase, .signedOut)
+        XCTAssertNil(controller.session)
+        XCTAssertNil(tokenStore.token)
+        XCTAssertNil(sessionStore.session)
+    }
+
     func testCorruptSavedSessionMetadataIsDiscarded() throws {
         let suiteName = "VelacantoTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
@@ -1186,6 +1434,43 @@ final class JellyfinFoundationTests: XCTestCase {
             controller.errorMessage,
             JellyfinSessionError.expiredSession.localizedDescription
         )
+    }
+
+    func testHTTPAuthenticationRejectionClearsRestoredShellExactlyOnce()
+        async throws
+    {
+        for status in [401, 403] {
+            let tokenStore = RecordingTokenStore(token: "expired-token")
+            let sessionStore = RecordingSessionStore(
+                session: JellyfinSession(
+                    serverURL: try XCTUnwrap(URL(string: "https://example.com")),
+                    serverID: "server-id",
+                    serverName: "Home",
+                    userID: "user-id",
+                    username: "Saved User"
+                ),
+                deviceID: "stable-device"
+            )
+            let controller = JellyfinSessionController(
+                tokenStore: tokenStore,
+                sessionStore: sessionStore,
+                makeClient: { _, _, _ in
+                    FakeJellyfinAPI(
+                        currentUserError: .httpStatus(status)
+                    )
+                }
+            )
+
+            for _ in 0..<100 where controller.phase == .restoring {
+                await Task.yield()
+            }
+
+            XCTAssertEqual(controller.phase, .signedOut, "HTTP \(status)")
+            XCTAssertNil(controller.session, "HTTP \(status)")
+            XCTAssertNil(tokenStore.token, "HTTP \(status)")
+            XCTAssertNil(sessionStore.session, "HTTP \(status)")
+            XCTAssertEqual(tokenStore.deleteCount, 1, "HTTP \(status)")
+        }
     }
 
     func testUnreachableServerReturnsToSignedOutWithRetryableError() async {
@@ -1408,6 +1693,99 @@ final class JellyfinFoundationTests: XCTestCase {
         XCTAssertNotNil(request.reporter)
     }
 
+    func testPlaybackResolverUsesDirectFileWithoutPlaybackInfoOrFallback()
+        async throws
+    {
+        FailingURLProtocol.requestCount = 0
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [FailingURLProtocol.self]
+        let api = JellyfinAPIClient(
+            server: try JellyfinServerURL("https://example.com/jellyfin"),
+            deviceID: "stable-device",
+            accessToken: "access-token",
+            session: URLSession(configuration: configuration)
+        )
+        let item = PlaybackItem(
+            id: "track-id",
+            title: "Night Drive",
+            artist: "Velacanto",
+            source: .jellyfin,
+            container: "flac"
+        )
+
+        let request = try await JellyfinPlaybackRequestResolver(
+            api: api,
+            userID: "user-id"
+        ).playbackRequest(for: item)
+
+        let asset = try XCTUnwrap(
+            request.asset.makePlayerItem().asset as? AVURLAsset
+        )
+        XCTAssertEqual(asset.url.path, "/jellyfin/Items/track-id/File")
+        XCTAssertEqual(request.transportKind, .directPlay)
+        XCTAssertNotNil(request.reporter)
+        XCTAssertNil(request.forcedPlaybackInfoFallback)
+        XCTAssertEqual(FailingURLProtocol.requestCount, 0)
+    }
+
+    func testLegacyPlaybackItemNegotiatesOnceAndKeepsSafeContainerEnrichment()
+        async throws
+    {
+        let api = FakeJellyfinAPI(playbackResolutionContainer: "flac")
+        let legacyItem = PlaybackItem(
+            id: "legacy-track",
+            title: "Legacy",
+            artist: "Velacanto",
+            source: .jellyfin,
+            container: nil
+        )
+
+        let request = try await JellyfinPlaybackRequestResolver(
+            api: api,
+            userID: "user-id"
+        ).playbackRequest(for: legacyItem)
+
+        let playbackResolutionRequestCount =
+            await api.playbackResolutionRequestCount()
+        XCTAssertEqual(playbackResolutionRequestCount, 1)
+        XCTAssertEqual(request.item.container, "flac")
+        XCTAssertNil(request.forcedPlaybackInfoFallback)
+    }
+
+    func testPlaybackResolverNegotiatesUnknownContainerInsteadOfGuessingDirectFile()
+        async throws
+    {
+        FailingURLProtocol.requestCount = 0
+        FailingURLProtocol.errorCode = .timedOut
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [FailingURLProtocol.self]
+        let api = JellyfinAPIClient(
+            server: try JellyfinServerURL("https://example.com"),
+            deviceID: "stable-device",
+            accessToken: "access-token",
+            session: URLSession(configuration: configuration)
+        )
+        let item = PlaybackItem(
+            id: "track-id",
+            title: "Night Drive",
+            artist: "Velacanto",
+            source: .jellyfin,
+            container: "webm"
+        )
+
+        do {
+            _ = try await JellyfinPlaybackRequestResolver(
+                api: api,
+                userID: "user-id"
+            ).playbackRequest(for: item)
+            XCTFail("Expected PlaybackInfo negotiation to fail")
+        } catch {
+            // Expected: the unknown container must use the network resolver.
+        }
+
+        XCTAssertEqual(FailingURLProtocol.requestCount, 1)
+    }
+
     func testJellyfinCatalogMappingProducesScopedNeutralMetadataAndCapabilities() throws {
         let data = Data(
             #"{"Id":"track-id","Name":"Night Drive","Type":"Audio","AlbumArtist":"Velacanto","Artists":["Velacanto"],"Album":"Open Roads","IndexNumber":2,"ParentIndexNumber":1,"RunTimeTicks":1800000000,"AlbumId":"album-id","AlbumPrimaryImageTag":"art-tag","UserData":{"IsFavorite":true}}"#
@@ -1460,31 +1838,24 @@ final class JellyfinFoundationTests: XCTestCase {
         XCTAssertNil(mapper.map(unsupportedTransport))
     }
 
-    func testGenreDiscoveryUsesAlbumArtworkAndOmitsPlaceholderGenres() async throws {
+    func testGenreDiscoveryUsesBoundedGenreMetadataAndOmitsPlaceholders()
+        async throws
+    {
         let decoder = JSONDecoder()
         let rock = try decoder.decode(
             JellyfinItem.self,
-            from: Data(#"{"Id":"rock","Name":"Rock","Type":"Genre"}"#.utf8)
+            from: Data(
+                #"{"Id":"rock","Name":"Rock","Type":"Genre","ChildCount":2,"ImageTags":{"Primary":"genre-tag"}}"#
+                    .utf8
+            )
         )
         let unknown = try decoder.decode(
             JellyfinItem.self,
             from: Data(#"{"Id":"unknown","Name":"Unknown","Type":"Genre"}"#.utf8)
         )
-        let albumWithoutArt = try decoder.decode(
-            JellyfinItem.self,
-            from: Data(#"{"Id":"plain","Name":"Plain","Type":"MusicAlbum"}"#.utf8)
-        )
-        let albumWithArt = try decoder.decode(
-            JellyfinItem.self,
-            from: Data(
-                #"{"Id":"cover","Name":"Cover","Type":"MusicAlbum","ImageTags":{"Primary":"cover-tag"}}"#
-                    .utf8
-            )
-        )
         let repository = JellyfinCatalogRepository(
             api: FakeJellyfinAPI(
-                genres: [unknown, rock],
-                genreAlbums: ["rock": [albumWithoutArt, albumWithArt]]
+                genres: [unknown, rock]
             ),
             userID: "user",
             accountScope: "server|user",
@@ -1495,8 +1866,7 @@ final class JellyfinFoundationTests: XCTestCase {
 
         XCTAssertEqual(genres.map(\.name), ["Rock"])
         XCTAssertEqual(genres.first?.albumCount, 2)
-        XCTAssertEqual(genres.first?.artwork?.opaqueItemID, "cover")
-        XCTAssertEqual(genres.first?.artwork?.imageTag, "cover-tag")
+        XCTAssertNil(genres.first?.artwork)
         XCTAssertFalse(MusicGenre.hasBrowsableName("undefined"))
     }
 
@@ -1825,6 +2195,433 @@ final class JellyfinFoundationTests: XCTestCase {
         }
     }
 
+    func testSecureConnectionFailureRemainsATransportSecurityError() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [FailingURLProtocol.self]
+        let api = JellyfinAPIClient(
+            server: try JellyfinServerURL("https://example.com"),
+            deviceID: "device",
+            session: URLSession(configuration: configuration)
+        )
+        FailingURLProtocol.errorCode = .secureConnectionFailed
+
+        do {
+            _ = try await api.publicServerInfo()
+            XCTFail("Expected a secure connection failure.")
+        } catch {
+            XCTAssertEqual(error as? JellyfinAPIError, .transportSecurity)
+        }
+    }
+
+    func testInteractiveReadDoesNotAmplifyLostConnection() async throws {
+        RecoveringURLProtocol.requestCount = 0
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [RecoveringURLProtocol.self]
+        let api = JellyfinAPIClient(
+            server: try JellyfinServerURL("https://example.com"),
+            deviceID: "device",
+            session: URLSession(configuration: configuration)
+        )
+
+        do {
+            _ = try await api.publicServerInfo()
+            XCTFail("Expected the first lost connection to remain observable.")
+        } catch {
+            XCTAssertEqual(error as? JellyfinAPIError, .offline)
+        }
+        XCTAssertEqual(RecoveringURLProtocol.requestCount, 1)
+    }
+
+    func testTimedOutReadFailsWithoutRetryAmplification() async throws {
+        FailingURLProtocol.requestCount = 0
+        FailingURLProtocol.errorCode = .timedOut
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [FailingURLProtocol.self]
+        let api = JellyfinAPIClient(
+            server: try JellyfinServerURL("https://example.com"),
+            deviceID: "device",
+            session: URLSession(configuration: configuration)
+        )
+
+        do {
+            _ = try await api.publicServerInfo()
+            XCTFail("Expected the timed-out request to fail.")
+        } catch {
+            XCTAssertEqual(error as? JellyfinAPIError, .timeout)
+        }
+
+        XCTAssertEqual(FailingURLProtocol.requestCount, 1)
+    }
+
+    func testInteractiveTimeoutSuppressesQueuedRequestCascade() async throws {
+        FailingURLProtocol.requestCount = 0
+        FailingURLProtocol.errorCode = .timedOut
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [FailingURLProtocol.self]
+        let api = JellyfinAPIClient(
+            server: try JellyfinServerURL("https://example.com"),
+            deviceID: "device",
+            session: URLSession(configuration: configuration)
+        )
+
+        let errors = await withTaskGroup(
+            of: JellyfinAPIError?.self,
+            returning: [JellyfinAPIError?].self
+        ) { group in
+            for _ in 0..<4 {
+                group.addTask {
+                    do {
+                        _ = try await api.publicServerInfo()
+                        return nil
+                    } catch {
+                        return error as? JellyfinAPIError
+                    }
+                }
+            }
+            var errors: [JellyfinAPIError?] = []
+            for await error in group {
+                errors.append(error)
+            }
+            return errors
+        }
+
+        XCTAssertEqual(errors.filter { $0 == .timeout }.count, 1)
+        XCTAssertEqual(errors.filter { $0 == .unreachable }.count, 3)
+        XCTAssertEqual(FailingURLProtocol.requestCount, 1)
+    }
+
+    func testTimedOutPlaybackReportDropsAndSuppressesDegradedRouteCascade()
+        async throws
+    {
+        FailingURLProtocol.requestCount = 0
+        FailingURLProtocol.errorCode = .timedOut
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [FailingURLProtocol.self]
+        let api = JellyfinAPIClient(
+            server: try JellyfinServerURL("https://example.com"),
+            deviceID: "device",
+            session: URLSession(configuration: configuration)
+        )
+
+        do {
+            try await api.reportPlaybackStarted(
+                itemID: "track",
+                playSessionID: "session",
+                positionTicks: 0,
+                playMethod: .directPlay
+            )
+            XCTFail("Expected the first report to fail.")
+        } catch {
+            XCTAssertEqual(error as? JellyfinAPIError, .timeout)
+        }
+
+        do {
+            try await api.reportPlaybackStarted(
+                itemID: "track",
+                playSessionID: "session",
+                positionTicks: 0,
+                playMethod: .directPlay
+            )
+            XCTFail("Expected the later report to remain observable.")
+        } catch {
+            XCTAssertEqual(error as? JellyfinAPIError, .unreachable)
+        }
+
+        XCTAssertEqual(FailingURLProtocol.requestCount, 1)
+    }
+
+    func testNetworkPolicySerializesNonPlaybackRequests() async {
+        let policy = VelacantoNetworkPolicy()
+        let tracker = RequestConcurrencyTracker()
+
+        await withTaskGroup(of: Void.self) { group in
+            for _ in 0..<6 {
+                group.addTask {
+                    try? await policy.perform(priority: .catalog) {
+                        await tracker.begin()
+                        try await Task.sleep(for: .milliseconds(40))
+                        await tracker.end()
+                    }
+                }
+            }
+        }
+
+        let maximumActiveCount = await tracker.maximumActiveCount()
+        XCTAssertEqual(maximumActiveCount, 1)
+    }
+
+    func testPlaybackDemandCancelsActiveReportingBeforeNegotiation() async {
+        let policy = VelacantoNetworkPolicy()
+        let probe = CancellableNetworkRequestProbe()
+        let reporting = Task {
+            do {
+                try await policy.perform(priority: .reporting) {
+                    try await probe.hold()
+                }
+                return false
+            } catch is CancellationError {
+                return true
+            } catch {
+                return false
+            }
+        }
+        while !(await probe.hasStarted) {
+            await Task.yield()
+        }
+
+        let startupToken = UUID()
+        policy.beginPlaybackStartup(startupToken)
+        let playbackAdmitted = Task {
+            do {
+                try await policy.perform(priority: .playback) {}
+                return true
+            } catch {
+                return false
+            }
+        }
+
+        let reportingWasCancelled = await reporting.value
+        let playbackWasAdmitted = await playbackAdmitted.value
+        let cancellationCount = await probe.cancellationCount
+        XCTAssertTrue(reportingWasCancelled)
+        XCTAssertTrue(playbackWasAdmitted)
+        XCTAssertEqual(cancellationCount, 1)
+        policy.endPlaybackStartup(startupToken)
+    }
+
+    func testTerminalRemoteQuarantineCancelsActiveAndQueuedNetworkWork()
+        async
+    {
+        for priority: VelacantoNetworkPriority in [
+            .catalog, .reporting, .artwork,
+        ] {
+            let policy = VelacantoNetworkPolicy(
+                quarantineTransport: {}
+            )
+            let probe = CancellableNetworkRequestProbe()
+            let active = Task {
+                do {
+                    try await policy.perform(priority: priority) {
+                        try await probe.hold()
+                    }
+                    return false
+                } catch is CancellationError {
+                    return true
+                } catch {
+                    return false
+                }
+            }
+            while !(await probe.hasStarted) {
+                await Task.yield()
+            }
+
+            let startupToken = UUID()
+            policy.beginPlaybackStartup(startupToken)
+            policy.enterTerminalRemoteQuarantine()
+            policy.endPlaybackStartup(startupToken)
+
+            let activeWasCancelled = await active.value
+            let cancellationCount = await probe.cancellationCount
+            XCTAssertTrue(activeWasCancelled)
+            XCTAssertEqual(cancellationCount, 1)
+            XCTAssertTrue(policy.isTerminalRemoteQuarantined)
+        }
+
+        let policy = VelacantoNetworkPolicy(
+            quarantineTransport: {}
+        )
+        let startupToken = UUID()
+        let queuedStart = NetworkOperationStartRecorder()
+        let activeProbe = CancellationIgnoringNetworkRequestProbe()
+        let active = Task {
+            try? await policy.perform(priority: .catalog) {
+                await activeProbe.hold()
+            }
+        }
+        while !(await activeProbe.hasStarted) {
+            await Task.yield()
+        }
+        policy.beginPlaybackStartup(startupToken)
+        let queued = Task {
+            do {
+                try await policy.perform(
+                    priority: .catalog,
+                    key: "terminal-queued"
+                ) {
+                    await queuedStart.record()
+                }
+                return true
+            } catch {
+                return false
+            }
+        }
+        while !policy.hasQueuedRequest(key: "terminal-queued") {
+            await Task.yield()
+        }
+        let quiescence = Task {
+            do {
+                try await policy.waitUntilPlaybackStartupQuiescent(
+                    startupToken
+                )
+                return true
+            } catch {
+                return false
+            }
+        }
+        while !policy.hasPlaybackQuiescenceWaiter(for: startupToken) {
+            await Task.yield()
+        }
+
+        policy.enterTerminalRemoteQuarantine()
+        policy.endPlaybackStartup(startupToken)
+
+        let queuedWasAdmitted = await queued.value
+        let quiescenceSucceeded = await quiescence.value
+        let queuedStartCount = await queuedStart.count
+        XCTAssertFalse(queuedWasAdmitted)
+        XCTAssertFalse(quiescenceSucceeded)
+        XCTAssertEqual(queuedStartCount, 0)
+        await activeProbe.release()
+        await active.value
+
+        let laterStart = NetworkOperationStartRecorder()
+        do {
+            try await policy.perform(priority: .playback) {
+                await laterStart.record()
+            }
+            XCTFail("Expected terminal quarantine to fail new work closed.")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+        let laterStartCount = await laterStart.count
+        XCTAssertEqual(laterStartCount, 0)
+    }
+
+    func testTransportQuarantineInvalidatesAndOnlyFreshProcessStartsCleanSession()
+        async throws
+    {
+        HoldingTransportURLProtocol.reset(holdsRequests: true)
+        let factory = TransportSessionFactory()
+        let transport = VelacantoNetworkTransport(
+            makeSession: { factory.makeSession() }
+        )
+        let request = URLRequest(
+            url: try XCTUnwrap(URL(string: "https://containment.test/resource"))
+        )
+        let first = Task { await transportCancellationResult(transport, request) }
+        let second = Task { await transportCancellationResult(transport, request) }
+        while HoldingTransportURLProtocol.requestCount < 2 {
+            await Task.yield()
+        }
+
+        XCTAssertEqual(transport.activeSessionGeneration, 1)
+        XCTAssertTrue(transport.hasLiveSession)
+
+        transport.enterTerminalRemoteQuarantine()
+
+        let firstWasCancelled = await first.value
+        let secondWasCancelled = await second.value
+        XCTAssertTrue(firstWasCancelled)
+        XCTAssertTrue(secondWasCancelled)
+        XCTAssertFalse(transport.hasLiveSession)
+        XCTAssertEqual(transport.activeSessionGeneration, nil)
+        XCTAssertEqual(factory.creationCount, 1)
+
+        do {
+            _ = try await transport.data(for: request)
+            XCTFail("Expected a quarantined transport to remain closed.")
+        } catch {
+            XCTAssertTrue(error is VelacantoNetworkTransportSuppressed)
+        }
+        XCTAssertEqual(HoldingTransportURLProtocol.requestCount, 2)
+
+        let freshTransport = VelacantoNetworkTransport(
+            makeSession: { factory.makeSession() }
+        )
+        XCTAssertTrue(freshTransport.hasLiveSession)
+        XCTAssertEqual(freshTransport.activeSessionGeneration, 1)
+        XCTAssertEqual(factory.creationCount, 2)
+        HoldingTransportURLProtocol.setHoldsRequests(false)
+        _ = try await freshTransport.data(for: request)
+        XCTAssertEqual(HoldingTransportURLProtocol.requestCount, 3)
+    }
+
+    func testPlaybackTimeoutKeepsOnePoolAndSuppressesImmediateRenegotiation()
+        async throws
+    {
+        RotatingPlaybackURLProtocol.requestCount = 0
+        let transport = VelacantoNetworkTransport {
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [RotatingPlaybackURLProtocol.self]
+            return URLSession(configuration: configuration)
+        }
+        let api = JellyfinAPIClient(
+            server: try JellyfinServerURL("https://example.com"),
+            deviceID: "device",
+            accessToken: "token",
+            transport: transport
+        )
+
+        do {
+            _ = try await api.playbackResolution(
+                itemID: "track",
+                userID: "user"
+            )
+            XCTFail("Expected the first negotiation to time out.")
+        } catch {
+            XCTAssertEqual(error as? JellyfinAPIError, .timeout)
+        }
+
+        do {
+            _ = try await api.playbackResolution(
+                itemID: "track",
+                userID: "user"
+            )
+            XCTFail("Expected the degraded origin to suppress a new flow.")
+        } catch {
+            XCTAssertEqual(error as? JellyfinAPIError, .unreachable)
+        }
+
+        XCTAssertEqual(RotatingPlaybackURLProtocol.requestCount, 1)
+    }
+
+    func testTimedOutPlaybackReportDoesNotPoisonPlaybackNegotiationRoute()
+        async throws
+    {
+        RotatingPlaybackURLProtocol.requestCount = 0
+        let transport = VelacantoNetworkTransport {
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [RotatingPlaybackURLProtocol.self]
+            return URLSession(configuration: configuration)
+        }
+        let api = JellyfinAPIClient(
+            server: try JellyfinServerURL("https://example.com"),
+            deviceID: "device",
+            accessToken: "token",
+            transport: transport
+        )
+
+        do {
+            try await api.reportPlaybackStarted(
+                itemID: "track",
+                playSessionID: "session",
+                positionTicks: 0,
+                playMethod: .directPlay
+            )
+            XCTFail("Expected the droppable report to time out.")
+        } catch {
+            XCTAssertEqual(error as? JellyfinAPIError, .timeout)
+        }
+
+        let resolution = try await api.playbackResolution(
+            itemID: "track",
+            userID: "user"
+        )
+
+        XCTAssertEqual(resolution.playSessionID, "fresh-session")
+        XCTAssertEqual(RotatingPlaybackURLProtocol.requestCount, 2)
+    }
+
     func testCatalogCursorCannotCrossAccountScopes() async throws {
         let decoder = JSONDecoder()
         let albums = try ["Alpha", "Bravo"].enumerated().map { index, name in
@@ -2069,6 +2866,7 @@ private actor FakeJellyfinAPI: JellyfinAPIService {
     private let publicServerInfoError: JellyfinAPIError?
     private let authenticationError: JellyfinAPIError?
     private let currentUserError: JellyfinAPIError?
+    private let currentUserDelay: Duration?
     private let albumsError: JellyfinAPIError?
     private let availableLibraries: [JellyfinItem]
     private let albumsByLibrary: [String: [JellyfinItem]]
@@ -2079,15 +2877,19 @@ private actor FakeJellyfinAPI: JellyfinAPIService {
     private let lyricsResponses: [String: JellyfinLyricsResponse]
     private let lyricsDelay: Duration?
     private let albumPageDelay: Duration?
+    private let playbackResolutionContainer: String?
     private var transientLyricsFailures: Int
     private var transientAlbumPageFailures: Int
     private var lyricsRequests = 0
     private var albumPageRequests = 0
+    private var currentUserRequests = 0
+    private var playbackResolutionRequests = 0
 
     init(
         publicServerInfoError: JellyfinAPIError? = nil,
         authenticationError: JellyfinAPIError? = nil,
         currentUserError: JellyfinAPIError? = nil,
+        currentUserDelay: Duration? = nil,
         albumsError: JellyfinAPIError? = nil,
         availableLibraries: [JellyfinItem] = [],
         albumsByLibrary: [String: [JellyfinItem]] = [:],
@@ -2099,11 +2901,13 @@ private actor FakeJellyfinAPI: JellyfinAPIService {
         lyricsDelay: Duration? = nil,
         transientLyricsFailures: Int = 0,
         albumPageDelay: Duration? = nil,
-        transientAlbumPageFailures: Int = 0
+        transientAlbumPageFailures: Int = 0,
+        playbackResolutionContainer: String? = nil
     ) {
         self.publicServerInfoError = publicServerInfoError
         self.authenticationError = authenticationError
         self.currentUserError = currentUserError
+        self.currentUserDelay = currentUserDelay
         self.albumsError = albumsError
         self.availableLibraries = availableLibraries
         self.albumsByLibrary = albumsByLibrary
@@ -2116,6 +2920,7 @@ private actor FakeJellyfinAPI: JellyfinAPIService {
         self.transientLyricsFailures = transientLyricsFailures
         self.albumPageDelay = albumPageDelay
         self.transientAlbumPageFailures = transientAlbumPageFailures
+        self.playbackResolutionContainer = playbackResolutionContainer
     }
 
     func publicServerInfo() async throws -> JellyfinServerInfo {
@@ -2148,6 +2953,10 @@ private actor FakeJellyfinAPI: JellyfinAPIService {
     }
 
     func currentUser() async throws -> JellyfinUser {
+        currentUserRequests += 1
+        if let currentUserDelay {
+            try await Task.sleep(for: currentUserDelay)
+        }
         if let currentUserError {
             throw currentUserError
         }
@@ -2156,6 +2965,10 @@ private actor FakeJellyfinAPI: JellyfinAPIService {
             name: "Tyler",
             primaryImageTag: "profile-image-tag"
         )
+    }
+
+    func currentUserRequestCount() -> Int {
+        currentUserRequests
     }
 
     func libraries(userID: String) async throws -> [JellyfinItem] {
@@ -2281,14 +3094,20 @@ private actor FakeJellyfinAPI: JellyfinAPIService {
         itemID: String,
         userID: String
     ) async throws -> JellyfinPlaybackResolution {
+        playbackResolutionRequests += 1
         guard let url = URL(string: "https://example.com/Audio/\(itemID)/stream") else {
             throw JellyfinAPIError.invalidResponse
         }
         return JellyfinPlaybackResolution(
             streamURL: url,
             playSessionID: "fake-session",
-            playMethod: .directPlay
+            playMethod: .directPlay,
+            container: playbackResolutionContainer
         )
+    }
+
+    func playbackResolutionRequestCount() -> Int {
+        playbackResolutionRequests
     }
 
     func lyrics(itemID: String) async throws -> JellyfinLyricsResponse? {
@@ -2396,4 +3215,271 @@ private final class LyricsURLProtocol: URLProtocol, @unchecked Sendable {
     }
 
     override func stopLoading() {}
+}
+
+private final class FailingURLProtocol: URLProtocol, @unchecked Sendable {
+    nonisolated(unsafe) static var errorCode = URLError.Code.timedOut
+    nonisolated(unsafe) static var requestCount = 0
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        Self.requestCount += 1
+        client?.urlProtocol(self, didFailWithError: URLError(Self.errorCode))
+    }
+
+    override func stopLoading() {}
+}
+
+private final class RecoveringURLProtocol: URLProtocol, @unchecked Sendable {
+    nonisolated(unsafe) static var requestCount = 0
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        Self.requestCount += 1
+        if Self.requestCount == 1 {
+            client?.urlProtocol(
+                self,
+                didFailWithError: URLError(.networkConnectionLost)
+            )
+            return
+        }
+        let data = Data(
+            #"{"Id":"server","ServerName":"Test","Version":"1"}"#.utf8
+        )
+        let response = HTTPURLResponse(
+            url: request.url!,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: ["Content-Type": "application/json"]
+        )!
+        client?.urlProtocol(
+            self,
+            didReceive: response,
+            cacheStoragePolicy: .notAllowed
+        )
+        client?.urlProtocol(self, didLoad: data)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+
+private final class RotatingPlaybackURLProtocol: URLProtocol, @unchecked Sendable {
+    nonisolated(unsafe) static var requestCount = 0
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        Self.requestCount += 1
+        if Self.requestCount == 1 {
+            client?.urlProtocol(
+                self,
+                didFailWithError: URLError(.timedOut)
+            )
+            return
+        }
+        let data = Data(
+            #"{"MediaSources":[{"Id":"source","SupportsDirectStream":true,"SupportsTranscoding":true}],"PlaySessionId":"fresh-session"}"#
+                .utf8
+        )
+        let response = HTTPURLResponse(
+            url: request.url!,
+            statusCode: 200,
+            httpVersion: "HTTP/2",
+            headerFields: ["Content-Type": "application/json"]
+        )!
+        client?.urlProtocol(
+            self,
+            didReceive: response,
+            cacheStoragePolicy: .notAllowed
+        )
+        client?.urlProtocol(self, didLoad: data)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+
+private actor CancellableNetworkRequestProbe {
+    private(set) var hasStarted = false
+    private(set) var cancellationCount = 0
+
+    func hold() async throws {
+        hasStarted = true
+        do {
+            try await Task.sleep(for: .seconds(30))
+        } catch {
+            cancellationCount += 1
+            throw CancellationError()
+        }
+    }
+}
+
+private actor NetworkOperationStartRecorder {
+    private(set) var count = 0
+
+    func record() {
+        count += 1
+    }
+}
+
+private actor CancellationIgnoringNetworkRequestProbe {
+    private(set) var hasStarted = false
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func hold() async {
+        hasStarted = true
+        await withCheckedContinuation { continuation in
+            self.continuation = continuation
+        }
+    }
+
+    func release() {
+        continuation?.resume()
+        continuation = nil
+    }
+}
+
+private final class TransportSessionFactory: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedCreationCount = 0
+
+    var creationCount: Int {
+        lock.withLock { storedCreationCount }
+    }
+
+    func makeSession() -> URLSession {
+        lock.withLock {
+            storedCreationCount += 1
+        }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [HoldingTransportURLProtocol.self]
+        return URLSession(configuration: configuration)
+    }
+}
+
+private final class NetworkContainmentCallbackRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedQuarantineCount = 0
+    private var storedReopenCount = 0
+
+    var quarantineCount: Int {
+        lock.withLock { storedQuarantineCount }
+    }
+
+    var reopenCount: Int {
+        lock.withLock { storedReopenCount }
+    }
+
+    func recordQuarantine() {
+        lock.withLock { storedQuarantineCount += 1 }
+    }
+
+    func recordReopen() {
+        lock.withLock { storedReopenCount += 1 }
+    }
+}
+
+private final class HoldingTransportURLProtocol: URLProtocol,
+    @unchecked Sendable
+{
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var storedRequestCount = 0
+    nonisolated(unsafe) private static var holdsRequests = true
+
+    static var requestCount: Int {
+        lock.withLock { storedRequestCount }
+    }
+
+    static func reset(holdsRequests: Bool) {
+        lock.withLock {
+            storedRequestCount = 0
+            self.holdsRequests = holdsRequests
+        }
+    }
+
+    static func setHoldsRequests(_ value: Bool) {
+        lock.withLock {
+            holdsRequests = value
+        }
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        let shouldHold = Self.lock.withLock {
+            Self.storedRequestCount += 1
+            return Self.holdsRequests
+        }
+        guard !shouldHold else { return }
+        let response = HTTPURLResponse(
+            url: request.url!,
+            statusCode: 204,
+            httpVersion: "HTTP/2",
+            headerFields: nil
+        )!
+        client?.urlProtocol(
+            self,
+            didReceive: response,
+            cacheStoragePolicy: .notAllowed
+        )
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+
+private func transportCancellationResult(
+    _ transport: VelacantoNetworkTransport,
+    _ request: URLRequest
+) async -> Bool {
+    do {
+        _ = try await transport.data(for: request)
+        return false
+    } catch let failure as VelacantoNetworkTransportFailure {
+        if failure.underlying is CancellationError { return true }
+        return (failure.underlying as? URLError)?.code == .cancelled
+    } catch is CancellationError {
+        return true
+    } catch let error as URLError {
+        return error.code == .cancelled
+    } catch {
+        return false
+    }
+}
+
+private actor RequestConcurrencyTracker {
+    private var activeCount = 0
+    private var maximumCount = 0
+
+    func begin() {
+        activeCount += 1
+        maximumCount = max(maximumCount, activeCount)
+    }
+
+    func end() {
+        activeCount -= 1
+    }
+
+    func maximumActiveCount() -> Int {
+        maximumCount
+    }
 }

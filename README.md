@@ -5,10 +5,10 @@ device-local audio in place and streams from personal Jellyfin libraries. Its
 shared music and playback boundaries are designed to support additional sources
 and a future CarPlay surface without coupling those surfaces to Jellyfin.
 
-> **Status:** Alpha. `0.2.0` is the current completed release. Development of
-> `0.3.0`, the native-player foundation release, begins from that tag. The
-> internal preview checkpoint is August 19, 2026; final release follows only
-> after the acceptance gate passes.
+> **Status:** Alpha. `0.2.5` is the current playback, network, and session
+> stabilization candidate for internal testing. Development of `0.3.0`, the
+> native-player foundation release, continues from this stabilized base; final
+> promotion follows only after the acceptance gate passes.
 
 ## 0.3 direction
 
@@ -96,9 +96,10 @@ the same playback coordinator without personal media.
 
 ### 0.x deployment
 
-Velacanto 0.x builds are local-development or sideloaded releases. App Store,
-TestFlight, paid distribution, analytics, and release automation remain 1.0
-work. Physical installs still require local Apple code signing.
+Velacanto 0.x builds are internal development releases. Starting with 0.2.5,
+approved stabilization candidates may use internal TestFlight distribution for
+bounded acceptance while public App Store submission remains 1.0 work. Local
+physical installs still require Apple code signing.
 
 ## Project identity
 

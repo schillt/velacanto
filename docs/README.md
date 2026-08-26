@@ -6,6 +6,8 @@ technical planning. Superseded plans and prototypes live under
 
 ## Current release
 
+- [0.2.5 release notes](0.2.5-release-notes.md) — purpose, provenance,
+  acceptance evidence, and remaining limitations for the stabilization build.
 - [0.3 plan](0.3-plan.md) — native-player scope, sequencing, and release rules.
 - [0.3 acceptance](0.3-stability-acceptance.md) — automated, platform, device,
   and server release evidence.

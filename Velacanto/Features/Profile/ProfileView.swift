@@ -86,8 +86,18 @@ struct ProfileView: View {
     }
 
     private var appVersion: String {
-        Bundle.main.object(
-            forInfoDictionaryKey: "CFBundleShortVersionString"
-        ) as? String ?? "0.1.0"
+        let marketingVersion =
+            Bundle.main.object(
+                forInfoDictionaryKey: "CFBundleShortVersionString"
+            ) as? String ?? "0.2.5"
+        guard
+            let buildVersion = Bundle.main.object(
+                forInfoDictionaryKey: "CFBundleVersion"
+            ) as? String,
+            !buildVersion.isEmpty
+        else {
+            return marketingVersion
+        }
+        return "\(marketingVersion) (\(buildVersion))"
     }
 }

@@ -88,6 +88,15 @@ struct VelacantoRootView: View {
         }
         .task(id: jellyfinAccountTaskID) {
             guard let session = jellyfin.session else { return }
+            // Restore only the durable, paused snapshot while the saved shell
+            // is validating. Resolver installation is intentionally deferred:
+            // no launch-time artwork or stream negotiation may leave the app
+            // before Users/Me has established remote capability.
+            playback.restoreSavedState(
+                serverID: session.serverID,
+                userID: session.userID
+            )
+            guard jellyfin.isRemoteAccessReady else { return }
             playback.configureRequestResolver { item in
                 try await jellyfin.playbackRequest(for: item)
             }
@@ -127,10 +136,6 @@ struct VelacantoRootView: View {
                     image: image
                 )
             }
-            playback.restoreSavedState(
-                serverID: session.serverID,
-                userID: session.userID
-            )
         }
         .onChange(of: jellyfin.session) { oldSession, newSession in
             guard
@@ -376,7 +381,8 @@ struct VelacantoRootView: View {
             },
             showNowPlaying: {
                 isShowingNowPlaying = true
-            }
+            },
+            isActive: selectedDestination == .home
         )
     }
 
@@ -394,7 +400,8 @@ struct VelacantoRootView: View {
             showNowPlaying: {
                 isShowingNowPlaying = true
             },
-            presentation: .new
+            presentation: .new,
+            isActive: selectedDestination == .new
         )
     }
 
@@ -407,7 +414,8 @@ struct VelacantoRootView: View {
             },
             showProfile: {
                 isShowingProfile = true
-            }
+            },
+            isActive: selectedDestination == .library
         )
     }
 
@@ -473,18 +481,8 @@ struct VelacantoRootView: View {
     }
 
     private func playRecentItem(_ item: PlaybackItem) {
-        Task { @MainActor in
-            do {
-                let request = try await jellyfin.playbackRequest(for: item)
-                actionError = nil
-                playback.play(
-                    request,
-                    account: playbackAccount
-                )
-            } catch {
-                actionError = error.localizedDescription
-            }
-        }
+        actionError = nil
+        playback.play(item, account: playbackAccount)
     }
 
     private var playbackAccount: PlaybackAccount? {
@@ -497,7 +495,7 @@ struct VelacantoRootView: View {
 
     private var jellyfinAccountTaskID: String {
         guard let account = playbackAccount else { return "signed-out" }
-        return "\(account.serverID)|\(account.userID)"
+        return "\(account.serverID)|\(account.userID)|\(jellyfin.isRemoteAccessReady)"
     }
 
 }

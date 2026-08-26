@@ -117,6 +117,7 @@ struct MusicCatalogItem: Identifiable, Equatable, Codable, Sendable {
     let discNumber: Int?
     let childCount: Int?
     let duration: TimeInterval?
+    let container: String?
     let artwork: MusicArtworkReference?
     let isFavorite: Bool
     let capabilities: MusicItemCapabilities
@@ -138,6 +139,7 @@ struct MusicCatalogItem: Identifiable, Equatable, Codable, Sendable {
         discNumber: Int?,
         childCount: Int?,
         duration: TimeInterval?,
+        container: String? = nil,
         artwork: MusicArtworkReference?,
         isFavorite: Bool,
         capabilities: MusicItemCapabilities
@@ -158,6 +160,7 @@ struct MusicCatalogItem: Identifiable, Equatable, Codable, Sendable {
         self.discNumber = discNumber
         self.childCount = childCount
         self.duration = duration
+        self.container = container
         self.artwork = artwork
         self.isFavorite = isFavorite
         self.capabilities = capabilities

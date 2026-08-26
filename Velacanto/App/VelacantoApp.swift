@@ -15,6 +15,9 @@ struct VelacantoApp: App {
     init() {
         let arguments = ProcessInfo.processInfo.arguments
         let usesSignedInUITestFixture = arguments.contains("-uiTestingSignedIn")
+        if !arguments.contains("-uiTesting") {
+            PlaybackDiagnosticJournal.shared.beginLaunch()
+        }
         let playback =
             usesSignedInUITestFixture
             ? AudioPlaybackCoordinator(
@@ -106,13 +109,39 @@ struct VelacantoApp: App {
 private final class UITestAudioPlayerEngine: AudioPlayerEngine {
     var eventHandler: (@MainActor (AudioPlayerEngineEvent) -> Void)?
     private(set) var hasCurrentItem = false
+    var terminalFailureKind: AudioPlayerTerminalFailureKind? { nil }
+    private(set) var currentGeneration = 0
+    private(set) var preparedNextItemState = AudioPlayerPreparedItemState(
+        identity: nil,
+        generation: 0,
+        phase: .absent
+    )
 
-    func load(_: AVPlayerItem) {
+    func load(_: AVPlayerItem, identity _: PlaybackItemQueueIdentity) {
+        currentGeneration += 1
         hasCurrentItem = true
         eventHandler?(.stateChanged(.paused))
     }
-    func preload(_: AVPlayerItem?) {}
-    func advanceToNextItem() {}
+    func preload(
+        _ item: AVPlayerItem?,
+        identity: PlaybackItemQueueIdentity?
+    ) {
+        preparedNextItemState = AudioPlayerPreparedItemState(
+            identity: item == nil ? nil : identity,
+            generation: currentGeneration,
+            phase: item == nil ? .absent : .ready
+        )
+        eventHandler?(.preparedNextItemStateChanged(preparedNextItemState))
+    }
+    func advanceToNextItem() {
+        currentGeneration += 1
+        preparedNextItemState = AudioPlayerPreparedItemState(
+            identity: nil,
+            generation: currentGeneration,
+            phase: .absent
+        )
+        eventHandler?(.advancedToNextItem)
+    }
     func play() { eventHandler?(.stateChanged(.playing)) }
     func pause() { eventHandler?(.stateChanged(.paused)) }
     func seek(to _: TimeInterval) {}

@@ -59,7 +59,8 @@ struct MusicSearchView: View {
                                 selectedGenre = genre
                             },
                             presentation: .collection,
-                            collectionColumnCount: 2
+                            collectionColumnCount: 2,
+                            isActive: isSearchTabSelected
                         )
                     }
                     .padding(.horizontal, 16)
@@ -285,12 +286,15 @@ struct MusicSearchView: View {
     }
 
     private var searchTaskID: String {
-        "\(jellyfin.session?.serverID ?? "signed-out")|\(query)"
+        "\(jellyfin.session?.serverID ?? "signed-out")|\(query)|active=\(isSearchTabSelected)"
     }
 
     @MainActor
     private func search() async {
         _ = resultsScrollPosition.begin(identity: searchTaskID)
+        #if os(iOS)
+            guard isSearchTabSelected else { return }
+        #endif
         guard jellyfin.isSignedIn, query.count >= 2 else {
             await model.reset(
                 loader: { _ in

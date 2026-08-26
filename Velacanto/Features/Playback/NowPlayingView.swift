@@ -323,6 +323,21 @@ struct NowPlayingView: View {
                 trackDetails(for: item, width: width)
             }
 
+            if let pendingItem = playback.preparingQueueItem {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Loading \(pendingItem.title)…")
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+                .font(.callout.weight(.medium))
+                .foregroundStyle(playbackSecondaryTextColor)
+                .frame(width: width, alignment: .leading)
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("Loading \(pendingItem.title)")
+            }
+
             VStack(spacing: 7) {
                 BufferedPlaybackSlider(
                     value: Binding(

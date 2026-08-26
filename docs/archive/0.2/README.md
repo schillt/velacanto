@@ -5,6 +5,7 @@ release:
 
 - [0.2 plan](0.2-plan.md)
 - [0.2 release notes](0.2-release-notes.md)
+- [0.2.5 stabilization release notes](../../0.2.5-release-notes.md)
 - [Native UI merge record](ui-merge-readiness.md)
 
 Use the current [0.3 plan](../../0.3-plan.md) and

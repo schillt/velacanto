@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import os
 
 /// Validates and normalizes a server root before any authenticated request.
 ///
@@ -135,6 +136,19 @@ struct JellyfinPlaybackResolution: Equatable, Sendable {
     let streamURL: URL
     let playSessionID: String
     let playMethod: JellyfinPlaybackMethod
+    let container: String?
+
+    init(
+        streamURL: URL,
+        playSessionID: String,
+        playMethod: JellyfinPlaybackMethod,
+        container: String? = nil
+    ) {
+        self.streamURL = streamURL
+        self.playSessionID = playSessionID
+        self.playMethod = playMethod
+        self.container = container
+    }
 }
 
 struct JellyfinLyricsResponse: Decodable, Equatable, Sendable {
@@ -169,12 +183,16 @@ struct JellyfinPlaybackInfoResponse: Decodable, Equatable, Sendable {
 
 struct JellyfinPlaybackMediaSource: Decodable, Equatable, Sendable {
     let id: String?
+    let container: String?
+    let supportsDirectPlay: Bool?
     let supportsDirectStream: Bool
     let supportsTranscoding: Bool
     let transcodingURL: String?
 
     private enum CodingKeys: String, CodingKey {
         case id = "Id"
+        case container = "Container"
+        case supportsDirectPlay = "SupportsDirectPlay"
         case supportsDirectStream = "SupportsDirectStream"
         case supportsTranscoding = "SupportsTranscoding"
         case transcodingURL = "TranscodingUrl"
@@ -262,6 +280,7 @@ struct JellyfinItem: Codable, Equatable, Identifiable, Sendable {
     let parentIndexNumber: Int?
     let childCount: Int?
     let runTimeTicks: Int64?
+    let container: String?
     let albumID: String?
     let imageTags: [String: String]
     let albumPrimaryImageTag: String?
@@ -317,6 +336,7 @@ struct JellyfinItem: Codable, Equatable, Identifiable, Sendable {
         case parentIndexNumber = "ParentIndexNumber"
         case childCount = "ChildCount"
         case runTimeTicks = "RunTimeTicks"
+        case container = "Container"
         case albumID = "AlbumId"
         case imageTags = "ImageTags"
         case albumPrimaryImageTag = "AlbumPrimaryImageTag"
@@ -349,6 +369,7 @@ struct JellyfinItem: Codable, Equatable, Identifiable, Sendable {
         parentIndexNumber = try container.decodeIfPresent(Int.self, forKey: .parentIndexNumber)
         childCount = try container.decodeIfPresent(Int.self, forKey: .childCount)
         runTimeTicks = try container.decodeIfPresent(Int64.self, forKey: .runTimeTicks)
+        self.container = try container.decodeIfPresent(String.self, forKey: .container)
         albumID = try container.decodeIfPresent(String.self, forKey: .albumID)
         imageTags =
             try container.decodeIfPresent([String: String].self, forKey: .imageTags)
@@ -378,6 +399,7 @@ struct JellyfinItem: Codable, Equatable, Identifiable, Sendable {
         try container.encodeIfPresent(parentIndexNumber, forKey: .parentIndexNumber)
         try container.encodeIfPresent(childCount, forKey: .childCount)
         try container.encodeIfPresent(runTimeTicks, forKey: .runTimeTicks)
+        try container.encodeIfPresent(self.container, forKey: .container)
         try container.encodeIfPresent(albumID, forKey: .albumID)
         try container.encode(imageTags, forKey: .imageTags)
         try container.encodeIfPresent(
@@ -491,6 +513,10 @@ enum JellyfinHomeCollection: Equatable, Sendable {
 }
 
 struct JellyfinRequestBuilder: Sendable {
+    private static let nativeAudioContainers = [
+        "mp3", "aac", "m4a", "m4b", "flac", "wav",
+    ]
+
     let server: JellyfinServerURL
     let deviceID: String
     let accessToken: String?
@@ -519,7 +545,10 @@ struct JellyfinRequestBuilder: Sendable {
         var request = URLRequest(url: url)
         request.httpMethod = method
         request.httpBody = body
-        request.timeoutInterval = 20
+        // Metadata responses are small. Failing within a bounded interval keeps
+        // navigation usable and lets a new request generation use a fresh
+        // connection pool instead of waiting behind a wedged task.
+        request.timeoutInterval = 6
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         if body != nil {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -559,12 +588,19 @@ struct JellyfinRequestBuilder: Sendable {
         }
 
         struct DeviceProfile: Encodable {
-            let maxStreamingBitrate = 320_000
+            let maxStreamingBitrate: Int
+            let maxStaticBitrate: Int
+            let musicStreamingTranscodingBitrate: Int
+            let maxStaticMusicBitrate: Int
             let directPlayProfiles: [DirectPlayProfile]
             let transcodingProfiles = [TranscodingProfile()]
 
             private enum CodingKeys: String, CodingKey {
                 case maxStreamingBitrate = "MaxStreamingBitrate"
+                case maxStaticBitrate = "MaxStaticBitrate"
+                case musicStreamingTranscodingBitrate =
+                    "MusicStreamingTranscodingBitrate"
+                case maxStaticMusicBitrate = "MaxStaticMusicBitrate"
                 case directPlayProfiles = "DirectPlayProfiles"
                 case transcodingProfiles = "TranscodingProfiles"
             }
@@ -572,7 +608,7 @@ struct JellyfinRequestBuilder: Sendable {
 
         struct Payload: Encodable {
             let userID: String
-            let maxStreamingBitrate = 320_000
+            let maxStreamingBitrate: Int
             let deviceProfile: DeviceProfile
             let enableDirectPlay = true
             let enableDirectStream = true
@@ -590,19 +626,58 @@ struct JellyfinRequestBuilder: Sendable {
             }
         }
 
-        let containers = [
-            "mp3", "aac", "m4a", "m4b", "flac", "webma", "webm", "wav", "ogg",
-        ]
+        // Keep direct play limited to file types AVURLAsset supports natively
+        // across Velacanto's Apple targets. In particular, WebM/WebM audio are
+        // not native AVPlayer asset types; Jellyfin must transcode those rather
+        // than handing an unsupported URL to the player. Ogg support varies by
+        // OS generation, so it remains on the safe transcoding path too.
+        let maximumDirectPlayBitrate = 100_000_000
+        let musicTranscodingBitrate = 320_000
         let payload = Payload(
             userID: userID,
+            maxStreamingBitrate: maximumDirectPlayBitrate,
             deviceProfile: DeviceProfile(
-                directPlayProfiles: containers.map(DirectPlayProfile.init)
+                maxStreamingBitrate: maximumDirectPlayBitrate,
+                maxStaticBitrate: maximumDirectPlayBitrate,
+                musicStreamingTranscodingBitrate: musicTranscodingBitrate,
+                maxStaticMusicBitrate: maximumDirectPlayBitrate,
+                directPlayProfiles: Self.nativeAudioContainers.map(DirectPlayProfile.init)
             )
         )
-        return try request(
+        var request = try request(
             pathComponents: ["Items", itemID, "PlaybackInfo"],
             method: "POST",
             body: JSONEncoder().encode(payload)
+        )
+        // PlaybackInfo gates every skip, previous, and history replay. Give one
+        // bounded negotiation the same total budget the former two-attempt
+        // path consumed, without creating a second DNS/TLS/VPN flow.
+        request.timeoutInterval = 8
+        request.networkServiceType = .responsiveData
+        return request
+    }
+
+    func directFileResolution(
+        itemID: String,
+        container: String
+    ) throws -> JellyfinPlaybackResolution? {
+        guard let nativeContainer = nativeAudioContainer(container) else {
+            return nil
+        }
+        let playSessionID = UUID().uuidString
+        let url = try request(
+            pathComponents: ["Items", itemID, "File"],
+            queryItems: [
+                URLQueryItem(name: "DeviceId", value: deviceID),
+                URLQueryItem(name: "api_key", value: accessToken),
+            ]
+        ).url
+        guard let url else { throw JellyfinAPIError.invalidResponse }
+        return JellyfinPlaybackResolution(
+            streamURL: url,
+            playSessionID: playSessionID,
+            playMethod: .directPlay,
+            container: nativeContainer
         )
     }
 
@@ -621,8 +696,10 @@ struct JellyfinRequestBuilder: Sendable {
         itemID: String,
         response: JellyfinPlaybackInfoResponse
     ) throws -> JellyfinPlaybackResolution {
+        guard response.errorCode == nil else {
+            throw JellyfinAPIError.unsupportedMedia
+        }
         guard
-            response.errorCode == nil,
             let playSessionID = response.playSessionID,
             !playSessionID.isEmpty,
             let source = response.mediaSources.first
@@ -630,17 +707,27 @@ struct JellyfinRequestBuilder: Sendable {
             throw JellyfinAPIError.invalidResponse
         }
 
-        // Jellyfin's UniversalAudioController uses SupportsDirectStream as its
-        // "can serve the original file statically" decision for audio.
-        if source.supportsDirectStream {
+        // Current Jellyfin servers report SupportsDirectPlay explicitly.
+        // Older responses used SupportsDirectStream for this decision, so keep
+        // that as a compatibility fallback only when the direct-play field is
+        // absent.
+        let reportedContainer = source.container?.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        let directPlayContainer = reportedContainer.flatMap(nativeAudioContainer)
+        let canDirectPlay =
+            source.supportsDirectPlay ?? source.supportsDirectStream
+        if canDirectPlay {
             return JellyfinPlaybackResolution(
                 streamURL: try directPlayURL(
                     itemID: itemID,
                     mediaSourceID: source.id,
-                    playSessionID: playSessionID
+                    playSessionID: playSessionID,
+                    container: directPlayContainer
                 ),
                 playSessionID: playSessionID,
-                playMethod: .directPlay
+                playMethod: .directPlay,
+                container: directPlayContainer
             )
         }
 
@@ -649,7 +736,7 @@ struct JellyfinRequestBuilder: Sendable {
             let transcodingURL = source.transcodingURL,
             !transcodingURL.isEmpty
         else {
-            throw JellyfinAPIError.invalidResponse
+            throw JellyfinAPIError.unsupportedMedia
         }
         return JellyfinPlaybackResolution(
             streamURL: try authenticatedStreamURL(
@@ -657,14 +744,16 @@ struct JellyfinRequestBuilder: Sendable {
                 playSessionID: playSessionID
             ),
             playSessionID: playSessionID,
-            playMethod: .transcode
+            playMethod: .transcode,
+            container: nil
         )
     }
 
     private func directPlayURL(
         itemID: String,
         mediaSourceID: String?,
-        playSessionID: String
+        playSessionID: String,
+        container: String?
     ) throws -> URL {
         var queryItems = [
             URLQueryItem(name: "Static", value: "true"),
@@ -677,13 +766,30 @@ struct JellyfinRequestBuilder: Sendable {
                 URLQueryItem(name: "MediaSourceId", value: mediaSourceID)
             )
         }
+        let streamComponent = container.map { "stream.\($0)" } ?? "stream"
         return try request(
-            pathComponents: ["Audio", itemID, "stream"],
+            pathComponents: ["Audio", itemID, streamComponent],
             queryItems: queryItems
         ).url
             ?? {
                 throw JellyfinAPIError.invalidResponse
             }()
+    }
+
+    private func nativeAudioContainer(_ value: String) -> String? {
+        // MediaSourceInfo.Container may contain equivalent comma-separated
+        // formats. Jellyfin's StreamBuilder selects the first format supported
+        // by the device profile; mirror that normalization for the documented
+        // stream.<container> route.
+        for candidate in value.split(separator: ",") {
+            let normalized = candidate.trimmingCharacters(
+                in: .whitespacesAndNewlines
+            ).lowercased()
+            if Self.nativeAudioContainers.contains(normalized) {
+                return normalized
+            }
+        }
+        return nil
     }
 
     private func authenticatedStreamURL(
@@ -746,7 +852,7 @@ struct JellyfinRequestBuilder: Sendable {
             }
         }
 
-        return try request(
+        var request = try request(
             pathComponents: pathComponents,
             method: "POST",
             body: JSONEncoder().encode(
@@ -760,6 +866,11 @@ struct JellyfinRequestBuilder: Sendable {
                 )
             )
         )
+        // Lifecycle telemetry is best effort. It must yield to PlaybackInfo
+        // and visible user actions on a constrained connection.
+        request.timeoutInterval = 4
+        request.networkServiceType = .background
+        return request
     }
 
     func artworkURL(
@@ -870,6 +981,10 @@ protocol JellyfinAPIService: Sendable {
         itemID: String,
         userID: String
     ) async throws -> JellyfinPlaybackResolution
+    func directPlaybackResolution(
+        itemID: String,
+        container: String
+    ) async throws -> JellyfinPlaybackResolution?
     func lyrics(itemID: String) async throws -> JellyfinLyricsResponse?
     func setFavorite(
         _ isFavorite: Bool,
@@ -969,6 +1084,11 @@ protocol JellyfinAPIService: Sendable {
 }
 
 extension JellyfinAPIService {
+    func directPlaybackResolution(
+        itemID: String,
+        container: String
+    ) async throws -> JellyfinPlaybackResolution? { nil }
+
     func lyrics(itemID: String) async throws -> JellyfinLyricsResponse? { nil }
 
     func musicGenres(userID: String) async throws -> [JellyfinItem] { [] }
@@ -1006,9 +1126,736 @@ extension JellyfinAPIService {
 
 }
 
+enum VelacantoNetworkPriority: Int, Sendable {
+    case reporting
+    case speculative
+    case artwork
+    case catalog
+    case playback
+}
+
+enum VelacantoNetworkRequestContext {
+    @TaskLocal static var priorityOverride: VelacantoNetworkPriority?
+}
+
+final class VelacantoNetworkPolicy: @unchecked Sendable {
+    /// Serializes cancellation with waiter registration. Without this guard a
+    /// task can be cancelled after `Task.isCancelled` is checked but before
+    /// its continuation is inserted into `waiters`, leaving that continuation
+    /// permanently stranded.
+    private final class AdmissionCancellationState: @unchecked Sendable {
+        private let lock = NSLock()
+        private var isCancelled = false
+
+        func registerIfActive(_ registration: () -> Void) -> Bool {
+            lock.withLock {
+                guard !isCancelled else { return false }
+                registration()
+                return true
+            }
+        }
+
+        func cancel(_ cancellation: () -> Void) {
+            lock.withLock {
+                isCancelled = true
+                cancellation()
+            }
+        }
+    }
+
+    private struct ActivePermit {
+        let priority: VelacantoNetworkPriority
+        var cancel: (@Sendable () -> Void)?
+        var cancellationRequested = false
+        var cancellationDelivered = false
+    }
+
+    private struct Waiter {
+        let id: UUID
+        let key: String?
+        var priority: VelacantoNetworkPriority
+        let continuation: CheckedContinuation<UUID?, Never>
+    }
+
+    private struct PlaybackQuiescenceWaiter {
+        let id: UUID
+        let startupToken: UUID
+        let continuation: CheckedContinuation<Bool, Never>
+    }
+
+    #if DEBUG
+        private static let sharedLock = NSLock()
+        nonisolated(unsafe) private static var sharedInstance =
+            VelacantoNetworkPolicy()
+
+        static var shared: VelacantoNetworkPolicy {
+            sharedLock.withLock { sharedInstance }
+        }
+
+        static func resetSharedForTesting() {
+            sharedLock.withLock {
+                sharedInstance = VelacantoNetworkPolicy()
+            }
+        }
+    #else
+        static let shared = VelacantoNetworkPolicy()
+    #endif
+
+    private let lock = NSLock()
+    private let quarantineTransport: @Sendable () -> Void
+    private let maximumActiveCount = 2
+    private var startupTokens = Set<UUID>()
+    private var activePermits: [UUID: ActivePermit] = [:]
+    private var waiters: [Waiter] = []
+    private var playbackQuiescenceWaiters: [PlaybackQuiescenceWaiter] = []
+    private var terminalRemoteQuarantined = false
+
+    init(
+        quarantineTransport: @escaping @Sendable () -> Void = {
+            VelacantoNetworkTransportRegistry.shared
+                .enterTerminalRemoteQuarantine()
+        }
+    ) {
+        self.quarantineTransport = quarantineTransport
+    }
+
+    var isTerminalRemoteQuarantined: Bool {
+        lock.withLock { terminalRemoteQuarantined }
+    }
+
+    /// Atomically closes app-generated remote admission before the current
+    /// playback startup permit is released. Existing cancellation closures
+    /// remain the sole task owners; quarantine only invokes and drains them.
+    func enterTerminalRemoteQuarantine() {
+        let result:
+            (
+                didEnter: Bool,
+                cancellations: [@Sendable () -> Void],
+                admission: [Waiter],
+                quiescence: [PlaybackQuiescenceWaiter]
+            ) = lock.withLock {
+                guard !terminalRemoteQuarantined else {
+                    return (false, [], [], [])
+                }
+                terminalRemoteQuarantined = true
+                var cancellations: [@Sendable () -> Void] = []
+                for permit in activePermits.keys {
+                    activePermits[permit]?.cancellationRequested = true
+                    if let cancel = activePermits[permit]?.cancel,
+                        activePermits[permit]?.cancellationDelivered == false
+                    {
+                        activePermits[permit]?.cancellationDelivered = true
+                        cancellations.append(cancel)
+                    }
+                }
+                let admission = waiters
+                waiters.removeAll()
+                let quiescence = playbackQuiescenceWaiters
+                playbackQuiescenceWaiters.removeAll()
+                return (true, cancellations, admission, quiescence)
+            }
+        guard result.didEnter else { return }
+
+        quarantineTransport()
+        for cancel in result.cancellations {
+            cancel()
+        }
+        for waiter in result.admission {
+            waiter.continuation.resume(returning: nil)
+        }
+        for waiter in result.quiescence {
+            waiter.continuation.resume(returning: false)
+        }
+        PlaybackDiagnosticJournal.shared.record(
+            "network-containment phase=entered active-cancelled=\(result.cancellations.count) queued-cancelled=\(result.admission.count) quiescence-cancelled=\(result.quiescence.count)"
+        )
+    }
+
+    func beginPlaybackStartup(_ token: UUID) {
+        let cancellations: [@Sendable () -> Void] = lock.withLock {
+            guard !terminalRemoteQuarantined else { return [] }
+            startupTokens.insert(token)
+            var cancellations: [@Sendable () -> Void] = []
+            for permit in activePermits.keys {
+                guard activePermits[permit]?.priority != .playback else {
+                    continue
+                }
+                activePermits[permit]?.cancellationRequested = true
+                if let cancel = activePermits[permit]?.cancel,
+                    activePermits[permit]?.cancellationDelivered == false
+                {
+                    activePermits[permit]?.cancellationDelivered = true
+                    cancellations.append(cancel)
+                }
+            }
+            return cancellations
+        }
+        for cancel in cancellations {
+            cancel()
+        }
+    }
+
+    func endPlaybackStartup(_ token: UUID) {
+        let result:
+            (
+                admission: [(Waiter, UUID)],
+                quiescence: [(PlaybackQuiescenceWaiter, Bool)]
+            ) = lock.withLock {
+                _ = startupTokens.remove(token)
+                return (
+                    drainWaitersLocked(),
+                    drainPlaybackQuiescenceWaitersLocked()
+                )
+            }
+        resume(result.admission)
+        resumePlaybackQuiescence(result.quiescence)
+    }
+
+    /// Waits for cancellation-requested lower-priority work to release its
+    /// actual permit. The startup token remains the sole admission owner; this
+    /// only closes the gap between requesting cancellation and route release.
+    func waitUntilPlaybackStartupQuiescent(_ token: UUID) async throws {
+        let waiterID = UUID()
+        let cancellationState = AdmissionCancellationState()
+        let isAuthoritative = await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                var immediateResult: Bool?
+                let registered = cancellationState.registerIfActive {
+                    immediateResult = lock.withLock {
+                        guard !terminalRemoteQuarantined else {
+                            return false
+                        }
+                        guard startupTokens.contains(token) else {
+                            return false
+                        }
+                        guard hasActiveNonPlaybackPermitLocked else {
+                            return true
+                        }
+                        playbackQuiescenceWaiters.append(
+                            PlaybackQuiescenceWaiter(
+                                id: waiterID,
+                                startupToken: token,
+                                continuation: continuation
+                            )
+                        )
+                        return nil
+                    }
+                }
+                guard registered else {
+                    continuation.resume(returning: false)
+                    return
+                }
+                if let immediateResult {
+                    continuation.resume(returning: immediateResult)
+                }
+            }
+        } onCancel: {
+            cancellationState.cancel {
+                self.cancelPlaybackQuiescenceWaiter(waiterID)
+            }
+        }
+        guard isAuthoritative else { throw CancellationError() }
+        try Task.checkCancellation()
+    }
+
+    var playbackStartupCount: Int {
+        lock.withLock { startupTokens.count }
+    }
+
+    func perform<Value: Sendable>(
+        priority: VelacantoNetworkPriority,
+        key: String? = nil,
+        _ operation: @escaping @Sendable () async throws -> Value
+    ) async throws -> Value {
+        guard let permit = await acquire(priority: priority, key: key) else {
+            throw CancellationError()
+        }
+        defer { release(permit) }
+        try Task.checkCancellation()
+        let operationTask = Task {
+            try await operation()
+        }
+        let shouldCancel = registerCancellation(
+            { operationTask.cancel() },
+            for: permit
+        )
+        if shouldCancel {
+            operationTask.cancel()
+        }
+        return try await withTaskCancellationHandler {
+            try await operationTask.value
+        } onCancel: {
+            operationTask.cancel()
+        }
+    }
+
+    func promote(key: String, to priority: VelacantoNetworkPriority) {
+        let resumptions: [(Waiter, UUID)] = lock.withLock {
+            for index in waiters.indices where waiters[index].key == key {
+                if priority.rawValue > waiters[index].priority.rawValue {
+                    waiters[index].priority = priority
+                }
+            }
+            sortWaitersLocked()
+            return drainWaitersLocked()
+        }
+        resume(resumptions)
+    }
+
+    func hasQueuedRequest(key: String) -> Bool {
+        lock.withLock {
+            waiters.contains { $0.key == key }
+        }
+    }
+
+    func hasPlaybackQuiescenceWaiter(for startupToken: UUID) -> Bool {
+        lock.withLock {
+            playbackQuiescenceWaiters.contains {
+                $0.startupToken == startupToken
+            }
+        }
+    }
+
+    private func acquire(
+        priority: VelacantoNetworkPriority,
+        key: String?
+    ) async -> UUID? {
+        let waiterID = UUID()
+        let cancellationState = AdmissionCancellationState()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                var immediatePermit: UUID?
+                var rejected = false
+                let registered = cancellationState.registerIfActive {
+                    immediatePermit = lock.withLock {
+                        guard !terminalRemoteQuarantined else {
+                            rejected = true
+                            return nil
+                        }
+                        if canAdmitLocked(priority) {
+                            let permit = UUID()
+                            activePermits[permit] = ActivePermit(priority: priority)
+                            return permit
+                        }
+                        waiters.append(
+                            Waiter(
+                                id: waiterID,
+                                key: key,
+                                priority: priority,
+                                continuation: continuation
+                            ))
+                        sortWaitersLocked()
+                        return nil
+                    }
+                }
+                guard registered else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+                if let immediatePermit {
+                    continuation.resume(returning: immediatePermit)
+                } else if rejected {
+                    continuation.resume(returning: nil)
+                }
+            }
+        } onCancel: {
+            cancellationState.cancel {
+                self.cancelWaiter(waiterID)
+            }
+        }
+    }
+
+    private func cancelWaiter(_ waiterID: UUID) {
+        let waiter: Waiter? = lock.withLock {
+            guard let index = waiters.firstIndex(where: { $0.id == waiterID })
+            else {
+                return nil
+            }
+            return waiters.remove(at: index)
+        }
+        waiter?.continuation.resume(returning: nil)
+    }
+
+    private func cancelPlaybackQuiescenceWaiter(_ waiterID: UUID) {
+        let waiter: PlaybackQuiescenceWaiter? = lock.withLock {
+            guard
+                let index = playbackQuiescenceWaiters.firstIndex(where: {
+                    $0.id == waiterID
+                })
+            else {
+                return nil
+            }
+            return playbackQuiescenceWaiters.remove(at: index)
+        }
+        waiter?.continuation.resume(returning: false)
+    }
+
+    private func release(_ permit: UUID) {
+        let result:
+            (
+                admission: [(Waiter, UUID)],
+                quiescence: [(PlaybackQuiescenceWaiter, Bool)]
+            ) = lock.withLock {
+                activePermits[permit] = nil
+                return (
+                    drainWaitersLocked(),
+                    drainPlaybackQuiescenceWaitersLocked()
+                )
+            }
+        resume(result.admission)
+        resumePlaybackQuiescence(result.quiescence)
+    }
+
+    private func registerCancellation(
+        _ cancellation: @escaping @Sendable () -> Void,
+        for permit: UUID
+    ) -> Bool {
+        lock.withLock {
+            guard var activePermit = activePermits[permit] else { return true }
+            activePermit.cancel = cancellation
+            let shouldCancel =
+                activePermit.cancellationRequested
+                && !activePermit.cancellationDelivered
+            if shouldCancel {
+                activePermit.cancellationDelivered = true
+            }
+            activePermits[permit] = activePermit
+            return shouldCancel
+        }
+    }
+
+    private func canAdmitLocked(_ priority: VelacantoNetworkPriority) -> Bool {
+        guard !terminalRemoteQuarantined else { return false }
+        guard activePermits.count < maximumActiveCount else { return false }
+        let hasActivePlayback = activePermits.values.contains {
+            $0.priority == .playback
+        }
+        if priority == .playback {
+            return !hasActivePlayback
+        }
+        guard startupTokens.isEmpty, !hasActivePlayback else { return false }
+        return activePermits.isEmpty
+    }
+
+    private var hasActiveNonPlaybackPermitLocked: Bool {
+        activePermits.values.contains { $0.priority != .playback }
+    }
+
+    private func drainWaitersLocked() -> [(Waiter, UUID)] {
+        var resumptions: [(Waiter, UUID)] = []
+        while let index = waiters.firstIndex(where: {
+            canAdmitLocked($0.priority)
+        }) {
+            let waiter = waiters.remove(at: index)
+            let permit = UUID()
+            activePermits[permit] = ActivePermit(priority: waiter.priority)
+            resumptions.append((waiter, permit))
+        }
+        return resumptions
+    }
+
+    private func sortWaitersLocked() {
+        waiters.sort { lhs, rhs in
+            lhs.priority.rawValue > rhs.priority.rawValue
+        }
+    }
+
+    private func drainPlaybackQuiescenceWaitersLocked() -> [(PlaybackQuiescenceWaiter, Bool)] {
+        var resumptions: [(PlaybackQuiescenceWaiter, Bool)] = []
+        var retained: [PlaybackQuiescenceWaiter] = []
+        for waiter in playbackQuiescenceWaiters {
+            if !startupTokens.contains(waiter.startupToken) {
+                resumptions.append((waiter, false))
+            } else if !hasActiveNonPlaybackPermitLocked {
+                resumptions.append((waiter, true))
+            } else {
+                retained.append(waiter)
+            }
+        }
+        playbackQuiescenceWaiters = retained
+        return resumptions
+    }
+
+    private func resume(_ resumptions: [(Waiter, UUID)]) {
+        for (waiter, permit) in resumptions {
+            waiter.continuation.resume(returning: permit)
+        }
+    }
+
+    private func resumePlaybackQuiescence(
+        _ resumptions: [(PlaybackQuiescenceWaiter, Bool)]
+    ) {
+        for (waiter, result) in resumptions {
+            waiter.continuation.resume(returning: result)
+        }
+    }
+}
+
+final class VelacantoNetworkMetricsDelegate: NSObject, URLSessionTaskDelegate,
+    @unchecked Sendable
+{
+    static let shared = VelacantoNetworkMetricsDelegate()
+
+    private static let logger = Logger(
+        subsystem: "com.chameleonenterprise.velacanto",
+        category: "NetworkMetrics"
+    )
+    private override init() {}
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didFinishCollecting metrics: URLSessionTaskMetrics
+    ) {
+        let duration = metrics.taskInterval.duration
+        guard duration >= 0.75 else { return }
+        let snapshot = PlaybackNetworkMetricSnapshot(metrics: metrics)
+        let event = PlaybackMetricJournalFormatter.appNetwork(
+            kind: Self.diagnosticRequestKind(
+                for: task.originalRequest ?? task.currentRequest
+            ),
+            ordinal: task.taskIdentifier,
+            snapshot: snapshot
+        )
+        Self.logger.debug(
+            "\(event, privacy: .public)"
+        )
+        PlaybackDiagnosticJournal.shared.record(event)
+    }
+
+    nonisolated static func diagnosticRequestKind(
+        for request: URLRequest?
+    ) -> PlaybackNetworkRequestMetricKind {
+        let components = request?.url?.pathComponents ?? []
+        if components.last?.caseInsensitiveCompare("PlaybackInfo")
+            == .orderedSame
+        {
+            return .playbackInfo
+        }
+        if components.suffix(2).map({ $0.lowercased() }) == ["users", "me"] {
+            return .sessionValidation
+        }
+        if components.contains(where: {
+            $0.caseInsensitiveCompare("Images") == .orderedSame
+        }) {
+            return .artwork
+        }
+        if components.contains(where: {
+            $0.caseInsensitiveCompare("Playing") == .orderedSame
+                || $0.caseInsensitiveCompare("PlayingProgress") == .orderedSame
+                || $0.caseInsensitiveCompare("PlayingStopped") == .orderedSame
+        }) {
+            return .playbackReport
+        }
+        return .app
+    }
+}
+
+struct VelacantoNetworkTransportFailure: Error {
+    let underlying: any Error
+}
+
+struct VelacantoNetworkTransportSuppressed: Error {}
+
+/// Owns one reusable connection pool and one degraded-route circuit breaker
+/// for a Jellyfin origin. A transport failure briefly rejects every new
+/// app-generated request at admission instead of creating fresh DNS/TLS/VPN
+/// flows from independent features.
+final class VelacantoNetworkTransport: @unchecked Sendable {
+    private let lock = NSLock()
+    private let makeSession: @Sendable () -> URLSession
+    private var session: URLSession?
+    private var latestSessionGeneration = 0
+    private var degradedUntil: Date?
+    private let degradedRouteCooldown: TimeInterval
+
+    init(
+        makeSession: @escaping @Sendable () -> URLSession =
+            VelacantoNetworkTransport.makeDefaultSession,
+        degradedRouteCooldown: TimeInterval = 5,
+        startsQuarantined: Bool = false
+    ) {
+        self.makeSession = makeSession
+        self.degradedRouteCooldown = degradedRouteCooldown
+        if startsQuarantined {
+            session = nil
+        } else {
+            latestSessionGeneration = 1
+            session = makeSession()
+        }
+    }
+
+    var hasLiveSession: Bool {
+        lock.withLock { session != nil }
+    }
+
+    var activeSessionGeneration: Int? {
+        lock.withLock {
+            session == nil ? nil : latestSessionGeneration
+        }
+    }
+
+    func enterTerminalRemoteQuarantine() {
+        let invalidated: (session: URLSession, generation: Int)? =
+            lock.withLock {
+                guard let session else { return nil }
+                let result = (session, latestSessionGeneration)
+                self.session = nil
+                degradedUntil = nil
+                return result
+            }
+        guard let invalidated else { return }
+        invalidated.session.invalidateAndCancel()
+        PlaybackDiagnosticJournal.shared.record(
+            "network-transport phase=invalidated generation=\(invalidated.generation)"
+        )
+    }
+
+    func data(
+        for request: URLRequest,
+        monitorsRouteHealth: Bool = true
+    ) async throws -> (Data, URLResponse) {
+        let attempt: (session: URLSession, generation: Int)? = lock.withLock {
+            if let degradedUntil, degradedUntil > Date() {
+                return nil
+            }
+            degradedUntil = nil
+            guard let session else { return nil }
+            return (session, latestSessionGeneration)
+        }
+        guard let attempt else {
+            throw VelacantoNetworkTransportSuppressed()
+        }
+        do {
+            let response = try await attempt.session.data(for: request)
+            if monitorsRouteHealth {
+                lock.withLock {
+                    if latestSessionGeneration == attempt.generation,
+                        session != nil
+                    {
+                        degradedUntil = nil
+                    }
+                }
+            }
+            return response
+        } catch {
+            if monitorsRouteHealth, Self.degradesRoute(error) {
+                lock.withLock {
+                    if latestSessionGeneration == attempt.generation,
+                        session != nil
+                    {
+                        degradedUntil = Date().addingTimeInterval(
+                            degradedRouteCooldown
+                        )
+                    }
+                }
+            }
+            throw VelacantoNetworkTransportFailure(underlying: error)
+        }
+    }
+
+    private static func degradesRoute(_ error: Error) -> Bool {
+        guard let error = error as? URLError else { return false }
+        switch error.code {
+        case .notConnectedToInternet, .networkConnectionLost,
+            .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed, .timedOut,
+            .appTransportSecurityRequiresSecureConnection,
+            .secureConnectionFailed, .serverCertificateHasBadDate,
+            .serverCertificateUntrusted, .serverCertificateHasUnknownRoot,
+            .serverCertificateNotYetValid, .clientCertificateRejected,
+            .clientCertificateRequired:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private static func makeDefaultSession() -> URLSession {
+        let configuration = URLSessionConfiguration.default
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        // A VPN-required route can be temporarily unavailable while its
+        // Network Extension reconnects. Let the single admitted task wait for
+        // that route; the resource deadline still bounds the wait.
+        configuration.waitsForConnectivity = true
+        configuration.httpMaximumConnectionsPerHost = 2
+        configuration.timeoutIntervalForRequest = 6
+        configuration.timeoutIntervalForResource = 12
+        return URLSession(
+            configuration: configuration,
+            delegate: VelacantoNetworkMetricsDelegate.shared,
+            delegateQueue: nil
+        )
+    }
+}
+
+final class VelacantoNetworkTransportRegistry: @unchecked Sendable {
+    static let shared = VelacantoNetworkTransportRegistry()
+
+    private let lock = NSLock()
+    private var transports: [String: VelacantoNetworkTransport] = [:]
+    private var terminalRemoteQuarantined = false
+
+    func transport(for url: URL) -> VelacantoNetworkTransport {
+        let key = Self.originKey(for: url)
+        return lock.withLock {
+            if let transport = transports[key] {
+                return transport
+            }
+            let transport = VelacantoNetworkTransport(
+                startsQuarantined: terminalRemoteQuarantined
+            )
+            transports[key] = transport
+            return transport
+        }
+    }
+
+    func enterTerminalRemoteQuarantine() {
+        let retained: [VelacantoNetworkTransport] = lock.withLock {
+            guard !terminalRemoteQuarantined else { return [] }
+            terminalRemoteQuarantined = true
+            return Array(transports.values)
+        }
+        for transport in retained {
+            transport.enterTerminalRemoteQuarantine()
+        }
+        PlaybackDiagnosticJournal.shared.record(
+            "network-transport-registry phase=quarantined retained=\(retained.count)"
+        )
+    }
+
+    private static func originKey(for url: URL) -> String {
+        guard
+            let components = URLComponents(
+                url: url,
+                resolvingAgainstBaseURL: false
+            )
+        else {
+            return "invalid-origin"
+        }
+        let scheme = components.scheme?.lowercased() ?? "unknown"
+        let host = components.host?.lowercased() ?? "unknown"
+        let port = components.port.map(String.init) ?? "default"
+        return "\(scheme)|\(host)|\(port)"
+    }
+}
+
 actor JellyfinAPIClient: JellyfinAPIService {
+    private enum SessionLane: String, Sendable {
+        case playback
+        case interactive
+        case background
+    }
+
+    private static let networkLogger = Logger(
+        subsystem: "com.chameleonenterprise.velacanto",
+        category: "Network"
+    )
+
     private let builder: JellyfinRequestBuilder
-    private let session: URLSession
+    private let fixedSession: URLSession?
+    private let transport: VelacantoNetworkTransport
+    private var interactiveSuppressedUntil: Date?
+    private var backgroundSuppressedUntil: Date?
     private let decoder = JSONDecoder()
     private let encoder = JSONEncoder()
 
@@ -1016,14 +1863,18 @@ actor JellyfinAPIClient: JellyfinAPIService {
         server: JellyfinServerURL,
         deviceID: String,
         accessToken: String? = nil,
-        session: URLSession = .shared
+        session: URLSession? = nil,
+        transport: VelacantoNetworkTransport? = nil
     ) {
         builder = JellyfinRequestBuilder(
             server: server,
             deviceID: deviceID,
             accessToken: accessToken
         )
-        self.session = session
+        fixedSession = session
+        self.transport =
+            transport
+            ?? VelacantoNetworkTransportRegistry.shared.transport(for: server.url)
     }
 
     func publicServerInfo() async throws -> JellyfinServerInfo {
@@ -1343,6 +2194,16 @@ actor JellyfinAPIClient: JellyfinAPIService {
         )
     }
 
+    func directPlaybackResolution(
+        itemID: String,
+        container: String
+    ) async throws -> JellyfinPlaybackResolution? {
+        try builder.directFileResolution(
+            itemID: itemID,
+            container: container
+        )
+    }
+
     func setFavorite(
         _ isFavorite: Bool,
         itemID: String,
@@ -1484,7 +2345,7 @@ actor JellyfinAPIClient: JellyfinAPIService {
     }
 
     private static let trackFields =
-        "Album,AlbumArtist,Artists,ArtistItems,AlbumId,AlbumPrimaryImageTag,Genres,GenreItems,ImageTags,RunTimeTicks,UserData"
+        "Album,AlbumArtist,Artists,ArtistItems,AlbumId,AlbumPrimaryImageTag,Container,Genres,GenreItems,ImageTags,RunTimeTicks,UserData"
     private static let searchFields = trackFields + ",ChildCount"
 
     private func pagedItemQuery(
@@ -1562,46 +2423,296 @@ actor JellyfinAPIClient: JellyfinAPIService {
         }
     }
 
-    private func executeWithoutResponse(_ request: URLRequest) async throws -> Data {
+    private func executeWithoutResponse(
+        _ request: URLRequest
+    ) async throws -> Data {
+        let lane = sessionLane(for: request)
+        let requestKind = diagnosticRequestKind(for: request, lane: lane)
+        if lane == .interactive, isInteractiveRequestSuppressed {
+            Self.networkLogger.debug(
+                "Request lane=interactive phase=suppressed-after-failure"
+            )
+            PlaybackDiagnosticJournal.shared.record(
+                "network-request kind=\(requestKind) lane=interactive phase=suppressed"
+            )
+            throw JellyfinAPIError.unreachable
+        }
+        if lane == .background, isBackgroundRequestSuppressed {
+            Self.networkLogger.debug(
+                "Request lane=background phase=dropped-after-failure"
+            )
+            PlaybackDiagnosticJournal.shared.record(
+                "network-request kind=\(requestKind) lane=background phase=dropped"
+            )
+            throw JellyfinAPIError.unreachable
+        }
+        try Task.checkCancellation()
+        let priority =
+            VelacantoNetworkRequestContext.priorityOverride
+            ?? networkPriority(for: lane)
+        let attempt = 1
+        let startedAt = Date()
+        PlaybackDiagnosticJournal.shared.record(
+            "network-request kind=\(requestKind) lane=\(lane.rawValue) phase=started attempt=\(attempt) priority=\(priority.rawValue)"
+        )
         do {
-            let (data, response) = try await session.data(for: request)
+            let (data, response) = try await VelacantoNetworkPolicy.shared.perform(
+                priority: priority
+            ) { @Sendable () async throws -> (Data, URLResponse) in
+                PlaybackDiagnosticJournal.shared.record(
+                    "network-request kind=\(requestKind) lane=\(lane.rawValue) phase=admitted attempt=\(attempt) priority=\(priority.rawValue)"
+                )
+                guard await self.canStartAdmittedRequest(in: lane) else {
+                    throw JellyfinAPIError.unreachable
+                }
+                if let fixedSession = self.fixedSession {
+                    return try await fixedSession.data(for: request)
+                }
+                return try await self.transport.data(
+                    for: request,
+                    monitorsRouteHealth: lane != .background
+                )
+            }
+            if lane == .background {
+                backgroundSuppressedUntil = nil
+            } else if lane == .interactive {
+                interactiveSuppressedUntil = nil
+            }
             guard let response = response as? HTTPURLResponse else {
                 throw JellyfinAPIError.invalidResponse
             }
             switch response.statusCode {
             case 200..<300:
+                PlaybackDiagnosticJournal.shared.record(
+                    "network-request kind=\(requestKind) lane=\(lane.rawValue) phase=succeeded attempt=\(attempt) elapsed-ms=\(Int(Date().timeIntervalSince(startedAt) * 1_000))"
+                )
                 return data
             case 401, 403:
+                PlaybackDiagnosticJournal.shared.record(
+                    "network-request kind=\(requestKind) lane=\(lane.rawValue) phase=failed category=authentication attempt=\(attempt)"
+                )
                 throw JellyfinAPIError.unauthorized
             default:
+                PlaybackDiagnosticJournal.shared.record(
+                    "network-request kind=\(requestKind) lane=\(lane.rawValue) phase=failed category=http status=\(response.statusCode) attempt=\(attempt)"
+                )
                 throw JellyfinAPIError.httpStatus(response.statusCode)
             }
         } catch let error as JellyfinAPIError {
             throw error
-        } catch let error as URLError {
-            switch error.code {
-            case .cancelled:
+        } catch is CancellationError {
+            PlaybackDiagnosticJournal.shared.record(
+                "network-request kind=\(requestKind) lane=\(lane.rawValue) phase=cancelled attempt=\(attempt)"
+            )
+            throw CancellationError()
+        } catch is VelacantoNetworkTransportSuppressed {
+            PlaybackDiagnosticJournal.shared.record(
+                "network-request kind=\(requestKind) lane=\(lane.rawValue) phase=suppressed category=degraded-route"
+            )
+            throw JellyfinAPIError.unreachable
+        } catch let failure as VelacantoNetworkTransportFailure {
+            if failure.underlying is CancellationError {
                 throw CancellationError()
-            case .notConnectedToInternet, .networkConnectionLost:
-                throw JellyfinAPIError.offline
-            case .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed, .timedOut:
-                throw JellyfinAPIError.unreachable
-            case .appTransportSecurityRequiresSecureConnection:
-                throw JellyfinAPIError.transportSecurity
-            default:
-                throw JellyfinAPIError.network(error.localizedDescription)
             }
+            guard let error = failure.underlying as? URLError else {
+                throw JellyfinAPIError.network(
+                    failure.underlying.localizedDescription
+                )
+            }
+            if error.code == .cancelled {
+                throw CancellationError()
+            }
+            recordTransportFailure(
+                error,
+                lane: lane,
+                startedAt: startedAt,
+                requestKind: requestKind,
+                attempt: attempt
+            )
+            throw Self.apiError(for: error)
+        } catch let error as URLError {
+            if error.code == .cancelled {
+                throw CancellationError()
+            }
+            recordTransportFailure(
+                error,
+                lane: lane,
+                startedAt: startedAt,
+                requestKind: requestKind,
+                attempt: attempt
+            )
+            throw Self.apiError(for: error)
         } catch {
             throw JellyfinAPIError.network(error.localizedDescription)
         }
     }
+
+    private func recordTransportFailure(
+        _ error: URLError,
+        lane: SessionLane,
+        startedAt: Date,
+        requestKind: String,
+        attempt: Int
+    ) {
+        guard
+            Self.isTransientTransportError(error)
+                || Self.isTransportSecurityError(error)
+        else {
+            return
+        }
+        if lane == .background {
+            backgroundSuppressedUntil = Date().addingTimeInterval(5)
+        } else if lane == .interactive {
+            interactiveSuppressedUntil = Date().addingTimeInterval(5)
+        }
+        Self.networkLogger.error(
+            "Request lane=\(lane.rawValue, privacy: .public) phase=transport-failed code=\(error.code.rawValue, privacy: .public) elapsed_ms=\(Int(Date().timeIntervalSince(startedAt) * 1_000), privacy: .public)"
+        )
+        PlaybackDiagnosticJournal.shared.record(
+            "network-request kind=\(requestKind) lane=\(lane.rawValue) phase=failed category=\(Self.diagnosticCategory(for: error)) attempt=\(attempt) elapsed-ms=\(Int(Date().timeIntervalSince(startedAt) * 1_000))"
+        )
+    }
+
+    private func diagnosticRequestKind(
+        for request: URLRequest,
+        lane: SessionLane
+    ) -> String {
+        let components = request.url?.pathComponents ?? []
+        if components.last?.caseInsensitiveCompare("PlaybackInfo") == .orderedSame {
+            return "playback-info"
+        }
+        if components.suffix(2).map({ $0.lowercased() }) == ["users", "me"] {
+            return "session-validation"
+        }
+        if components.contains(where: {
+            $0.caseInsensitiveCompare("Images") == .orderedSame
+        }) {
+            return "artwork"
+        }
+        if components.contains(where: {
+            $0.caseInsensitiveCompare("Playing") == .orderedSame
+                || $0.caseInsensitiveCompare("PlayingProgress") == .orderedSame
+                || $0.caseInsensitiveCompare("PlayingStopped") == .orderedSame
+        }) {
+            return "playback-report"
+        }
+        return lane == .interactive ? "catalog-or-session" : lane.rawValue
+    }
+
+    private static func diagnosticCategory(for error: URLError) -> String {
+        switch error.code {
+        case .timedOut: return "timeout"
+        case .notConnectedToInternet: return "offline"
+        case .cannotFindHost, .dnsLookupFailed: return "dns"
+        case .cannotConnectToHost, .networkConnectionLost: return "unreachable"
+        case .secureConnectionFailed, .serverCertificateUntrusted,
+            .serverCertificateHasBadDate, .serverCertificateHasUnknownRoot,
+            .serverCertificateNotYetValid, .clientCertificateRejected,
+            .clientCertificateRequired:
+            return "tls"
+        default: return "transport"
+        }
+    }
+
+    private func sessionLane(for request: URLRequest) -> SessionLane {
+        switch request.networkServiceType {
+        case .responsiveData, .responsiveAV:
+            .playback
+        case .background:
+            .background
+        default:
+            .interactive
+        }
+    }
+
+    private var isInteractiveRequestSuppressed: Bool {
+        guard let interactiveSuppressedUntil else { return false }
+        return interactiveSuppressedUntil > Date()
+    }
+
+    private var isBackgroundRequestSuppressed: Bool {
+        guard let backgroundSuppressedUntil else { return false }
+        return backgroundSuppressedUntil > Date()
+    }
+
+    private func canStartAdmittedRequest(in lane: SessionLane) -> Bool {
+        switch lane {
+        case .playback:
+            true
+        case .interactive:
+            !isInteractiveRequestSuppressed
+        case .background:
+            !isBackgroundRequestSuppressed
+        }
+    }
+
+    private func networkPriority(
+        for lane: SessionLane
+    ) -> VelacantoNetworkPriority {
+        switch lane {
+        case .playback:
+            .playback
+        case .interactive:
+            .catalog
+        case .background:
+            .reporting
+        }
+    }
+
+    private static func isTransientTransportError(_ error: URLError) -> Bool {
+        switch error.code {
+        case .notConnectedToInternet, .networkConnectionLost, .cannotConnectToHost,
+            .cannotFindHost, .dnsLookupFailed, .timedOut:
+            true
+        default:
+            false
+        }
+    }
+
+    private static func isTransportSecurityError(_ error: URLError) -> Bool {
+        switch error.code {
+        case .appTransportSecurityRequiresSecureConnection, .secureConnectionFailed,
+            .serverCertificateHasBadDate, .serverCertificateUntrusted,
+            .serverCertificateHasUnknownRoot, .serverCertificateNotYetValid,
+            .clientCertificateRejected, .clientCertificateRequired:
+            true
+        default:
+            false
+        }
+    }
+
+    private static func apiError(for error: URLError) -> Error {
+        switch error.code {
+        case .cancelled:
+            CancellationError()
+        case .notConnectedToInternet, .networkConnectionLost:
+            JellyfinAPIError.offline
+        case .timedOut:
+            JellyfinAPIError.timeout
+        case .cannotFindHost, .dnsLookupFailed:
+            JellyfinAPIError.dns
+        case .cannotConnectToHost:
+            JellyfinAPIError.unreachable
+        case .appTransportSecurityRequiresSecureConnection, .secureConnectionFailed,
+            .serverCertificateHasBadDate, .serverCertificateUntrusted,
+            .serverCertificateHasUnknownRoot, .serverCertificateNotYetValid,
+            .clientCertificateRejected, .clientCertificateRequired:
+            JellyfinAPIError.transportSecurity
+        default:
+            JellyfinAPIError.network(error.localizedDescription)
+        }
+    }
+
 }
 
-enum JellyfinAPIError: LocalizedError, Equatable {
+enum JellyfinAPIError: LocalizedError, Equatable, Sendable {
     case unauthorized
     case unreachable
+    case timeout
+    case dns
     case offline
     case transportSecurity
+    case unsupportedMedia
     case invalidResponse
     case httpStatus(Int)
     case network(String)
@@ -1612,10 +2723,16 @@ enum JellyfinAPIError: LocalizedError, Equatable {
             "Jellyfin rejected the username, password, or saved session."
         case .unreachable:
             "Velacanto could not reach that Jellyfin server. Check the address and network."
+        case .timeout:
+            "The Jellyfin server did not respond in time."
+        case .dns:
+            "Velacanto could not resolve the Jellyfin server address."
         case .offline:
             "This device appears to be offline."
         case .transportSecurity:
             "The connection was blocked because it does not meet Apple's network security requirements."
+        case .unsupportedMedia:
+            "Jellyfin could not provide a supported audio stream for this item."
         case .invalidResponse:
             "The server returned a response Velacanto could not understand."
         case .httpStatus(let status):

@@ -6,6 +6,7 @@ struct MusicLibraryView: View {
 
     let openLocalFile: () -> Void
     let showProfile: () -> Void
+    var isActive = true
 
     @StateObject private var mostListened = PagedMusicCatalogModel()
     @StateObject private var scrollPosition = CatalogScrollPositionState<MusicCatalogItemID>()
@@ -107,7 +108,8 @@ struct MusicLibraryView: View {
                 }
             }
         }
-        .task(id: libraryIdentity) {
+        .task(id: "\(libraryIdentity)|active=\(isActive)") {
+            guard isActive else { return }
             guard scrollPosition.begin(identity: libraryIdentity) else { return }
             mostListenedSnapshot = []
             await loadMostListened()

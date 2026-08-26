@@ -39,10 +39,21 @@ struct PlaybackAccessory: View {
                             Text(playback.currentItem?.title ?? "Nothing Playing")
                                 .font(.callout.weight(.medium))
                                 .lineLimit(1)
-                            Text(playback.currentItem?.artist ?? "")
+                            if let pendingItem = playback.preparingQueueItem {
+                                HStack(spacing: 5) {
+                                    ProgressView()
+                                        .controlSize(.mini)
+                                    Text("Loading \(pendingItem.title)…")
+                                        .lineLimit(1)
+                                }
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
-                                .lineLimit(1)
+                            } else {
+                                Text(playback.currentItem?.artist ?? "")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
                         }
 
                         Spacer(minLength: 4)
@@ -124,10 +135,21 @@ struct PlaybackAccessory: View {
                             Text(playback.currentItem?.title ?? "Nothing Playing")
                                 .font(.callout.weight(.medium))
                                 .lineLimit(1)
-                            Text(playback.currentItem?.artist ?? "")
+                            if let pendingItem = playback.preparingQueueItem {
+                                HStack(spacing: 5) {
+                                    ProgressView()
+                                        .controlSize(.mini)
+                                    Text("Loading \(pendingItem.title)…")
+                                        .lineLimit(1)
+                                }
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
-                                .lineLimit(1)
+                            } else {
+                                Text(playback.currentItem?.artist ?? "")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
                         }
                         .frame(minWidth: 180, maxWidth: 360, alignment: .leading)
                     }

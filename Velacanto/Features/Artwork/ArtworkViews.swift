@@ -239,38 +239,11 @@ enum ArtworkLoadIntent: Int, Sendable {
         case .speculative: .background
         }
     }
-}
 
-/// Starts a small cancellable, idle prefetch window for likely next genre
-/// covers. Visible artwork can still promote ahead of this near-viewport work.
-@MainActor
-func prefetchGenreArtwork(
-    _ genres: [MusicGenre],
-    jellyfin: JellyfinSessionController
-) -> Task<Void, Never> {
-    guard let session = jellyfin.session else { return Task {} }
-    let references = Array(
-        Set(genres.compactMap(\.artwork))
-            .prefix(4)
-    )
-    return Task(priority: .utility) { @MainActor in
-        try? await Task.sleep(nanoseconds: 250_000_000)
-        guard !Task.isCancelled else { return }
-        for artwork in references where !Task.isCancelled {
-            let key = ArtworkKey(
-                serverID: session.serverID,
-                userID: session.userID,
-                itemID: artwork.opaqueItemID,
-                imageTag: artwork.imageTag ?? "no-tag",
-                sizeBucket: ArtworkKey.sizeBucket(for: 360)
-            )
-            _ = await ArtworkRepository.shared.image(for: key, intent: .nearViewport) {
-                await jellyfin.artworkRequest(
-                    itemID: artwork.opaqueItemID,
-                    imageTag: artwork.imageTag,
-                    maxWidth: key.sizeBucket
-                )
-            }
+    var networkPriority: VelacantoNetworkPriority {
+        switch self {
+        case .visible: .artwork
+        case .nearViewport, .speculative: .speculative
         }
     }
 }
@@ -475,74 +448,6 @@ actor ArtworkDiskCache {
     }
 }
 
-actor ArtworkDownloadLimiter {
-    private struct Waiter {
-        let id: UUID
-        let key: ArtworkKey
-        var intent: ArtworkLoadIntent
-        let continuation: CheckedContinuation<Void, Never>
-    }
-
-    private var availablePermits: Int
-    private var waiters: [Waiter] = []
-
-    init(limit: Int) {
-        availablePermits = max(limit, 1)
-    }
-
-    func acquire(key: ArtworkKey, intent: ArtworkLoadIntent) async {
-        let waiterID = UUID()
-        guard availablePermits == 0 else {
-            availablePermits -= 1
-            return
-        }
-
-        await withTaskCancellationHandler {
-            await withCheckedContinuation { continuation in
-                guard !Task.isCancelled else {
-                    continuation.resume()
-                    return
-                }
-                waiters.append(
-                    Waiter(
-                        id: waiterID,
-                        key: key,
-                        intent: intent,
-                        continuation: continuation
-                    ))
-                waiters.sort { $0.intent.rawValue > $1.intent.rawValue }
-            }
-        } onCancel: {
-            Task { await self.cancelWaiter(id: waiterID) }
-        }
-    }
-
-    func promote(_ key: ArtworkKey, to intent: ArtworkLoadIntent) {
-        guard let index = waiters.firstIndex(where: { $0.key == key }) else { return }
-        if intent.rawValue > waiters[index].intent.rawValue {
-            waiters[index].intent = intent
-        }
-        waiters.sort { $0.intent.rawValue > $1.intent.rawValue }
-    }
-
-    func hasQueuedRequest(for key: ArtworkKey) -> Bool {
-        waiters.contains { $0.key == key }
-    }
-
-    private func cancelWaiter(id: UUID) {
-        guard let index = waiters.firstIndex(where: { $0.id == id }) else { return }
-        waiters.remove(at: index).continuation.resume()
-    }
-
-    func release() {
-        if waiters.isEmpty {
-            availablePermits += 1
-        } else {
-            waiters.removeFirst().continuation.resume()
-        }
-    }
-}
-
 protocol ArtworkLoading: AnyObject, Sendable {
     func cachedImage(for key: ArtworkKey) async -> PlatformImage?
     func image(
@@ -566,8 +471,9 @@ actor ArtworkRepository: ArtworkLoading {
 
     private let memoryCache = NSCache<NSString, PlatformImage>()
     private let diskCache = ArtworkDiskCache()
-    private let downloadLimiter = ArtworkDownloadLimiter(limit: 4)
-    private let session: URLSession
+    private let fixedSession: URLSession?
+    private let fixedTransport: VelacantoNetworkTransport?
+    private var networkSuppressedUntil: Date?
     private var memoryKeys: [ArtworkKey: NSString] = [:]
     private struct InFlight {
         let task: Task<PlatformImage?, Never>
@@ -577,16 +483,13 @@ actor ArtworkRepository: ArtworkLoading {
     private var inFlight: [ArtworkKey: InFlight] = [:]
     private(set) var requestCounts: [ArtworkKey: Int] = [:]
 
-    init(session: URLSession? = nil) {
+    init(
+        session: URLSession? = nil,
+        transport: VelacantoNetworkTransport? = nil
+    ) {
         memoryCache.totalCostLimit = 16 * 1_024 * 1_024
-        if let session {
-            self.session = session
-        } else {
-            let configuration = URLSessionConfiguration.ephemeral
-            configuration.httpMaximumConnectionsPerHost = 4
-            configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
-            self.session = URLSession(configuration: configuration)
-        }
+        fixedSession = session
+        fixedTransport = transport
     }
 
     func cachedImage(for key: ArtworkKey) -> PlatformImage? {
@@ -624,7 +527,10 @@ actor ArtworkRepository: ArtworkLoading {
         let task: Task<PlatformImage?, Never>
         if var existing = inFlight[key] {
             Self.logger.debug("Artwork request coalesced")
-            await downloadLimiter.promote(key, to: intent)
+            VelacantoNetworkPolicy.shared.promote(
+                key: key.identifier,
+                to: intent.networkPriority
+            )
             existing.consumers.insert(consumer)
             inFlight[key] = existing
             task = existing.task
@@ -696,15 +602,53 @@ actor ArtworkRepository: ArtworkLoading {
             return decoded
         }
 
-        guard !Task.isCancelled, let urlRequest = await request() else { return nil }
-        await downloadLimiter.acquire(key: key, intent: intent)
-        defer { Task { await downloadLimiter.release() } }
-        guard !Task.isCancelled else { return nil }
+        guard !isNetworkSuppressed else {
+            Self.logger.debug("Artwork network request suppressed-after-failure")
+            return nil
+        }
+
+        guard !Task.isCancelled, var urlRequest = await request() else { return nil }
+        urlRequest.timeoutInterval = intent == .visible ? 5 : 4
+        urlRequest.networkServiceType = intent == .visible ? .responsiveData : .background
+        guard !Task.isCancelled, !isNetworkSuppressed else { return nil }
+        let networkRequest = urlRequest
         requestCounts[key, default: 0] += 1
-        Self.logger.debug("Artwork network request")
-        os_signpost(.event, log: Self.performanceLog, name: "Artwork Request")
+        Self.logger.debug(
+            "Artwork network request intent=\(intent.rawValue, privacy: .public)"
+        )
+        os_signpost(
+            .event,
+            log: Self.performanceLog,
+            name: "Artwork Request"
+        )
         do {
-            let (data, response) = try await session.data(for: urlRequest)
+            guard let requestURL = networkRequest.url else { return nil }
+            let artworkTransport =
+                fixedTransport
+                ?? (fixedSession == nil
+                    ? VelacantoNetworkTransportRegistry.shared.transport(
+                        for: requestURL
+                    ) : nil)
+            let (data, response) = try await VelacantoNetworkPolicy.shared.perform(
+                priority: intent.networkPriority,
+                key: key.identifier
+            ) { @Sendable () async throws -> (Data, URLResponse) in
+                guard await self.canStartAdmittedNetworkRequest() else {
+                    throw CancellationError()
+                }
+                if let fixedSession = self.fixedSession {
+                    return try await fixedSession.data(for: networkRequest)
+                }
+                guard let artworkTransport else {
+                    throw CancellationError()
+                }
+                // Artwork owns a short local cooldown, but it must never set
+                // or clear the origin breaker used by playback negotiation.
+                return try await artworkTransport.data(
+                    for: networkRequest,
+                    monitorsRouteHealth: false
+                )
+            }
             guard
                 !Task.isCancelled,
                 let response = response as? HTTPURLResponse,
@@ -713,9 +657,63 @@ actor ArtworkRepository: ArtworkLoading {
             else { return nil }
             await diskCache.store(data, for: key)
             insert(decoded, for: key)
+            networkSuppressedUntil = nil
             return decoded
+        } catch let failure as VelacantoNetworkTransportFailure {
+            guard let error = failure.underlying as? URLError else {
+                return nil
+            }
+            return handleNetworkFailure(error)
+        } catch is VelacantoNetworkTransportSuppressed {
+            return nil
+        } catch let error as URLError {
+            return handleNetworkFailure(error)
         } catch {
             return nil
+        }
+    }
+
+    private func handleNetworkFailure(_ error: URLError) -> PlatformImage? {
+        guard
+            Self.isTransient(error)
+                || Self.isTransportSecurityError(error)
+        else { return nil }
+        networkSuppressedUntil = Date().addingTimeInterval(5)
+        let code = error.code.rawValue
+        Self.logger.error(
+            "Artwork network failure code=\(code, privacy: .public)"
+        )
+        return nil
+    }
+
+    private var isNetworkSuppressed: Bool {
+        guard let networkSuppressedUntil else { return false }
+        return networkSuppressedUntil > Date()
+    }
+
+    private func canStartAdmittedNetworkRequest() -> Bool {
+        !isNetworkSuppressed
+    }
+
+    private static func isTransient(_ error: URLError) -> Bool {
+        switch error.code {
+        case .notConnectedToInternet, .networkConnectionLost, .cannotConnectToHost,
+            .cannotFindHost, .dnsLookupFailed, .timedOut:
+            true
+        default:
+            false
+        }
+    }
+
+    private static func isTransportSecurityError(_ error: URLError) -> Bool {
+        switch error.code {
+        case .appTransportSecurityRequiresSecureConnection, .secureConnectionFailed,
+            .serverCertificateHasBadDate, .serverCertificateUntrusted,
+            .serverCertificateHasUnknownRoot, .serverCertificateNotYetValid,
+            .clientCertificateRejected, .clientCertificateRequired:
+            true
+        default:
+            false
         }
     }
 

@@ -62,6 +62,9 @@ final class JellyfinSessionController: ObservableObject {
     private var cachedGenres: [MusicGenre] = []
     private var genreLoadTask: Task<[MusicGenre], Error>?
     private var homeGenreLoadTask: Task<[MusicGenre], Error>?
+    /// Changes whenever the visible account shell is replaced or removed.
+    /// A delayed Users/Me response may only affect the shell it started with.
+    private var lifecycleRevision = 0
 
     convenience init(autoRestore: Bool = true) {
         self.init(
@@ -136,6 +139,12 @@ final class JellyfinSessionController: ObservableObject {
         session != nil
     }
 
+    /// Persisted account identity can be available before the remote service is.
+    /// Catalog, artwork, and playback negotiation must wait for this capability.
+    var isRemoteAccessReady: Bool {
+        phase == .signedIn && session != nil && client != nil
+    }
+
     var isWorking: Bool {
         switch phase {
         case .restoring, .connecting, .authenticating:
@@ -160,6 +169,7 @@ final class JellyfinSessionController: ObservableObject {
     // MARK: - Connection lifecycle
 
     func connect(to userInput: String) async {
+        lifecycleRevision += 1
         resetLyricsState()
         phase = .connecting
         errorMessage = nil
@@ -195,6 +205,7 @@ final class JellyfinSessionController: ObservableObject {
             return
         }
 
+        lifecycleRevision += 1
         phase = .authenticating
         errorMessage = nil
 
@@ -233,7 +244,7 @@ final class JellyfinSessionController: ObservableObject {
     }
 
     func refreshLibraries() async {
-        guard let activeSession = session, client != nil else { return }
+        guard let activeSession = session, isRemoteAccessReady else { return }
         isRefreshingLibraries = true
         defer {
             if session == activeSession {
@@ -618,6 +629,7 @@ final class JellyfinSessionController: ObservableObject {
         imageTag: String?,
         maxWidth: Int
     ) async -> URLRequest? {
+        guard isRemoteAccessReady else { return nil }
         do {
             return try await catalogRepository().artworkRequest(
                 itemID: itemID,
@@ -633,7 +645,7 @@ final class JellyfinSessionController: ObservableObject {
     }
 
     func userImageRequest(maxWidth: Int) async -> URLRequest? {
-        guard let session else { return nil }
+        guard let session, isRemoteAccessReady else { return nil }
         do {
             return try await catalogRepository().userImageRequest(
                 imageTag: session.userPrimaryImageTag,
@@ -659,6 +671,7 @@ final class JellyfinSessionController: ObservableObject {
     }
 
     func logout() async {
+        lifecycleRevision += 1
         let oldSession = session
         let oldClient = client
         do {
@@ -695,7 +708,7 @@ final class JellyfinSessionController: ObservableObject {
     /// The repository does not retain UI state, so in-flight browsing cannot
     /// mutate published session state after logout or a new sign-in.
     private func catalogRepository() throws -> JellyfinCatalogRepository {
-        guard let session, let client else {
+        guard let session, let client, isRemoteAccessReady else {
             throw JellyfinSessionError.notSignedIn
         }
         return JellyfinCatalogRepository(
@@ -730,7 +743,7 @@ final class JellyfinSessionController: ObservableObject {
     }
 
     private func playbackResolver() throws -> JellyfinPlaybackRequestResolver {
-        guard let session, let client else {
+        guard let session, let client, isRemoteAccessReady else {
             throw JellyfinSessionError.notSignedIn
         }
         return JellyfinPlaybackRequestResolver(api: client, userID: session.userID)
@@ -759,32 +772,57 @@ final class JellyfinSessionController: ObservableObject {
                 return
             }
 
-            let server = try JellyfinServerURL(savedSession.serverURL.absoluteString)
+            let server: JellyfinServerURL
+            do {
+                server = try JellyfinServerURL(savedSession.serverURL.absoluteString)
+            } catch {
+                discardExpiredCredentials()
+                errorMessage = error.localizedDescription
+                return
+            }
             let authenticatedClient = makeClient(server, deviceID, token)
-            session = savedSession
             candidateServer = server
             client = authenticatedClient
+            lifecycleRevision += 1
+            let restoreRevision = lifecycleRevision
+            // Make the durable shell available first. Remote capability remains
+            // explicitly unavailable until the single Users/Me validation wins.
+            session = savedSession
             configureItemActions()
+            PlaybackDiagnosticJournal.shared.record(
+                "session-restore phase=verification-started"
+            )
 
             do {
-                let user = try await authenticatedClient.currentUser()
-                let restored = JellyfinSession(
-                    serverURL: savedSession.serverURL,
-                    serverID: savedSession.serverID,
-                    serverName: savedSession.serverName,
-                    userID: user.id,
-                    username: user.name,
-                    userPrimaryImageTag: user.primaryImageTag
-                )
-                session = restored
-                sessionStore.saveSession(restored)
+                _ = try await authenticatedClient.currentUser()
+                guard lifecycleRevision == restoreRevision,
+                    session == savedSession,
+                    phase == .restoring
+                else { return }
                 phase = .signedIn
                 configureItemActions()
+                PlaybackDiagnosticJournal.shared.record(
+                    "session-restore phase=verified"
+                )
                 await refreshLibraries()
-            } catch JellyfinAPIError.unauthorized {
-                discardExpiredCredentials()
             } catch {
-                phase = .signedIn
+                guard lifecycleRevision == restoreRevision,
+                    session == savedSession,
+                    phase == .restoring
+                else { return }
+                if Self.isUnauthorized(error) {
+                    PlaybackDiagnosticJournal.shared.record(
+                        "session-restore phase=rejected category=authentication"
+                    )
+                    discardExpiredCredentials()
+                    return
+                }
+                // An unavailable route never revokes the durable account shell.
+                // Keep phase restoring so remote work remains gated until a later
+                // explicit recovery path validates the account.
+                PlaybackDiagnosticJournal.shared.record(
+                    "session-restore phase=accepted-degraded category=\(Self.diagnosticCategory(for: error))"
+                )
                 errorMessage =
                     "The saved session is available, but Velacanto could not verify it: "
                     + error.localizedDescription
@@ -795,9 +833,34 @@ final class JellyfinSessionController: ObservableObject {
         }
     }
 
+    private static func diagnosticCategory(for error: Error) -> String {
+        guard let error = error as? JellyfinAPIError else {
+            return "other"
+        }
+        switch error {
+        case .offline: return "offline"
+        case .unreachable: return "unreachable"
+        case .timeout: return "timeout"
+        case .dns: return "dns"
+        case .unauthorized: return "authentication"
+        case .transportSecurity: return "tls"
+        case .unsupportedMedia: return "unsupported-media"
+        case .invalidResponse: return "invalid-response"
+        case .httpStatus(let code): return "http-\(code)"
+        case .network: return "network"
+        }
+    }
+
     private func handleExpiredSessionIfNeeded(_ error: Error) {
-        guard error as? JellyfinAPIError == .unauthorized else { return }
+        guard Self.isUnauthorized(error) else { return }
         discardExpiredCredentials()
+    }
+
+    private static func isUnauthorized(_ error: Error) -> Bool {
+        switch error as? JellyfinAPIError {
+        case .unauthorized, .httpStatus(401), .httpStatus(403): true
+        default: false
+        }
     }
 
     /// Removes locally stored expired credentials. If Keychain access fails,
@@ -818,6 +881,7 @@ final class JellyfinSessionController: ObservableObject {
     }
 
     private func clearSession() {
+        lifecycleRevision += 1
         itemActions.clear()
         resetLyricsState()
         genreLoadTask?.cancel()

@@ -17,15 +17,15 @@ the [0.3 acceptance matrix](0.3-stability-acceptance.md).
   must continue treating playback URLs as sensitive.
 - A saved session remains available when launch validation fails because the
   server is offline. An explicitly rejected token is removed.
-- Committed unit suites pass, but the restored UI-test target currently runs two
-  iOS tab-bar tests against macOS, where both navigation assertions fail. Issue
-  #61 owns platform-appropriate UI automation and signed-in coverage.
 - Metadata and artwork caches are account-isolated browsing accelerators, not
   offline playback. The artwork cache is bounded to 64 MB; user-visible storage
   management and offline policy remain 0.4 work.
-- The active queue restores a bounded window. OS 27 reordering and final
-  interruption/session acceptance remain in issue #12 and must retain that
-  bounded restoration policy.
-- Lyrics exist in recovered working changes but are not integrated. Issues #80
-  and #81 own the provider-neutral data path and native presentation.
+- The active queue restores a bounded window. Play Next and direct History/Up
+  Next selection are accepted for 0.2.5, but touch queue reordering is not
+  currently functional and remains tracked in issue #12. Any correction must
+  retain bounded restoration and immutable History/current entries.
+- A successful Play Next load in final physical-device acceptance took about
+  10.2 seconds; other successful selections converged in about 3.2 and 2.1
+  seconds. This is accepted 0.2.5 performance debt, not a reliability failure,
+  and remains tracked in issue #47.
 - Sample-accurate gapless playback is not promised for transcoded streams.

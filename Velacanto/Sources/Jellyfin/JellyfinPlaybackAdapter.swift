@@ -38,14 +38,27 @@ struct JellyfinPlaybackAdapter: PlaybackSourceAdapter {
             albumID: track.albumID,
             artistID: track.artistIDs.first ?? fallbackArtistID,
             source: .jellyfin,
+            accountScope: track.id.accountScope,
             artworkItemID: track.artworkItemID,
             artworkTag: track.primaryImageTag,
             duration: track.duration,
+            container: track.container,
             isFavorite: track.isFavorite
         )
     }
 
     func playbackRequest(for selection: JellyfinTrackSelection) async throws -> PlaybackRequest {
+        try await playbackRequest(
+            for: selection,
+            forcedPlaybackInfoFallback: nil
+        )
+    }
+
+    func playbackRequest(
+        for selection: JellyfinTrackSelection,
+        forcedPlaybackInfoFallback:
+            (@Sendable () async throws -> PlaybackRequest)?
+    ) async throws -> PlaybackRequest {
         guard !selection.streamURL.isFileURL else {
             throw JellyfinPlaybackError.invalidStreamURL
         }
@@ -54,7 +67,8 @@ struct JellyfinPlaybackAdapter: PlaybackSourceAdapter {
             item: Self.playbackItem(for: selection.track),
             asset: PlaybackAsset(url: selection.streamURL),
             transportKind: selection.transportKind,
-            reporter: selection.reporter
+            reporter: selection.reporter,
+            forcedPlaybackInfoFallback: forcedPlaybackInfoFallback
         )
     }
 }

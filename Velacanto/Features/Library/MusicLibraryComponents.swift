@@ -58,13 +58,13 @@ struct MusicGenreGrid: View {
     /// Allows a caller to opt into a stable collection column count while the
     /// default adaptive layout remains unchanged for Library and Home.
     var collectionColumnCount: Int?
+    var isActive = true
 
     @State private var genres: [MusicGenre] = []
     @State private var errorMessage: String?
     @State private var isLoading = true
     @StateObject private var carouselScrollPosition =
         CatalogScrollPositionState<MusicCatalogItemID>()
-    @State private var genreArtworkPrefetchTask: Task<Void, Never>?
 
     var body: some View {
         Group {
@@ -80,12 +80,17 @@ struct MusicGenreGrid: View {
                 grid
             }
         }
-        .task(id: jellyfin.playbackAccount) {
+        .task(
+            id: GenreLoadIdentity(
+                serverID: jellyfin.playbackAccount?.serverID,
+                userID: jellyfin.playbackAccount?.userID,
+                isActive: isActive
+            )
+        ) {
+            guard isActive else {
+                return
+            }
             await loadGenres()
-        }
-        .onDisappear {
-            genreArtworkPrefetchTask?.cancel()
-            genreArtworkPrefetchTask = nil
         }
     }
 
@@ -197,15 +202,14 @@ struct MusicGenreGrid: View {
         if !cached.isEmpty {
             genres = cached
             isLoading = false
-            scheduleGenreArtworkPrefetch()
         }
         do {
             genres = try await jellyfin.musicGenres(forceRefresh: true)
             errorMessage = nil
-            scheduleGenreArtworkPrefetch()
         } catch {
-            genres = []
-            errorMessage = error.localizedDescription
+            if genres.isEmpty {
+                errorMessage = error.localizedDescription
+            }
         }
         isLoading = false
     }
@@ -230,9 +234,10 @@ struct MusicGenreGrid: View {
         ].joined(separator: "|")
     }
 
-    private func scheduleGenreArtworkPrefetch() {
-        genreArtworkPrefetchTask?.cancel()
-        genreArtworkPrefetchTask = prefetchGenreArtwork(genres, jellyfin: jellyfin)
+    private struct GenreLoadIdentity: Hashable {
+        let serverID: String?
+        let userID: String?
+        let isActive: Bool
     }
 }
 
@@ -255,22 +260,11 @@ struct GenreTile: View {
 
     @ViewBuilder
     private var artworkBackground: some View {
-        if let artwork = genre.artwork {
-            JellyfinArtworkReferenceView(
-                itemID: artwork.opaqueItemID,
-                imageTag: artwork.imageTag,
-                jellyfin: jellyfin,
-                cornerRadius: MusicGenreCardLayout.cornerRadius,
-                maxWidth: 360
-            )
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else {
-            LinearGradient(
-                colors: [palette.0, palette.1],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-        }
+        LinearGradient(
+            colors: [palette.0, palette.1],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
     }
 
     private var genreHueOverlay: LinearGradient {

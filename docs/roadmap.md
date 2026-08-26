@@ -20,6 +20,14 @@ Required outcomes are maintained in the [0.3 plan](0.3-plan.md) and
 
 ## Release history
 
+### 0.2.5 — stabilization candidate
+
+Packages the physically accepted playback, network-admission, and session-
+restoration repairs as an internal test build. It preserves queue/cursor state
+through navigation, interruption, backgrounding, and relaunch while keeping
+slow media-start performance and nonfunctional queue reordering visible as
+follow-up work. See the [0.2.5 release notes](0.2.5-release-notes.md).
+
 ### 0.2.0 — complete
 
 Separated presentation ownership, resolved the scoped macOS and artwork defects,

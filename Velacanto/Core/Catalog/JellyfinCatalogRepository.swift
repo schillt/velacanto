@@ -9,6 +9,12 @@ import os
 actor JellyfinCatalogRepository: MusicLibraryProviding, MusicItemActionProviding,
     MusicLyricsProviding
 {
+    private enum RequestPolicy {
+        /// Leaves headroom for playback negotiation and AVPlayer streaming on
+        /// the same host while still allowing useful catalog parallelism.
+        static let maximumParallelReads = 1
+    }
+
     private static let performanceLog = OSLog(
         subsystem: "com.chameleonenterprise.velacanto",
         category: "Performance"
@@ -54,33 +60,13 @@ actor JellyfinCatalogRepository: MusicLibraryProviding, MusicItemActionProviding
     func musicGenres() async throws -> [MusicGenre] {
         let candidates = try await api.musicGenres(userID: userID)
             .filter { MusicGenre.hasBrowsableName($0.name) }
-        let api = api
-        let userID = userID
-        var pages: [String: JellyfinItemPage] = [:]
-
-        for batchStart in stride(from: 0, to: candidates.count, by: 6) {
-            let batch = candidates[batchStart..<min(batchStart + 6, candidates.count)]
-            await withTaskGroup(of: (String, JellyfinItemPage?).self) { group in
-                for genre in batch {
-                    group.addTask {
-                        let page = try? await api.genreItemsPage(
-                            userID: userID,
-                            genreID: genre.id,
-                            startIndex: 0,
-                            limit: 8
-                        )
-                        return (genre.id, page)
-                    }
-                }
-                for await (genreID, page) in group {
-                    if let page { pages[genreID] = page }
-                }
-            }
-        }
-
+        // Genre navigation must become interactive after one bounded request.
+        // Fetching an album page for every genre made the whole grid wait on an
+        // N+1 fanout and let an inactive tab monopolize catalog networking.
+        // Keep cards network-free. The native genre gradient is immediate and
+        // browsing the selected genre is the first point that should request
+        // its albums or artwork.
         return candidates.map { genre in
-            let page = pages[genre.id]
-            let cover = page?.items.first { $0.primaryImageTag != nil }
             return MusicGenre(
                 id: MusicCatalogItemID(
                     source: .jellyfin,
@@ -88,17 +74,8 @@ actor JellyfinCatalogRepository: MusicLibraryProviding, MusicItemActionProviding
                     opaqueID: genre.id
                 ),
                 name: genre.name,
-                artwork: cover.map {
-                    MusicArtworkReference(
-                        opaqueItemID: $0.artworkItemID,
-                        imageTag: $0.primaryImageTag
-                    )
-                },
-                albumCount: max(
-                    page?.totalRecordCount ?? 0,
-                    page?.items.count ?? 0,
-                    genre.childCount ?? 0
-                )
+                artwork: nil,
+                albumCount: genre.childCount ?? 0
             )
         }
         .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
@@ -353,19 +330,38 @@ actor JellyfinCatalogRepository: MusicLibraryProviding, MusicItemActionProviding
             }
             if !sourcesToFill.isEmpty {
                 let offsets = state.offsets
-                let responses = try await withThrowingTaskGroup(of: (String, JellyfinItemPage).self)
-                { group in
-                    for sourceID in sourcesToFill {
-                        group.addTask {
-                            (
-                                sourceID,
-                                try await loader(sourceID, offsets[sourceID, default: 0], safeLimit)
-                            )
+                var responses: [(String, JellyfinItemPage)] = []
+                for batchStart in stride(
+                    from: 0,
+                    to: sourcesToFill.count,
+                    by: RequestPolicy.maximumParallelReads
+                ) {
+                    let batch = sourcesToFill[
+                        batchStart..<min(
+                            batchStart + RequestPolicy.maximumParallelReads,
+                            sourcesToFill.count
+                        )
+                    ]
+                    let batchResponses = try await withThrowingTaskGroup(
+                        of: (String, JellyfinItemPage).self
+                    ) { group in
+                        for sourceID in batch {
+                            group.addTask {
+                                (
+                                    sourceID,
+                                    try await loader(
+                                        sourceID,
+                                        offsets[sourceID, default: 0],
+                                        safeLimit
+                                    )
+                                )
+                            }
                         }
+                        var values: [(String, JellyfinItemPage)] = []
+                        for try await value in group { values.append(value) }
+                        return values
                     }
-                    var values: [(String, JellyfinItemPage)] = []
-                    for try await value in group { values.append(value) }
-                    return values
+                    responses.append(contentsOf: batchResponses)
                 }
                 for (sourceID, page) in responses {
                     let items = page.items.filter {
@@ -445,6 +441,7 @@ struct JellyfinCatalogMapper: Sendable {
             discNumber: item.parentIndexNumber,
             childCount: item.childCount,
             duration: item.duration,
+            container: item.container,
             artwork: MusicArtworkReference(
                 opaqueItemID: item.artworkItemID,
                 imageTag: item.primaryImageTag
