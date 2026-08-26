@@ -1043,9 +1043,6 @@ final class AVFoundationAudioPlayerEngine: AudioPlayerEngine {
             publishStateEvent(.paused, generation: generation)
         case .waitingToPlayAtSpecifiedRate:
             let reason = Self.waitingReasonName(player.reasonForWaitingToPlay)
-            Self.logger.debug(
-                "AVPlayer generation=\(self.itemGeneration, privacy: .public) phase=waiting reason=\(reason, privacy: .public)"
-            )
             journal("role=current phase=waiting reason=\(reason)")
             publishStateEvent(.waiting, generation: generation)
         case .playing:
@@ -1331,9 +1328,6 @@ final class AVFoundationAudioPlayerEngine: AudioPlayerEngine {
                 let transferMilliseconds =
                     PlaybackNetworkMetricSnapshot
                     .milliseconds(event.transferDuration)
-                Self.logger.debug(
-                    "AVPlayer generation=\(self.itemGeneration, privacy: .public) phase=access-log observed_bps=\(observedBitrate, privacy: .public) indicated_bps=\(indicatedBitrate, privacy: .public) transfer_s=\(event.transferDuration, privacy: .public) bytes=\(event.numberOfBytesTransferred, privacy: .public) requests=\(event.numberOfMediaRequests, privacy: .public) stalls=\(event.numberOfStalls, privacy: .public)"
-                )
                 self.journal(
                     "role=current phase=access-log startup-ms=\(startupMilliseconds) observed-bps=\(observedBitrate) indicated-bps=\(indicatedBitrate) transfer-ms=\(transferMilliseconds) bytes=\(event.numberOfBytesTransferred) requests=\(event.numberOfMediaRequests) stalls=\(event.numberOfStalls)"
                 )

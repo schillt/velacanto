@@ -2559,7 +2559,6 @@ final class AudioPlaybackCoordinator: ObservableObject {
         PlaybackDiagnosticJournal.shared.record(
             "playback-preload id=\(taskID.uuidString) phase=started revision=\(expectedQueueRevision) candidates=\(preparationItems.count)"
         )
-        let startedAt = Date()
         preloadTask = Task(priority: .utility) { [weak self] in
             guard let self else { return }
             defer {
@@ -2662,9 +2661,6 @@ final class AudioPlaybackCoordinator: ObservableObject {
                     continue
                 }
             }
-            Self.logger.debug(
-                "Playback preload id=\(taskID.uuidString, privacy: .public) phase=window-prepared count=\(preparedCount, privacy: .public) elapsed_ms=\(Int(Date().timeIntervalSince(startedAt) * 1_000), privacy: .public)"
-            )
         }
     }
 
@@ -3698,9 +3694,6 @@ final class AudioPlaybackCoordinator: ObservableObject {
         let startedAt = Date()
         do {
             let request = try await requestResolver(item)
-            Self.logger.debug(
-                "Playback intent id=\(intentID.uuidString, privacy: .public) phase=resolved elapsed_ms=\(Int(Date().timeIntervalSince(startedAt) * 1_000), privacy: .public)"
-            )
             return request
         } catch is CancellationError {
             throw CancellationError()
@@ -3764,9 +3757,6 @@ final class AudioPlaybackCoordinator: ObservableObject {
     }
 
     private func logIntentCancelled(_ id: UUID, kind: String) {
-        Self.logger.debug(
-            "Playback intent id=\(id.uuidString, privacy: .public) kind=\(kind, privacy: .public) phase=cancelled"
-        )
         PlaybackDiagnosticJournal.shared.record(
             "playback-intent id=\(id.uuidString) kind=\(kind) phase=cancelled revision=\(queueEditRevision)"
         )

@@ -3,7 +3,7 @@
 	archiveVersion = 1;
 	classes = {
 	};
-	objectVersion = 71;
+	objectVersion = 110;
 	objects = {
 
 /* Begin PBXBuildFile section */
@@ -25,20 +25,13 @@
 		000000000000000000000217 /* App/VelacantoRootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000120 /* App/VelacantoRootView.swift */; };
 		000000000000000000000219 /* Features/Profile/ProfileView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000122 /* Features/Profile/ProfileView.swift */; };
 		000000000000000000000220 /* Features/Search/MusicSearchView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000123 /* Features/Search/MusicSearchView.swift */; };
+		000000000000000000000221 /* Resources/AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000124 /* Resources/AppIcon.icon */; };
 		000000000000000000000222 /* Core/Catalog/JellyfinCatalogRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000125 /* Core/Catalog/JellyfinCatalogRepository.swift */; };
 		000000000000000000000223 /* Sources/Jellyfin/JellyfinPlaybackRequestResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000126 /* Sources/Jellyfin/JellyfinPlaybackRequestResolver.swift */; };
 		000000000000000000000224 /* Core/Session/JellyfinSessionPersistence.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000127 /* Core/Session/JellyfinSessionPersistence.swift */; };
 		000000000000000000000225 /* App/AppNavigation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000128 /* App/AppNavigation.swift */; };
 		000000000000000000000226 /* Features/Home/HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000129 /* Features/Home/HomeView.swift */; };
 		000000000000000000000227 /* Features/Artwork/ArtworkViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000130 /* Features/Artwork/ArtworkViews.swift */; };
-		000000000000000000000241 /* Features/Playback/PlaybackAccessory.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000145 /* Features/Playback/PlaybackAccessory.swift */; };
-		000000000000000000000242 /* Features/Playback/PlaybackSystemControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000146 /* Features/Playback/PlaybackSystemControls.swift */; };
-		000000000000000000000243 /* Features/Playback/NowPlayingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000147 /* Features/Playback/NowPlayingView.swift */; };
-		000000000000000000000244 /* Features/Playback/LyricsPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000148 /* Features/Playback/LyricsPresentation.swift */; };
-		000000000000000000000245 /* Features/Playback/UpNextPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000149 /* Features/Playback/UpNextPresentation.swift */; };
-		000000000000000000000246 /* Features/Playback/PlaybackQueueView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000000000000000000014A /* Features/Playback/PlaybackQueueView.swift */; };
-		000000000000000000000247 /* Features/Playback/ModernPlaybackAccessory.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000000000000000000014B /* Features/Playback/ModernPlaybackAccessory.swift */; };
-		000000000000000000000248 /* Features/Playback/BufferedPlaybackSlider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000000000000000000014C /* Features/Playback/BufferedPlaybackSlider.swift */; };
 		000000000000000000000229 /* Features/Library/PagedJellyfinItemsModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000132 /* Features/Library/PagedJellyfinItemsModel.swift */; };
 		000000000000000000000230 /* Features/Library/MusicLibraryNavigation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000133 /* Features/Library/MusicLibraryNavigation.swift */; };
 		000000000000000000000231 /* Features/Library/MusicAlbumsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000134 /* Features/Library/MusicAlbumsView.swift */; };
@@ -51,7 +44,17 @@
 		000000000000000000000238 /* Features/Library/MusicFavoriteControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000141 /* Features/Library/MusicFavoriteControls.swift */; };
 		000000000000000000000239 /* MusicItemActionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000142 /* MusicItemActionTests.swift */; };
 		000000000000000000000240 /* VelacantoUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000143 /* VelacantoUITests.swift */; };
-		000000000000000000000221 /* Resources/AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000124 /* Resources/AppIcon.icon */; };
+		000000000000000000000241 /* Features/Playback/PlaybackAccessory.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000145 /* Features/Playback/PlaybackAccessory.swift */; };
+		000000000000000000000242 /* Features/Playback/PlaybackSystemControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000146 /* Features/Playback/PlaybackSystemControls.swift */; };
+		000000000000000000000243 /* Features/Playback/NowPlayingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000147 /* Features/Playback/NowPlayingView.swift */; };
+		000000000000000000000244 /* Features/Playback/LyricsPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000148 /* Features/Playback/LyricsPresentation.swift */; };
+		000000000000000000000245 /* Features/Playback/UpNextPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000149 /* Features/Playback/UpNextPresentation.swift */; };
+		000000000000000000000246 /* Features/Playback/PlaybackQueueView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000000000000000000014A /* Features/Playback/PlaybackQueueView.swift */; };
+		000000000000000000000247 /* Features/Playback/ModernPlaybackAccessory.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000000000000000000014B /* Features/Playback/ModernPlaybackAccessory.swift */; };
+		000000000000000000000248 /* Features/Playback/BufferedPlaybackSlider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000000000000000000014C /* Features/Playback/BufferedPlaybackSlider.swift */; };
+		526902b61e754ed08f0cf232 /* Core/Diagnostics/PlaybackDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = ccd9c9820b444c13982d6ab8 /* Core/Diagnostics/PlaybackDiagnostics.swift */; };
+		bb53bf84b01343d0bf595fd3 /* Core/Diagnostics/JellyfinNetworkMetrics.swift in Sources */ = {isa = PBXBuildFile; fileRef = d0d80671fbdd4f10bddab142 /* Core/Diagnostics/JellyfinNetworkMetrics.swift */; };
+		f14d7a2636b24c55927c9a4d /* Core/Diagnostics/PlaybackDiagnosticJournal.swift in Sources */ = {isa = PBXBuildFile; fileRef = a5e6f7c899da4bb0b1c2d3e4 /* Core/Diagnostics/PlaybackDiagnosticJournal.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -77,8 +80,6 @@
 		000000000000000000000104 /* PlaybackFoundationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackFoundationTests.swift; sourceTree = "<group>"; };
 		000000000000000000000105 /* Velacanto.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Velacanto.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		000000000000000000000106 /* VelacantoTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = VelacantoTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
-		000000000000000000000143 /* VelacantoUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VelacantoUITests.swift; sourceTree = "<group>"; };
-		000000000000000000000144 /* VelacantoUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = VelacantoUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		000000000000000000000107 /* Resources/Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Resources/Info.plist; sourceTree = "<group>"; };
 		000000000000000000000108 /* Resources/PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Resources/PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		000000000000000000000109 /* Core/Models/MusicSource.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Core/Models/MusicSource.swift; sourceTree = "<group>"; };
@@ -102,14 +103,6 @@
 		000000000000000000000128 /* App/AppNavigation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App/AppNavigation.swift; sourceTree = "<group>"; };
 		000000000000000000000129 /* Features/Home/HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Home/HomeView.swift; sourceTree = "<group>"; };
 		000000000000000000000130 /* Features/Artwork/ArtworkViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Artwork/ArtworkViews.swift; sourceTree = "<group>"; };
-		000000000000000000000145 /* Features/Playback/PlaybackAccessory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Playback/PlaybackAccessory.swift; sourceTree = "<group>"; };
-		000000000000000000000146 /* Features/Playback/PlaybackSystemControls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Playback/PlaybackSystemControls.swift; sourceTree = "<group>"; };
-		000000000000000000000147 /* Features/Playback/NowPlayingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Playback/NowPlayingView.swift; sourceTree = "<group>"; };
-		000000000000000000000148 /* Features/Playback/LyricsPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Playback/LyricsPresentation.swift; sourceTree = "<group>"; };
-		000000000000000000000149 /* Features/Playback/UpNextPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Playback/UpNextPresentation.swift; sourceTree = "<group>"; };
-		00000000000000000000014A /* Features/Playback/PlaybackQueueView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Playback/PlaybackQueueView.swift; sourceTree = "<group>"; };
-		00000000000000000000014B /* Features/Playback/ModernPlaybackAccessory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Playback/ModernPlaybackAccessory.swift; sourceTree = "<group>"; };
-		00000000000000000000014C /* Features/Playback/BufferedPlaybackSlider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Playback/BufferedPlaybackSlider.swift; sourceTree = "<group>"; };
 		000000000000000000000132 /* Features/Library/PagedJellyfinItemsModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Library/PagedJellyfinItemsModel.swift; sourceTree = "<group>"; };
 		000000000000000000000133 /* Features/Library/MusicLibraryNavigation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Library/MusicLibraryNavigation.swift; sourceTree = "<group>"; };
 		000000000000000000000134 /* Features/Library/MusicAlbumsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Library/MusicAlbumsView.swift; sourceTree = "<group>"; };
@@ -121,29 +114,36 @@
 		000000000000000000000140 /* Core/Catalog/MusicItemActionStateOwner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Core/Catalog/MusicItemActionStateOwner.swift; sourceTree = "<group>"; };
 		000000000000000000000141 /* Features/Library/MusicFavoriteControls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Library/MusicFavoriteControls.swift; sourceTree = "<group>"; };
 		000000000000000000000142 /* MusicItemActionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MusicItemActionTests.swift; sourceTree = "<group>"; };
+		000000000000000000000143 /* VelacantoUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VelacantoUITests.swift; sourceTree = "<group>"; };
+		000000000000000000000144 /* VelacantoUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = VelacantoUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		000000000000000000000145 /* Features/Playback/PlaybackAccessory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Playback/PlaybackAccessory.swift; sourceTree = "<group>"; };
+		000000000000000000000146 /* Features/Playback/PlaybackSystemControls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Playback/PlaybackSystemControls.swift; sourceTree = "<group>"; };
+		000000000000000000000147 /* Features/Playback/NowPlayingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Playback/NowPlayingView.swift; sourceTree = "<group>"; };
+		000000000000000000000148 /* Features/Playback/LyricsPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Playback/LyricsPresentation.swift; sourceTree = "<group>"; };
+		000000000000000000000149 /* Features/Playback/UpNextPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Playback/UpNextPresentation.swift; sourceTree = "<group>"; };
+		00000000000000000000014A /* Features/Playback/PlaybackQueueView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Playback/PlaybackQueueView.swift; sourceTree = "<group>"; };
+		00000000000000000000014B /* Features/Playback/ModernPlaybackAccessory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Playback/ModernPlaybackAccessory.swift; sourceTree = "<group>"; };
+		00000000000000000000014C /* Features/Playback/BufferedPlaybackSlider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Playback/BufferedPlaybackSlider.swift; sourceTree = "<group>"; };
+		a5e6f7c899da4bb0b1c2d3e4 /* Core/Diagnostics/PlaybackDiagnosticJournal.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Core/Diagnostics/PlaybackDiagnosticJournal.swift; sourceTree = "<group>"; };
+		ccd9c9820b444c13982d6ab8 /* Core/Diagnostics/PlaybackDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Core/Diagnostics/PlaybackDiagnostics.swift; sourceTree = "<group>"; };
+		d0d80671fbdd4f10bddab142 /* Core/Diagnostics/JellyfinNetworkMetrics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Core/Diagnostics/JellyfinNetworkMetrics.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		000000000000000000000302 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
-			buildActionMask = 2147483647;
 			files = (
 			);
-			runOnlyForDeploymentPostprocessing = 0;
 		};
 		000000000000000000000305 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
-			buildActionMask = 2147483647;
 			files = (
 			);
-			runOnlyForDeploymentPostprocessing = 0;
 		};
 		000000000000000000000308 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
-			buildActionMask = 2147483647;
 			files = (
 			);
-			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXFrameworksBuildPhase section */
 
@@ -196,12 +196,15 @@
 				000000000000000000000123 /* Features/Search/MusicSearchView.swift */,
 				000000000000000000000103 /* Core/Playback/PlaybackTimeFormatter.swift */,
 				000000000000000000000109 /* Core/Models/MusicSource.swift */,
+				ccd9c9820b444c13982d6ab8 /* Core/Diagnostics/PlaybackDiagnostics.swift */,
+				a5e6f7c899da4bb0b1c2d3e4 /* Core/Diagnostics/PlaybackDiagnosticJournal.swift */,
 				000000000000000000000110 /* Core/Playback/AudioPlaybackCoordinator.swift */,
 				000000000000000000000114 /* Core/Playback/AudioPlayerEngine.swift */,
 				000000000000000000000111 /* Sources/LocalFiles/LocalFilePlaybackAdapter.swift */,
 				000000000000000000000112 /* Sources/LocalFiles/DemoToneFactory.swift */,
 				000000000000000000000113 /* Core/Playback/PlaybackSystemMediaSession.swift */,
 				000000000000000000000115 /* Core/JellyfinAPI/JellyfinAPI.swift */,
+				d0d80671fbdd4f10bddab142 /* Core/Diagnostics/JellyfinNetworkMetrics.swift */,
 				000000000000000000000116 /* Core/Session/JellyfinSessionController.swift */,
 				000000000000000000000127 /* Core/Session/JellyfinSessionPersistence.swift */,
 				000000000000000000000125 /* Core/Catalog/JellyfinCatalogRepository.swift */,
@@ -247,8 +250,6 @@
 				000000000000000000000303 /* Resources */,
 			);
 			buildRules = (
-			);
-			dependencies = (
 			);
 			name = Velacanto;
 			productName = Velacanto;
@@ -315,7 +316,6 @@
 				};
 			};
 			buildConfigurationList = 000000000000000000000501 /* Build configuration list for PBXProject "Velacanto" */;
-			compatibilityVersion = "Xcode 16.0";
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
 			knownRegions = (
@@ -324,6 +324,7 @@
 			);
 			mainGroup = 000000000000000000000002;
 			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 110;
 			productRefGroup = 000000000000000000000003 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
@@ -338,43 +339,39 @@
 /* Begin PBXResourcesBuildPhase section */
 		000000000000000000000303 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
-			buildActionMask = 2147483647;
 			files = (
 				000000000000000000000205 /* Resources/PrivacyInfo.xcprivacy in Resources */,
 				000000000000000000000221 /* Resources/AppIcon.icon in Resources */,
 			);
-			runOnlyForDeploymentPostprocessing = 0;
 		};
 		000000000000000000000306 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
-			buildActionMask = 2147483647;
 			files = (
 			);
-			runOnlyForDeploymentPostprocessing = 0;
 		};
 		000000000000000000000309 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
-			buildActionMask = 2147483647;
 			files = (
 			);
-			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		000000000000000000000301 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
-			buildActionMask = 2147483647;
 			files = (
 				000000000000000000000201 /* App/VelacantoApp.swift in Sources */,
 				000000000000000000000203 /* Core/Playback/PlaybackTimeFormatter.swift in Sources */,
 				000000000000000000000206 /* Core/Models/MusicSource.swift in Sources */,
+				526902b61e754ed08f0cf232 /* Core/Diagnostics/PlaybackDiagnostics.swift in Sources */,
+				f14d7a2636b24c55927c9a4d /* Core/Diagnostics/PlaybackDiagnosticJournal.swift in Sources */,
 				000000000000000000000207 /* Core/Playback/AudioPlaybackCoordinator.swift in Sources */,
 				000000000000000000000211 /* Core/Playback/AudioPlayerEngine.swift in Sources */,
 				000000000000000000000208 /* Sources/LocalFiles/LocalFilePlaybackAdapter.swift in Sources */,
 				000000000000000000000209 /* Sources/LocalFiles/DemoToneFactory.swift in Sources */,
 				000000000000000000000210 /* Core/Playback/PlaybackSystemMediaSession.swift in Sources */,
 				000000000000000000000212 /* Core/JellyfinAPI/JellyfinAPI.swift in Sources */,
+				bb53bf84b01343d0bf595fd3 /* Core/Diagnostics/JellyfinNetworkMetrics.swift in Sources */,
 				000000000000000000000213 /* Core/Session/JellyfinSessionController.swift in Sources */,
 				000000000000000000000214 /* Features/Jellyfin/JellyfinAccessView.swift in Sources */,
 				000000000000000000000215 /* Sources/Jellyfin/JellyfinPlaybackAdapter.swift in Sources */,
@@ -406,25 +403,20 @@
 				000000000000000000000224 /* Core/Session/JellyfinSessionPersistence.swift in Sources */,
 				000000000000000000000225 /* App/AppNavigation.swift in Sources */,
 			);
-			runOnlyForDeploymentPostprocessing = 0;
 		};
 		000000000000000000000304 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
-			buildActionMask = 2147483647;
 			files = (
 				000000000000000000000204 /* PlaybackFoundationTests.swift in Sources */,
 				000000000000000000000216 /* JellyfinFoundationTests.swift in Sources */,
 				000000000000000000000239 /* MusicItemActionTests.swift in Sources */,
 			);
-			runOnlyForDeploymentPostprocessing = 0;
 		};
 		000000000000000000000307 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
-			buildActionMask = 2147483647;
 			files = (
 				000000000000000000000240 /* VelacantoUITests.swift in Sources */,
 			);
-			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
 
@@ -442,7 +434,7 @@
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
-		000000000000000000000601 /* Debug */ = {
+		000000000000000000000601 /* Debug configuration for PBXProject "Velacanto" */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
@@ -487,7 +479,7 @@
 			};
 			name = Debug;
 		};
-		000000000000000000000602 /* Release */ = {
+		000000000000000000000602 /* Release configuration for PBXProject "Velacanto" */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
@@ -525,7 +517,7 @@
 			};
 			name = Release;
 		};
-		000000000000000000000603 /* Debug */ = {
+		000000000000000000000603 /* Debug configuration for PBXNativeTarget "Velacanto" */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
@@ -534,6 +526,7 @@
 				DEVELOPMENT_TEAM = B9X8T5LT8Q;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
+				EXTRACT_APP_INTENTS_METADATA = NO;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Velacanto/Resources/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Velacanto;
@@ -551,14 +544,16 @@
 			};
 			name = Debug;
 		};
-		000000000000000000000604 /* Release */ = {
+		000000000000000000000604 /* Release configuration for PBXNativeTarget "Velacanto" */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 6;
+				DEVELOPMENT_TEAM = B9X8T5LT8Q;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
+				EXTRACT_APP_INTENTS_METADATA = NO;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Velacanto/Resources/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Velacanto;
@@ -576,7 +571,7 @@
 			};
 			name = Release;
 		};
-		000000000000000000000605 /* Debug */ = {
+		000000000000000000000605 /* Debug configuration for PBXNativeTarget "VelacantoTests" */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
@@ -600,7 +595,7 @@
 			};
 			name = Debug;
 		};
-		000000000000000000000606 /* Release */ = {
+		000000000000000000000606 /* Release configuration for PBXNativeTarget "VelacantoTests" */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
@@ -624,7 +619,7 @@
 			};
 			name = Release;
 		};
-		000000000000000000000607 /* Debug */ = {
+		000000000000000000000607 /* Debug configuration for PBXNativeTarget "VelacantoUITests" */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
@@ -644,7 +639,7 @@
 			};
 			name = Debug;
 		};
-		000000000000000000000608 /* Release */ = {
+		000000000000000000000608 /* Release configuration for PBXNativeTarget "VelacantoUITests" */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
@@ -670,37 +665,33 @@
 		000000000000000000000501 /* Build configuration list for PBXProject "Velacanto" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
-				000000000000000000000601 /* Debug */,
-				000000000000000000000602 /* Release */,
+				000000000000000000000601 /* Debug configuration for PBXProject "Velacanto" */,
+				000000000000000000000602 /* Release configuration for PBXProject "Velacanto" */,
 			);
-			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
 		000000000000000000000502 /* Build configuration list for PBXNativeTarget "Velacanto" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
-				000000000000000000000603 /* Debug */,
-				000000000000000000000604 /* Release */,
+				000000000000000000000603 /* Debug configuration for PBXNativeTarget "Velacanto" */,
+				000000000000000000000604 /* Release configuration for PBXNativeTarget "Velacanto" */,
 			);
-			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
 		000000000000000000000503 /* Build configuration list for PBXNativeTarget "VelacantoTests" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
-				000000000000000000000605 /* Debug */,
-				000000000000000000000606 /* Release */,
+				000000000000000000000605 /* Debug configuration for PBXNativeTarget "VelacantoTests" */,
+				000000000000000000000606 /* Release configuration for PBXNativeTarget "VelacantoTests" */,
 			);
-			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
 		000000000000000000000504 /* Build configuration list for PBXNativeTarget "VelacantoUITests" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
-				000000000000000000000607 /* Debug */,
-				000000000000000000000608 /* Release */,
+				000000000000000000000607 /* Debug configuration for PBXNativeTarget "VelacantoUITests" */,
+				000000000000000000000608 /* Release configuration for PBXNativeTarget "VelacantoUITests" */,
 			);
-			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */

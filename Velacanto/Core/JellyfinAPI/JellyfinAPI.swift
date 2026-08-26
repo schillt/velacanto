@@ -1183,21 +1183,7 @@ final class VelacantoNetworkPolicy: @unchecked Sendable {
         let continuation: CheckedContinuation<Bool, Never>
     }
 
-    #if DEBUG
-        private static let sharedLock = NSLock()
-        nonisolated(unsafe) private static var sharedInstance =
-            VelacantoNetworkPolicy()
-
-        static var shared: VelacantoNetworkPolicy {
-            sharedLock.withLock { sharedInstance }
-        }
-
-        static func resetSharedForTesting() {
-            sharedLock.withLock {
-                sharedInstance = VelacantoNetworkPolicy()
-            }
-        }
-    #else
+    #if !DEBUG
         static let shared = VelacantoNetworkPolicy()
     #endif
 
@@ -1590,72 +1576,6 @@ final class VelacantoNetworkPolicy: @unchecked Sendable {
         }
     }
 }
-
-final class VelacantoNetworkMetricsDelegate: NSObject, URLSessionTaskDelegate,
-    @unchecked Sendable
-{
-    static let shared = VelacantoNetworkMetricsDelegate()
-
-    private static let logger = Logger(
-        subsystem: "com.chameleonenterprise.velacanto",
-        category: "NetworkMetrics"
-    )
-    private override init() {}
-
-    func urlSession(
-        _ session: URLSession,
-        task: URLSessionTask,
-        didFinishCollecting metrics: URLSessionTaskMetrics
-    ) {
-        let duration = metrics.taskInterval.duration
-        guard duration >= 0.75 else { return }
-        let snapshot = PlaybackNetworkMetricSnapshot(metrics: metrics)
-        let event = PlaybackMetricJournalFormatter.appNetwork(
-            kind: Self.diagnosticRequestKind(
-                for: task.originalRequest ?? task.currentRequest
-            ),
-            ordinal: task.taskIdentifier,
-            snapshot: snapshot
-        )
-        Self.logger.debug(
-            "\(event, privacy: .public)"
-        )
-        PlaybackDiagnosticJournal.shared.record(event)
-    }
-
-    nonisolated static func diagnosticRequestKind(
-        for request: URLRequest?
-    ) -> PlaybackNetworkRequestMetricKind {
-        let components = request?.url?.pathComponents ?? []
-        if components.last?.caseInsensitiveCompare("PlaybackInfo")
-            == .orderedSame
-        {
-            return .playbackInfo
-        }
-        if components.suffix(2).map({ $0.lowercased() }) == ["users", "me"] {
-            return .sessionValidation
-        }
-        if components.contains(where: {
-            $0.caseInsensitiveCompare("Images") == .orderedSame
-        }) {
-            return .artwork
-        }
-        if components.contains(where: {
-            $0.caseInsensitiveCompare("Playing") == .orderedSame
-                || $0.caseInsensitiveCompare("PlayingProgress") == .orderedSame
-                || $0.caseInsensitiveCompare("PlayingStopped") == .orderedSame
-        }) {
-            return .playbackReport
-        }
-        return .app
-    }
-}
-
-struct VelacantoNetworkTransportFailure: Error {
-    let underlying: any Error
-}
-
-struct VelacantoNetworkTransportSuppressed: Error {}
 
 /// Owns one reusable connection pool and one degraded-route circuit breaker
 /// for a Jellyfin origin. A transport failure briefly rejects every new
@@ -2429,18 +2349,12 @@ actor JellyfinAPIClient: JellyfinAPIService {
         let lane = sessionLane(for: request)
         let requestKind = diagnosticRequestKind(for: request, lane: lane)
         if lane == .interactive, isInteractiveRequestSuppressed {
-            Self.networkLogger.debug(
-                "Request lane=interactive phase=suppressed-after-failure"
-            )
             PlaybackDiagnosticJournal.shared.record(
                 "network-request kind=\(requestKind) lane=interactive phase=suppressed"
             )
             throw JellyfinAPIError.unreachable
         }
         if lane == .background, isBackgroundRequestSuppressed {
-            Self.networkLogger.debug(
-                "Request lane=background phase=dropped-after-failure"
-            )
             PlaybackDiagnosticJournal.shared.record(
                 "network-request kind=\(requestKind) lane=background phase=dropped"
             )

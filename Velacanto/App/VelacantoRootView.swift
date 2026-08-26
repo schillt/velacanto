@@ -16,7 +16,6 @@ struct VelacantoRootView: View {
         @State private var selectedMacDestination = MacDestination.home
     #endif
     @State private var isChoosingLocalFile = false
-    @State private var isPreparingTestTone = false
     @State private var isShowingProfile = false
     @State private var isShowingNowPlaying = false
     #if os(iOS)
@@ -60,8 +59,6 @@ struct VelacantoRootView: View {
             NavigationStack {
                 ProfileView(
                     jellyfin: jellyfin,
-                    isPreparingPlaybackCheck: isPreparingTestTone,
-                    runPlaybackCheck: playTestTone,
                     dismiss: { isShowingProfile = false }
                 )
             }
@@ -446,37 +443,6 @@ struct VelacantoRootView: View {
             }
         case .failure(let error):
             actionError = error.localizedDescription
-        }
-    }
-
-    private func playTestTone() {
-        isPreparingTestTone = true
-        actionError = nil
-
-        Task { @MainActor in
-            defer {
-                isPreparingTestTone = false
-            }
-            do {
-                let url = try await DemoToneFactory.makeURL()
-                let localRequest = try await localFiles.playbackRequest(
-                    for: LocalFileSelection(
-                        url: url,
-                        title: "Velacanto playback check",
-                        artist: "440 Hz local tone"
-                    )
-                )
-                playback.play(
-                    PlaybackRequest(
-                        item: localRequest.item,
-                        asset: localRequest.asset,
-                        transportKind: localRequest.transportKind,
-                        recordsHistory: false
-                    )
-                )
-            } catch {
-                actionError = error.localizedDescription
-            }
         }
     }
 

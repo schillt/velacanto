@@ -2,9 +2,10 @@ import SwiftUI
 
 struct ProfileView: View {
     @ObservedObject var jellyfin: JellyfinSessionController
+    @AppStorage(PlaybackDiagnosticJournal.recordingEnabledDefaultsKey)
+    private var isRecordingPlaybackDiagnostics =
+        PlaybackDiagnosticJournal.defaultRecordingEnabled
 
-    let isPreparingPlaybackCheck: Bool
-    let runPlaybackCheck: () -> Void
     let dismiss: () -> Void
 
     var body: some View {
@@ -27,41 +28,17 @@ struct ProfileView: View {
                 }
             }
 
-            #if DEBUG
-                Section {
-                    Button(action: runPlaybackCheck) {
-                        Label {
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text(
-                                    isPreparingPlaybackCheck
-                                        ? "Preparing Playback Check…"
-                                        : "Run Playback Check"
-                                )
-                                .foregroundStyle(.primary)
-                                Text("Play a generated 440 Hz diagnostic tone")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                        } icon: {
-                            if isPreparingPlaybackCheck {
-                                ProgressView()
-                                    .controlSize(.small)
-                            } else {
-                                SourceIcon(
-                                    symbolName: "waveform.badge.magnifyingglass"
-                                )
-                            }
-                        }
-                    }
-                    .disabled(isPreparingPlaybackCheck)
-                } header: {
-                    Text("Diagnostics")
-                } footer: {
-                    Text(
-                        "The playback check uses the same player and system media controls as your music."
-                    )
-                }
-            #endif
+            Section("Diagnostics") {
+                Toggle(
+                    "Record playback diagnostics",
+                    isOn: $isRecordingPlaybackDiagnostics
+                )
+                Text(
+                    "Saves a small, privacy-safe playback journal on this device while enabled."
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
 
             Section("About") {
                 LabeledContent("Version", value: appVersion)

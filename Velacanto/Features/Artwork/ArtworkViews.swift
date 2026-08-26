@@ -512,7 +512,6 @@ actor ArtworkRepository: ArtworkLoading {
             os_signpost(.event, log: Self.performanceLog, name: "Visible Artwork Requested")
         }
         if let cached = cachedImage(for: key) {
-            Self.logger.debug("Artwork memory cache hit")
             os_signpost(
                 .event,
                 log: Self.performanceLog,
@@ -526,7 +525,6 @@ actor ArtworkRepository: ArtworkLoading {
         let consumer = UUID()
         let task: Task<PlatformImage?, Never>
         if var existing = inFlight[key] {
-            Self.logger.debug("Artwork request coalesced")
             VelacantoNetworkPolicy.shared.promote(
                 key: key.identifier,
                 to: intent.networkPriority
@@ -597,13 +595,11 @@ actor ArtworkRepository: ArtworkLoading {
             let decoded = Self.decode(data, maximumPixelSize: key.sizeBucket)
         {
             insert(decoded, for: key)
-            Self.logger.debug("Artwork disk cache hit")
             os_signpost(.event, log: Self.performanceLog, name: "Artwork Cache Hit")
             return decoded
         }
 
         guard !isNetworkSuppressed else {
-            Self.logger.debug("Artwork network request suppressed-after-failure")
             return nil
         }
 
@@ -613,9 +609,6 @@ actor ArtworkRepository: ArtworkLoading {
         guard !Task.isCancelled, !isNetworkSuppressed else { return nil }
         let networkRequest = urlRequest
         requestCounts[key, default: 0] += 1
-        Self.logger.debug(
-            "Artwork network request intent=\(intent.rawValue, privacy: .public)"
-        )
         os_signpost(
             .event,
             log: Self.performanceLog,
