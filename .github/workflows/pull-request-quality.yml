@@ -16,34 +16,8 @@ concurrency:
 jobs:
   quality:
     name: Quality Gate
-    runs-on: macos-26
-    timeout-minutes: 45
-    env:
-      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
-      VELACANTO_IOS_SIMULATOR_DESTINATION: platform=iOS Simulator,name=iPhone Air,OS=26.5
-
-    steps:
-      - name: Check out pull request
-        uses: actions/checkout@v4
-
-      - name: Install preflight dependency
-        run: brew install ripgrep
-
-      - name: Show toolchain and simulator destination
-        run: |
-          xcodebuild -version
-          xcrun simctl list devices available
-
-      - name: Run quality checks
-        # This stable Xcode 26.6 lane cannot compile OS 27 SDK APIs or launch
-        # OS 27 tests. The separate preview lane below covers that scope.
-        run: ./scripts/build.sh pr-hosted
-
-  os27-preview:
-    name: OS 27 Preview Advisory Verification
     runs-on: xcode-27
-    continue-on-error: true
-    timeout-minutes: 60
+    timeout-minutes: 45
     env:
       DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
       VELACANTO_IOS_SIMULATOR_DESTINATION: platform=iOS Simulator,name=iPhone Air,OS=27.0
@@ -55,14 +29,37 @@ jobs:
       - name: Install preflight dependency
         run: brew install ripgrep
 
-      - name: Show preview toolchain and simulator destination
+      - name: Show OS 27 toolchain and simulator destination
         run: |
           xcodebuild -version
           xcrun simctl list devices available
 
-      - name: Run OS 27 preview verification
-        # The xcode-27 image is a public preview. This job verifies native OS 27
-        # paths and iOS simulator tests for 0.3. It is visible advisory evidence,
-        # not a required alpha gate or v1 stable-release evidence; local OS 27
-        # and physical-device acceptance remain required release evidence.
+      - name: Run quality checks
         run: ./scripts/build.sh pr-os27-preview
+
+  os27-preview:
+    name: Xcode 26 Compatibility Advisory
+    runs-on: macos-26
+    continue-on-error: true
+    timeout-minutes: 60
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+      VELACANTO_IOS_SIMULATOR_DESTINATION: platform=iOS Simulator,name=iPhone Air,OS=26.5
+
+    steps:
+      - name: Check out pull request
+        uses: actions/checkout@v4
+
+      - name: Install preflight dependency
+        run: brew install ripgrep
+
+      - name: Show compatibility toolchain and simulator destination
+        run: |
+          xcodebuild -version
+          xcrun simctl list devices available
+
+      - name: Run Xcode 26 compatibility verification
+        # The product requires OS 27. Keep this older toolchain visible as
+        # advisory compatibility evidence without allowing it to override the
+        # required native OS 27 build and test gate above.
+        run: ./scripts/build.sh pr-hosted
