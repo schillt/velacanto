@@ -76,11 +76,31 @@ build_ios_simulator() {
 }
 
 test_ios_simulator() {
+  test_ios_simulator_units
+  test_ios_simulator_ui
+}
+
+test_ios_simulator_units() {
   "$xcodebuild_path" \
     -project "$project_path" \
     -scheme Velacanto \
     -configuration Debug \
     -destination "$ios_simulator_destination" \
+    -only-testing:VelacantoTests \
+    -derivedDataPath "$derived_data_path" \
+    CODE_SIGNING_ALLOWED=NO \
+    SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
+    test
+}
+
+test_ios_simulator_ui() {
+  "$xcodebuild_path" \
+    -project "$project_path" \
+    -scheme Velacanto \
+    -configuration Debug \
+    -destination "$ios_simulator_destination" \
+    -only-testing:VelacantoUITests \
+    -parallel-testing-enabled NO \
     -derivedDataPath "$derived_data_path" \
     CODE_SIGNING_ALLOWED=NO \
     SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \

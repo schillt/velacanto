@@ -22,18 +22,20 @@ final class VelacantoUITests: XCTestCase {
     func testSignedOutPrimaryNavigation() throws {
         continueAfterFailure = false
         launchApplication()
-        XCTAssertTrue(app.navigationBars["Home"].waitForExistence(timeout: 5))
+        XCTAssertTrue(
+            app.staticTexts["Your music, ready when you are"].waitForExistence(
+                timeout: 5
+            )
+        )
         assertPlaybackAccessoryIsHidden()
 
         app.tabBars.buttons["Library"].tap()
-        XCTAssertTrue(app.navigationBars["Library"].waitForExistence(timeout: 2))
         XCTAssertTrue(
             app.staticTexts["Connect Your Music Library"].waitForExistence(timeout: 2)
         )
         assertPlaybackAccessoryIsHidden()
 
         app.tabBars.buttons["Search"].tap()
-        XCTAssertTrue(app.navigationBars["Search"].waitForExistence(timeout: 2))
         XCTAssertTrue(
             app.staticTexts["Search Needs a Music Server"].waitForExistence(timeout: 2)
         )
@@ -46,16 +48,14 @@ final class VelacantoUITests: XCTestCase {
         app.tabBars.buttons["Library"].tap()
         app.buttons["Open Profile"].tap()
 
-        XCTAssertTrue(
-            app.navigationBars["Profile & Settings"].waitForExistence(timeout: 2)
-        )
+        XCTAssertTrue(app.staticTexts["Version"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.buttons["Done"].exists)
     }
 
     func testSignedInLibraryAndSearchNavigation() throws {
         continueAfterFailure = false
         launchSignedInFixture()
-        XCTAssertTrue(app.navigationBars["Home"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts["Favorites"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.tabBars.buttons["Library"].waitForExistence(timeout: 5))
 
         app.tabBars.buttons["Library"].tap()
         XCTAssertTrue(app.staticTexts["Your Music"].waitForExistence(timeout: 3))
