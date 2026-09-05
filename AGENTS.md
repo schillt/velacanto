@@ -1,5 +1,18 @@
 # Velacanto agent guide
 
+## Current Foundation rebuild priority
+
+Read [ADR0012](docs/decisions/0012-foundation-rebuild-and-playback-freeze.md) and
+[Foundation delivery guidance](docs/native-foundation-rebuild.md) before assigning
+new UI or playback work. The owner freezes the proven Foundation playback core
+and prioritizes complete Library UI with iOS and macOS parity. Preserve historical
+ADRs and issue evidence; do not treat the old delivery calendar or old recovery
+implementation as the current Foundation contract. NativeFoundation/AGENTS.md,
+when present in an assigned local Foundation tree, controls scoped work and
+explicit exact-base exceptions. Do not reset those trees to this remote branch.
+The following legacy workflow remains applicable outside those exceptions.
+
+
 ## Assign an issue
 
 The canonical assignment prompt is:

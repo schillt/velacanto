@@ -18,6 +18,8 @@ their context, and their consequences.
 | [0009](0009-platform-27-baseline.md) | Accepted | Require the stable OS 27 SDK and use its native player APIs for 0.3 |
 | [0010](0010-internal-testflight-for-0-x.md) | Accepted | Permit internal TestFlight for approved 0.x stabilization candidates |
 
+| [0012](0012-foundation-rebuild-and-playback-freeze.md) | Accepted | Preserve architectural principles, freeze Foundation playback, restore UI incrementally |
+
 ## Adding a decision
 
 Create the next numbered Markdown file using this structure:
