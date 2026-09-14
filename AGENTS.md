@@ -16,6 +16,54 @@ paths, verification results, privacy audit, limitations and integration guidance
 The coordinator serializes integration and device builds. Read the active app
 contract before applying historical network or milestone instructions.
 
+## GitHub is the source of truth
+
+The GitHub repository, its integrated commits, issues and latest relevant issue
+comments are authoritative for shared implementation and task contracts. Use the
+Project and milestones for delivery status; resolve any disagreement against the
+issue contract and exact integrated commit before marking work complete. For
+current development, fetch `origin/alpha` and read its AGENTS.md plus the applicable
+app contract before assigning or starting work. `main` represents promoted release
+history, not automatically the current development instructions.
+
+Local worktrees, private notes, chat summaries and unpushed planning documents are
+working material until published through the approved integration workflow. Do
+not treat them as integrated dependencies or silently replace GitHub contracts
+with stale local copies. Explicit current owner instructions can change scope;
+record the resulting approved contract in GitHub through the coordinator so other
+workers receive the same instructions. Preserve existing issue history and never
+publish credentials or private device/server evidence.
+
+## Subagents and parallel work
+
+The owner authorizes subagents for delegation. The coordinating agent may assign
+multiple independent, bounded tasks at the same time without asking for permission
+for each subagent. Delegate when it enables useful parallel progress; simple work
+can remain with one agent. Delegation does not expand the authorized task scope.
+
+- Give each worker the GitHub issue or bounded subtask, exact base SHA, owned paths,
+  dependencies, acceptance criteria, privacy constraints and expected handoff.
+- Independent implementation issues use separate worktrees and local-only branches.
+  Read-only research/review can run alongside implementation. Workers sharing an
+  issue must have non-overlapping write ownership; never edit the same file
+  concurrently. The coordinator resolves ownership conflicts before work starts.
+- Do not start dependent implementation on unintegrated assumptions. Wait for its
+  accepted dependency on GitHub, refresh the base, then assign the next stage.
+- Workers run focused checks and return their exact commit, changed paths, results,
+  limitations and unresolved P0–P3 findings. A subagent's completion is a handoff,
+  not proof of integration, physical acceptance or release readiness.
+- The coordinator reviews results, reconciles findings and integrates one change
+  at a time. Only the coordinator publishes accepted work and updates GitHub
+  delivery status through the existing integration workflow. Issue workers do
+  not push, merge, or independently change issues/Project fields.
+- Serialize Xcode builds and simulator/physical-device tests through the
+  coordinator. Use the existing retained iPhone and iPad simulators; do not create
+  extra simulators to parallelize tests or overwrite protected reference apps.
+  The physical iPhone 17 Pro remains excluded from testing and cleanup.
+- Preserve other workers' uncommitted/unintegrated work. No reset, stash, revert,
+  branch deletion or artifact cleanup to resolve contention. Report the conflict
+  and continue only independently owned work until it is resolved.
+
 ## Assign an issue
 
 The canonical assignment prompt is:
@@ -136,11 +184,12 @@ for integration and release-candidate testing. Open each issue's own
 testing; do not build or run another issue from the `alpha` window.
 
 `./scripts/build.sh` gives each worktree a distinct derived-data directory by
-default. Do not override `VELACANTO_DERIVED_DATA_PATH` with a shared path. When
-two issue trees need simulator testing at the same time, give each a distinct
-simulator destination with `VELACANTO_IOS_SIMULATOR_DESTINATION`; otherwise run
-simulator and physical-device tests serially because the app shares a bundle
-identifier and device state.
+default. Do not override `VELACANTO_DERIVED_DATA_PATH` with a shared path. Select
+an existing authorized simulator explicitly with
+`VELACANTO_IOS_SIMULATOR_DESTINATION`; do not assume a script's default destination
+still exists. Keep one iPhone and one iPad simulator and preserve their reference
+apps. The coordinator serializes Xcode builds, simulator and physical-device
+tests because the app shares bundle identity and device state.
 
 An issue agent proves focused behavior in its own tree. The integration agent
 proves combined behavior in a clean `alpha` tree after applying the accepted
