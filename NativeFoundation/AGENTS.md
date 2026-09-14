@@ -33,12 +33,15 @@ Root scripts/build.sh now targets this project and its 55-test suite. Compiler
 warnings are errors. Existing 106 formatting debt is baselined only to preserve
 the accepted source; do not add findings or expand that baseline. Run focused
 checks for development and combined iOS/macOS/Release gates for integration.
-Use serial Xcode slots and separate simulator destinations. Do not overwrite the
+Use serial Xcode slots and the existing retained simulators. Do not overwrite the
 original-reference Simulator or build 106 physical comparison without instruction.
 
 Workers commit only their assigned paths and proactively report exact base,
 parent/final SHA, clean status, changed paths, deletions, commands/results and
-limitations. Root integrates serially and handles GitHub/build distribution.
+limitations. The workspace maintainer publishes focused task PRs into alpha; acceptance and
+audit review precede authorized serial merges. Root AGENTS.md governs PRs,
+protected-branch policy and tagged release promotion to main. Do not use the
+historical direct-push or alpha/beta/preview branch chain.
 Passing synthetic tests is not physical streaming or TestFlight acceptance.
 
 ## Identity and privacy
