@@ -115,36 +115,34 @@ else
   fail "Bundle identifier is not documented consistently"
 fi
 
-if find . -maxdepth 2 -name '*.xcodeproj' -print -quit | grep -q .; then
-  pass "An Xcode project exists"
+if [ -f NativeFoundation/VelacantoFoundation.xcodeproj/project.pbxproj ]; then
+  pass "Active rebuilt Xcode project exists"
 else
-  warn "No Xcode project exists yet"
+  fail "Active rebuilt Xcode project is missing"
 fi
 
-if [ -f Velacanto/Resources/PrivacyInfo.xcprivacy ] &&
-  plutil -lint Velacanto/Resources/PrivacyInfo.xcprivacy >/dev/null; then
+if [ -f NativeFoundation/Resources/PrivacyInfo.xcprivacy ] &&
+  plutil -lint NativeFoundation/Resources/PrivacyInfo.xcprivacy >/dev/null; then
   pass "Privacy manifest exists and is a valid property list"
 else
   fail "Privacy manifest is missing or invalid"
 fi
 
-if [ -f Velacanto/Resources/Info.plist ] &&
-  plutil -extract NSAppTransportSecurity.NSAllowsLocalNetworking raw \
-    Velacanto/Resources/Info.plist 2>/dev/null | grep -q '^true$'; then
-  pass "Local-network ATS exception is configured"
+if plutil -lint NativeFoundation/Resources/Info.plist >/dev/null; then
+  pass "Application Info.plist is valid"
 else
-  fail "Local-network ATS exception is missing"
+  fail "Application Info.plist is invalid"
 fi
 
 if plutil -extract NSAppTransportSecurity.NSAllowsArbitraryLoads raw \
-  Velacanto/Resources/Info.plist >/dev/null 2>&1; then
+  NativeFoundation/Resources/Info.plist >/dev/null 2>&1; then
   fail "Global arbitrary network loads are enabled"
 else
   pass "Global arbitrary network loads remain disabled"
 fi
 
 if plutil -extract UIBackgroundModes.0 raw \
-  Velacanto/Resources/Info.plist 2>/dev/null | grep -q '^audio$'; then
+  NativeFoundation/Resources/Info.plist 2>/dev/null | grep -q '^audio$'; then
   pass "iOS background audio mode is configured"
 else
   fail "iOS background audio mode is missing"

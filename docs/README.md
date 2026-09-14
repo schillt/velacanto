@@ -1,34 +1,15 @@
-# Project documentation
+# Velacanto documentation
 
-This directory is the public source of truth for current Velacanto product and
-technical planning. Superseded plans and prototypes live under
-[`archive/`](archive/README.md) and are not implementation guidance.
+- [0.3 release notes](0.3-release-notes.md)
+- [Acceptance/provenance](0.3-acceptance-and-provenance.md)
+- [Engineering history and investigations](0.3-engineering-record.md)
+- [Known issues](0.3-known-issues.md)
+- [Dependency inventory](0.3-dependencies.md)
+- [Architecture](architecture.md)
+- [Current release plan](0.3-plan.md)
+- [Decision records](decisions/README.md)
+- [Historical Foundation notes](archive/foundation-development/README.md)
+- [Earlier releases and designs](archive/README.md)
 
-## Current release
-
-- [0.2.5 release notes](0.2.5-release-notes.md) — purpose, provenance,
-  acceptance evidence, and remaining limitations for the stabilization build.
-- [0.3 plan](0.3-plan.md) — native-player scope, sequencing, and release rules.
-- [0.3 acceptance](0.3-stability-acceptance.md) — automated, platform, device,
-  and server release evidence.
-- [Roadmap](roadmap.md) — release history and ordered later milestones.
-- [Known issues](known-issues.md) — current operational limitations.
-- [Architecture](architecture.md) — component boundaries and runtime flows.
-- [Agent assignment prompt](agent-assignment-template.md) — the one-line issue
-  prompt and serial integration handoff.
-
-## Decisions and design
-
-- [Architecture decisions](decisions/README.md) — accepted and superseded
-  technical choices.
-- [0.3 native-player design](design/README.md) — platform navigation, screen
-  hierarchy, action vocabulary, system components, states, and accessibility.
-
-## History
-
-- [Documentation archive](archive/README.md) — historical 0.1/0.2 plans,
-  foundational design assets, and the standalone architecture explorer.
-
-All content is public. Credentials, server addresses, private media names,
-commercial discussions, signing material, and other confidential operations
-must not be committed here.
+Earlier roadmap and design documents are historical direction; 0.3 release notes
+control actual shipped scope. Open milestone items are not automatically complete.

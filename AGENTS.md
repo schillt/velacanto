@@ -1,17 +1,20 @@
 # Velacanto agent guide
 
-## Current Foundation rebuild priority
+## Current product and release
 
-Read [ADR0012](docs/decisions/0012-foundation-rebuild-and-playback-freeze.md) and
-[Foundation delivery guidance](docs/native-foundation-rebuild.md) before assigning
-new UI or playback work. The owner freezes the proven Foundation playback core
-and prioritizes complete Library UI with iOS and macOS parity. Preserve historical
-ADRs and issue evidence; do not treat the old delivery calendar or old recovery
-implementation as the current Foundation contract. NativeFoundation/AGENTS.md,
-when present in an assigned local Foundation tree, controls scoped work and
-explicit exact-base exceptions. Do not reset those trees to this remote branch.
-The following legacy workflow remains applicable outside those exceptions.
+Velacanto 0.3.0 replaces the old app with the build 106 native rebuild. There is
+one maintained application: NativeFoundation/VelacantoFoundation.xcodeproj,
+scheme VelacantoFoundation, product Velacanto. Read NativeFoundation/AGENTS.md,
+ADR 0012, ADR 0013 and docs/0.3-release-notes.md. Root scripts target this rebuilt
+product. Do not reintroduce removed legacy code or tests from historical plans.
+The owner approved one source-snapshot squash onto alpha, original production
+bundle identity, fresh sign-in, GitHub prerelease and internal TestFlight.
+Beta/preview/main stay unchanged. Later cleanup must preserve release evidence.
 
+Every worker must proactively hand off its exact base and final commit, owned
+paths, verification results, privacy audit, limitations and integration guidance.
+The coordinator serializes integration and device builds. Read the active app
+contract before applying historical network or milestone instructions.
 
 ## Assign an issue
 
@@ -129,7 +132,7 @@ issue.
 
 Treat the `alpha` worktree as the canonical combined-app test tree. Use it only
 for integration and release-candidate testing. Open each issue's own
-`Velacanto.xcodeproj` in a separate Xcode window for focused development and
+`NativeFoundation/VelacantoFoundation.xcodeproj` in a separate Xcode window for focused development and
 testing; do not build or run another issue from the `alpha` window.
 
 `./scripts/build.sh` gives each worktree a distinct derived-data directory by

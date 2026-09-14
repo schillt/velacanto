@@ -1,4 +1,4 @@
-name: Pull Request Quality
+name: Velacanto Quality
 
 on:
   pull_request:
@@ -23,7 +23,7 @@ jobs:
       VELACANTO_IOS_SIMULATOR_DESTINATION: platform=iOS Simulator,name=iPhone Air,OS=27.0
 
     steps:
-      - name: Check out pull request
+      - name: Check out candidate
         uses: actions/checkout@v4
 
       - name: Install preflight dependency
@@ -47,7 +47,7 @@ jobs:
       VELACANTO_IOS_SIMULATOR_DESTINATION: platform=iOS Simulator,name=iPhone Air,OS=26.5
 
     steps:
-      - name: Check out pull request
+      - name: Check out candidate
         uses: actions/checkout@v4
 
       - name: Install preflight dependency
@@ -59,7 +59,6 @@ jobs:
           xcrun simctl list devices available
 
       - name: Run Xcode 26 compatibility verification
-        # The product requires OS 27. Keep this older toolchain visible as
-        # advisory compatibility evidence without allowing it to override the
-        # required native OS 27 build and test gate above.
+        # Keep the older toolchain advisory; the required gate tests the
+        # rebuilt product with the current development toolchain.
         run: ./scripts/build.sh pr-hosted

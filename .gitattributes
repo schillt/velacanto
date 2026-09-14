@@ -1,0 +1,2 @@
+# Preserve upstream license text verbatim, including its Markdown line breaks.
+NativeFoundation/Resources/ThirdPartyNotices.txt -whitespace

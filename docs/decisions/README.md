@@ -48,3 +48,5 @@ later ADR replaces an earlier decision, link both records.
 
 Do not use ADRs for temporary task status, credentials, server addresses, or
 other confidential information.
+
+- [0013 — Rebuilt 0.3 release](0013-rebuilt-03-release.md)
