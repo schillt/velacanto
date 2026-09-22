@@ -847,7 +847,7 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
         return URLSession(configuration: configuration)
     }()
 
-    static func nativeLoad(_ request: URLRequest) async throws -> (Data, URLResponse) {
+    static let nativeLoad: Load = { request in
         try await nativeSession.data(for: request, delegate: RejectRedirects())
     }
 }
