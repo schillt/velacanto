@@ -77,13 +77,13 @@ final class FoundationPlayer: ObservableObject {
             Task { @MainActor [weak self] in self?.refreshTime() }
         }
         notifications.append(NotificationCenter.default.addObserver(
-            forName: .AVPlayerItemDidPlayToEndTime, object: nil, queue: .main
+            forName: AVPlayerItem.didPlayToEndTimeNotification, object: nil, queue: .main
         ) { [weak self] notification in
             guard let item = notification.object as? AVPlayerItem else { return }
             Task { @MainActor [weak self] in self?.didReachEnd(item) }
         })
         notifications.append(NotificationCenter.default.addObserver(
-            forName: .AVPlayerItemFailedToPlayToEndTime, object: nil, queue: .main
+            forName: AVPlayerItem.failedToPlayToEndTimeNotification, object: nil, queue: .main
         ) { [weak self] notification in
             guard let item = notification.object as? AVPlayerItem else { return }
             Task { @MainActor [weak self] in

@@ -31,15 +31,27 @@ the built product is `Velacanto.app`. No legacy app target remains.
 ```sh
 ./scripts/preflight.sh --skip-xcode
 ./scripts/build.sh all
+# For tests, first select an existing authorized OS 27 simulator:
+# export VELACANTO_IOS_SIMULATOR_DESTINATION='platform=iOS Simulator,id=<authorized-UUID>'
 ./scripts/build.sh pr
 ```
 
 Modes: `lint`, `macos`, `test`, `ios-simulator`, `ios-simulator-test`, `release`.
 Builds use per-worktree derived data. Set `VELACANTO_IOS_SIMULATOR_DESTINATION`
-for a dedicated test device and `VELACANTO_PACKAGES_PATH` for an existing package
-checkout cache. The committed SwiftPM resolution is required. Current gates use
-Xcode 27; declared deployment targets remain iOS 18/macOS 14 from 106. Those minimums
-are not a claim of physical validation on every supported OS.
+explicitly for an existing authorized test device and `VELACANTO_PACKAGES_PATH` for an existing package
+checkout cache. The committed SwiftPM resolution is required. Current development
+requires iOS/iPadOS 27 and macOS 27 for both app and tests, Debug and Release.
+Use regular Xcode 27 or newer at `/Applications/Xcode.app/Contents/Developer`;
+scripts honor an explicit `DEVELOPER_DIR` and never auto-select Xcode beta.
+Preflight checks the selected Xcode and all three platform SDK versions. CI retains
+the OS 27 Quality Gate and validates its existing simulator before testing; Xcode
+26 is no longer a supported compatibility gate. The project is maintained directly
+(no tracked generator). See the [platform decision update](docs/decisions/0013-rebuilt-03-release.md#035-development-platform-update).
+
+The published 0.3.0 (108) minimums and historical acceptance remain unchanged.
+Development metadata stays 0.3.0 (108) until separately authorized packaging.
+Unsigned local/CI checks do not establish signed, physical or distribution
+acceptance; signing/export and Apple processing remain tracked by issue #149.
 
 Existing 106 formatting findings are explicitly baselined in
 `scripts/foundation-lint-baseline.txt` to preserve runtime sources byte-for-byte

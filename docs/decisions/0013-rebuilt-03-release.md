@@ -30,3 +30,25 @@ is recorded without changing source, new debt fails, and strict compilation/test
 are required. Exact new-package signing, Release exclusion, hosted and physical
 results must be recorded honestly. TestFlight processing is a separate state
 from upload; no external/public release is authorized.
+
+## 0.3.5 development platform update
+
+Issue #161 (2026-09-22) raises current development minimums to iOS/iPadOS 27 and
+macOS 27 for app and tests in Debug and Release. The project-level settings are
+inherited by both targets; there is no tracked project generator. This supersedes
+the older-minimum requirement above for future development only, without rewriting
+the published 0.3.0 release or its evidence. Swift language mode, version 0.3.0
+(108) and signing configuration are unchanged. The scoped compatibility exception
+uses AVPlayerItem.didPlayToEndTimeNotification and failedToPlayToEndTimeNotification
+in place of deprecated aliases; observer behavior and lifetime remain unchanged.
+
+Use regular Xcode 27 or newer, defaulting to `/Applications/Xcode.app`, with an
+explicit `DEVELOPER_DIR` honored. Preflight requires iPhoneOS, iPhoneSimulator and
+macOS SDKs 27 or newer. The OS 27 Quality Gate remains required; retire the Xcode
+26 advisory rather than extending support below the deployment minimum. CI must
+select an existing available simulator or fail clearly. Local simulator selection
+requires an explicit authorized destination; never create or overwrite references.
+
+Hosted candidate validation, signed artifacts, physical acceptance and distribution
+remain separate gates. Issue #149 owns Xcode Cloud/signing/export/Apple processing;
+this settings change does not establish distribution compatibility or availability.
