@@ -46,14 +46,15 @@ final class FoundationPlayer: ObservableObject {
         makeItem: @escaping (URL) -> AVPlayerItem = { AVPlayerItem(url: $0) },
         activateSession: @escaping () throws -> Void = {
             #if os(iOS)
-            let session = AVAudioSession.sharedInstance()
-            try session.setCategory(.playback, mode: .default)
-            try session.setActive(true)
+                let session = AVAudioSession.sharedInstance()
+                try session.setCategory(.playback, mode: .default)
+                try session.setActive(true)
             #endif
         },
         deactivateSession: @escaping () -> Void = {
             #if os(iOS)
-            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+                try? AVAudioSession.sharedInstance().setActive(
+                    false, options: .notifyOthersOnDeactivation)
             #endif
         },
         startPlayback: @escaping (AVPlayer) -> Void = { $0.play() }
@@ -69,37 +70,45 @@ final class FoundationPlayer: ObservableObject {
             },
             nativePlayer.observe(\.status, options: [.new]) { [weak self] _, _ in
                 Task { @MainActor [weak self] in self?.refreshNativeState() }
-            }
+            },
         ]
         timeObserver = nativePlayer.addPeriodicTimeObserver(
             forInterval: CMTime(seconds: 0.5, preferredTimescale: 600), queue: .main
         ) { [weak self] _ in
             Task { @MainActor [weak self] in self?.refreshTime() }
         }
-        notifications.append(NotificationCenter.default.addObserver(
-            forName: AVPlayerItem.didPlayToEndTimeNotification, object: nil, queue: .main
-        ) { [weak self] notification in
-            guard let item = notification.object as? AVPlayerItem else { return }
-            Task { @MainActor [weak self] in self?.didReachEnd(item) }
-        })
-        notifications.append(NotificationCenter.default.addObserver(
-            forName: AVPlayerItem.failedToPlayToEndTimeNotification, object: nil, queue: .main
-        ) { [weak self] notification in
-            guard let item = notification.object as? AVPlayerItem else { return }
-            Task { @MainActor [weak self] in
-                guard let self, self.nativePlayer.currentItem === item else { return }
-                self.fail(.nativeEnd, error: item.error)
-            }
-        })
+        notifications.append(
+            NotificationCenter.default.addObserver(
+                forName: AVPlayerItem.didPlayToEndTimeNotification, object: nil, queue: .main
+            ) { [weak self] notification in
+                guard let item = notification.object as? AVPlayerItem else { return }
+                Task { @MainActor [weak self] in self?.didReachEnd(item) }
+            })
+        notifications.append(
+            NotificationCenter.default.addObserver(
+                forName: AVPlayerItem.failedToPlayToEndTimeNotification, object: nil, queue: .main
+            ) { [weak self] notification in
+                guard let item = notification.object as? AVPlayerItem else { return }
+                Task { @MainActor [weak self] in
+                    guard let self, self.nativePlayer.currentItem === item else { return }
+                    self.fail(.nativeEnd, error: item.error)
+                }
+            })
         #if os(iOS)
-        notifications.append(NotificationCenter.default.addObserver(
-            forName: AVAudioSession.interruptionNotification, object: nil, queue: .main
-        ) { [weak self] notification in
-            let began = (notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt)
-                == AVAudioSession.InterruptionType.began.rawValue
-            guard began else { return }
-            Task { @MainActor [weak self] in self?.pause() }
-        })
+            notifications.append(
+                NotificationCenter.default.addObserver(
+                    forName: AVAudioSession.didBecomeInactiveNotification,
+                    object: AVAudioSession.sharedInstance(), queue: .main
+                ) { [weak self] notification in
+                    guard
+                        let context = notification.userInfo?[AVAudioSession.deactivationContextKey]
+                            as? AVAudioSession.DeactivationContext
+                    else { return }
+                    // Handle main-queue delivery here, without deferring a pause past a newer command.
+                    MainActor.assumeIsolated {
+                        self?.didDeactivateAudioSession(source: context.source)
+                    }
+                })
         #endif
     }
 
@@ -114,7 +123,7 @@ final class FoundationPlayer: ObservableObject {
 
     func setQueue(_ items: [FoundationItem], selectedIndex: Int) {
         #if DEBUG
-        recordSnapshot("command.setQueue")
+            recordSnapshot("command.setQueue")
         #endif
         discardSelection()
         queue = items.map { FoundationQueueEntry(item: $0) }
@@ -155,7 +164,7 @@ final class FoundationPlayer: ObservableObject {
         let selectionGeneration = generation
         let resolve = resolve
         #if DEBUG
-        recordSnapshot("selection.started")
+            recordSnapshot("selection.started")
         #endif
         selectionTask = Task { [weak self] in
             do {
@@ -169,7 +178,7 @@ final class FoundationPlayer: ObservableObject {
                 }
                 self.nativePlayer.replaceCurrentItem(with: item)
                 #if DEBUG
-                self.recordSnapshot("item.installed")
+                    self.recordSnapshot("item.installed")
                 #endif
                 self.selectionTask = nil
                 if self.wantsPlayback { self.play() } else { self.refreshNativeState() }
@@ -183,7 +192,7 @@ final class FoundationPlayer: ObservableObject {
 
     func next() {
         #if DEBUG
-        recordSnapshot("command.next")
+            recordSnapshot("command.next")
         #endif
         guard let index = selectedIndex, queue.indices.contains(index + 1) else { return }
         select(queue[index + 1].id)
@@ -191,7 +200,7 @@ final class FoundationPlayer: ObservableObject {
 
     func previous() {
         #if DEBUG
-        recordSnapshot("command.previous")
+            recordSnapshot("command.previous")
         #endif
         guard let index = selectedIndex else { return }
         let position = nativePlayer.currentTime().seconds
@@ -204,7 +213,7 @@ final class FoundationPlayer: ObservableObject {
 
     func togglePlayback() {
         #if DEBUG
-        recordSnapshot("command.toggle")
+            recordSnapshot("command.toggle")
         #endif
         if wantsPlayback { pause() } else { play() }
     }
@@ -242,7 +251,7 @@ final class FoundationPlayer: ObservableObject {
         discardSelection()
         state = .idle
         #if DEBUG
-        recordSnapshot("command.stop")
+            recordSnapshot("command.stop")
         #endif
         deactivateSession()
     }
@@ -251,9 +260,12 @@ final class FoundationPlayer: ObservableObject {
 
     private func play() {
         #if DEBUG
-        recordSnapshot("command.play")
+            recordSnapshot("command.play")
         #endif
-        if state == .failed, let selectedEntryID { select(selectedEntryID); return }
+        if state == .failed, let selectedEntryID {
+            select(selectedEntryID)
+            return
+        }
         guard nativePlayer.currentItem != nil else {
             if selectionTask != nil {
                 wantsPlayback = true
@@ -264,7 +276,10 @@ final class FoundationPlayer: ObservableObject {
             return
         }
         // Ended items restart through the same explicit selection path.
-        if state == .ended, let selectedEntryID { select(selectedEntryID); return }
+        if state == .ended, let selectedEntryID {
+            select(selectedEntryID)
+            return
+        }
         do {
             try activateSession()
             wantsPlayback = true
@@ -273,9 +288,18 @@ final class FoundationPlayer: ObservableObject {
         } catch { fail(.audioSession, error: error) }
     }
 
+    #if os(iOS)
+        /// Applies system inactivity in notification order through the existing pause operation.
+        /// App-requested deactivation is already handled by stop; resumption never starts audio automatically.
+        func didDeactivateAudioSession(source: AVAudioSession.DeactivationSource) {
+            guard source == .system else { return }
+            pause()
+        }
+    #endif
+
     private func pause() {
         #if DEBUG
-        recordSnapshot("command.pause")
+            recordSnapshot("command.pause")
         #endif
         wantsPlayback = false
         nativePlayer.pause()
@@ -285,7 +309,7 @@ final class FoundationPlayer: ObservableObject {
     private func discardSelection() {
         generation &+= 1
         #if DEBUG
-        recordSnapshot("discard.cancelRequested")
+            recordSnapshot("discard.cancelRequested")
         #endif
         selectionTask?.cancel()
         selectionTask = nil
@@ -303,15 +327,21 @@ final class FoundationPlayer: ObservableObject {
 
     private func refreshNativeState() {
         #if DEBUG
-        defer { recordSnapshot("native.observed") }
+            defer { recordSnapshot("native.observed") }
         #endif
         guard state != .failed, state != .ended else { return }
         guard let item = nativePlayer.currentItem else {
             state = selectionTask == nil ? .idle : (wantsPlayback ? .loading : .paused)
             return
         }
-        if nativePlayer.status == .failed { fail(.nativePlayer, error: nativePlayer.error); return }
-        if item.status == .failed { fail(.nativeItem, error: item.error); return }
+        if nativePlayer.status == .failed {
+            fail(.nativePlayer, error: nativePlayer.error)
+            return
+        }
+        if item.status == .failed {
+            fail(.nativeItem, error: item.error)
+            return
+        }
         switch nativePlayer.timeControlStatus {
         case .playing: state = .playing
         case .waitingToPlayAtSpecifiedRate: state = .waiting
@@ -332,7 +362,7 @@ final class FoundationPlayer: ObservableObject {
     func didReachEnd(_ item: AVPlayerItem) {
         guard nativePlayer.currentItem === item, state != .failed else { return }
         #if DEBUG
-        recordSnapshot("item.ended")
+            recordSnapshot("item.ended")
         #endif
         if let index = selectedIndex, queue.indices.contains(index + 1) {
             next()
@@ -354,52 +384,52 @@ final class FoundationPlayer: ObservableObject {
         state = .failed
         errorMessage = "Playback failed. Select a track to try again."
         #if DEBUG
-        let errorKind: String
-        if let error = error as? URLError {
-            switch error.code {
-            case .cancelled: errorKind = "cancelled"
-            case .timedOut: errorKind = "timeout"
-            case .networkConnectionLost, .notConnectedToInternet: errorKind = "connectivity"
-            case .secureConnectionFailed, .serverCertificateUntrusted: errorKind = "security"
-            default: errorKind = "networkOther"
+            let errorKind: String
+            if let error = error as? URLError {
+                switch error.code {
+                case .cancelled: errorKind = "cancelled"
+                case .timedOut: errorKind = "timeout"
+                case .networkConnectionLost, .notConnectedToInternet: errorKind = "connectivity"
+                case .secureConnectionFailed, .serverCertificateUntrusted: errorKind = "security"
+                default: errorKind = "networkOther"
+                }
+            } else {
+                errorKind = error == nil ? "unavailable" : "other"
             }
-        } else {
-            errorKind = error == nil ? "unavailable" : "other"
-        }
-        recordSnapshot("failure." + category.rawValue + "." + errorKind)
+            recordSnapshot("failure." + category.rawValue + "." + errorKind)
         #endif
     }
 
     #if DEBUG
-    private func recordSnapshot(_ event: String) {
-        let itemStatus: String
-        switch nativePlayer.currentItem?.status {
-        case .unknown?: itemStatus = "unknown"
-        case .readyToPlay?: itemStatus = "ready"
-        case .failed?: itemStatus = "failed"
-        case nil: itemStatus = "none"
-        @unknown default: itemStatus = "other"
+        private func recordSnapshot(_ event: String) {
+            let itemStatus: String
+            switch nativePlayer.currentItem?.status {
+            case .unknown?: itemStatus = "unknown"
+            case .readyToPlay?: itemStatus = "ready"
+            case .failed?: itemStatus = "failed"
+            case nil: itemStatus = "none"
+            @unknown default: itemStatus = "other"
+            }
+            let control: String
+            switch nativePlayer.timeControlStatus {
+            case .paused: control = "paused"
+            case .waitingToPlayAtSpecifiedRate: control = "waiting"
+            case .playing: control = "playing"
+            @unknown default: control = "other"
+            }
+            let reason: String
+            switch nativePlayer.reasonForWaitingToPlay {
+            case .evaluatingBufferingRate?: reason = "evaluatingBuffer"
+            case .toMinimizeStalls?: reason = "minimizeStalls"
+            case .noItemToPlay?: reason = "noItem"
+            case nil: reason = "none"
+            default: reason = "other"
+            }
+            FoundationJournal.shared.record(
+                "player.\(event) generation=\(generation) state=\(state.rawValue) "
+                    + "item=\(itemStatus) control=\(control) wait=\(reason) intent=\(wantsPlayback ? 1 : 0)"
+            )
         }
-        let control: String
-        switch nativePlayer.timeControlStatus {
-        case .paused: control = "paused"
-        case .waitingToPlayAtSpecifiedRate: control = "waiting"
-        case .playing: control = "playing"
-        @unknown default: control = "other"
-        }
-        let reason: String
-        switch nativePlayer.reasonForWaitingToPlay {
-        case .evaluatingBufferingRate?: reason = "evaluatingBuffer"
-        case .toMinimizeStalls?: reason = "minimizeStalls"
-        case .noItemToPlay?: reason = "noItem"
-        case nil: reason = "none"
-        default: reason = "other"
-        }
-        FoundationJournal.shared.record(
-            "player.\(event) generation=\(generation) state=\(state.rawValue) "
-                + "item=\(itemStatus) control=\(control) wait=\(reason) intent=\(wantsPlayback ? 1 : 0)"
-        )
-    }
     #endif
 
 }

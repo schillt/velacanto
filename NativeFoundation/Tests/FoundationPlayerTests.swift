@@ -74,6 +74,83 @@ final class FoundationPlayerTests: XCTestCase {
         XCTAssertNil(player.nativePlayer.currentItem)
     }
 
+    #if os(iOS)
+        func testSystemDeactivationPausesNativePlaybackAndRetainsItem() async throws {
+            let file = FileManager.default.temporaryDirectory
+                .appendingPathComponent(UUID().uuidString).appendingPathExtension("wav")
+            try Self.silentWAV().write(to: file, options: .atomic)
+            defer { try? FileManager.default.removeItem(at: file) }
+            let player = FoundationPlayer(
+                resolve: { _ in file }, activateSession: {}, deactivateSession: {})
+            defer { player.stop() }
+            let playing = XCTestExpectation(description: "Native playback started")
+            let subscription = player.$state.filter { $0 == .playing }.first().sink { _ in
+                playing.fulfill()
+            }
+            defer { subscription.cancel() }
+            player.setQueue([track], selectedIndex: 0)
+            let result = await XCTWaiter.fulfillment(of: [playing], timeout: 10)
+            XCTAssertEqual(result, .completed)
+            let item = try XCTUnwrap(player.nativePlayer.currentItem)
+            let selected = player.selectedEntryID
+
+            player.didDeactivateAudioSession(source: .system)
+
+            XCTAssertFalse(player.wantsPlayback)
+            XCTAssertEqual(player.state, .paused)
+            XCTAssertEqual(player.nativePlayer.rate, 0)
+            XCTAssertTrue(player.nativePlayer.currentItem === item)
+            XCTAssertEqual(player.selectedEntryID, selected)
+        }
+
+        func testSystemDeactivationBeforeResolutionPreventsLateAutomaticStart() async {
+            let resolver = PlayerResolutionProbe()
+            var starts = 0
+            let player = FoundationPlayer(
+                resolve: { _ in try await resolver.resolve() },
+                makeItem: { _ in AVPlayerItem(asset: AVMutableComposition()) },
+                activateSession: {}, deactivateSession: {}, startPlayback: { _ in starts += 1 })
+            defer { player.stop() }
+            player.setQueue([track], selectedIndex: 0)
+            let selection = player.selectionTask
+            await resolver.waitForCalls(1)
+
+            player.didDeactivateAudioSession(source: .system)
+            await resolver.succeed(0)
+            await selection?.value
+
+            XCTAssertFalse(player.wantsPlayback)
+            XCTAssertEqual(player.state, .paused)
+            XCTAssertNotNil(player.nativePlayer.currentItem)
+            XCTAssertEqual(starts, 0)
+        }
+
+        func testLateAppDeactivationDoesNotPauseNewSelection() async throws {
+            let resolver = PlayerResolutionProbe()
+            let player = player(resolver)
+            defer { player.stop() }
+            player.setQueue([track], selectedIndex: 0)
+            let oldSelection = player.selectionTask
+            await resolver.waitForCalls(1)
+            player.stop()
+            player.setQueue([track], selectedIndex: 0)
+            let newSelection = player.selectionTask
+            await resolver.waitForCalls(2)
+
+            player.didDeactivateAudioSession(source: .app)
+            XCTAssertTrue(player.wantsPlayback)
+            await resolver.succeed(0)
+            await oldSelection?.value
+            XCTAssertNil(player.nativePlayer.currentItem)
+            await resolver.succeed(1)
+            await newSelection?.value
+            let item = try XCTUnwrap(player.nativePlayer.currentItem)
+            player.didDeactivateAudioSession(source: .app)
+            XCTAssertTrue(player.wantsPlayback)
+            XCTAssertTrue(player.nativePlayer.currentItem === item)
+        }
+    #endif
+
     private static func silentWAV() -> Data {
         // Six seconds of 8 kHz, mono, signed 16-bit little-endian PCM.
         let byteCount: UInt32 = 8_000 * 6 * 2
