@@ -1,22 +1,18 @@
 # Velacanto roadmap
 
-## Current development release: 0.3.0
+## Current development target: 0.3.5
 
-0.3.0 is the **Native Player Foundation** release. It turns the proven 0.2
-listening path into a coherent daily-use experience across iPhone, iPad, and
-Mac while keeping catalog, actions, queue state, and playback presentation
-usable by a future CarPlay surface.
+The released baseline is 0.3.0 (108), the native rebuild derived from Foundation 106.
+Lyrics and active system controls were not delivered by that baseline. Historical
+plans do not override the release notes or current GitHub issue contracts.
 
-0.3 requires iOS 27, iPadOS 27, and macOS 27 and includes provider-supported
-timed or untimed lyrics in the native Now Playing baseline.
-
-The original internal preview checkpoint was **August 19, 2026**. That date
-does not override quality or the stable OS 27 SDK requirement: the milestone
-remains open, and final promotion to `main` occurs only after every required
-acceptance row passes or records an explicitly accepted limitation.
-
-Required outcomes are maintained in the [0.3 plan](0.3-plan.md) and
-[acceptance matrix](0.3-stability-acceptance.md).
+The [0.3.5 execution plan](0.3.5-execution-plan.md) sequences existing-player
+correctness and background-network investigation, OS 27 toolchain/session work,
+NowPlaying text/commands, native volume, AirPlay and shared static artwork. Target
+minimums are iOS/iPadOS 27 and macOS 27; project/CI alignment is issue #161, not a
+completed claim. Each stage requires independent exact-candidate acceptance.
+No calendar date is committed. Distribution and prior 0.3 acceptance gaps remain
+tracked separately; preparing 0.3.5 does not close them.
 
 ## Release history
 
@@ -43,10 +39,12 @@ repeatable quality gate. Historical plans and evidence are retained in
 
 ## Ordered later direction
 
-### 0.4.0 — Offline and Network Resilience
+### 0.4.0 — Optional metadata and broader resilience
 
-Offline downloads, storage controls, explicit artwork/offline policy, and
-network-transition recovery. No date is committed.
+After accepted 0.3.5: bounded optional lyrics and Jellyfin reporting, broader
+streaming/codec/queue follow-ups, measured artwork/storage policy and offline
+downloads. New optional features preserve the accepted playback and network
+boundaries. No date is committed.
 
 ### 0.5.0 — CarPlay and Connected Playback
 
