@@ -96,16 +96,19 @@ final class FoundationPlayer: ObservableObject {
                     self.fail(.nativeEnd, error: item.error)
                 }
             })
+        let rateChangeReasonKey = AVPlayer.rateDidChangeReasonKey
         notifications.append(
             NotificationCenter.default.addObserver(
                 forName: AVPlayer.rateDidChangeNotification, object: nativePlayer, queue: .main
             ) { [weak self] notification in
-                guard
-                    let value = notification.userInfo?[AVPlayer.rateDidChangeReasonKey] as? String,
-                    AVPlayer.RateDidChangeReason(rawValue: value) == .setRateFailed
-                else { return }
-                // Reconcile at delivery; a deferred callback must not clear a newer Play command.
-                MainActor.assumeIsolated { self?.reconcileRejectedStart() }
+                // Only the copied String crosses into the actor; Notification.userInfo is not Sendable.
+                let value = notification.userInfo?[rateChangeReasonKey] as? String
+                MainActor.assumeIsolated {
+                    guard let value,
+                        AVPlayer.RateDidChangeReason(rawValue: value) == .setRateFailed
+                    else { return }
+                    self?.reconcileRejectedStart()
+                }
             })
         #if os(iOS)
             notifications.append(
