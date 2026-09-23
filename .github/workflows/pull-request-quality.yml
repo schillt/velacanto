@@ -20,7 +20,6 @@ jobs:
     timeout-minutes: 45
     env:
       DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
-      VELACANTO_IOS_SIMULATOR_DESTINATION: platform=iOS Simulator,name=iPhone Air,OS=27.0
 
     steps:
       - name: Check out candidate
@@ -29,36 +28,25 @@ jobs:
       - name: Install preflight dependency
         run: brew install ripgrep
 
-      - name: Show OS 27 toolchain and simulator destination
+      - name: Verify OS 27 toolchain and select existing simulator
         run: |
-          xcodebuild -version
-          xcrun simctl list devices available
+          ./scripts/preflight.sh
+          xcrun simctl list devices available --json > "$RUNNER_TEMP/velacanto-simulators.json"
+          python3 - <<'PYTHON'
+          import json
+          import os
+          from pathlib import Path
+
+          devices = json.loads((Path(os.environ["RUNNER_TEMP"]) / "velacanto-simulators.json").read_text())
+          matches = [device for device in devices["devices"].get("com.apple.CoreSimulator.SimRuntime.iOS-27-0", [])
+                     if device["name"] == "iPhone Air" and device["isAvailable"]]
+          if len(matches) != 1:
+              raise SystemExit("Expected exactly one available iPhone Air with iOS 27.0; no simulator will be created.")
+          destination = "platform=iOS Simulator,id=" + matches[0]["udid"]
+          print("Verified destination: " + destination)
+          with open(os.environ["GITHUB_ENV"], "a") as environment:
+              environment.write("VELACANTO_IOS_SIMULATOR_DESTINATION=" + destination + "\n")
+          PYTHON
 
       - name: Run quality checks
-        run: ./scripts/build.sh pr-os27-preview
-
-  os27-preview:
-    name: Xcode 26 Compatibility Advisory
-    runs-on: macos-26
-    continue-on-error: true
-    timeout-minutes: 60
-    env:
-      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
-      VELACANTO_IOS_SIMULATOR_DESTINATION: platform=iOS Simulator,name=iPhone Air,OS=26.5
-
-    steps:
-      - name: Check out candidate
-        uses: actions/checkout@v4
-
-      - name: Install preflight dependency
-        run: brew install ripgrep
-
-      - name: Show compatibility toolchain and simulator destination
-        run: |
-          xcodebuild -version
-          xcrun simctl list devices available
-
-      - name: Run Xcode 26 compatibility verification
-        # Keep the older toolchain advisory; the required gate tests the
-        # rebuilt product with the current development toolchain.
-        run: ./scripts/build.sh pr-hosted
+        run: ./scripts/build.sh pr

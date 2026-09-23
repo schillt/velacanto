@@ -13,12 +13,8 @@ elif [ "$#" -gt 0 ]; then
   exit 2
 fi
 
-if [ "$skip_xcode" = false ] &&
-  [ -z "${DEVELOPER_DIR:-}" ] &&
-  [ -d /Applications/Xcode-beta.app/Contents/Developer ]; then
-  DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer
-  export DEVELOPER_DIR
-fi
+DEVELOPER_DIR=${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}
+export DEVELOPER_DIR
 
 failures=0
 warnings=0
@@ -165,22 +161,25 @@ fi
 if [ "$skip_xcode" = true ]; then
   warn "Xcode checks were skipped by request"
 else
-  if command_exists xcodebuild; then
-    developer_dir=$(xcode-select -p 2>/dev/null || true)
-    if [ -n "$developer_dir" ]; then
-      pass "Active developer directory is $developer_dir"
+  xcodebuild_path="$DEVELOPER_DIR/usr/bin/xcodebuild"
+  pass "Selected developer directory is $DEVELOPER_DIR"
+  if [ -x "$xcodebuild_path" ] && xcode_version=$("$xcodebuild_path" -version 2>/dev/null); then
+    xcode_major=$(printf '%s\n' "$xcode_version" | awk '/^Xcode / { split($2, version, "."); print version[1] }')
+    if [ "${xcode_major:-0}" -ge 27 ] 2>/dev/null; then
+      pass "xcodebuild is ready ($(printf '%s' "$xcode_version" | tr '\n' ' '))"
     else
-      fail "No active Xcode developer directory is selected"
+      fail "Xcode 27 or newer is required"
     fi
-
-    if xcodebuild -version >/dev/null 2>&1; then
-      xcode_version=$(xcodebuild -version | tr '\n' ' ')
-      pass "xcodebuild is ready ($xcode_version)"
-    else
-      fail "xcodebuild is installed but not ready"
-    fi
+    for sdk in iphoneos iphonesimulator macosx; do
+      if sdk_version=$(xcrun --sdk "$sdk" --show-sdk-version 2>/dev/null) &&
+        [ "${sdk_version%%.*}" -ge 27 ] 2>/dev/null; then
+        pass "$sdk SDK $sdk_version is available"
+      else
+        fail "$sdk SDK 27 or newer is required"
+      fi
+    done
   else
-    fail "xcodebuild is missing"
+    fail "Xcode is unavailable or not ready at $DEVELOPER_DIR"
   fi
 fi
 
