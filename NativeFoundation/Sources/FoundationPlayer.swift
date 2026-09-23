@@ -28,6 +28,8 @@ final class FoundationPlayer: ObservableObject {
     private let activateSession: () throws -> Void
     private let deactivateSession: () -> Void
     private let startPlayback: (AVPlayer) -> Void
+    private var isStartingPlayback = false
+    private var rejectionDuringStart = false
     private var observations: [NSKeyValueObservation] = []
     private var itemObservation: NSKeyValueObservation?
     private var notifications: [NSObjectProtocol] = []
@@ -93,6 +95,17 @@ final class FoundationPlayer: ObservableObject {
                     guard let self, self.nativePlayer.currentItem === item else { return }
                     self.fail(.nativeEnd, error: item.error)
                 }
+            })
+        notifications.append(
+            NotificationCenter.default.addObserver(
+                forName: AVPlayer.rateDidChangeNotification, object: nativePlayer, queue: .main
+            ) { [weak self] notification in
+                guard
+                    let value = notification.userInfo?[AVPlayer.rateDidChangeReasonKey] as? String,
+                    AVPlayer.RateDidChangeReason(rawValue: value) == .setRateFailed
+                else { return }
+                // Reconcile at delivery; a deferred callback must not clear a newer Play command.
+                MainActor.assumeIsolated { self?.reconcileRejectedStart() }
             })
         #if os(iOS)
             notifications.append(
@@ -258,7 +271,9 @@ final class FoundationPlayer: ObservableObject {
 
     private var selectedIndex: Int? { queue.firstIndex { $0.id == selectedEntryID } }
 
-    private func play() {
+    /// Requests playback explicitly, retaining the current occurrence when native start was rejected.
+    /// Repeated commands during an active start do not reactivate the session or replace the item.
+    func play() {
         #if DEBUG
             recordSnapshot("command.play")
         #endif
@@ -280,10 +295,18 @@ final class FoundationPlayer: ObservableObject {
             select(selectedEntryID)
             return
         }
+        if wantsPlayback, nativePlayer.rate > 0 { return }
         do {
             try activateSession()
             wantsPlayback = true
+            isStartingPlayback = true
+            rejectionDuringStart = false
             startPlayback(nativePlayer)
+            isStartingPlayback = false
+            if rejectionDuringStart {
+                rejectionDuringStart = false
+                reconcileRejectedStart()
+            }
             refreshNativeState()
         } catch { fail(.audioSession, error: error) }
     }
@@ -297,13 +320,35 @@ final class FoundationPlayer: ObservableObject {
         }
     #endif
 
-    private func pause() {
+    /// Cancels playback intent, including a pending resolution, without discarding the occurrence.
+    /// A later explicit Play may resume the same item; inactivity never resumes it automatically.
+    func pause() {
         #if DEBUG
             recordSnapshot("command.pause")
         #endif
         wantsPlayback = false
         nativePlayer.pause()
         refreshNativeState()
+    }
+
+    /// Only an explicit native rejection can end a pending start; transient paused readiness cannot.
+    /// Consult current native state so a delayed notification cannot interrupt an already active start.
+    private func reconcileRejectedStart() {
+        // Native start may deliver an earlier rate notification reentrantly. Inspect its final state.
+        if isStartingPlayback {
+            rejectionDuringStart = true
+            return
+        }
+        guard wantsPlayback, nativePlayer.currentItem != nil,
+            nativePlayer.currentItem?.status != .failed,
+            nativePlayer.timeControlStatus == .paused, nativePlayer.rate == 0,
+            state != .failed, state != .ended
+        else { return }
+        wantsPlayback = false
+        refreshNativeState()
+        #if DEBUG
+            recordSnapshot("start.rejected")
+        #endif
     }
 
     private func discardSelection() {

@@ -151,6 +151,154 @@ final class FoundationPlayerTests: XCTestCase {
         }
     #endif
 
+    func testRejectedStartResumesSameItemWithOneToggleAndIgnoresLateFailure() async throws {
+        let file = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString).appendingPathExtension("wav")
+        try Self.silentWAV().write(to: file, options: .atomic)
+        defer { try? FileManager.default.removeItem(at: file) }
+        let resolver = PlayerResolutionProbe()
+        var starts = 0
+        var activations = 0
+        let player = FoundationPlayer(
+            resolve: { _ in try await resolver.resolve() },
+            makeItem: { _ in AVPlayerItem(url: file) },
+            activateSession: { activations += 1 }, deactivateSession: {},
+            startPlayback: { native in
+                starts += 1
+                if starts > 1 {
+                    // A prior rejection arrives inside the newer native start, before rate changes.
+                    NotificationCenter.default.post(
+                        name: AVPlayer.rateDidChangeNotification, object: native,
+                        userInfo: [
+                            AVPlayer.rateDidChangeReasonKey: AVPlayer.RateDidChangeReason
+                                .setRateFailed.rawValue
+                        ])
+                    native.play()
+                }
+            })
+        defer { player.stop() }
+        player.setQueue([track], selectedIndex: 0)
+        let selection = player.selectionTask
+        await resolver.waitForCalls(1)
+        await resolver.succeed(0)
+        await selection?.value
+        let item = try XCTUnwrap(player.nativePlayer.currentItem)
+        let occurrence = player.selectedEntryID
+        let ready = XCTestExpectation(description: "Real item becomes ready without native start")
+        let observation = item.observe(\.status, options: [.initial, .new]) { item, _ in
+            if item.status == .readyToPlay { ready.fulfill() }
+        }
+        defer { observation.invalidate() }
+        let readiness = await XCTWaiter.fulfillment(of: [ready], timeout: 10)
+        XCTAssertEqual(readiness, .completed)
+        // Readiness plus paused alone is not proof that the requested start was rejected.
+        XCTAssertTrue(player.wantsPlayback)
+        Self.postRateFailure(player)
+        XCTAssertFalse(player.wantsPlayback)
+        XCTAssertEqual(player.state, .paused)
+        XCTAssertTrue(player.nativePlayer.currentItem === item)
+
+        let playing = XCTestExpectation(description: "One toggle resumes the retained native item")
+        let subscription = player.$state.filter { $0 == .playing }.first().sink { _ in
+            playing.fulfill()
+        }
+        defer { subscription.cancel() }
+        player.togglePlayback()
+        XCTAssertGreaterThan(player.nativePlayer.rate, 0)
+        // Delivered before any queued KVO task runs: a newer waiting/playing request wins.
+        Self.postRateFailure(player)
+        XCTAssertTrue(player.wantsPlayback)
+        player.play()
+        XCTAssertEqual(starts, 2)
+        XCTAssertEqual(activations, 2)
+        let playback = await XCTWaiter.fulfillment(of: [playing], timeout: 10)
+        XCTAssertEqual(playback, .completed)
+        XCTAssertTrue(player.nativePlayer.currentItem === item)
+        XCTAssertEqual(player.selectedEntryID, occurrence)
+        let resolutions = await resolver.count
+        XCTAssertEqual(resolutions, 1)
+
+        player.pause()
+        player.pause()
+        Self.postRateFailure(player)
+        XCTAssertFalse(player.wantsPlayback)
+        XCTAssertEqual(player.state, .paused)
+        XCTAssertEqual(starts, 2)
+    }
+
+    func testOldRateFailureCannotCancelReplacementResolutionOrExplicitPause() async {
+        let resolver = PlayerResolutionProbe()
+        var starts = 0
+        let player = FoundationPlayer(
+            resolve: { _ in try await resolver.resolve() },
+            makeItem: { _ in AVPlayerItem(asset: AVMutableComposition()) },
+            activateSession: {}, deactivateSession: {}, startPlayback: { _ in starts += 1 })
+        defer { player.stop() }
+        player.setQueue([track, track], selectedIndex: 0)
+        let oldSelection = player.selectionTask
+        await resolver.waitForCalls(1)
+        player.next()
+        let replacement = player.selectionTask
+        await resolver.waitForCalls(2)
+        Self.postRateFailure(player)
+        XCTAssertTrue(player.wantsPlayback)
+        XCTAssertEqual(player.state, .loading)
+        player.play()
+        player.pause()
+        Self.postRateFailure(player)
+        await resolver.succeed(0)
+        await oldSelection?.value
+        XCTAssertNil(player.nativePlayer.currentItem)
+        await resolver.succeed(1)
+        await replacement?.value
+        XCTAssertFalse(player.wantsPlayback)
+        XCTAssertEqual(player.state, .paused)
+        XCTAssertEqual(starts, 0)
+    }
+
+    func testImmediateNativeRejectionFinishesIntentWithoutAutomaticRetry() async throws {
+        let resolver = PlayerResolutionProbe()
+        var starts = 0
+        let player = FoundationPlayer(
+            resolve: { _ in try await resolver.resolve() },
+            makeItem: { _ in AVPlayerItem(asset: AVMutableComposition()) },
+            activateSession: {}, deactivateSession: {},
+            startPlayback: { native in
+                starts += 1
+                NotificationCenter.default.post(
+                    name: AVPlayer.rateDidChangeNotification, object: native,
+                    userInfo: [
+                        AVPlayer.rateDidChangeReasonKey: AVPlayer.RateDidChangeReason.setRateFailed
+                            .rawValue
+                    ])
+            })
+        defer { player.stop() }
+        player.setQueue([track], selectedIndex: 0)
+        let selection = player.selectionTask
+        await resolver.waitForCalls(1)
+        await resolver.succeed(0)
+        await selection?.value
+        let item = try XCTUnwrap(player.nativePlayer.currentItem)
+        await Task.yield()
+        XCTAssertFalse(player.wantsPlayback)
+        XCTAssertEqual(player.state, .paused)
+        XCTAssertEqual(starts, 1)
+        player.play()
+        XCTAssertEqual(starts, 2)
+        XCTAssertFalse(player.wantsPlayback)
+        XCTAssertTrue(player.nativePlayer.currentItem === item)
+        let resolutions = await resolver.count
+        XCTAssertEqual(resolutions, 1)
+    }
+
+    private static func postRateFailure(_ player: FoundationPlayer) {
+        NotificationCenter.default.post(
+            name: AVPlayer.rateDidChangeNotification, object: player.nativePlayer,
+            userInfo: [
+                AVPlayer.rateDidChangeReasonKey: AVPlayer.RateDidChangeReason.setRateFailed.rawValue
+            ])
+    }
+
     private static func silentWAV() -> Data {
         // Six seconds of 8 kHz, mono, signed 16-bit little-endian PCM.
         let byteCount: UInt32 = 8_000 * 6 * 2
