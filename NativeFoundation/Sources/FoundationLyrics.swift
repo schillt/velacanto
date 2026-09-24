@@ -140,7 +140,7 @@ struct FoundationLyricsView: View {
                             .padding(.vertical)
                             .padding(.horizontal, 24)
                     }
-                    .mask { FoundationLyricsTopFade() }
+                    .mask { FoundationLyricsEdgeFade() }
                 }
             }
         }
@@ -211,7 +211,7 @@ private struct FoundationTimedLyricsView: View {
                 .padding(.vertical)
                 .padding(.horizontal, 24)
             }
-            .mask { FoundationLyricsTopFade() }
+            .mask { FoundationLyricsEdgeFade() }
             .onScrollPhaseChange { _, phase in
                 scrollIsIdle = phase == .idle
                 if phase == .tracking || phase == .interacting { followsPlayback = false }
@@ -263,12 +263,14 @@ private struct FoundationTimedLyricsView: View {
     }
 }
 
-private struct FoundationLyricsTopFade: View {
+private struct FoundationLyricsEdgeFade: View {
     var body: some View {
         VStack(spacing: 0) {
             LinearGradient(colors: [.clear, .white], startPoint: .top, endPoint: .bottom)
                 .frame(height: 24)
             Rectangle().fill(.white)
+            LinearGradient(colors: [.white, .clear], startPoint: .top, endPoint: .bottom)
+                .frame(height: 24)
         }
     }
 }
