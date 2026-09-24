@@ -200,6 +200,22 @@ final class FoundationLyricsTests: XCTestCase {
         XCTAssertEqual(lyrics.activeLine(at: 3, duration: 60), 3)
     }
 
+    func testRapidReopenKeepsOutgoingPresentationCancellationIndependent() async {
+        let entry = FoundationQueueEntry(item: item)
+        let outgoing = FoundationLyricsPresentation(entry: entry)
+        let current = FoundationLyricsPresentation(entry: entry)
+        XCTAssertNotEqual(outgoing.id, current.id)
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            (Data(#"{"Lyrics":[{"Text":"Current"}]}"#.utf8), Self.response(request, status: 200))
+        }
+        await current.model.load(item: item, library: library) { true }
+        outgoing.model.cancel()
+        XCTAssertFalse(outgoing.model.isActive)
+        await outgoing.model.load(item: item, library: library) { true }
+        XCTAssertEqual(outgoing.model.state, .idle)
+        XCTAssertEqual(current.model.state, .loaded(FoundationLyrics(text: "Current")))
+    }
+
     nonisolated private static func response(_ request: URLRequest, status: Int) -> HTTPURLResponse
     {
         HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!

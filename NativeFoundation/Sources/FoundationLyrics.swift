@@ -49,38 +49,57 @@ final class FoundationLyricsModel: ObservableObject {
     }
 
     @Published private(set) var state: State = .idle
+    @Published private(set) var isActive = true
+    private var loadTask: Task<FoundationLyrics?, Error>?
     private var generation = 0
 
-    /// The visible sheet owns the task. Repeated appearances do not reload a completed result.
+    /// The visible lyrics content owns the task. Redraws do not reload a completed result.
     func load(
         item: FoundationItem, library: any FoundationLibrary,
         isCurrent: @MainActor () -> Bool
     ) async {
-        guard state == .idle, isCurrent(), !Task.isCancelled else { return }
+        guard isActive, state == .idle, isCurrent(), !Task.isCancelled else { return }
         generation += 1
         let request = generation
         state = .loading
+        let task = Task { try await library.lyrics(for: item) }
+        loadTask = task
+        defer { if request == generation { loadTask = nil } }
         do {
-            let lyrics = try await library.lyrics(for: item)
-            guard request == generation, isCurrent(), !Task.isCancelled else { return }
+            let lyrics = try await withTaskCancellationHandler {
+                try await task.value
+            } onCancel: {
+                task.cancel()
+            }
+            guard isActive, request == generation, isCurrent(), !Task.isCancelled else { return }
             state = lyrics.map(State.loaded) ?? .missing
         } catch {
-            guard request == generation, isCurrent(), !Task.isCancelled else { return }
+            guard isActive, request == generation, isCurrent(), !Task.isCancelled else { return }
             let failure = FoundationLibraryError.category(error)
             state = failure == .cancelled ? .idle : .failed(failure)
         }
     }
 
-    /// Invalidate before dismissal so a provider that ignores cancellation cannot publish.
+    /// Invalidate before hiding so a provider that ignores cancellation cannot publish.
     func cancel() {
+        isActive = false
         generation += 1
+        loadTask?.cancel()
+        loadTask = nil
         state = .idle
     }
 
     func prepareRetry() {
-        guard case .failed = state else { return }
+        guard isActive, case .failed = state else { return }
         state = .idle
     }
+}
+
+@MainActor
+struct FoundationLyricsPresentation: Identifiable {
+    let id = UUID()
+    let entry: FoundationQueueEntry
+    let model = FoundationLyricsModel()
 }
 
 struct FoundationLyricsView: View {
@@ -88,63 +107,50 @@ struct FoundationLyricsView: View {
     let entryID: UUID
     let library: any FoundationLibrary
     @ObservedObject var player: FoundationPlayer
-    @StateObject private var model = FoundationLyricsModel()
+    @ObservedObject var model: FoundationLyricsModel
     @State private var retry = 0
-    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        NavigationStack {
-            Group {
-                switch model.state {
-                case .idle, .loading:
-                    ProgressView("Loading lyrics…")
-                case .missing:
-                    ContentUnavailableView("Lyrics unavailable", systemImage: "quote.bubble")
-                case .failed(let error):
-                    VStack(spacing: 16) {
-                        ContentUnavailableView(
-                            "Couldn’t load lyrics", systemImage: "exclamationmark.bubble",
-                            description: Text(error.localizedDescription))
-                        Button("Retry") {
-                            model.prepareRetry()
-                            retry += 1
-                        }
-                    }
-                case .loaded(let lyrics):
-                    if lyrics.hasTiming {
-                        FoundationTimedLyricsView(lyrics: lyrics, entryID: entryID, player: player)
-                    } else {
-                        ScrollView {
-                            Text(lyrics.text)
-                                .font(.title3)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .textSelection(.enabled)
-                                .padding()
-                        }
+        Group {
+            switch model.state {
+            case .idle, .loading:
+                ProgressView("Loading lyrics…")
+            case .missing:
+                ContentUnavailableView("Lyrics unavailable", systemImage: "quote.bubble")
+            case .failed(let error):
+                VStack(spacing: 16) {
+                    ContentUnavailableView(
+                        "Couldn’t load lyrics", systemImage: "exclamationmark.bubble",
+                        description: Text(error.localizedDescription))
+                    Button("Retry") {
+                        model.prepareRetry()
+                        retry += 1
                     }
                 }
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .navigationTitle("Lyrics")
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") {
-                        model.cancel()
-                        dismiss()
+            case .loaded(let lyrics):
+                if lyrics.hasTiming {
+                    FoundationTimedLyricsView(lyrics: lyrics, entryID: entryID, player: player)
+                } else {
+                    ScrollView {
+                        Text(lyrics.text)
+                            .font(.title3)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .textSelection(.enabled)
+                            .padding()
                     }
                 }
             }
         }
-        #if os(macOS)
-            .frame(minWidth: 360, idealWidth: 480, minHeight: 420, idealHeight: 600)
-        #endif
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .disabled(!model.isActive)
+        .allowsHitTesting(model.isActive)
+        .accessibilityHidden(!model.isActive)
         .task(id: retry) {
             await model.load(item: item, library: library) { player.selectedEntryID == entryID }
         }
         .onChange(of: player.selectedEntryID) { _, selection in
             guard selection != entryID else { return }
             model.cancel()
-            dismiss()
         }
         .onDisappear { model.cancel() }
     }

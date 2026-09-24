@@ -17,7 +17,7 @@ struct FoundationPlayerView: View {
     @State private var scrubEntryID: UUID?
     @State private var showingGrabber = true
     @State private var showingQueue = false
-    @State private var lyricsEntry: FoundationQueueEntry?
+    @State private var lyricsPresentation: FoundationLyricsPresentation?
     @State private var showsDelayedLoading = false
     @Environment(\.foundationOpenLibraryItem) private var openLibraryItem
     @State private var queuedDestination: FoundationItem?
@@ -45,56 +45,78 @@ struct FoundationPlayerView: View {
             GeometryReader { geometry in
                 VStack(spacing: 0) {
                     GeometryReader { artworkGeometry in
-                        artworkView(
-                            size: artworkGeometry.size.width,
-                            height: artworkGeometry.size.width
-                                + max(0, artworkGeometry.size.height - artworkGeometry.size.width)
-                                * 0.75
-                        )
-                        .mask {
-                            LinearGradient(
-                                stops: [
-                                    .init(color: .white, location: 0.84),
-                                    .init(color: .white.opacity(0.82), location: 0.90),
-                                    .init(color: .white.opacity(0.35), location: 0.96),
-                                    .init(color: .white.opacity(0.07), location: 0.99),
-                                    .init(color: .clear, location: 1),
-                                ], startPoint: .top, endPoint: .bottom)
-                        }
-                        .frame(width: artworkGeometry.size.width, alignment: .top)
-                        .overlay(alignment: .top) {
-                            if let artworkUpperEdgeColors, geometry.safeAreaInsets.top > 0 {
-                                // Broad edge colors preserve the cover palette without
-                                // reflecting objects. Retain the wider feather at the join.
+                        ZStack {
+                            artworkView(
+                                size: artworkGeometry.size.width,
+                                height: artworkGeometry.size.width
+                                    + max(
+                                        0, artworkGeometry.size.height - artworkGeometry.size.width)
+                                    * 0.75
+                            )
+                            .mask {
                                 LinearGradient(
-                                    colors: artworkUpperEdgeColors,
-                                    startPoint: .leading, endPoint: .trailing
-                                )
-                                .frame(
-                                    width: artworkGeometry.size.width,
-                                    height: geometry.safeAreaInsets.top + 28
-                                )
-                                .mask {
-                                    VStack(spacing: 0) {
-                                        Rectangle().fill(.white)
-                                            .frame(height: geometry.safeAreaInsets.top)
-                                        LinearGradient(
-                                            stops: [
-                                                .init(color: .white, location: 0),
-                                                .init(
-                                                    color: .white.opacity(0.65),
-                                                    location: 0.25),
-                                                .init(
-                                                    color: .white.opacity(0.2),
-                                                    location: 0.6),
-                                                .init(color: .clear, location: 1),
-                                            ], startPoint: .top, endPoint: .bottom
-                                        ).frame(height: 28)
+                                    stops: [
+                                        .init(color: .white, location: 0.84),
+                                        .init(color: .white.opacity(0.82), location: 0.90),
+                                        .init(color: .white.opacity(0.35), location: 0.96),
+                                        .init(color: .white.opacity(0.07), location: 0.99),
+                                        .init(color: .clear, location: 1),
+                                    ], startPoint: .top, endPoint: .bottom)
+                            }
+                            .frame(width: artworkGeometry.size.width, alignment: .top)
+                            .overlay(alignment: .top) {
+                                if let artworkUpperEdgeColors, geometry.safeAreaInsets.top > 0 {
+                                    // Broad edge colors preserve the cover palette without
+                                    // reflecting objects. Retain the wider feather at the join.
+                                    LinearGradient(
+                                        colors: artworkUpperEdgeColors,
+                                        startPoint: .leading, endPoint: .trailing
+                                    )
+                                    .frame(
+                                        width: artworkGeometry.size.width,
+                                        height: geometry.safeAreaInsets.top + 28
+                                    )
+                                    .mask {
+                                        VStack(spacing: 0) {
+                                            Rectangle().fill(.white)
+                                                .frame(height: geometry.safeAreaInsets.top)
+                                            LinearGradient(
+                                                stops: [
+                                                    .init(color: .white, location: 0),
+                                                    .init(
+                                                        color: .white.opacity(0.65),
+                                                        location: 0.25),
+                                                    .init(
+                                                        color: .white.opacity(0.2),
+                                                        location: 0.6),
+                                                    .init(color: .clear, location: 1),
+                                                ], startPoint: .top, endPoint: .bottom
+                                            ).frame(height: 28)
+                                        }
                                     }
+                                    .offset(y: -geometry.safeAreaInsets.top)
                                 }
-                                .offset(y: -geometry.safeAreaInsets.top)
+                            }
+                            .opacity(lyricsPresentation == nil ? 1 : 0)
+                            .accessibilityHidden(lyricsPresentation != nil)
+                            .allowsHitTesting(lyricsPresentation == nil)
+                            if let presentation = lyricsPresentation {
+                                let entry = presentation.entry
+                                FoundationLyricsView(
+                                    item: entry.item, entryID: entry.id, library: library,
+                                    player: player, model: presentation.model
+                                )
+                                .id(presentation.id)
+                                .transition(.opacity)
                             }
                         }
+                        .frame(
+                            width: artworkGeometry.size.width, height: artworkGeometry.size.height
+                        )
+                        .clipped()
+                        .animation(
+                            reduceMotion ? nil : .easeInOut(duration: 0.2),
+                            value: lyricsPresentation?.id)
                     }
                     VStack(alignment: .leading, spacing: geometry.size.height < 700 ? 8 : 14) {
                         VStack(spacing: 0) {
@@ -105,14 +127,24 @@ struct FoundationPlayerView: View {
                         volumePlaceholder
                         HStack {
                             Button {
-                                lyricsEntry = player.queue.first { $0.id == player.selectedEntryID }
+                                lyricsPresentation?.model.cancel()
+                                if lyricsPresentation == nil {
+                                    lyricsPresentation = player.queue.first {
+                                        $0.id == player.selectedEntryID
+                                    }.map { FoundationLyricsPresentation(entry: $0) }
+                                } else {
+                                    lyricsPresentation = nil
+                                }
                             } label: {
                                 Image(systemName: "quote.bubble")
                                     .font(.title2)
                                     .frame(width: 44, height: 44)
                             }
                             .disabled(current == nil)
-                            .accessibilityLabel("Lyrics")
+                            .accessibilityLabel(
+                                lyricsPresentation == nil ? "Show lyrics" : "Show artwork"
+                            )
+                            .accessibilityAddTraits(lyricsPresentation == nil ? [] : .isSelected)
                             Spacer()
                             FoundationAirPlayPicker(player: player)
                                 .frame(width: 44, height: 44)
@@ -214,10 +246,8 @@ struct FoundationPlayerView: View {
         .onChange(of: player.selectedEntryID) { _, _ in
             scrubbing = false
             scrubEntryID = nil
-        }
-        .sheet(item: $lyricsEntry) { entry in
-            FoundationLyricsView(
-                item: entry.item, entryID: entry.id, library: library, player: player)
+            lyricsPresentation?.model.cancel()
+            lyricsPresentation = nil
         }
         .sheet(isPresented: $showingQueue, onDismiss: finishQueueDismissal) {
             FoundationQueueView(player: player) { item in
