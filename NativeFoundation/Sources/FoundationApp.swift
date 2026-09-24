@@ -1,4 +1,5 @@
 import CryptoKit
+import NowPlaying
 import SwiftUI
 
 @main
@@ -20,6 +21,10 @@ final class FoundationAppModel: ObservableObject {
     @Published private(set) var actions: FoundationLibraryActions?
     @Published var credentialError: String?
     private var restored = false
+    private var nowPlaying: FoundationNowPlaying?
+    private var mediaSession: MediaSession<FoundationNowPlaying>?
+
+    isolated deinit { nowPlaying?.invalidate() }
 
     func restore() {
         guard !restored else { return }
@@ -43,6 +48,9 @@ final class FoundationAppModel: ObservableObject {
     }
 
     private func open(_ session: FoundationSession) {
+        nowPlaying?.invalidate()
+        mediaSession = nil
+        nowPlaying = nil
         actions?.invalidate()
         player?.stop()
         let library = FoundationJellyfinLibrary(session: session)
@@ -62,6 +70,13 @@ final class FoundationAppModel: ObservableObject {
         #else
             self.player = FoundationPlayer(library: library)
         #endif
+        if let player = self.player {
+            let bridge = FoundationNowPlaying(player: player)
+            let mediaSession = MediaSession(bridge)
+            self.nowPlaying = bridge
+            self.mediaSession = mediaSession
+            bridge.attach(mediaSession)
+        }
     }
 
     func signOut() {
@@ -70,6 +85,9 @@ final class FoundationAppModel: ObservableObject {
             try FoundationCredentials.clear()
             actions?.invalidate()
             actions = nil
+            nowPlaying?.invalidate()
+            mediaSession = nil
+            nowPlaying = nil
             player = nil
             library = nil
             credentialError = nil

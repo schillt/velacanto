@@ -18,6 +18,8 @@ final class FoundationPlayer: ObservableObject {
     @Published private(set) var errorMessage: String?
     @Published private(set) var elapsed: Double = 0
     @Published private(set) var duration: Double = 0
+    @Published private(set) var isInterrupted = false
+    let playbackPositionChanged = PassthroughSubject<Void, Never>()
 
     // Internal access lets tests await the exact selection, including an obsolete task.
     private(set) var selectionTask: Task<Void, Never>?
@@ -193,6 +195,7 @@ final class FoundationPlayer: ObservableObject {
     private func select(_ id: UUID, retainingEndedItem: Bool) {
         guard let entry = queue.first(where: { $0.id == id }) else { return }
         discardSelection(retainingNativeItem: retainingEndedItem)
+        isInterrupted = false
         selectedEntryID = id
         wantsPlayback = true
         state = .loading
@@ -267,30 +270,32 @@ final class FoundationPlayer: ObservableObject {
             nativePlayer.currentItem?.status == .readyToPlay
         else { return }
         let target = CMTime(seconds: min(max(0, seconds), duration), preferredTimescale: 600)
+        let seekGeneration = generation
         #if DEBUG
             let direction =
                 target.seconds < nativePlayer.currentTime().seconds ? "backward" : "forward"
-            let seekGeneration = generation
             FoundationTrace.event("seek.request direction=\(direction)")
-            nativePlayer.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero) {
-                [weak self] finished in
-                Task { @MainActor in
-                    guard let self else { return }
-                    let current =
-                        self.selectedEntryID == entryID && self.generation == seekGeneration
-                    let reached =
-                        current && abs(self.nativePlayer.currentTime().seconds - target.seconds) < 1
-                    FoundationTrace.event(
-                        "seek.complete direction=\(direction) finished=\(finished ? 1 : 0) current=\(current ? 1 : 0) reached=\(reached ? 1 : 0)"
-                    )
-                }
-            }
-        #else
-            nativePlayer.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero)
         #endif
+        nativePlayer.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero) {
+            [weak self] finished in
+            Task { @MainActor in
+                guard let self, self.selectedEntryID == entryID,
+                    self.generation == seekGeneration
+                else { return }
+                self.refreshTime()
+                self.playbackPositionChanged.send()
+                #if DEBUG
+                    let reached = abs(self.nativePlayer.currentTime().seconds - target.seconds) < 1
+                    FoundationTrace.event(
+                        "seek.complete direction=\(direction) finished=\(finished ? 1 : 0) current=1 reached=\(reached ? 1 : 0)"
+                    )
+                #endif
+            }
+        }
     }
 
     func stop() {
+        isInterrupted = false
         discardSelection()
         state = .idle
         #if DEBUG
@@ -314,6 +319,7 @@ final class FoundationPlayer: ObservableObject {
     /// Requests playback explicitly, retaining the current occurrence when native start was rejected.
     /// Repeated commands during an active start do not reactivate the session or replace the item.
     func play() {
+        isInterrupted = false
         #if DEBUG
             recordSnapshot("command.play")
         #endif
@@ -393,12 +399,14 @@ final class FoundationPlayer: ObservableObject {
         func didDeactivateAudioSession(source: AVAudioSession.DeactivationSource) {
             guard source == .system else { return }
             pause()
+            isInterrupted = true
         }
     #endif
 
     /// Cancels playback intent, including a pending resolution, without discarding the occurrence.
     /// A later explicit Play may resume the same item; inactivity never resumes it automatically.
     func pause() {
+        isInterrupted = false
         #if DEBUG
             recordSnapshot("command.pause")
         #endif
