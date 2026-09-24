@@ -25,8 +25,13 @@ final class FoundationPlayer: ObservableObject {
     private var generation: UInt64 = 0
     private let resolve: @Sendable (FoundationItem) async throws -> URL
     private let makeItem: (URL) -> AVPlayerItem
-    private let activateSession: () throws -> Void
-    private let deactivateSession: () -> Void
+    private let activateSession: () async throws -> Void
+    private let deactivateSession: () async throws -> Void
+    private(set) var playTask: Task<Void, Never>?
+    private(set) var sessionTask: Task<Void, Never>?
+    private var playRequest: UInt64 = 0
+    // AVAudioSession is process-wide; retiring account owners must finish before a new owner activates.
+    private static var lastSessionOperation: Task<Void, Never>?
     private let startPlayback: (AVPlayer) -> Void
     private var isStartingPlayback = false
     private var rejectionDuringStart = false
@@ -46,17 +51,21 @@ final class FoundationPlayer: ObservableObject {
     init(
         resolve: @escaping @Sendable (FoundationItem) async throws -> URL,
         makeItem: @escaping (URL) -> AVPlayerItem = { AVPlayerItem(url: $0) },
-        activateSession: @escaping () throws -> Void = {
+        activateSession: @escaping () async throws -> Void = {
             #if os(iOS)
                 let session = AVAudioSession.sharedInstance()
                 try session.setCategory(.playback, mode: .default)
-                try session.setActive(true)
+                guard try await session.activate(options: []) else {
+                    throw AudioSessionFailure.activationDeclined
+                }
             #endif
         },
-        deactivateSession: @escaping () -> Void = {
+        deactivateSession: @escaping () async throws -> Void = {
             #if os(iOS)
-                try? AVAudioSession.sharedInstance().setActive(
-                    false, options: .notifyOthersOnDeactivation)
+                guard
+                    try await AVAudioSession.sharedInstance().deactivate(
+                        options: .notifyOthersOnDeactivation)
+                else { throw AudioSessionFailure.deactivationDeclined }
             #endif
         },
         startPlayback: @escaping (AVPlayer) -> Void = { $0.play() }
@@ -132,6 +141,7 @@ final class FoundationPlayer: ObservableObject {
     }
 
     isolated deinit {
+        playTask?.cancel()
         selectionTask?.cancel()
         if let timeObserver { nativePlayer.removeTimeObserver(timeObserver) }
         notifications.forEach(NotificationCenter.default.removeObserver)
@@ -286,7 +296,17 @@ final class FoundationPlayer: ObservableObject {
         #if DEBUG
             recordSnapshot("command.stop")
         #endif
-        deactivateSession()
+        let previous = Self.lastSessionOperation
+        let deactivate = deactivateSession
+        let stopGeneration = generation
+        sessionTask = Task { [weak self] in
+            await previous?.value
+            do { try await deactivate() } catch {
+                guard let self, self.generation == stopGeneration else { return }
+                self.errorMessage = "Audio session could not be released. Try playback again."
+            }
+        }
+        Self.lastSessionOperation = sessionTask
     }
 
     private var selectedIndex: Int? { queue.firstIndex { $0.id == selectedEntryID } }
@@ -307,7 +327,7 @@ final class FoundationPlayer: ObservableObject {
             state = .loading
             return
         }
-        guard nativePlayer.currentItem != nil else {
+        guard let item = nativePlayer.currentItem else {
             if let selectedEntryID {
                 select(selectedEntryID)
             }
@@ -319,19 +339,52 @@ final class FoundationPlayer: ObservableObject {
             return
         }
         if wantsPlayback, nativePlayer.rate > 0 { return }
-        do {
-            try activateSession()
-            wantsPlayback = true
-            isStartingPlayback = true
-            rejectionDuringStart = false
-            startPlayback(nativePlayer)
-            isStartingPlayback = false
-            if rejectionDuringStart {
-                rejectionDuringStart = false
-                reconcileRejectedStart()
+        guard playTask == nil || playTask?.isCancelled == true else { return }
+        wantsPlayback = true
+        playRequest &+= 1
+        let request = playRequest
+        let selectionGeneration = generation
+        let previous = Self.lastSessionOperation
+        let activate = activateSession
+        let task = Task { [weak self] in
+            await previous?.value
+            defer {
+                if self?.playRequest == request { self?.playTask = nil }
             }
-            refreshNativeState()
-        } catch { fail(.audioSession, error: error) }
+            do {
+                try Task.checkCancellation()
+                guard self?.generation == selectionGeneration, self?.wantsPlayback == true else {
+                    return
+                }
+                try await activate()
+                try Task.checkCancellation()
+                guard let self, self.generation == selectionGeneration,
+                    self.playRequest == request, self.wantsPlayback,
+                    self.nativePlayer.currentItem === item
+                else { return }
+                self.isStartingPlayback = true
+                self.rejectionDuringStart = false
+                self.startPlayback(self.nativePlayer)
+                self.isStartingPlayback = false
+                if self.rejectionDuringStart {
+                    self.rejectionDuringStart = false
+                    self.reconcileRejectedStart()
+                }
+                self.refreshNativeState()
+            } catch {
+                guard let self, self.generation == selectionGeneration,
+                    self.playRequest == request, !Task.isCancelled
+                else { return }
+                self.fail(.audioSession, error: error)
+            }
+        }
+        playTask = task
+        sessionTask = task
+        Self.lastSessionOperation = task
+    }
+
+    private enum AudioSessionFailure: Error {
+        case activationDeclined, deactivationDeclined
     }
 
     #if os(iOS)
@@ -349,6 +402,7 @@ final class FoundationPlayer: ObservableObject {
         #if DEBUG
             recordSnapshot("command.pause")
         #endif
+        cancelPendingPlay()
         wantsPlayback = false
         nativePlayer.pause()
         refreshNativeState()
@@ -374,7 +428,14 @@ final class FoundationPlayer: ObservableObject {
         #endif
     }
 
+    private func cancelPendingPlay() {
+        playRequest &+= 1
+        playTask?.cancel()
+        playTask = nil
+    }
+
     private func discardSelection(retainingNativeItem: Bool = false) {
+        cancelPendingPlay()
         generation &+= 1
         #if DEBUG
             recordSnapshot("discard.cancelRequested")
@@ -461,6 +522,7 @@ final class FoundationPlayer: ObservableObject {
     }
 
     private func fail(_ category: FailureCategory, error: Error?) {
+        cancelPendingPlay()
         wantsPlayback = false
         nativePlayer.pause()
         state = .failed
