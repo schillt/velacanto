@@ -23,8 +23,10 @@ ADR 0012/0013 and `docs/0.3.5-acceptance.md`. Build 107 remains rejected. Histor
 0.3.0 freeze documents do not disable the scoped 0.3.5 features. Never restore old
 controllers to satisfy superseded plans.
 
-The owner authorized 0.3.5 publication and TestFlight preparation with documented
-known bugs, explicitly retaining the native volume slider. This is a recorded
+The owner authorized PR #174 into alpha after required checks pass, a 0.3.5
+GitHub prerelease from alpha and existing-workflow internal TestFlight, with
+documented known bugs and the native volume slider retained. No main promotion
+is authorized for this prerelease. This is a recorded
 release exception, not evidence the volume defect is fixed. Record current checks,
 exceptions and signed distribution status separately; no public App Store
 submission is implied. Do not change runtime/version metadata in planning-only

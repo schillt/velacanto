@@ -1,6 +1,6 @@
 # Velacanto
 
-Velacanto is a native Jellyfin music app for iPhone, iPad and Mac. **0.3.5**
+Velacanto is a native Jellyfin music app for iPhone, iPad and Mac. **0.3.5 alpha prerelease**
 restores system controls, lyrics, AirPlay and volume while improving playback and
 Now Playing presentation. It follows the 0.3.0 Foundation replacement; earlier
 releases remain in Git history and tags. Publication and distribution status are
@@ -73,8 +73,10 @@ Remove this formatting debt separately after release.
 - [Historical 0.3 plan](docs/0.3-plan.md)
 - [Agent instructions](AGENTS.md)
 
-The owner authorized a final 0.3.5 GitHub release and TestFlight upload with the
-documented known defects. This does not authorize public App Store submission.
+The owner authorized PR #174 into alpha after passing checks, a 0.3.5 GitHub
+prerelease from alpha and internal TestFlight through the existing Xcode Cloud
+workflow, with the documented known defects. Main promotion and public App Store
+submission are not authorized.
 Publication still requires recorded candidate checks and signed distribution verification. Credentials,
 signing material and raw device traces never belong in the repository.
 
