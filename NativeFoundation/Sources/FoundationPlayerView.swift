@@ -99,6 +99,20 @@ struct FoundationPlayerView: View {
                             .opacity(lyricsPresentation == nil && !showingQueue ? 1 : 0)
                             .accessibilityHidden(lyricsPresentation != nil || showingQueue)
                             .allowsHitTesting(lyricsPresentation == nil && !showingQueue)
+                            if lyricsPresentation != nil || showingQueue {
+                                Color.black.opacity(0.6)
+                                    .frame(
+                                        width: artworkGeometry.size.width,
+                                        height: artworkGeometry.size.height
+                                    )
+                                    .mask {
+                                        FoundationPlayerContentFade(
+                                            topHeight: showingQueue ? 8 : 24)
+                                    }
+                                    .allowsHitTesting(false)
+                                    .accessibilityHidden(true)
+                                    .transition(.opacity)
+                            }
                             if let presentation = lyricsPresentation {
                                 let entry = presentation.entry
                                 FoundationLyricsView(
@@ -455,7 +469,8 @@ private struct FoundationQueueView: View {
             HStack {
                 Text("Queue").font(.headline)
                 Spacer()
-                Text("\(player.queue.count) songs").font(.subheadline).foregroundStyle(.secondary)
+                Text("\(player.queue.count) songs").font(.subheadline).foregroundStyle(
+                    .white.opacity(0.85))
             }
             .padding(.horizontal, 24)
             .padding(.vertical, 12)
@@ -468,12 +483,13 @@ private struct FoundationQueueView: View {
                                 player.select(entry.id)
                             } label: {
                                 HStack {
-                                    Text("\(index + 1)").font(.caption).foregroundStyle(.secondary)
+                                    Text("\(index + 1)").font(.caption).foregroundStyle(
+                                        .white.opacity(0.85))
                                     VStack(alignment: .leading) {
                                         Text(entry.item.title).font(.body.weight(.semibold))
                                             .lineLimit(2)
                                         Text(entry.item.subtitle).font(.caption).foregroundStyle(
-                                            .secondary)
+                                            .white.opacity(0.85))
                                     }
                                     Spacer()
                                     if entry.id == player.selectedEntryID {

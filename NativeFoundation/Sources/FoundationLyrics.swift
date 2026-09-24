@@ -258,16 +258,18 @@ private struct FoundationTimedLyricsView: View {
     private func row(_ line: FoundationLyrics.Line, isCurrent: Bool) -> some View {
         Text(line.text.isEmpty ? " " : line.text)
             .font(.system(.title2, design: .default, weight: isCurrent ? .bold : .semibold))
-            .foregroundStyle(Color.primary.opacity(isCurrent ? 1 : 0.78))
+            .foregroundStyle(Color.white.opacity(isCurrent ? 1 : 0.85))
             .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
     }
 }
 
 struct FoundationPlayerContentFade: View {
+    var topHeight: CGFloat = 24
+
     var body: some View {
         VStack(spacing: 0) {
             LinearGradient(colors: [.clear, .white], startPoint: .top, endPoint: .bottom)
-                .frame(height: 24)
+                .frame(height: topHeight)
             Rectangle().fill(.white)
             LinearGradient(colors: [.white, .clear], startPoint: .top, endPoint: .bottom)
                 .frame(height: 24)
