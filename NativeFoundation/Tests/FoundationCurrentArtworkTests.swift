@@ -56,15 +56,17 @@ final class FoundationCurrentArtworkTests: XCTestCase {
         XCTAssertNil(owner.result(for: item))
         await bridge.updateTask?.value
         let pendingArtworkID = try XCTUnwrap((bridge.content as? MusicContent)?.artwork?.id)
+        let contentID = bridge.content?.id
         await probe.complete(0, with: data)
         await owner.loadTask?.value
         await bridge.updateTask?.value
         let result = try XCTUnwrap(owner.result(for: item))
         XCTAssertEqual((bridge.content as? MusicContent)?.artwork?.id, result.id.uuidString)
-        XCTAssertEqual(pendingArtworkID, result.id.uuidString)
+        XCTAssertNotEqual(pendingArtworkID, result.id.uuidString)
+        XCTAssertEqual(bridge.content?.id, contentID)
         XCTAssertEqual(owner.data(for: result.id), data)
         for _ in 0..<5 {
-            _ = owner.artwork(for: item)
+            XCTAssertEqual(owner.artwork(for: item)?.id, result.id.uuidString)
             _ = owner.result(for: item)
             _ = bridge.commands
         }
@@ -74,6 +76,7 @@ final class FoundationCurrentArtworkTests: XCTestCase {
         await owner.updateTask?.value
         await bridge.updateTask?.value
         XCTAssertEqual(owner.result(for: item)?.id, result.id)
+        XCTAssertEqual(owner.artwork(for: item)?.id, result.id.uuidString)
         let count = await probe.count
         XCTAssertEqual(count, 1)
         XCTAssertTrue(player.wantsPlayback)
@@ -144,6 +147,7 @@ final class FoundationCurrentArtworkTests: XCTestCase {
         await owner.updateTask?.value
         await probe.waitForCount(1)
         let provider = try XCTUnwrap(owner.provider(for: item))
+        let pendingID = try XCTUnwrap(owner.artwork(for: item)?.id)
         let started = XCTestExpectation(description: "Both system providers await artwork")
         started.expectedFulfillmentCount = 2
         let first = Task { () throws -> Void in
@@ -167,6 +171,11 @@ final class FoundationCurrentArtworkTests: XCTestCase {
         let count = await probe.count
         XCTAssertEqual(count, 1)
         _ = try await provider(CGSize(width: 640, height: 640))
+        let readyID = try XCTUnwrap(owner.artwork(for: item)?.id)
+        XCTAssertNotEqual(readyID, pendingID)
+        let readyProvider = try XCTUnwrap(owner.provider(for: item))
+        _ = try await readyProvider(CGSize(width: 160, height: 160))
+        XCTAssertEqual(owner.artwork(for: item)?.id, readyID)
         let finalCount = await probe.count
         XCTAssertEqual(finalCount, 1)
     }

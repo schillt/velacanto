@@ -84,7 +84,7 @@ final class FoundationCurrentArtwork: ObservableObject {
         key = nextKey
         artworkID = nextKey == nil ? nil : UUID()
         result = nil
-        guard let artworkID, let item else { return }
+        guard artworkID != nil, let item else { return }
         #if DEBUG
             diagnosticIdentityCount += 1
             let completionDelay = diagnosticIdentityCount == 2 ? diagnosticCompletionDelay : nil
@@ -121,7 +121,7 @@ final class FoundationCurrentArtwork: ObservableObject {
                 #endif
                 try Task.checkCancellation()
                 guard let self, self.isLive, self.generation == requestGeneration else { return }
-                self.result = data.flatMap { Self.decode($0, id: artworkID) }
+                self.result = data.flatMap { Self.decode($0) }
                 #if DEBUG
                     let outcome =
                         self.result != nil ? "ready" : (data == nil ? "missing" : "rejected")
@@ -172,7 +172,9 @@ final class FoundationCurrentArtwork: ObservableObject {
     /// Publish the asynchronous provider immediately; late bytes complete the same system request.
     func artwork(for item: FoundationItem) -> Artwork? {
         guard let artworkID, let provider = provider(for: item) else { return nil }
-        return Artwork(id: artworkID.uuidString, artworkProvider: provider)
+        // A completed representation gets one cache revision; its load ownership stays unchanged.
+        let representationID = result?.id ?? artworkID
+        return Artwork(id: representationID.uuidString, artworkProvider: provider)
     }
 
     /// Size requests share the owned load. Cancelling one consumer never cancels that useful load.
@@ -207,7 +209,7 @@ final class FoundationCurrentArtwork: ObservableObject {
                         "artwork.provider generation=\(providerGeneration) event=waitReturned")
                 #endif
                 try Task.checkCancellation()
-                guard let data = await self?.data(for: artworkID) else {
+                guard let data = await self?.dataForLoad(artworkID) else {
                     throw ArtworkRepresentation.ArtworkRepresentationError.noRepresentationAvailable
                 }
                 try Task.checkCancellation()
@@ -245,6 +247,11 @@ final class FoundationCurrentArtwork: ObservableObject {
             throw ArtworkRepresentation.ArtworkRepresentationError.noRepresentationAvailable
         }
         return loadTask
+    }
+
+    private func dataForLoad(_ id: UUID) -> Data? {
+        guard isLive, key == currentSelectionKey, artworkID == id else { return nil }
+        return result?.data
     }
 
     private var currentSelectionKey: Key? {
