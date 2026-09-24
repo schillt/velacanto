@@ -118,6 +118,9 @@ final class FoundationPlayer: ObservableObject {
                 // Only the copied String crosses into the actor; Notification.userInfo is not Sendable.
                 let value = notification.userInfo?[rateChangeReasonKey] as? String
                 MainActor.assumeIsolated {
+                    #if DEBUG
+                        self?.recordSnapshot("native.rate reason=" + Self.rateCategory(value))
+                    #endif
                     guard let value,
                         AVPlayer.RateDidChangeReason(rawValue: value) == .setRateFailed
                     else { return }
@@ -136,9 +139,44 @@ final class FoundationPlayer: ObservableObject {
                     else { return }
                     // Handle main-queue delivery here, without deferring a pause past a newer command.
                     MainActor.assumeIsolated {
+                        #if DEBUG
+                            self?.recordSnapshot(
+                                "session.inactive source="
+                                    + Self.deactivationCategory(context.source)
+                                    + " reason="
+                                    + Self.interruptionCategory(context.interruptionContext?.reason)
+                            )
+                        #endif
                         self?.didDeactivateAudioSession(source: context.source)
                     }
                 })
+            #if DEBUG
+                notifications.append(
+                    NotificationCenter.default.addObserver(
+                        forName: AVAudioSession.routeChangeNotification,
+                        object: AVAudioSession.sharedInstance(), queue: .main
+                    ) { [weak self] notification in
+                        let raw =
+                            notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt
+                        MainActor.assumeIsolated {
+                            self?.recordSnapshot("session.route reason=" + Self.routeCategory(raw))
+                        }
+                    })
+                notifications.append(
+                    NotificationCenter.default.addObserver(
+                        forName: AVAudioSession.resumptionRecommendationNotification,
+                        object: AVAudioSession.sharedInstance(), queue: .main
+                    ) { [weak self] notification in
+                        let context =
+                            notification.userInfo?[AVAudioSession.resumptionContextKey]
+                            as? AVAudioSession.ResumptionContext
+                        MainActor.assumeIsolated {
+                            self?.recordSnapshot(
+                                "session.resumption recommendation="
+                                    + Self.resumptionCategory(context?.recommendation))
+                        }
+                    })
+            #endif
         #endif
     }
 
@@ -552,7 +590,68 @@ final class FoundationPlayer: ObservableObject {
         #endif
     }
 
+    #if DEBUG && os(iOS)
+        /// Map only documented enum cases; missing and future values never expose raw payloads.
+        static func routeCategory(_ raw: UInt?) -> String {
+            guard let raw, let reason = AVAudioSession.RouteChangeReason(rawValue: raw) else {
+                return "unknown"
+            }
+            switch reason {
+            case .newDeviceAvailable: return "available"
+            case .oldDeviceUnavailable: return "unavailable"
+            case .categoryChange: return "category"
+            case .override: return "override"
+            case .wakeFromSleep: return "wake"
+            case .noSuitableRouteForCategory: return "noSuitableRoute"
+            case .routeConfigurationChange: return "configuration"
+            default: return "unknown"
+            }
+        }
+
+        static func deactivationCategory(_ source: AVAudioSession.DeactivationSource) -> String {
+            switch source {
+            case .app: return "app"
+            case .system: return "system"
+            @unknown default: return "unknown"
+            }
+        }
+
+        static func interruptionCategory(_ reason: AVAudioSession.InterruptionReason?) -> String {
+            guard let reason else { return "absent" }
+            switch reason {
+            case .default: return "default"
+            case .builtInMicMuted: return "microphoneMuted"
+            case .routeDisconnected: return "routeDisconnected"
+            default: return "other"
+            }
+        }
+
+        static func resumptionCategory(_ recommendation: AVAudioSession.ResumptionRecommendation?)
+            -> String
+        {
+            guard let recommendation else { return "absent" }
+            switch recommendation {
+            case .shouldResume: return "recommended"
+            case .shouldNotResume: return "notRecommended"
+            @unknown default: return "unknown"
+            }
+        }
+    #endif
+
     #if DEBUG
+        static func rateCategory(_ raw: String?) -> String {
+            guard let raw else { return "absent" }
+            switch AVPlayer.RateDidChangeReason(rawValue: raw) {
+            case .setRateCalled: return "requested"
+            case .setRateFailed: return "rejected"
+            case .audioSessionInterrupted: return "interrupted"
+            case .appBackgrounded: return "backgrounded"
+            case .playheadReachedLiveEdge: return "liveEdge"
+            case .reversePlaybackReachedStartOfSeekableRange: return "seekableStart"
+            default: return "other"
+            }
+        }
+
         private func recordSnapshot(_ event: String) {
             let itemStatus: String
             switch nativePlayer.currentItem?.status {

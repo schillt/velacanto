@@ -153,6 +153,61 @@ final class FoundationPlayerTests: XCTestCase {
         await newPlayer.sessionTask?.value
     }
 
+    func testNativeRateDiagnosticDropsUnrecognizedPayloads() {
+        XCTAssertEqual(FoundationPlayer.rateCategory(nil), "absent")
+        XCTAssertEqual(FoundationPlayer.rateCategory("private payload"), "other")
+        XCTAssertEqual(
+            FoundationPlayer.rateCategory(
+                AVPlayer.RateDidChangeReason.audioSessionInterrupted.rawValue), "interrupted")
+        XCTAssertEqual(
+            FoundationPlayer.rateCategory(AVPlayer.RateDidChangeReason.appBackgrounded.rawValue),
+            "backgrounded")
+        XCTAssertEqual(
+            FoundationPlayer.rateCategory(AVPlayer.RateDidChangeReason.setRateFailed.rawValue),
+            "rejected")
+    }
+
+    #if DEBUG && os(iOS)
+        func testSessionDiagnosticCategoriesDiscardUnknownPayloads() {
+            XCTAssertEqual(FoundationPlayer.routeCategory(nil), "unknown")
+            XCTAssertEqual(FoundationPlayer.routeCategory(UInt.max), "unknown")
+            XCTAssertEqual(
+                FoundationPlayer.routeCategory(
+                    AVAudioSession.RouteChangeReason.oldDeviceUnavailable.rawValue), "unavailable")
+            XCTAssertEqual(
+                FoundationPlayer.routeCategory(AVAudioSession.RouteChangeReason.override.rawValue),
+                "override")
+            XCTAssertEqual(FoundationPlayer.deactivationCategory(.app), "app")
+            XCTAssertEqual(FoundationPlayer.deactivationCategory(.system), "system")
+            XCTAssertEqual(FoundationPlayer.interruptionCategory(nil), "absent")
+            XCTAssertEqual(
+                FoundationPlayer.interruptionCategory(.routeDisconnected), "routeDisconnected")
+            XCTAssertEqual(FoundationPlayer.resumptionCategory(nil), "absent")
+            XCTAssertEqual(FoundationPlayer.resumptionCategory(.shouldResume), "recommended")
+            XCTAssertEqual(FoundationPlayer.resumptionCategory(.shouldNotResume), "notRecommended")
+        }
+
+        func testDiagnosticRouteNotificationDoesNotChangePlaybackIntent() async {
+            let player = FoundationPlayer(
+                resolve: { _ in URL(fileURLWithPath: "/synthetic") },
+                makeItem: { _ in AVPlayerItem(asset: AVMutableComposition()) },
+                activateSession: {}, deactivateSession: {}, startPlayback: { _ in })
+            player.setQueue([track], selectedIndex: 0)
+            await player.selectionTask?.value
+            await player.playTask?.value
+            let before = player.wantsPlayback
+            NotificationCenter.default.post(
+                name: AVAudioSession.routeChangeNotification,
+                object: AVAudioSession.sharedInstance(),
+                userInfo: [
+                    AVAudioSessionRouteChangeReasonKey: AVAudioSession.RouteChangeReason
+                        .oldDeviceUnavailable.rawValue
+                ])
+            XCTAssertEqual(player.wantsPlayback, before)
+            player.stop()
+        }
+    #endif
+
     #if os(iOS)
         func testSystemInterruptionDuringActivationCannotStartAudio() async {
             let session = SessionOperationProbe()
