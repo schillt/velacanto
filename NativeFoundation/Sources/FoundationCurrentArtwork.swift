@@ -29,20 +29,11 @@ final class FoundationCurrentArtwork: ObservableObject {
     private var generation: UInt = 0
     private var subscriptions: Set<AnyCancellable> = []
     private var isLive = true
-    #if DEBUG
-        var diagnosticCompletionDelay: (@Sendable () async throws -> Void)?
-        private var diagnosticIdentityCount = 0
-    #endif
 
     init(player: FoundationPlayer, load: @escaping @Sendable (FoundationItem) async throws -> Data?)
     {
         self.player = player
         self.load = load
-        #if DEBUG
-            if ProcessInfo.processInfo.arguments.contains("-foundationDelayedArtwork") {
-                diagnosticCompletionDelay = { try await Task.sleep(for: .seconds(15)) }
-            }
-        #endif
         Publishers.Merge(
             player.$queue.map { _ in () },
             player.$selectedEntryID.removeDuplicates().map { _ in () }
@@ -85,10 +76,6 @@ final class FoundationCurrentArtwork: ObservableObject {
         artworkID = nextKey == nil ? nil : UUID()
         result = nil
         guard let artworkID, let item else { return }
-        #if DEBUG
-            diagnosticIdentityCount += 1
-            let completionDelay = diagnosticIdentityCount == 2 ? diagnosticCompletionDelay : nil
-        #endif
         let requestGeneration = generation
         let load = load
         let imageItem = item.catalogArtworkItem
@@ -104,39 +91,12 @@ final class FoundationCurrentArtwork: ObservableObject {
                     data = try await load(imageItem)
                 #endif
                 try Task.checkCancellation()
-                #if DEBUG
-                    if let completionDelay {
-                        FoundationJournal.shared.record("artwork.diagnostic event=delayStarted")
-                        do {
-                            try await completionDelay()
-                            FoundationJournal.shared.record(
-                                "artwork.diagnostic event=delayReturned outcome=completed")
-                        } catch {
-                            FoundationJournal.shared.record(
-                                "artwork.diagnostic event=delayReturned outcome=\(error is CancellationError ? "cancelled" : "failed")"
-                            )
-                            throw error
-                        }
-                    }
-                #endif
-                try Task.checkCancellation()
                 guard let self, self.isLive, self.generation == requestGeneration else { return }
                 self.result = data.flatMap { Self.decode($0, id: artworkID) }
-                #if DEBUG
-                    let outcome =
-                        self.result != nil ? "ready" : (data == nil ? "missing" : "rejected")
-                    FoundationJournal.shared.record(
-                        "artwork.shared generation=\(requestGeneration) outcome=\(outcome)")
-                #endif
                 self.loadTask = nil
             } catch {
                 guard let self, self.isLive, self.generation == requestGeneration else { return }
                 self.loadTask = nil
-                #if DEBUG
-                    FoundationJournal.shared.record(
-                        "artwork.shared generation=\(requestGeneration) outcome=\(Task.isCancelled ? "cancelled" : "failed")"
-                    )
-                #endif
                 // Artwork is optional. Keep this identity completed until selection changes.
             }
         }
@@ -182,63 +142,18 @@ final class FoundationCurrentArtwork: ObservableObject {
         guard isLive, key == currentSelectionKey, key == identity(item), let artworkID else {
             return nil
         }
-        #if DEBUG
-            let providerGeneration = generation
-        #endif
         return { [weak self] _ in
-            #if DEBUG
-                var stage = "admission"
-                FoundationJournal.shared.record(
-                    "artwork.provider generation=\(providerGeneration) event=entered")
-            #endif
-            do {
-                try Task.checkCancellation()
-                let pending = try await self?.pendingLoad(for: artworkID)
-                #if DEBUG
-                    stage = "waiting"
-                    FoundationJournal.shared.record(
-                        "artwork.provider generation=\(providerGeneration) event=waitStarted pending=\(pending == nil ? 0 : 1)"
-                    )
-                #endif
-                await pending?.value
-                #if DEBUG
-                    stage = "currentResult"
-                    FoundationJournal.shared.record(
-                        "artwork.provider generation=\(providerGeneration) event=waitReturned")
-                #endif
-                try Task.checkCancellation()
-                guard let data = await self?.data(for: artworkID) else {
-                    throw ArtworkRepresentation.ArtworkRepresentationError.noRepresentationAvailable
-                }
-                try Task.checkCancellation()
-                #if DEBUG
-                    stage = "representation"
-                #endif
-                let representation = try ArtworkRepresentation(data: data)
-                #if DEBUG
-                    FoundationJournal.shared.record(
-                        "artwork.provider generation=\(providerGeneration) event=returned outcome=success"
-                    )
-                #endif
-                return representation
-            } catch {
-                #if DEBUG
-                    FoundationJournal.shared.record(
-                        "artwork.provider generation=\(providerGeneration) event=returned stage=\(stage) outcome=\(error is CancellationError ? "cancelled" : "unavailable")"
-                    )
-                #endif
-                throw error
+            try Task.checkCancellation()
+            let pending = try await self?.pendingLoad(for: artworkID)
+            await pending?.value
+            try Task.checkCancellation()
+            guard let data = await self?.data(for: artworkID) else {
+                throw ArtworkRepresentation.ArtworkRepresentationError.noRepresentationAvailable
             }
+            try Task.checkCancellation()
+            return try ArtworkRepresentation(data: data)
         }
     }
-
-    #if DEBUG
-        var diagnosticState: String {
-            guard isLive, key == currentSelectionKey, artworkID != nil else { return "absent" }
-            if result != nil { return "ready" }
-            return loadTask == nil ? "unavailable" : "pending"
-        }
-    #endif
 
     private func pendingLoad(for id: UUID) throws -> Task<Void, Never>? {
         guard isLive, key == currentSelectionKey, artworkID == id else {

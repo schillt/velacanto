@@ -79,56 +79,6 @@ final class FoundationCurrentArtworkTests: XCTestCase {
         XCTAssertTrue(player.wantsPlayback)
     }
 
-    #if DEBUG
-        func testDiagnosticDelayAppliesOnceToSecondArtworkIdentityAndCancelsOnDiscard() async throws
-        {
-            let data = try imageData()
-            let probe = ArtworkProbe()
-            let player = player()
-            let owner = FoundationCurrentArtwork(player: player) { await probe.load($0) }
-            defer {
-                owner.invalidate()
-                player.stop()
-            }
-            let delayed = XCTestExpectation(description: "Second artwork identity delayed once")
-            delayed.assertForOverFulfill = true
-            owner.diagnosticCompletionDelay = {
-                delayed.fulfill()
-                try await Task.sleep(for: .seconds(60))
-            }
-            let first = track("first")
-            let second = track("second")
-            let third = track("third")
-            player.setQueue([first, first, second, third], selectedIndex: 0)
-            await owner.updateTask?.value
-            await probe.waitForCount(1)
-            await probe.complete(0, with: data)
-            await owner.loadTask?.value
-            XCTAssertNotNil(owner.result(for: first))
-            player.next()
-            await owner.updateTask?.value
-            let afterDuplicate = await probe.count
-            XCTAssertEqual(afterDuplicate, 1)
-            player.next()
-            await owner.updateTask?.value
-            await probe.waitForCount(2)
-            let delayedTask = owner.loadTask
-            await probe.complete(1, with: data)
-            let entered = await XCTWaiter.fulfillment(of: [delayed], timeout: 2)
-            XCTAssertEqual(entered, .completed)
-            XCTAssertNil(owner.result)
-            player.next()
-            await owner.updateTask?.value
-            await delayedTask?.value
-            XCTAssertTrue(delayedTask?.isCancelled == true)
-            await probe.waitForCount(3)
-            await probe.complete(2, with: data)
-            await owner.loadTask?.value
-            XCTAssertNotNil(owner.result(for: third))
-            XCTAssertNil(owner.result(for: second))
-        }
-    #endif
-
     func testDelayedSystemProvidersShareLoadAndConsumerCancellationDoesNotCancelOwner() async throws
     {
         let data = try imageData()

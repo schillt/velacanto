@@ -115,17 +115,11 @@ final class FoundationNowPlaying: MediaSessionRepresentable {
         }
         let entry = player.queue[index]
         let length = player.duration > 0 ? player.duration : entry.item.duration
-        let systemArtwork = artwork?.artwork(for: entry.item)
         content = MusicContent(
             id: entry.id.uuidString, songTitle: entry.item.title, artistName: entry.item.subtitle,
             albumName: entry.item.album?.title ?? "", type: .audio,
             duration: length.flatMap { $0.isFinite && $0 > 0 ? .finite($0) : nil },
-            artwork: systemArtwork)
-        #if DEBUG
-            FoundationJournal.shared.record(
-                "artwork.publication provider=\(systemArtwork == nil ? 0 : 1) result=\(artwork?.diagnosticState ?? "absent")"
-            )
-        #endif
+            artwork: artwork?.artwork(for: entry.item))
         let state: MediaPlaybackSnapshot.PlaybackState
         if player.isInterrupted {
             state = .interrupted
