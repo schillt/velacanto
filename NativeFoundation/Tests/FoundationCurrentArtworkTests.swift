@@ -21,16 +21,18 @@ final class FoundationCurrentArtworkTests: XCTestCase {
             activateSession: {}, deactivateSession: {}, startPlayback: { _ in })
     }
 
-    private func imageData(width: Int = 2, height: Int = 2) throws -> Data {
+    private func imageData(width: Int = 64, height: Int = 64) throws -> Data {
         let context = try XCTUnwrap(
             CGContext(
                 data: nil, width: width, height: height,
                 bitsPerComponent: 8, bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
                 bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        context.setFillColor(CGColor(red: 0.6, green: 0.2, blue: 0.1, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
         let image = try XCTUnwrap(context.makeImage())
         let data = NSMutableData()
         let destination = try XCTUnwrap(
-            CGImageDestinationCreateWithData(data, UTType.png.identifier as CFString, 1, nil))
+            CGImageDestinationCreateWithData(data, UTType.jpeg.identifier as CFString, 1, nil))
         CGImageDestinationAddImage(destination, image, nil)
         XCTAssertTrue(CGImageDestinationFinalize(destination))
         return data as Data
@@ -52,12 +54,14 @@ final class FoundationCurrentArtworkTests: XCTestCase {
         await owner.updateTask?.value
         await probe.waitForCount(1)
         XCTAssertNil(owner.result(for: item))
-        XCTAssertNil((bridge.content as? MusicContent)?.artwork)
+        await bridge.updateTask?.value
+        let pendingArtworkID = try XCTUnwrap((bridge.content as? MusicContent)?.artwork?.id)
         await probe.complete(0, with: data)
         await owner.loadTask?.value
         await bridge.updateTask?.value
         let result = try XCTUnwrap(owner.result(for: item))
         XCTAssertEqual((bridge.content as? MusicContent)?.artwork?.id, result.id.uuidString)
+        XCTAssertEqual(pendingArtworkID, result.id.uuidString)
         XCTAssertEqual(owner.data(for: result.id), data)
         for _ in 0..<5 {
             _ = owner.artwork(for: item)
@@ -73,6 +77,118 @@ final class FoundationCurrentArtworkTests: XCTestCase {
         let count = await probe.count
         XCTAssertEqual(count, 1)
         XCTAssertTrue(player.wantsPlayback)
+    }
+
+    func testDelayedSystemProvidersShareLoadAndConsumerCancellationDoesNotCancelOwner() async throws
+    {
+        let data = try imageData()
+        let probe = ArtworkProbe()
+        let player = player()
+        let item = track("album")
+        let owner = FoundationCurrentArtwork(player: player) { await probe.load($0) }
+        defer {
+            owner.invalidate()
+            player.stop()
+        }
+        player.setQueue([item], selectedIndex: 0)
+        await owner.updateTask?.value
+        await probe.waitForCount(1)
+        let provider = try XCTUnwrap(owner.provider(for: item))
+        let started = XCTestExpectation(description: "Both system providers await artwork")
+        started.expectedFulfillmentCount = 2
+        let first = Task { () throws -> Void in
+            started.fulfill()
+            _ = try await provider(CGSize(width: 40, height: 40))
+        }
+        let second = Task { () throws -> Void in
+            started.fulfill()
+            _ = try await provider(CGSize(width: 1_024, height: 1_024))
+        }
+        let ready = await XCTWaiter.fulfillment(of: [started], timeout: 2)
+        XCTAssertEqual(ready, .completed)
+        first.cancel()
+        XCTAssertFalse(owner.loadTask?.isCancelled == true)
+        await probe.complete(0, with: data)
+        try await second.value
+        do {
+            try await first.value
+            XCTFail("Cancelled provider published artwork")
+        } catch is CancellationError {} catch { XCTFail("Unexpected cancellation outcome") }
+        let count = await probe.count
+        XCTAssertEqual(count, 1)
+        _ = try await provider(CGSize(width: 640, height: 640))
+        let finalCount = await probe.count
+        XCTAssertEqual(finalCount, 1)
+    }
+
+    func testPendingSystemProviderDoesNotRetainInvalidatedOwner() async throws {
+        let data = try imageData()
+        let probe = ArtworkProbe()
+        let player = player()
+        let item = track("album")
+        var owner: FoundationCurrentArtwork? = FoundationCurrentArtwork(player: player) {
+            await probe.load($0)
+        }
+        player.setQueue([item], selectedIndex: 0)
+        await owner?.updateTask?.value
+        await probe.waitForCount(1)
+        let provider = try XCTUnwrap(owner?.provider(for: item))
+        let started = XCTestExpectation(description: "Provider starts before account teardown")
+        let request = Task { () throws -> Void in
+            started.fulfill()
+            _ = try await provider(CGSize(width: 640, height: 640))
+        }
+        let ready = await XCTWaiter.fulfillment(of: [started], timeout: 2)
+        XCTAssertEqual(ready, .completed)
+        weak let released = owner
+        owner?.invalidate()
+        owner = nil
+        XCTAssertNil(released)
+        await probe.complete(0, with: data)
+        do {
+            try await request.value
+            XCTFail("Released account published artwork")
+        } catch {}
+        player.stop()
+    }
+
+    func testPendingSystemProviderRejectsDiscardedSelectionAndAccount() async throws {
+        let data = try imageData()
+        for invalidateAccount in [false, true] {
+            let probe = ArtworkProbe()
+            let player = player()
+            let item = track("album")
+            let owner = FoundationCurrentArtwork(player: player) { await probe.load($0) }
+            player.setQueue([item], selectedIndex: 0)
+            await owner.updateTask?.value
+            await probe.waitForCount(1)
+            let provider = try XCTUnwrap(owner.provider(for: item))
+            let started = XCTestExpectation(description: "System provider awaits current load")
+            let request = Task { () throws -> Void in
+                started.fulfill()
+                _ = try await provider(CGSize(width: 640, height: 640))
+            }
+            let ready = await XCTWaiter.fulfillment(of: [started], timeout: 2)
+            XCTAssertEqual(ready, .completed)
+            if invalidateAccount {
+                owner.invalidate()
+            } else {
+                player.setQueue(
+                    [
+                        FoundationItem(
+                            id: "no-art", title: "", subtitle: "", kind: .track, duration: nil)
+                    ], selectedIndex: 0)
+                await owner.updateTask?.value
+            }
+            await probe.complete(0, with: data)
+            do {
+                try await request.value
+                XCTFail("Discarded provider published artwork")
+            } catch {}
+            XCTAssertNil(owner.result)
+            owner.invalidate()
+            player.stop()
+        }
     }
 
     func testChangedIdentityCancelsAndRejectsLateResultAndStaleCallback() async throws {

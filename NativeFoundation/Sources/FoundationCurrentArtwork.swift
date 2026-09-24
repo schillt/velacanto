@@ -7,7 +7,7 @@ import NowPlaying
 @MainActor
 final class FoundationCurrentArtwork: ObservableObject {
     struct Result {
-        let id = UUID()
+        let id: UUID
         let data: Data
         let image: CGImage
     }
@@ -25,6 +25,7 @@ final class FoundationCurrentArtwork: ObservableObject {
     private let load: @Sendable (FoundationItem) async throws -> Data?
     private let account = UUID()
     private var key: Key?
+    private var artworkID: UUID?
     private var generation: UInt = 0
     private var subscriptions: Set<AnyCancellable> = []
     private var isLive = true
@@ -72,8 +73,9 @@ final class FoundationCurrentArtwork: ObservableObject {
         loadTask?.cancel()
         loadTask = nil
         key = nextKey
+        artworkID = nextKey == nil ? nil : UUID()
         result = nil
-        guard nextKey != nil, let item else { return }
+        guard let artworkID, let item else { return }
         let requestGeneration = generation
         let load = load
         let imageItem = item.catalogArtworkItem
@@ -90,7 +92,7 @@ final class FoundationCurrentArtwork: ObservableObject {
                 #endif
                 try Task.checkCancellation()
                 guard let self, self.isLive, self.generation == requestGeneration else { return }
-                self.result = data.flatMap(Self.decode)
+                self.result = data.flatMap { Self.decode($0, id: artworkID) }
                 self.loadTask = nil
             } catch {
                 guard let self, self.isLive, self.generation == requestGeneration else { return }
@@ -101,7 +103,7 @@ final class FoundationCurrentArtwork: ObservableObject {
     }
 
     /// Reject oversized input before decoding; retain at most one bounded image and payload.
-    static func decode(_ data: Data) -> Result? {
+    static func decode(_ data: Data, id: UUID = UUID()) -> Result? {
         guard !data.isEmpty, data.count <= maximumBytes,
             let source = CGImageSourceCreateWithData(
                 data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
@@ -119,7 +121,7 @@ final class FoundationCurrentArtwork: ObservableObject {
                     kCGImageSourceShouldCacheImmediately: true,
                 ] as CFDictionary)
         else { return nil }
-        return Result(data: data, image: image)
+        return Result(id: id, data: data, image: image)
     }
 
     func result(for item: FoundationItem) -> Result? {
@@ -127,18 +129,37 @@ final class FoundationCurrentArtwork: ObservableObject {
         return result
     }
 
-    /// System size requests read the accepted result and never start or restart a download.
+    /// Publish the asynchronous provider immediately; late bytes complete the same system request.
     func artwork(for item: FoundationItem) -> Artwork? {
-        guard let result = result(for: item) else { return nil }
-        let id = result.id
-        return Artwork(id: id.uuidString) { [weak self] _ in
+        guard let artworkID, let provider = provider(for: item) else { return nil }
+        return Artwork(id: artworkID.uuidString, artworkProvider: provider)
+    }
+
+    /// Size requests share the owned load. Cancelling one consumer never cancels that useful load.
+    func provider(for item: FoundationItem)
+        -> (@Sendable (CGSize) async throws -> ArtworkRepresentation)?
+    {
+        guard isLive, key == currentSelectionKey, key == identity(item), let artworkID else {
+            return nil
+        }
+        return { [weak self] _ in
             try Task.checkCancellation()
-            guard let data = await self?.data(for: id) else {
+            let pending = try await self?.pendingLoad(for: artworkID)
+            await pending?.value
+            try Task.checkCancellation()
+            guard let data = await self?.data(for: artworkID) else {
                 throw ArtworkRepresentation.ArtworkRepresentationError.noRepresentationAvailable
             }
             try Task.checkCancellation()
             return try ArtworkRepresentation(data: data)
         }
+    }
+
+    private func pendingLoad(for id: UUID) throws -> Task<Void, Never>? {
+        guard isLive, key == currentSelectionKey, artworkID == id else {
+            throw ArtworkRepresentation.ArtworkRepresentationError.noRepresentationAvailable
+        }
+        return loadTask
     }
 
     private var currentSelectionKey: Key? {
@@ -159,6 +180,7 @@ final class FoundationCurrentArtwork: ObservableObject {
         loadTask = nil
         subscriptions.removeAll()
         key = nil
+        artworkID = nil
         result = nil
     }
 }
