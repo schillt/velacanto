@@ -58,7 +58,7 @@ final class FoundationPlayerTests: XCTestCase {
     #endif
 
     func testDiagnosticTonesAreBoundedDistinctPCMWithoutArtwork() throws {
-        let items = FoundationDiagnosticTones.items
+        let items = FoundationTestTones.items
         XCTAssertEqual(items.count, 3)
         XCTAssertEqual(Set(items.map(\.id)).count, 3)
         var payloads: [Data] = []
@@ -67,7 +67,7 @@ final class FoundationPlayerTests: XCTestCase {
             XCTAssertNil(item.album)
             XCTAssertNil(item.primaryImageTag)
             XCTAssertNil(item.isFavorite)
-            let data = FoundationDiagnosticTones.wave(index: index)
+            let data = FoundationTestTones.wave(index: index)
             XCTAssertEqual(data.count, 44 + 22_050 * 8 * 2)
             XCTAssertEqual(String(decoding: data.prefix(4), as: UTF8.self), "RIFF")
             let samples = stride(from: 44, to: data.count, by: 2).map {
@@ -81,13 +81,13 @@ final class FoundationPlayerTests: XCTestCase {
         }
         XCTAssertNotEqual(payloads[0], payloads[1])
         XCTAssertNotEqual(payloads[1], payloads[2])
-        XCTAssertNil(try FoundationDiagnosticTones.resolve(track))
+        XCTAssertNil(try FoundationTestTones.resolve(track))
     }
 
     func testDiagnosticNativeQueueCompletesEveryOccurrenceWithoutManualAdvance() async throws {
         let player = FoundationPlayer(
             resolve: { item in
-                guard let url = try FoundationDiagnosticTones.resolve(item) else {
+                guard let url = try FoundationTestTones.resolve(item) else {
                     throw URLError(.unsupportedURL)
                 }
                 return url
@@ -102,7 +102,7 @@ final class FoundationPlayerTests: XCTestCase {
             selection.cancel()
             state.cancel()
         }
-        player.setQueue(FoundationDiagnosticTones.items, selectedIndex: 0)
+        player.setQueue(FoundationTestTones.items, selectedIndex: 0)
         let expected = player.queue.map(\.id)
         let result = await XCTWaiter.fulfillment(of: [ended], timeout: 40)
         XCTAssertEqual(result, .completed)
@@ -1002,5 +1002,64 @@ private actor SessionOperationProbe {
         } else {
             pending.removeValue(forKey: index)?.resume()
         }
+    }
+}
+
+/// Test-only PCM fixtures exercise the native queue without contacting the provider.
+enum FoundationTestTones {
+    static let sampleRate = 22_050
+    static let duration = 8.0
+    static let items = (0..<3).map { index in
+        FoundationItem(
+            id: "foundation-diagnostic-tone-\(index)", title: "Diagnostic tone \(index + 1)",
+            subtitle: "Local audio · no streaming", kind: .track, duration: duration)
+    }
+
+    /// Resolve only the exact synthetic test items.
+    static func resolve(_ item: FoundationItem) throws -> URL? {
+        guard let index = items.firstIndex(of: item) else { return nil }
+        try Task.checkCancellation()
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("foundation-diagnostic-tones-v1", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        let file = directory.appendingPathComponent("tone-\(index).wav")
+        if !FileManager.default.fileExists(atPath: file.path) {
+            try wave(index: index).write(to: file, options: .atomic)
+        }
+        try Task.checkCancellation()
+        return file
+    }
+
+    /// Mono 16-bit PCM at eight percent peak, with short fades to avoid edge clicks.
+    /// Fixed inputs bound all three temporary files to approximately one megabyte total.
+    static func wave(index: Int) -> Data {
+        precondition((0..<3).contains(index))
+        let frames = Int(Double(sampleRate) * duration)
+        let bytes = UInt32(frames * 2)
+        var data = Data()
+        func append<T: FixedWidthInteger>(_ value: T) {
+            var littleEndian = value.littleEndian
+            withUnsafeBytes(of: &littleEndian) { data.append(contentsOf: $0) }
+        }
+        data.append(contentsOf: "RIFF".utf8)
+        append(bytes + 36)
+        data.append(contentsOf: "WAVEfmt ".utf8)
+        append(UInt32(16))
+        append(UInt16(1))
+        append(UInt16(1))
+        append(UInt32(sampleRate))
+        append(UInt32(sampleRate * 2))
+        append(UInt16(2))
+        append(UInt16(16))
+        data.append(contentsOf: "data".utf8)
+        append(bytes)
+        let frequency = [330.0, 440.0, 660.0][index]
+        for frame in 0..<frames {
+            let fade = min(1, Double(min(frame, frames - 1 - frame)) / 441)
+            let phase = 2 * Double.pi * frequency * Double(frame) / Double(sampleRate)
+            append(Int16(sin(phase) * fade * 0.08 * Double(Int16.max)))
+        }
+        return data
     }
 }

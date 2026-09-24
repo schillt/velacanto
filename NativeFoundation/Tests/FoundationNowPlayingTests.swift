@@ -66,7 +66,7 @@ final class FoundationNowPlayingTests: XCTestCase {
 
     func testSnapshotsDoNotFollowPeriodicElapsedTicksButUpdateAfterSeek() async throws {
         let file = try XCTUnwrap(
-            FoundationDiagnosticTones.resolve(FoundationDiagnosticTones.items[0]))
+            FoundationTestTones.resolve(FoundationTestTones.items[0]))
         let player = FoundationPlayer(
             resolve: { _ in file }, activateSession: {}, deactivateSession: {})
         player.nativePlayer.volume = 0
@@ -103,7 +103,7 @@ final class FoundationNowPlayingTests: XCTestCase {
 
     func testDeniedPrimacyDoesNotRetryDuringNaturalHandoff() async throws {
         let file = try XCTUnwrap(
-            FoundationDiagnosticTones.resolve(FoundationDiagnosticTones.items[0]))
+            FoundationTestTones.resolve(FoundationTestTones.items[0]))
         let source = NowPlayingHandoffProbe(file: file)
         let player = FoundationPlayer(
             resolve: { _ in await source.resolve() }, activateSession: {}, deactivateSession: {})
@@ -144,7 +144,7 @@ final class FoundationNowPlayingTests: XCTestCase {
 
     func testPauseBeforeQueuedPrimacyPreventsRequest() async throws {
         let file = try XCTUnwrap(
-            FoundationDiagnosticTones.resolve(FoundationDiagnosticTones.items[0]))
+            FoundationTestTones.resolve(FoundationTestTones.items[0]))
         let player = FoundationPlayer(
             resolve: { _ in file }, activateSession: {}, deactivateSession: {})
         player.nativePlayer.volume = 0

@@ -255,9 +255,6 @@ struct FoundationPlayerView: View {
         }
         #if DEBUG
             .environment(\.foundationTraceOrigin, .nowPlaying)
-            .onChange(of: isVisible) { _, visible in
-                FoundationTrace.event("surface origin=nowPlaying contentVisible=\(visible ? 1 : 0)")
-            }
             .onAppear { FoundationTrace.event("surface origin=nowPlaying event=appeared") }
             .onDisappear { FoundationTrace.event("surface origin=nowPlaying event=disappeared") }
             .onChange(of: showingQueue) { _, shown in
@@ -325,11 +322,6 @@ struct FoundationPlayerView: View {
                     .lineLimit(dynamicTypeSize.isAccessibilitySize ? 2 : 1)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 Menu {
-                    #if DEBUG
-                        Button("Play diagnostic tones", systemImage: "waveform") {
-                            player.setQueue(FoundationDiagnosticTones.items, selectedIndex: 0)
-                        }
-                    #endif
                     Button("View Album", systemImage: "square.stack") {
                         if let album { openLibraryItem?(album) }
                     }.disabled(album == nil || openLibraryItem == nil)
