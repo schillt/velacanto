@@ -54,7 +54,14 @@ final class FoundationAppModel: ObservableObject {
             try await library.setFavorite(for: item, isFavorite: favorite)
         }
         self.library = library
-        self.player = FoundationPlayer(library: library)
+        #if DEBUG
+            self.player = FoundationPlayer(resolve: { item in
+                if let url = try FoundationDiagnosticTones.resolve(item) { return url }
+                return try await library.playbackURL(for: item)
+            })
+        #else
+            self.player = FoundationPlayer(library: library)
+        #endif
     }
 
     func signOut() {
@@ -170,3 +177,64 @@ private struct FoundationSignInView: View {
         }
     }
 }
+
+#if DEBUG
+    /// Three bounded local signals exercise the normal queue without contacting the provider.
+    enum FoundationDiagnosticTones {
+        static let sampleRate = 22_050
+        static let duration = 8.0
+        static let items = (0..<3).map { index in
+            FoundationItem(
+                id: "foundation-diagnostic-tone-\(index)", title: "Diagnostic tone \(index + 1)",
+                subtitle: "Local audio · no streaming", kind: .track, duration: duration)
+        }
+
+        /// Resolve only exact synthetic items; all real selections retain the library resolver.
+        static func resolve(_ item: FoundationItem) throws -> URL? {
+            guard let index = items.firstIndex(of: item) else { return nil }
+            try Task.checkCancellation()
+            let directory = FileManager.default.temporaryDirectory
+                .appendingPathComponent("foundation-diagnostic-tones-v1", isDirectory: true)
+            try FileManager.default.createDirectory(
+                at: directory, withIntermediateDirectories: true)
+            let file = directory.appendingPathComponent("tone-\(index).wav")
+            if !FileManager.default.fileExists(atPath: file.path) {
+                try wave(index: index).write(to: file, options: .atomic)
+            }
+            try Task.checkCancellation()
+            return file
+        }
+
+        /// Mono 16-bit PCM at eight percent peak, with short fades to avoid edge clicks.
+        /// Fixed inputs bound all three temporary files to approximately one megabyte total.
+        static func wave(index: Int) -> Data {
+            precondition((0..<3).contains(index))
+            let frames = Int(Double(sampleRate) * duration)
+            let bytes = UInt32(frames * 2)
+            var data = Data()
+            func append<T: FixedWidthInteger>(_ value: T) {
+                var littleEndian = value.littleEndian
+                withUnsafeBytes(of: &littleEndian) { data.append(contentsOf: $0) }
+            }
+            data.append(contentsOf: "RIFF".utf8)
+            append(bytes + 36)
+            data.append(contentsOf: "WAVEfmt ".utf8)
+            append(UInt32(16))
+            append(UInt16(1))
+            append(UInt16(1))
+            append(UInt32(sampleRate))
+            append(UInt32(sampleRate * 2))
+            append(UInt16(2))
+            append(UInt16(16))
+            data.append(contentsOf: "data".utf8)
+            append(bytes)
+            let frequency = [330.0, 440.0, 660.0][index]
+            for frame in 0..<frames {
+                let fade = min(1, Double(min(frame, frames - 1 - frame)) / 441)
+                let phase = 2 * Double.pi * frequency * Double(frame) / Double(sampleRate)
+                append(Int16(sin(phase) * fade * 0.08 * Double(Int16.max)))
+            }
+            return data
+        }
+    }
+#endif

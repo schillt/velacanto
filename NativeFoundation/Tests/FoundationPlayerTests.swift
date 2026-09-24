@@ -10,6 +10,59 @@ final class FoundationPlayerTests: XCTestCase {
     private let track = FoundationItem(
         id: "synthetic", title: "", subtitle: "", kind: .track, duration: nil)
 
+    func testDiagnosticTonesAreBoundedDistinctPCMWithoutArtwork() throws {
+        let items = FoundationDiagnosticTones.items
+        XCTAssertEqual(items.count, 3)
+        XCTAssertEqual(Set(items.map(\.id)).count, 3)
+        var payloads: [Data] = []
+        for index in items.indices {
+            let item = items[index]
+            XCTAssertNil(item.album)
+            XCTAssertNil(item.primaryImageTag)
+            XCTAssertNil(item.isFavorite)
+            let data = FoundationDiagnosticTones.wave(index: index)
+            XCTAssertEqual(data.count, 44 + 22_050 * 8 * 2)
+            XCTAssertEqual(String(decoding: data.prefix(4), as: UTF8.self), "RIFF")
+            let samples = stride(from: 44, to: data.count, by: 2).map {
+                Int(Int16(bitPattern: UInt16(data[$0]) | UInt16(data[$0 + 1]) << 8))
+            }
+            XCTAssertGreaterThan(samples.map { abs($0) }.max() ?? 0, 2_000)
+            XCTAssertLessThanOrEqual(samples.map { abs($0) }.max() ?? 0, 2_622)
+            XCTAssertEqual(samples.first, 0)
+            XCTAssertEqual(samples.last, 0)
+            payloads.append(data)
+        }
+        XCTAssertNotEqual(payloads[0], payloads[1])
+        XCTAssertNotEqual(payloads[1], payloads[2])
+        XCTAssertNil(try FoundationDiagnosticTones.resolve(track))
+    }
+
+    func testDiagnosticNativeQueueCompletesEveryOccurrenceWithoutManualAdvance() async throws {
+        let player = FoundationPlayer(
+            resolve: { item in
+                guard let url = try FoundationDiagnosticTones.resolve(item) else {
+                    throw URLError(.unsupportedURL)
+                }
+                return url
+            }, activateSession: {}, deactivateSession: {})
+        player.nativePlayer.volume = 0  // Automated evidence is native completion, not audibility.
+        defer { player.stop() }
+        let ended = XCTestExpectation(description: "Three native tone items finish")
+        var selections: [UUID] = []
+        let selection = player.$selectedEntryID.compactMap { $0 }.sink { selections.append($0) }
+        let state = player.$state.filter { $0 == .ended }.first().sink { _ in ended.fulfill() }
+        defer {
+            selection.cancel()
+            state.cancel()
+        }
+        player.setQueue(FoundationDiagnosticTones.items, selectedIndex: 0)
+        let expected = player.queue.map(\.id)
+        let result = await XCTWaiter.fulfillment(of: [ended], timeout: 40)
+        XCTAssertEqual(result, .completed)
+        XCTAssertEqual(selections, expected)
+        XCTAssertFalse(player.wantsPlayback)
+    }
+
     private func player(_ resolver: PlayerResolutionProbe) -> FoundationPlayer {
         FoundationPlayer(
             resolve: { _ in try await resolver.resolve() },

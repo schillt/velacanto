@@ -266,6 +266,11 @@ struct FoundationPlayerView: View {
                     .lineLimit(dynamicTypeSize.isAccessibilitySize ? 2 : 1)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 Menu {
+                    #if DEBUG
+                        Button("Play diagnostic tones", systemImage: "waveform") {
+                            player.setQueue(FoundationDiagnosticTones.items, selectedIndex: 0)
+                        }
+                    #endif
                     Button("View Album", systemImage: "square.stack") {
                         if let album { openLibraryItem?(album) }
                     }.disabled(album == nil || openLibraryItem == nil)
