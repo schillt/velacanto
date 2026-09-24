@@ -29,7 +29,9 @@ import SwiftUI
         }
 
         func updateNSView(_ nsView: AVRoutePickerView, context: Context) {
-            nsView.player = player.nativePlayer
+            if nsView.player !== player.nativePlayer {
+                nsView.player = player.nativePlayer
+            }
         }
     }
 #endif

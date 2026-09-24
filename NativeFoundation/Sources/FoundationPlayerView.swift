@@ -113,15 +113,8 @@ struct FoundationPlayerView: View {
                             .foregroundStyle(.white.opacity(0.3))
                             .accessibilityLabel("Lyrics, coming soon")
                             Spacer()
-                            Button {
-                            } label: {
-                                Image(systemName: "airplay.audio")
-                                    .font(.title2)
-                                    .frame(width: 44, height: 44)
-                            }
-                            .disabled(true)
-                            .foregroundStyle(.white.opacity(0.3))
-                            .accessibilityLabel("AirPlay, coming soon")
+                            FoundationAirPlayPicker(player: player)
+                                .frame(width: 44, height: 44)
                             Spacer()
                             Button {
                                 showingQueue = true
