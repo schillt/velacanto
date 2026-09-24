@@ -36,6 +36,7 @@ struct FoundationSession: Codable, Sendable {
 }
 
 protocol FoundationLibrary: Sendable {
+    func lyrics(for item: FoundationItem) async throws -> FoundationLyrics?
     func overview(for item: FoundationItem) async throws -> String?
     func appearances(artistID: String, startIndex: Int) async throws -> FoundationPage
     func similarItems(for item: FoundationItem) async throws -> FoundationPage
@@ -69,6 +70,9 @@ protocol FoundationLibrary: Sendable {
 }
 
 extension FoundationLibrary {
+    func lyrics(for item: FoundationItem) async throws -> FoundationLyrics? {
+        throw FoundationLibraryError.unavailable
+    }
     func mostPlayedAlbums() async throws -> FoundationPage {
         throw FoundationLibraryError.unavailable
     }
@@ -522,6 +526,25 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
         guard result.isFavorite == isFavorite else { throw FoundationLibraryError.invalidResponse }
     }
 
+    /// Only the lyrics endpoint treats a missing resource as optional metadata.
+    func lyrics(for item: FoundationItem) async throws -> FoundationLyrics? {
+        guard item.kind == .track, Self.validID(item.id) else {
+            throw FoundationLibraryError.invalidResponse
+        }
+        let data = try await responseData(Paths.getLyrics(itemID: item.id), notFoundIsEmpty: true)
+        guard !data.isEmpty else { return nil }
+        guard data.count <= 262_144 else { throw FoundationLibraryError.invalidResponse }
+        do {
+            let result = try JSONDecoder().decode(LyricDto.self, from: data)
+            let text = (result.lyrics ?? []).compactMap(\.text).joined(separator: "\n")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            try Task.checkCancellation()
+            return text.isEmpty ? nil : FoundationLyrics(text: text)
+        } catch {
+            throw FoundationLibraryError.category(error)
+        }
+    }
+
     func playbackURL(for item: FoundationItem) async throws -> URL {
         try Task.checkCancellation()
         guard item.kind == .track, Self.validID(item.id),
@@ -689,6 +712,7 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
         private static func tracePurpose<Response>(_ endpoint: Request<Response>) -> String {
             switch endpoint.id {
             case "GetItemImage": return "artwork"
+            case "GetLyrics": return "lyrics"
             case "GetAlbumArtists": return "artists"
             case "GetMusicGenres": return "genres"
             case "GetPlaylistItems": return "playlistTracks"
@@ -720,7 +744,8 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
     #endif
 
     private func responseData<Response>(
-        _ endpoint: Request<Response>, accept: String = "application/json"
+        _ endpoint: Request<Response>, accept: String = "application/json",
+        notFoundIsEmpty: Bool = false
     ) async throws -> Data {
         #if DEBUG
             let operationID = UUID().uuidString
@@ -778,6 +803,7 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
             guard response.url == request.url else { throw FoundationLibraryError.secureConnection }
             switch response.statusCode {
             case 200..<300: break
+            case 404 where notFoundIsEmpty: break
             case 401, 403: throw FoundationLibraryError.authentication
             case 300..<400: throw FoundationLibraryError.secureConnection
             default: throw FoundationLibraryError.unavailable
@@ -787,7 +813,7 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
                     "api family=\(family) operation=\(operationID) purpose=\(purpose) \(traceFields) outcome=success"
                 )
             #endif
-            return data
+            return response.statusCode == 404 && notFoundIsEmpty ? Data() : data
         } catch {
             let category = FoundationLibraryError.category(error)
             #if DEBUG

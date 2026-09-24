@@ -17,6 +17,7 @@ struct FoundationPlayerView: View {
     @State private var scrubEntryID: UUID?
     @State private var showingGrabber = true
     @State private var showingQueue = false
+    @State private var lyricsEntry: FoundationQueueEntry?
     @State private var showsDelayedLoading = false
     @Environment(\.foundationOpenLibraryItem) private var openLibraryItem
     @State private var queuedDestination: FoundationItem?
@@ -104,14 +105,14 @@ struct FoundationPlayerView: View {
                         volumePlaceholder
                         HStack {
                             Button {
+                                lyricsEntry = player.queue.first { $0.id == player.selectedEntryID }
                             } label: {
                                 Image(systemName: "quote.bubble")
                                     .font(.title2)
                                     .frame(width: 44, height: 44)
                             }
-                            .disabled(true)
-                            .foregroundStyle(.white.opacity(0.3))
-                            .accessibilityLabel("Lyrics, coming soon")
+                            .disabled(current == nil)
+                            .accessibilityLabel("Lyrics")
                             Spacer()
                             FoundationAirPlayPicker(player: player)
                                 .frame(width: 44, height: 44)
@@ -213,6 +214,10 @@ struct FoundationPlayerView: View {
         .onChange(of: player.selectedEntryID) { _, _ in
             scrubbing = false
             scrubEntryID = nil
+        }
+        .sheet(item: $lyricsEntry) { entry in
+            FoundationLyricsView(
+                item: entry.item, entryID: entry.id, library: library, player: player)
         }
         .sheet(isPresented: $showingQueue, onDismiss: finishQueueDismissal) {
             FoundationQueueView(player: player) { item in
