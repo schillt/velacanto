@@ -99,20 +99,6 @@ struct FoundationPlayerView: View {
                             .opacity(lyricsPresentation == nil && !showingQueue ? 1 : 0)
                             .accessibilityHidden(lyricsPresentation != nil || showingQueue)
                             .allowsHitTesting(lyricsPresentation == nil && !showingQueue)
-                            if lyricsPresentation != nil || showingQueue {
-                                Color.black.opacity(0.6)
-                                    .frame(
-                                        width: artworkGeometry.size.width,
-                                        height: artworkGeometry.size.height
-                                    )
-                                    .mask {
-                                        FoundationPlayerContentFade(
-                                            topHeight: showingQueue ? 8 : 24)
-                                    }
-                                    .allowsHitTesting(false)
-                                    .accessibilityHidden(true)
-                                    .transition(.opacity)
-                            }
                             if let presentation = lyricsPresentation {
                                 let entry = presentation.entry
                                 FoundationLyricsView(
@@ -219,8 +205,19 @@ struct FoundationPlayerView: View {
                                     .init(color: artworkTint.opacity(0.8), location: 0.80),
                                     .init(color: artworkTint, location: 1),
                                 ], startPoint: .top, endPoint: .bottom)
-                        }.frame(width: background.size.width, height: background.size.height)
-                            .clipped()
+                            if lyricsPresentation != nil || showingQueue {
+                                Color.black.opacity(0.6)
+                                    .allowsHitTesting(false)
+                                    .accessibilityHidden(true)
+                                    .transition(.opacity)
+                            }
+                        }
+                        .animation(
+                            reduceMotion ? nil : .easeInOut(duration: 0.2),
+                            value: lyricsPresentation != nil || showingQueue
+                        )
+                        .frame(width: background.size.width, height: background.size.height)
+                        .clipped()
                     }.ignoresSafeArea()
                 }
             }

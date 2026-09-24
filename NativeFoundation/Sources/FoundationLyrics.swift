@@ -264,12 +264,10 @@ private struct FoundationTimedLyricsView: View {
 }
 
 struct FoundationPlayerContentFade: View {
-    var topHeight: CGFloat = 24
-
     var body: some View {
         VStack(spacing: 0) {
             LinearGradient(colors: [.clear, .white], startPoint: .top, endPoint: .bottom)
-                .frame(height: topHeight)
+                .frame(height: 24)
             Rectangle().fill(.white)
             LinearGradient(colors: [.white, .clear], startPoint: .top, endPoint: .bottom)
                 .frame(height: 24)
