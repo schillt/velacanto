@@ -140,6 +140,7 @@ struct FoundationLyricsView: View {
                             .padding(.vertical)
                             .padding(.horizontal, 24)
                     }
+                    .mask { FoundationLyricsTopFade() }
                 }
             }
         }
@@ -210,6 +211,7 @@ private struct FoundationTimedLyricsView: View {
                 .padding(.vertical)
                 .padding(.horizontal, 24)
             }
+            .mask { FoundationLyricsTopFade() }
             .onScrollPhaseChange { _, phase in
                 scrollIsIdle = phase == .idle
                 if phase == .tracking || phase == .interacting { followsPlayback = false }
@@ -258,5 +260,15 @@ private struct FoundationTimedLyricsView: View {
             .font(.system(.title2, design: .default, weight: isCurrent ? .bold : .semibold))
             .foregroundStyle(Color.primary.opacity(isCurrent ? 1 : 0.78))
             .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+    }
+}
+
+private struct FoundationLyricsTopFade: View {
+    var body: some View {
+        VStack(spacing: 0) {
+            LinearGradient(colors: [.clear, .white], startPoint: .top, endPoint: .bottom)
+                .frame(height: 24)
+            Rectangle().fill(.white)
+        }
     }
 }
