@@ -93,10 +93,21 @@ final class FoundationCurrentArtwork: ObservableObject {
                 try Task.checkCancellation()
                 guard let self, self.isLive, self.generation == requestGeneration else { return }
                 self.result = data.flatMap { Self.decode($0, id: artworkID) }
+                #if DEBUG
+                    let outcome =
+                        self.result != nil ? "ready" : (data == nil ? "missing" : "rejected")
+                    FoundationJournal.shared.record(
+                        "artwork.shared generation=\(requestGeneration) outcome=\(outcome)")
+                #endif
                 self.loadTask = nil
             } catch {
                 guard let self, self.isLive, self.generation == requestGeneration else { return }
                 self.loadTask = nil
+                #if DEBUG
+                    FoundationJournal.shared.record(
+                        "artwork.shared generation=\(requestGeneration) outcome=\(Task.isCancelled ? "cancelled" : "failed")"
+                    )
+                #endif
                 // Artwork is optional. Keep this identity completed until selection changes.
             }
         }
@@ -142,18 +153,63 @@ final class FoundationCurrentArtwork: ObservableObject {
         guard isLive, key == currentSelectionKey, key == identity(item), let artworkID else {
             return nil
         }
+        #if DEBUG
+            let providerGeneration = generation
+        #endif
         return { [weak self] _ in
-            try Task.checkCancellation()
-            let pending = try await self?.pendingLoad(for: artworkID)
-            await pending?.value
-            try Task.checkCancellation()
-            guard let data = await self?.data(for: artworkID) else {
-                throw ArtworkRepresentation.ArtworkRepresentationError.noRepresentationAvailable
+            #if DEBUG
+                var stage = "admission"
+                FoundationJournal.shared.record(
+                    "artwork.provider generation=\(providerGeneration) event=entered")
+            #endif
+            do {
+                try Task.checkCancellation()
+                let pending = try await self?.pendingLoad(for: artworkID)
+                #if DEBUG
+                    stage = "waiting"
+                    FoundationJournal.shared.record(
+                        "artwork.provider generation=\(providerGeneration) event=waitStarted pending=\(pending == nil ? 0 : 1)"
+                    )
+                #endif
+                await pending?.value
+                #if DEBUG
+                    stage = "currentResult"
+                    FoundationJournal.shared.record(
+                        "artwork.provider generation=\(providerGeneration) event=waitReturned")
+                #endif
+                try Task.checkCancellation()
+                guard let data = await self?.data(for: artworkID) else {
+                    throw ArtworkRepresentation.ArtworkRepresentationError.noRepresentationAvailable
+                }
+                try Task.checkCancellation()
+                #if DEBUG
+                    stage = "representation"
+                #endif
+                let representation = try ArtworkRepresentation(data: data)
+                #if DEBUG
+                    FoundationJournal.shared.record(
+                        "artwork.provider generation=\(providerGeneration) event=returned outcome=success"
+                    )
+                #endif
+                return representation
+            } catch {
+                #if DEBUG
+                    FoundationJournal.shared.record(
+                        "artwork.provider generation=\(providerGeneration) event=returned stage=\(stage) outcome=\(error is CancellationError ? "cancelled" : "unavailable")"
+                    )
+                #endif
+                throw error
             }
-            try Task.checkCancellation()
-            return try ArtworkRepresentation(data: data)
         }
     }
+
+    #if DEBUG
+        var diagnosticState: String {
+            guard isLive, key == currentSelectionKey, artworkID != nil else { return "absent" }
+            if result != nil { return "ready" }
+            return loadTask == nil ? "unavailable" : "pending"
+        }
+    #endif
 
     private func pendingLoad(for id: UUID) throws -> Task<Void, Never>? {
         guard isLive, key == currentSelectionKey, artworkID == id else {
