@@ -29,6 +29,7 @@ final class FoundationNowPlaying: MediaSessionRepresentable {
     private(set) var availability = Availability()
     private(set) var entryID: UUID?
     @ObservationIgnored private let player: FoundationPlayer
+    @ObservationIgnored private let artwork: FoundationCurrentArtwork?
     @ObservationIgnored private var subscriptions: Set<AnyCancellable> = []
     @ObservationIgnored private weak var session: MediaSession<FoundationNowPlaying>?
     @ObservationIgnored private(set) var updateTask: Task<Void, Never>?
@@ -40,9 +41,11 @@ final class FoundationNowPlaying: MediaSessionRepresentable {
 
     init(
         player: FoundationPlayer,
+        artwork: FoundationCurrentArtwork? = nil,
         applicationPrimacyRequest: (() async throws -> Void)? = nil
     ) {
         self.player = player
+        self.artwork = artwork
         self.applicationPrimacyRequest = applicationPrimacyRequest
         Publishers.MergeMany(
             player.$queue.map { _ in () }.eraseToAnyPublisher(),
@@ -53,6 +56,7 @@ final class FoundationNowPlaying: MediaSessionRepresentable {
             player.$isInterrupted.removeDuplicates().map { _ in () }.eraseToAnyPublisher(),
             player.playbackPositionChanged.eraseToAnyPublisher()
         ).sink { [weak self] in self?.scheduleUpdate() }.store(in: &subscriptions)
+        artwork?.$result.sink { [weak self] _ in self?.scheduleUpdate() }.store(in: &subscriptions)
         #if os(iOS)
             NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)
                 .sink { [weak self] _ in
@@ -114,7 +118,8 @@ final class FoundationNowPlaying: MediaSessionRepresentable {
         content = MusicContent(
             id: entry.id.uuidString, songTitle: entry.item.title, artistName: entry.item.subtitle,
             albumName: entry.item.album?.title ?? "", type: .audio,
-            duration: length.flatMap { $0.isFinite && $0 > 0 ? .finite($0) : nil }, artwork: nil)
+            duration: length.flatMap { $0.isFinite && $0 > 0 ? .finite($0) : nil },
+            artwork: artwork?.artwork(for: entry.item))
         let state: MediaPlaybackSnapshot.PlaybackState
         if player.isInterrupted {
             state = .interrupted

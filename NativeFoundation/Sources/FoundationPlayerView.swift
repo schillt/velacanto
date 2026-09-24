@@ -3,6 +3,7 @@ import SwiftUI
 struct FoundationPlayerView: View {
     @ObservedObject var player: FoundationPlayer
     let library: any FoundationLibrary
+    @EnvironmentObject private var currentArtwork: FoundationCurrentArtwork
     @EnvironmentObject private var actions: FoundationLibraryActions
     @Environment(\.dismiss) private var dismiss
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -102,7 +103,8 @@ struct FoundationPlayerView: View {
                         transport
                         volumePlaceholder
                         HStack {
-                            Button {} label: {
+                            Button {
+                            } label: {
                                 Image(systemName: "quote.bubble")
                                     .font(.title2)
                                     .frame(width: 44, height: 44)
@@ -111,7 +113,8 @@ struct FoundationPlayerView: View {
                             .foregroundStyle(.white.opacity(0.3))
                             .accessibilityLabel("Lyrics, coming soon")
                             Spacer()
-                            Button {} label: {
+                            Button {
+                            } label: {
                                 Image(systemName: "airplay.audio")
                                     .font(.title2)
                                     .frame(width: 44, height: 44)
@@ -236,7 +239,8 @@ struct FoundationPlayerView: View {
     @ViewBuilder private func artworkView(size: CGFloat, height: CGFloat) -> some View {
         if let album {
             FoundationCatalogArtwork(
-                item: album, library: library, isActive: isVisible, size: size,
+                source: .current(currentArtwork.result(for: album)), item: album, library: library,
+                isActive: isVisible, size: size,
                 displayHeight: height,
                 sampledColor: $artworkTint, isHero: true,
                 loadedImage: $artworkFill,
