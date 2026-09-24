@@ -143,6 +143,63 @@ final class FoundationLyricsTests: XCTestCase {
         } catch { XCTAssertEqual(error as? FoundationLibraryError, .invalidResponse) }
     }
 
+    func testTimingBoundariesDuplicatesBlankMarkersAndBackwardsPosition() {
+        let lyrics = FoundationLyrics(lines: [
+            .init(id: 0, text: "Later", start: 10),
+            .init(id: 1, text: "First", start: 2),
+            .init(id: 2, text: "Duplicate", start: 2),
+            .init(id: 3, text: "", start: 5),
+            .init(id: 4, text: "Untimed", start: nil),
+            .init(id: 5, text: "Invalid", start: -1),
+        ])
+        XCTAssertNil(lyrics.activeLine(at: 1.99, duration: 20))
+        XCTAssertEqual(lyrics.activeLine(at: 2, duration: 20), 2)
+        XCTAssertEqual(lyrics.activeLine(at: 4.99, duration: 20), 2)
+        XCTAssertEqual(lyrics.activeLine(at: 5, duration: 20), 3)
+        XCTAssertEqual(lyrics.activeLine(at: 12, duration: 20), 0)
+        XCTAssertEqual(lyrics.activeLine(at: 3, duration: 20), 2)
+        XCTAssertNil(lyrics.activeLine(at: .nan, duration: 20))
+    }
+
+    func testTimedSeekTargetsRequireCurrentOccurrenceAndValidDuration() {
+        let occurrence = UUID()
+        let lyrics = FoundationLyrics(lines: [
+            .init(id: 0, text: "Timed", start: 5),
+            .init(id: 1, text: "Untimed", start: nil),
+            .init(id: 2, text: "", start: 7),
+            .init(id: 3, text: "Beyond", start: 90),
+        ])
+        XCTAssertEqual(
+            lyrics.seekTarget(
+                lineID: 0, entryID: occurrence, currentEntryID: occurrence, duration: 20), 5)
+        XCTAssertNil(
+            lyrics.seekTarget(lineID: 0, entryID: occurrence, currentEntryID: UUID(), duration: 20))
+        XCTAssertNil(
+            lyrics.seekTarget(
+                lineID: 0, entryID: occurrence, currentEntryID: occurrence, duration: 0))
+        for line in [1, 2, 3] {
+            XCTAssertNil(
+                lyrics.seekTarget(
+                    lineID: line, entryID: occurrence, currentEntryID: occurrence, duration: 20))
+        }
+    }
+
+    func testTickConversionUsesServerPositionsAndRetainsInvalidLinesAsText() async throws {
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            let body =
+                #"{"Metadata":{"Offset":10000000,"IsSynced":false},"Lyrics":[{"Text":"First","Start":12500000},{"Text":"Negative","Start":-1},{"Text":"Untimed"},{"Text":"","Start":30000000},{"Text":"Huge","Start":9223372036854775807}]}"#
+            return (Data(body.utf8), Self.response(request, status: 200))
+        }
+        let boundedItem = FoundationItem(
+            id: item.id, title: item.title, subtitle: "", kind: .track, duration: 60)
+        let result = try await library.lyrics(for: boundedItem)
+        let lyrics = try XCTUnwrap(result)
+        XCTAssertEqual(lyrics.lines.map(\.start), [1.25, nil, nil, 3, nil])
+        XCTAssertEqual(lyrics.lines.map(\.id), [0, 1, 2, 3, 4])
+        XCTAssertEqual(lyrics.lines[1].text, "Negative")
+        XCTAssertEqual(lyrics.activeLine(at: 3, duration: 60), 3)
+    }
+
     nonisolated private static func response(_ request: URLRequest, status: Int) -> HTTPURLResponse
     {
         HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!

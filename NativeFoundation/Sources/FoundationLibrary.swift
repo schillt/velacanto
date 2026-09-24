@@ -536,10 +536,25 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
         guard data.count <= 262_144 else { throw FoundationLibraryError.invalidResponse }
         do {
             let result = try JSONDecoder().decode(LyricDto.self, from: data)
-            let text = (result.lyrics ?? []).compactMap(\.text).joined(separator: "\n")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
+            // Jellyfin's parser and client use Start directly; applying Metadata.Offset again
+            // could shift already-normalized timestamps. One second is 10,000,000 ticks.
+            let lines = (result.lyrics ?? []).enumerated().map { index, line in
+                let start = line.start.flatMap { ticks -> Double? in
+                    guard ticks >= 0 else { return nil }
+                    let seconds = Double(ticks) / 10_000_000
+                    if let duration = item.duration, duration > 0, seconds >= duration {
+                        return nil
+                    }
+                    return seconds
+                }
+                return FoundationLyrics.Line(
+                    id: index,
+                    text: (line.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines),
+                    start: start)
+            }
+            let lyrics = FoundationLyrics(lines: lines)
             try Task.checkCancellation()
-            return text.isEmpty ? nil : FoundationLyrics(text: text)
+            return lyrics.text.isEmpty ? nil : lyrics
         } catch {
             throw FoundationLibraryError.category(error)
         }
