@@ -29,11 +29,20 @@ final class FoundationCurrentArtwork: ObservableObject {
     private var generation: UInt = 0
     private var subscriptions: Set<AnyCancellable> = []
     private var isLive = true
+    #if DEBUG
+        var diagnosticCompletionDelay: (@Sendable () async throws -> Void)?
+        private var diagnosticIdentityCount = 0
+    #endif
 
     init(player: FoundationPlayer, load: @escaping @Sendable (FoundationItem) async throws -> Data?)
     {
         self.player = player
         self.load = load
+        #if DEBUG
+            if ProcessInfo.processInfo.arguments.contains("-foundationDelayedArtwork") {
+                diagnosticCompletionDelay = { try await Task.sleep(for: .seconds(15)) }
+            }
+        #endif
         Publishers.Merge(
             player.$queue.map { _ in () },
             player.$selectedEntryID.removeDuplicates().map { _ in () }
@@ -76,6 +85,10 @@ final class FoundationCurrentArtwork: ObservableObject {
         artworkID = nextKey == nil ? nil : UUID()
         result = nil
         guard let artworkID, let item else { return }
+        #if DEBUG
+            diagnosticIdentityCount += 1
+            let completionDelay = diagnosticIdentityCount == 2 ? diagnosticCompletionDelay : nil
+        #endif
         let requestGeneration = generation
         let load = load
         let imageItem = item.catalogArtworkItem
@@ -89,6 +102,22 @@ final class FoundationCurrentArtwork: ObservableObject {
                     ) { try await load(imageItem) }
                 #else
                     data = try await load(imageItem)
+                #endif
+                try Task.checkCancellation()
+                #if DEBUG
+                    if let completionDelay {
+                        FoundationJournal.shared.record("artwork.diagnostic event=delayStarted")
+                        do {
+                            try await completionDelay()
+                            FoundationJournal.shared.record(
+                                "artwork.diagnostic event=delayReturned outcome=completed")
+                        } catch {
+                            FoundationJournal.shared.record(
+                                "artwork.diagnostic event=delayReturned outcome=\(error is CancellationError ? "cancelled" : "failed")"
+                            )
+                            throw error
+                        }
+                    }
                 #endif
                 try Task.checkCancellation()
                 guard let self, self.isLive, self.generation == requestGeneration else { return }
