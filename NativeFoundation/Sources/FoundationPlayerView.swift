@@ -21,6 +21,13 @@ struct FoundationPlayerView: View {
     @State private var showsDelayedLoading = false
     @Environment(\.foundationOpenLibraryItem) private var openLibraryItem
 
+    private enum ContentMode { case artwork, lyrics, queue }
+
+    private var contentMode: ContentMode {
+        if showingQueue { return .queue }
+        return lyricsPresentation == nil ? .artwork : .lyrics
+    }
+
     private var current: FoundationItem? {
         player.queue.first { $0.id == player.selectedEntryID }?.item
     }
@@ -96,7 +103,8 @@ struct FoundationPlayerView: View {
                                     .offset(y: -geometry.safeAreaInsets.top)
                                 }
                             }
-                            .opacity(lyricsPresentation == nil && !showingQueue ? 1 : 0)
+                            .compositingGroup()
+                            .opacity(contentMode == .artwork ? 1 : 0)
                             .accessibilityHidden(lyricsPresentation != nil || showingQueue)
                             .allowsHitTesting(lyricsPresentation == nil && !showingQueue)
                             if let presentation = lyricsPresentation {
@@ -131,12 +139,6 @@ struct FoundationPlayerView: View {
                             width: artworkGeometry.size.width, height: artworkGeometry.size.height,
                             alignment: .topLeading
                         )
-                        .animation(
-                            reduceMotion ? nil : .easeInOut(duration: 0.2),
-                            value: lyricsPresentation?.id
-                        )
-                        .animation(
-                            reduceMotion ? nil : .easeInOut(duration: 0.2), value: showingQueue)
                     }
                     VStack(alignment: .leading, spacing: geometry.size.height < 700 ? 8 : 14) {
                         VStack(spacing: 0) {
@@ -205,21 +207,15 @@ struct FoundationPlayerView: View {
                                     .init(color: artworkTint.opacity(0.8), location: 0.80),
                                     .init(color: artworkTint, location: 1),
                                 ], startPoint: .top, endPoint: .bottom)
-                            if lyricsPresentation != nil || showingQueue {
-                                Color.black.opacity(0.6)
-                                    .allowsHitTesting(false)
-                                    .accessibilityHidden(true)
-                                    .transition(.opacity)
-                            }
+                            Color.black.opacity(contentMode == .artwork ? 0 : 0.6)
+                                .allowsHitTesting(false)
+                                .accessibilityHidden(true)
                         }
-                        .animation(
-                            reduceMotion ? nil : .easeInOut(duration: 0.2),
-                            value: lyricsPresentation != nil || showingQueue
-                        )
                         .frame(width: background.size.width, height: background.size.height)
                         .clipped()
                     }.ignoresSafeArea()
                 }
+                .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: contentMode)
             }
             .onAppear { isVisible = true }
             .onDisappear { isVisible = false }
