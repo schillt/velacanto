@@ -10,6 +10,53 @@ final class FoundationPlayerTests: XCTestCase {
     private let track = FoundationItem(
         id: "synthetic", title: "", subtitle: "", kind: .track, duration: nil)
 
+    #if os(macOS)
+        func testPlayerVolumeRejectsNonfiniteClampsAndDoesNotTouchPlaybackOwnership() async throws {
+            let resolution = PlayerResolutionProbe()
+            var sessionCalls = 0
+            let player = FoundationPlayer(
+                resolve: { _ in try await resolution.resolve() },
+                activateSession: { sessionCalls += 1 }, deactivateSession: { sessionCalls += 1 })
+            player.setQueue([track, track], selectedIndex: 0)
+            let selection = try XCTUnwrap(player.selectionTask)
+            await resolution.waitForCalls(1)
+            let native = player.nativePlayer
+            let occurrence = player.selectedEntryID
+            let queue = player.queue
+            let state = player.state
+            let intent = player.wantsPlayback
+            let elapsed = player.elapsed
+            player.playerVolume = 0.35
+            XCTAssertEqual(player.playerVolume, 0.35, accuracy: 0.0001)
+            for invalid in [Double.nan, .infinity, -.infinity] { player.playerVolume = invalid }
+            XCTAssertEqual(player.playerVolume, 0.35, accuracy: 0.0001)
+            player.playerVolume = -2
+            XCTAssertEqual(player.nativePlayer.volume, 0)
+            player.playerVolume = 2
+            XCTAssertEqual(player.nativePlayer.volume, 1)
+            player.playerVolume = 0.4
+            XCTAssertTrue(player.nativePlayer === native)
+            XCTAssertNil(player.nativePlayer.currentItem)
+            XCTAssertEqual(player.selectedEntryID, occurrence)
+            XCTAssertEqual(player.queue, queue)
+            XCTAssertEqual(player.state, state)
+            XCTAssertEqual(player.wantsPlayback, intent)
+            XCTAssertEqual(player.elapsed, elapsed)
+            XCTAssertFalse(selection.isCancelled)
+            XCTAssertEqual(sessionCalls, 0)
+            let count = await resolution.count
+            XCTAssertEqual(count, 1)
+            await resolution.fail(0)
+            await selection.value
+            player.setQueue([track], selectedIndex: 0)
+            let replacement = try XCTUnwrap(player.selectionTask)
+            await resolution.waitForCalls(2)
+            XCTAssertEqual(player.playerVolume, 0.4, accuracy: 0.0001)
+            await resolution.fail(1)
+            await replacement.value
+        }
+    #endif
+
     func testDiagnosticTonesAreBoundedDistinctPCMWithoutArtwork() throws {
         let items = FoundationDiagnosticTones.items
         XCTAssertEqual(items.count, 3)

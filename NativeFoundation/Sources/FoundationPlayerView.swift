@@ -146,7 +146,7 @@ struct FoundationPlayerView: View {
                             timeline
                         }
                         transport
-                        volumePlaceholder
+                        volumeControl
                         HStack {
                             Button {
                                 showingQueue = false
@@ -297,15 +297,25 @@ struct FoundationPlayerView: View {
         }
     }
 
-    private var volumePlaceholder: some View {
-        HStack(spacing: 12) {
-            Image(systemName: "speaker.fill")
-            Slider(value: .constant(0.5), in: 0...1).disabled(true)
-            Image(systemName: "speaker.wave.3.fill")
-        }
-        .font(.caption).foregroundStyle(.secondary)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Volume control preview, unavailable")
+    @ViewBuilder private var volumeControl: some View {
+        #if os(iOS)
+            FoundationSystemVolumeView().frame(height: 44)
+        #elseif os(macOS)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Player volume").font(.caption).foregroundStyle(.secondary)
+                HStack(spacing: 12) {
+                    Image(systemName: "speaker.fill").accessibilityHidden(true)
+                    Slider(
+                        value: Binding(
+                            get: { player.playerVolume }, set: { player.playerVolume = $0 }),
+                        in: 0...1
+                    )
+                    .accessibilityLabel("Player volume")
+                    Image(systemName: "speaker.wave.3.fill").accessibilityHidden(true)
+                }
+                .font(.caption)
+            }
+        #endif
     }
 
     private var trackDetails: some View {

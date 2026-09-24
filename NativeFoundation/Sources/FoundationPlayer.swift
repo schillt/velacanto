@@ -24,6 +24,19 @@ final class FoundationPlayer: ObservableObject {
     // Internal access lets tests await the exact selection, including an obsolete task.
     private(set) var selectionTask: Task<Void, Never>?
     private(set) var nativePlayer = AVPlayer()
+    #if os(macOS)
+        /// App gain belongs to the existing player; it does not change system or route volume.
+        var playerVolume: Double {
+            get { Double(nativePlayer.volume) }
+            set {
+                guard newValue.isFinite else { return }
+                let value = Float(min(max(newValue, 0), 1))
+                guard value != nativePlayer.volume else { return }
+                objectWillChange.send()
+                nativePlayer.volume = value
+            }
+        }
+    #endif
     private var generation: UInt64 = 0
     private let resolve: @Sendable (FoundationItem) async throws -> URL
     private let makeItem: (URL) -> AVPlayerItem
