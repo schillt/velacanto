@@ -32,13 +32,18 @@ final class FoundationNowPlaying: MediaSessionRepresentable {
     @ObservationIgnored private var subscriptions: Set<AnyCancellable> = []
     @ObservationIgnored private weak var session: MediaSession<FoundationNowPlaying>?
     @ObservationIgnored private(set) var updateTask: Task<Void, Never>?
-    @ObservationIgnored private var primacyTask: Task<Void, Never>?
+    @ObservationIgnored private(set) var primacyTask: Task<Void, Never>?
+    @ObservationIgnored private let applicationPrimacyRequest: (() async throws -> Void)?
     @ObservationIgnored private var applicationPrimacyAttempted = false
     @ObservationIgnored private var systemPrimacyAttempted = false
     @ObservationIgnored private var isLive = true
 
-    init(player: FoundationPlayer) {
+    init(
+        player: FoundationPlayer,
+        applicationPrimacyRequest: (() async throws -> Void)? = nil
+    ) {
         self.player = player
+        self.applicationPrimacyRequest = applicationPrimacyRequest
         Publishers.MergeMany(
             player.$queue.map { _ in () }.eraseToAnyPublisher(),
             player.$selectedEntryID.removeDuplicates().map { _ in () }.eraseToAnyPublisher(),
@@ -91,10 +96,11 @@ final class FoundationNowPlaying: MediaSessionRepresentable {
 
     private func refresh() {
         guard isLive else { return }
-        // A later playback episode may request primacy again; metadata redraws never retry it.
-        if player.state != .playing {
+        // Only ended intent rearms primacy; buffering and natural handoff retain their attempt.
+        if !player.wantsPlayback || player.isInterrupted {
             applicationPrimacyAttempted = false
             systemPrimacyAttempted = false
+            primacyTask?.cancel()
         }
         entryID = player.selectedEntryID
         guard let index = player.queue.firstIndex(where: { $0.id == entryID }) else {
@@ -177,30 +183,51 @@ final class FoundationNowPlaying: MediaSessionRepresentable {
 
     /// Primacy is a system presentation request, never an instruction to activate audio.
     private func requestPrimacyIfEligible() {
-        guard isLive, player.state == .playing, let session, primacyTask == nil else { return }
+        guard isLive, player.state == .playing, player.wantsPlayback, primacyTask == nil else {
+            return
+        }
+        let session = session
         let application =
-            !session.isApplicationPrimary && !applicationPrimacyAttempted
-            && session.canBecomeApplicationPrimary
+            !applicationPrimacyAttempted
+            && (applicationPrimacyRequest != nil
+                || (session?.isApplicationPrimary == false
+                    && session?.canBecomeApplicationPrimary == true))
         #if os(iOS)
             let system =
                 UIApplication.shared.applicationState == .active
-                && !session.isSystemPrimary && !systemPrimacyAttempted
-                && (session.isApplicationPrimary || application)
+                && session?.isSystemPrimary == false && !systemPrimacyAttempted
+                && (session?.isApplicationPrimary == true || application)
         #else
             let system = false
         #endif
         guard application || system else { return }
         primacyTask = Task { [weak self, weak session] in
-            defer { self?.primacyTask = nil }
-            guard let self, let session, self.isLive, !Task.isCancelled else { return }
+            defer {
+                self?.primacyTask = nil
+                self?.requestPrimacyIfEligible()
+            }
+            guard let self, self.isLive, !Task.isCancelled,
+                self.player.state == .playing, self.player.wantsPlayback
+            else { return }
             do {
                 if application {
-                    self.applicationPrimacyAttempted = true
-                    try await session.requestToBecomeApplicationPrimary()
+                    if let request = self.applicationPrimacyRequest {
+                        self.applicationPrimacyAttempted = true
+                        try await request()
+                    } else if let session, !session.isApplicationPrimary,
+                        session.canBecomeApplicationPrimary
+                    {
+                        self.applicationPrimacyAttempted = true
+                        try await session.requestToBecomeApplicationPrimary()
+                    }
                 }
-                guard self.isLive, !Task.isCancelled, self.player.state == .playing else { return }
+                guard self.isLive, !Task.isCancelled, self.player.state == .playing,
+                    self.player.wantsPlayback
+                else { return }
                 #if os(iOS)
-                    if system, UIApplication.shared.applicationState == .active {
+                    if system, let session, session.isApplicationPrimary,
+                        UIApplication.shared.applicationState == .active
+                    {
                         self.systemPrimacyAttempted = true
                         try await session.requestToBecomeSystemPrimary()
                     }

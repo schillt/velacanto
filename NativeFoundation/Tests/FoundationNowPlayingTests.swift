@@ -101,6 +101,77 @@ final class FoundationNowPlayingTests: XCTestCase {
         XCTAssertEqual(player.nativePlayer.currentTime().seconds, 3, accuracy: 0.3)
     }
 
+    func testDeniedPrimacyDoesNotRetryDuringNaturalHandoff() async throws {
+        let file = try XCTUnwrap(
+            FoundationDiagnosticTones.resolve(FoundationDiagnosticTones.items[0]))
+        let source = NowPlayingHandoffProbe(file: file)
+        let player = FoundationPlayer(
+            resolve: { _ in await source.resolve() }, activateSession: {}, deactivateSession: {})
+        player.nativePlayer.volume = 0
+        player.setQueue([track, track], selectedIndex: 0)
+        await waitForPlayback(player)
+        var requests = 0
+        let bridge = FoundationNowPlaying(player: player) {
+            requests += 1
+            throw MediaSessionError.invalidState
+        }
+        defer {
+            bridge.invalidate()
+            player.stop()
+        }
+        await bridge.primacyTask?.value
+        XCTAssertEqual(requests, 1)
+        player.didReachEnd(try XCTUnwrap(player.nativePlayer.currentItem))
+        await source.waitForPending()
+        await bridge.updateTask?.value
+        XCTAssertEqual(player.state, .loading)
+        XCTAssertTrue(player.wantsPlayback)
+        XCTAssertEqual(requests, 1)
+        await source.complete()
+        await player.selectionTask?.value
+        await waitForPlayback(player)
+        await bridge.updateTask?.value
+        await bridge.primacyTask?.value
+        XCTAssertEqual(requests, 1)
+        player.pause()
+        await bridge.updateTask?.value
+        player.play()
+        await waitForPlayback(player)
+        await bridge.updateTask?.value
+        await bridge.primacyTask?.value
+        XCTAssertEqual(requests, 2)
+    }
+
+    func testPauseBeforeQueuedPrimacyPreventsRequest() async throws {
+        let file = try XCTUnwrap(
+            FoundationDiagnosticTones.resolve(FoundationDiagnosticTones.items[0]))
+        let player = FoundationPlayer(
+            resolve: { _ in file }, activateSession: {}, deactivateSession: {})
+        player.nativePlayer.volume = 0
+        player.setQueue([track], selectedIndex: 0)
+        await waitForPlayback(player)
+        var requests = 0
+        let bridge = FoundationNowPlaying(player: player) { requests += 1 }
+        defer {
+            bridge.invalidate()
+            player.stop()
+        }
+        XCTAssertNotNil(bridge.primacyTask)
+        player.pause()
+        await bridge.primacyTask?.value
+        await bridge.updateTask?.value
+        XCTAssertEqual(requests, 0)
+    }
+
+    private func waitForPlayback(_ player: FoundationPlayer) async {
+        let playing = XCTestExpectation(description: "Native playback")
+        let subscription = player.$state.filter { $0 == .playing }.first()
+            .sink { _ in playing.fulfill() }
+        let result = await XCTWaiter.fulfillment(of: [playing], timeout: 10)
+        subscription.cancel()
+        XCTAssertEqual(result, .completed)
+    }
+
     #if os(iOS)
         func testSystemInterruptionPublishesInterruptedAndExplicitPlayClearsIt() async {
             let player = FoundationPlayer(
@@ -130,5 +201,34 @@ private actor NowPlayingSourceProbe {
     func resolve() -> URL {
         count += 1
         return URL(fileURLWithPath: "/synthetic")
+    }
+}
+
+private actor NowPlayingHandoffProbe {
+    let file: URL
+    private var calls = 0
+    private var pending: CheckedContinuation<URL, Never>?
+    private var waiter: CheckedContinuation<Void, Never>?
+
+    init(file: URL) { self.file = file }
+
+    func resolve() async -> URL {
+        calls += 1
+        guard calls == 2 else { return file }
+        return await withCheckedContinuation { continuation in
+            pending = continuation
+            waiter?.resume()
+            waiter = nil
+        }
+    }
+
+    func waitForPending() async {
+        guard pending == nil else { return }
+        await withCheckedContinuation { waiter = $0 }
+    }
+
+    func complete() {
+        pending?.resume(returning: file)
+        pending = nil
     }
 }
