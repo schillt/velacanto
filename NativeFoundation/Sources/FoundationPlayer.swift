@@ -77,6 +77,10 @@ final class FoundationPlayer: ObservableObject {
         self.activateSession = activateSession
         self.startPlayback = startPlayback
         self.deactivateSession = deactivateSession
+        #if os(iOS)
+            // Keep music on the audio route instead of handing video playback to the receiver.
+            nativePlayer.allowsExternalPlayback = false
+        #endif
         nativePlayer.actionAtItemEnd = .none
         observations = [
             nativePlayer.observe(\.timeControlStatus, options: [.new]) { [weak self] _, _ in
