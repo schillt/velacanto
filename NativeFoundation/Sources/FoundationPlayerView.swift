@@ -44,7 +44,7 @@ struct FoundationPlayerView: View {
             GeometryReader { geometry in
                 VStack(spacing: 0) {
                     GeometryReader { artworkGeometry in
-                        ZStack {
+                        ZStack(alignment: .topLeading) {
                             artworkView(
                                 size: artworkGeometry.size.width,
                                 height: artworkGeometry.size.width
@@ -106,6 +106,11 @@ struct FoundationPlayerView: View {
                                     player: player, model: presentation.model
                                 )
                                 .id(presentation.id)
+                                .frame(
+                                    width: artworkGeometry.size.width,
+                                    height: artworkGeometry.size.height
+                                )
+                                .clipped()
                                 .transition(.opacity)
                             }
                             if showingQueue {
@@ -114,13 +119,18 @@ struct FoundationPlayerView: View {
                                     guard showingQueue else { return }
                                     openLibraryItem?(item)
                                 }
+                                .frame(
+                                    width: artworkGeometry.size.width,
+                                    height: artworkGeometry.size.height
+                                )
+                                .clipped()
                                 .transition(.opacity)
                             }
                         }
                         .frame(
-                            width: artworkGeometry.size.width, height: artworkGeometry.size.height
+                            width: artworkGeometry.size.width, height: artworkGeometry.size.height,
+                            alignment: .topLeading
                         )
-                        .clipped()
                         .animation(
                             reduceMotion ? nil : .easeInOut(duration: 0.2),
                             value: lyricsPresentation?.id
