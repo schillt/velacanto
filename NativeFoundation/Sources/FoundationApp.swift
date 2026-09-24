@@ -1,4 +1,5 @@
 import CryptoKit
+import NowPlaying
 import SwiftUI
 
 @main
@@ -18,8 +19,16 @@ final class FoundationAppModel: ObservableObject {
     @Published private(set) var library: FoundationJellyfinLibrary?
     @Published private(set) var player: FoundationPlayer?
     @Published private(set) var actions: FoundationLibraryActions?
+    @Published private(set) var currentArtwork: FoundationCurrentArtwork?
     @Published var credentialError: String?
     private var restored = false
+    private var nowPlaying: FoundationNowPlaying?
+    private var mediaSession: MediaSession<FoundationNowPlaying>?
+
+    isolated deinit {
+        nowPlaying?.invalidate()
+        currentArtwork?.invalidate()
+    }
 
     func restore() {
         guard !restored else { return }
@@ -43,6 +52,11 @@ final class FoundationAppModel: ObservableObject {
     }
 
     private func open(_ session: FoundationSession) {
+        nowPlaying?.invalidate()
+        currentArtwork?.invalidate()
+        currentArtwork = nil
+        mediaSession = nil
+        nowPlaying = nil
         actions?.invalidate()
         player?.stop()
         let library = FoundationJellyfinLibrary(session: session)
@@ -55,6 +69,17 @@ final class FoundationAppModel: ObservableObject {
         }
         self.library = library
         self.player = FoundationPlayer(library: library)
+        if let player = self.player {
+            let artwork = FoundationCurrentArtwork(player: player) { item in
+                try await library.artwork(for: item, size: 640)
+            }
+            self.currentArtwork = artwork
+            let bridge = FoundationNowPlaying(player: player, artwork: artwork)
+            let mediaSession = MediaSession(bridge)
+            self.nowPlaying = bridge
+            self.mediaSession = mediaSession
+            bridge.attach(mediaSession)
+        }
     }
 
     func signOut() {
@@ -63,6 +88,11 @@ final class FoundationAppModel: ObservableObject {
             try FoundationCredentials.clear()
             actions?.invalidate()
             actions = nil
+            nowPlaying?.invalidate()
+            currentArtwork?.invalidate()
+            currentArtwork = nil
+            mediaSession = nil
+            nowPlaying = nil
             player = nil
             library = nil
             credentialError = nil
@@ -77,9 +107,12 @@ struct FoundationRootView: View {
 
     var body: some View {
         Group {
-            if let library = model.library, let player = model.player, let actions = model.actions {
+            if let library = model.library, let player = model.player, let actions = model.actions,
+                let artwork = model.currentArtwork
+            {
                 FoundationLibraryView(library: library, player: player, signOut: model.signOut)
                     .environmentObject(actions)
+                    .environmentObject(artwork)
                     .id(ObjectIdentifier(actions))
             } else {
                 FoundationSignInView(model: model)

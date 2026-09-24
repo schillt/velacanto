@@ -5,14 +5,14 @@ application; the legacy app code/targets are removed. Internal Foundation names
 remain implementation names, not a separate product or authorization to restore
 old controllers. Use the exact assigned base; never edit another worktree.
 
-## Frozen release boundary
+## Release boundary
 
-0.3.0 derives from 106 (3d66dbe8c9f0119f935c466585bd048f4e4d15b2).
-Player, playback delivery, native transport, credentials and runtime UI remain
-unchanged. The release changes product/display name, bundle identity, version,
-test-host/module build settings and packaging/docs/CI only. Build 107 is rejected and
-must not be included. Any runtime correction needs explicit scope and isolated
-acceptance. Do not restore legacy code to satisfy superseded tests or documents.
+0.3.5 builds on the accepted 0.3.0 (108) Foundation replacement. The historical
+0.3.0 freeze remains documented in ADR 0013; it does not disable the independently
+implemented 0.3.5 features. Build 107 remains rejected. Read
+`docs/0.3.5-release-notes.md`, `docs/0.3.5-known-issues.md` and
+`docs/0.3.5-acceptance.md` for current scope and evidence limits. Never restore
+legacy controllers or change playback/network ownership during cosmetic cleanup.
 
 ## Product
 
@@ -23,13 +23,18 @@ models avoid reloading; work follows live ownership. Native URLSession bounds
 remain. No automatic retry, session retirement, cooldown, health checker, player
 replacement layer, prefetch scans or new transport without demonstrated need.
 
-Lyrics, active AirPlay/volume and system-media integration remain disabled.
+Now Playing system controls, shared artwork, native AirPlay, synchronized lyrics,
+inline queue and native iOS volume are implemented. macOS volume is existing-player
+gain. The player owns playback intent and native items; the account-lifetime system
+bridge forwards commands and metadata. Views must not create players, activate the
+audio session, restore system volume or trigger catalog/artwork work on redraw.
+Lyrics and artwork retain explicit cancellation and stale-result protection.
 Collection Shuffle is supported; persistent shuffle/repeat, playlist editing,
 offline/local libraries, new providers and playback reporting are not.
 
 ## Verification and delivery
 
-Root scripts/build.sh now targets this project and its 55-test suite. Compiler
+Root scripts/build.sh targets this project and its current test suite. Compiler
 warnings are errors. Existing 106 formatting debt is baselined only to preserve
 the accepted source; do not add findings or expand that baseline. Run focused
 checks for development and combined iOS/macOS/Release gates for integration.

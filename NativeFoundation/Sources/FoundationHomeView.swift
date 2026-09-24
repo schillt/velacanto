@@ -110,6 +110,7 @@ struct FoundationHomeView<Profile: View>: View {
 }
 
 private struct FoundationContinueListening: View {
+    @EnvironmentObject private var currentArtwork: FoundationCurrentArtwork
     @ObservedObject var player: FoundationPlayer
     let library: any FoundationLibrary
     let isActive: Bool
@@ -122,7 +123,9 @@ private struct FoundationContinueListening: View {
     }
 
     private var playbackProgress: Double {
-        guard player.duration.isFinite, player.duration > 0, player.elapsed.isFinite else { return 0 }
+        guard player.duration.isFinite, player.duration > 0, player.elapsed.isFinite else {
+            return 0
+        }
         return min(1, max(0, player.elapsed / player.duration))
     }
 
@@ -138,8 +141,13 @@ private struct FoundationContinueListening: View {
                     showingPlayer = true
                 } label: {
                     HStack(spacing: 12) {
-                        homeArtwork(
-                            item, library: library, isActive: isActive, size: 64)
+                        FoundationCatalogArtwork(
+                            source: .current(currentArtwork.result(for: item)),
+                            item: item.catalogArtworkItem, library: library,
+                            isActive: isActive, size: 64
+                        ).id(
+                            item.catalogArtworkItem.id
+                                + (item.catalogArtworkItem.primaryImageTag ?? ""))
                         VStack(alignment: .leading, spacing: 4) {
                             Text(item.title).font(.headline).lineLimit(2)
                             Text(
@@ -164,7 +172,10 @@ private struct FoundationContinueListening: View {
                         .overlay {
                             Circle()
                                 .trim(from: 0, to: playbackProgress)
-                                .stroke(.primary.opacity(0.75), style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                                .stroke(
+                                    .primary.opacity(0.75),
+                                    style: StrokeStyle(lineWidth: 2, lineCap: .round)
+                                )
                                 .rotationEffect(.degrees(-90))
                                 .padding(2)
                                 .allowsHitTesting(false)

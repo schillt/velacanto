@@ -16,13 +16,21 @@ Do not follow those older instructions from archived documents or stale worktree
 Current owner instructions can change scope; reconcile their approved contract in
 GitHub before dependent work begins. Do not silently promote unpublished plans.
 
-Velacanto 0.3.0 (108) replaces the old app with accepted Foundation build 106.
-The maintained app is `NativeFoundation/VelacantoFoundation.xcodeproj`, scheme
+Velacanto 0.3.5 follows the 0.3.0 (108) Foundation replacement. The maintained
+app is `NativeFoundation/VelacantoFoundation.xcodeproj`, scheme
 `VelacantoFoundation`, product `Velacanto`. Read `NativeFoundation/AGENTS.md`,
-ADR 0012/0013 and `docs/0.3-release-notes.md`. Build 107 remains rejected.
-The 0.3.0 freeze protects that release; future runtime work requires its own
-explicit issue scope and acceptance. Never restore old controllers to satisfy
-superseded plans. Do not change runtime/version metadata in a planning-only task.
+ADR 0012/0013 and `docs/0.3.5-acceptance.md`. Build 107 remains rejected. Historical
+0.3.0 freeze documents do not disable the scoped 0.3.5 features. Never restore old
+controllers to satisfy superseded plans.
+
+The owner authorized PR #174 into alpha after required checks pass, a 0.3.5
+GitHub prerelease from alpha and existing-workflow internal TestFlight, with
+documented known bugs and the native volume slider retained. No main promotion
+is authorized for this prerelease. This is a recorded
+release exception, not evidence the volume defect is fixed. Record current checks,
+exceptions and signed distribution status separately; no public App Store
+submission is implied. Do not change runtime/version metadata in planning-only
+work. Apply `docs/engineering-rubric.md` to future reviews without inventing grades.
 
 ## Roles and parallel delegation
 

@@ -11,8 +11,8 @@ if not info_path.exists():
 info = plistlib.loads(info_path.read_bytes())
 assert info["CFBundleIdentifier"] == "com.chameleonenterprise.velacanto"
 assert info["CFBundleDisplayName"] == "Velacanto"
-assert info["CFBundleShortVersionString"] == "0.3.0"
-assert info["CFBundleVersion"] == "108"
+assert info["CFBundleShortVersionString"] == "0.3.5"
+assert info["CFBundleVersion"] == "109"
 executable = app / info["CFBundleExecutable"]
 if not executable.exists():
     executable = app / "Contents/MacOS" / info["CFBundleExecutable"]
