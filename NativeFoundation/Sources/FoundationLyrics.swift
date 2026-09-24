@@ -129,14 +129,16 @@ struct FoundationLyricsView: View {
                 }
             case .loaded(let lyrics):
                 if lyrics.hasTiming {
-                    FoundationTimedLyricsView(lyrics: lyrics, entryID: entryID, player: player)
+                    FoundationTimedLyricsView(
+                        lyrics: lyrics, entryID: entryID, player: player, isActive: model.isActive)
                 } else {
                     ScrollView {
                         Text(lyrics.text)
-                            .font(.title3)
+                            .font(.system(.title2, design: .default, weight: .semibold))
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .textSelection(.enabled)
-                            .padding()
+                            .padding(.vertical)
+                            .padding(.horizontal, 24)
                     }
                 }
             }
@@ -160,13 +162,20 @@ private struct FoundationTimedLyricsView: View {
     let lyrics: FoundationLyrics
     let entryID: UUID
     @ObservedObject var player: FoundationPlayer
+    let isActive: Bool
     @State private var followsPlayback = true
+    @State private var scrollIsIdle = true
+    @State private var interaction = 0
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
 
     private var activeLine: Int? {
         guard player.selectedEntryID == entryID else { return nil }
         return lyrics.activeLine(at: player.elapsed, duration: player.duration)
+    }
+
+    private var followDelayID: Int? {
+        isActive && !followsPlayback && scrollIsIdle && !voiceOver ? interaction : nil
     }
 
     var body: some View {
@@ -181,6 +190,7 @@ private struct FoundationTimedLyricsView: View {
                         Group {
                             if let target {
                                 Button {
+                                    interaction &+= 1
                                     player.seek(to: target, entryID: entryID)
                                 } label: {
                                     row(line, isCurrent: activeLine == line.id)
@@ -197,10 +207,25 @@ private struct FoundationTimedLyricsView: View {
                         .id(line.id)
                     }
                 }
-                .padding()
+                .padding(.vertical)
+                .padding(.horizontal, 24)
             }
             .onScrollPhaseChange { _, phase in
+                scrollIsIdle = phase == .idle
                 if phase == .tracking || phase == .interacting { followsPlayback = false }
+            }
+            .task(id: followDelayID) {
+                guard let delayID = followDelayID else { return }
+                do { try await Task.sleep(for: .seconds(5)) } catch { return }
+                guard !Task.isCancelled, followDelayID == delayID,
+                    player.selectedEntryID == entryID
+                else { return }
+                followsPlayback = true
+                if let currentLine = self.activeLine {
+                    withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.25)) {
+                        proxy.scrollTo(currentLine, anchor: .center)
+                    }
+                }
             }
             .onChange(of: activeLine, initial: true) { _, line in
                 guard followsPlayback, !voiceOver, let line else { return }
@@ -208,7 +233,7 @@ private struct FoundationTimedLyricsView: View {
                     proxy.scrollTo(line, anchor: .center)
                 }
             }
-            .safeAreaInset(edge: .bottom) {
+            .overlay(alignment: .top) {
                 if !followsPlayback || voiceOver {
                     Button("Follow current lyric") {
                         followsPlayback = true
@@ -218,8 +243,11 @@ private struct FoundationTimedLyricsView: View {
                             }
                         }
                     }
-                    .buttonStyle(.bordered)
-                    .padding()
+                    .buttonStyle(.glass)
+                    .buttonBorderShape(.capsule)
+                    .controlSize(.large)
+                    .padding(.horizontal, 24)
+                    .padding(.top, 12)
                 }
             }
         }
@@ -227,9 +255,8 @@ private struct FoundationTimedLyricsView: View {
 
     private func row(_ line: FoundationLyrics.Line, isCurrent: Bool) -> some View {
         Text(line.text.isEmpty ? " " : line.text)
-            .font(.title3)
-            .fontWeight(isCurrent ? .bold : .regular)
-            .foregroundStyle(isCurrent ? Color.primary : Color.secondary)
+            .font(.system(.title2, design: .default, weight: isCurrent ? .bold : .semibold))
+            .foregroundStyle(Color.primary.opacity(isCurrent ? 1 : 0.78))
             .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
     }
 }
