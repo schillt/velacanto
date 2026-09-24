@@ -537,6 +537,112 @@ final class FoundationPlayerTests: XCTestCase {
         player.stop()
     }
 
+    func testNaturalHandoffRetainsItemAndPendingCommandsDoNotReplayIt() async throws {
+        let resolver = PlayerResolutionProbe()
+        var starts = 0
+        let player = FoundationPlayer(
+            resolve: { _ in try await resolver.resolve() },
+            makeItem: { _ in AVPlayerItem(asset: AVMutableComposition()) },
+            activateSession: {}, deactivateSession: {}, startPlayback: { _ in starts += 1 })
+        defer { player.stop() }
+        player.setQueue([track, track], selectedIndex: 0)
+        let first = player.selectionTask
+        await resolver.waitForCalls(1)
+        await resolver.succeed(0)
+        await first?.value
+        let oldItem = try XCTUnwrap(player.nativePlayer.currentItem)
+        XCTAssertEqual(player.nativePlayer.actionAtItemEnd, .none)
+        player.didReachEnd(oldItem)
+        let successor = player.selectionTask
+        await resolver.waitForCalls(2)
+        XCTAssertTrue(player.nativePlayer.currentItem === oldItem)
+        let startCount = starts
+        player.play()
+        player.play()
+        player.didReachEnd(oldItem)
+        XCTAssertEqual(starts, startCount)
+        player.pause()
+        await resolver.succeed(1)
+        await successor?.value
+        XCTAssertFalse(player.nativePlayer.currentItem === oldItem)
+        XCTAssertFalse(player.wantsPlayback)
+        XCTAssertEqual(starts, startCount)
+        let resolutions = await resolver.count
+        XCTAssertEqual(resolutions, 2)
+    }
+
+    func testPreviousDuringNaturalHandoffDiscardsOldEventsAndLateSuccessor() async throws {
+        let resolver = PlayerResolutionProbe()
+        let player = player(resolver)
+        defer { player.stop() }
+        player.setQueue([track, track], selectedIndex: 0)
+        let firstID = player.queue[0].id
+        let first = player.selectionTask
+        await resolver.waitForCalls(1)
+        await resolver.succeed(0)
+        await first?.value
+        let oldItem = try XCTUnwrap(player.nativePlayer.currentItem)
+        player.didReachEnd(oldItem)
+        let successor = player.selectionTask
+        await resolver.waitForCalls(2)
+        Self.postRateFailure(player)
+        NotificationCenter.default.post(
+            name: AVPlayerItem.failedToPlayToEndTimeNotification, object: oldItem)
+        await Task.yield()
+        XCTAssertTrue(player.wantsPlayback)
+        XCTAssertEqual(player.state, .loading)
+        player.previous()
+        let replacement = player.selectionTask
+        await resolver.waitForCalls(3)
+        XCTAssertEqual(player.selectedEntryID, firstID)
+        XCTAssertNil(player.nativePlayer.currentItem)
+        await resolver.succeed(1)
+        await successor?.value
+        XCTAssertNil(player.nativePlayer.currentItem)
+        await resolver.succeed(2)
+        await replacement?.value
+        XCTAssertNotNil(player.nativePlayer.currentItem)
+        XCTAssertEqual(player.selectedEntryID, firstID)
+    }
+
+    func testStoppedNaturalHandoffRejectsLateResolution() async throws {
+        let resolver = PlayerResolutionProbe()
+        let player = player(resolver)
+        player.setQueue([track, track], selectedIndex: 0)
+        let first = player.selectionTask
+        await resolver.waitForCalls(1)
+        await resolver.succeed(0)
+        await first?.value
+        player.didReachEnd(try XCTUnwrap(player.nativePlayer.currentItem))
+        let successor = player.selectionTask
+        await resolver.waitForCalls(2)
+        player.stop()
+        await resolver.succeed(1)
+        await successor?.value
+        XCTAssertNil(player.nativePlayer.currentItem)
+        XCTAssertEqual(player.state, .idle)
+        XCTAssertFalse(player.wantsPlayback)
+    }
+
+    func testFailedNaturalHandoffReleasesExhaustedItem() async throws {
+        let resolver = PlayerResolutionProbe()
+        let player = player(resolver)
+        defer { player.stop() }
+        player.setQueue([track, track], selectedIndex: 0)
+        let first = player.selectionTask
+        await resolver.waitForCalls(1)
+        await resolver.succeed(0)
+        await first?.value
+        player.didReachEnd(try XCTUnwrap(player.nativePlayer.currentItem))
+        let successor = player.selectionTask
+        await resolver.waitForCalls(2)
+        await resolver.fail(1)
+        await successor?.value
+        XCTAssertNil(player.nativePlayer.currentItem)
+        XCTAssertEqual(player.state, .failed)
+        XCTAssertFalse(player.wantsPlayback)
+    }
+
     func testNaturalEndAdvancesOnceAndStaleEndIsIgnored() async throws {
         let resolver = PlayerResolutionProbe()
         let player = player(resolver)

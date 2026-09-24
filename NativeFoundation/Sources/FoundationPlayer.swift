@@ -66,6 +66,7 @@ final class FoundationPlayer: ObservableObject {
         self.activateSession = activateSession
         self.startPlayback = startPlayback
         self.deactivateSession = deactivateSession
+        nativePlayer.actionAtItemEnd = .none
         observations = [
             nativePlayer.observe(\.timeControlStatus, options: [.new]) { [weak self] _, _ in
                 Task { @MainActor [weak self] in self?.refreshNativeState() }
@@ -92,7 +93,9 @@ final class FoundationPlayer: ObservableObject {
             ) { [weak self] notification in
                 guard let item = notification.object as? AVPlayerItem else { return }
                 Task { @MainActor [weak self] in
-                    guard let self, self.nativePlayer.currentItem === item else { return }
+                    guard let self, self.selectionTask == nil,
+                        self.nativePlayer.currentItem === item
+                    else { return }
                     self.fail(.nativeEnd, error: item.error)
                 }
             })
@@ -172,8 +175,14 @@ final class FoundationPlayer: ObservableObject {
     }
 
     func select(_ id: UUID) {
+        select(id, retainingEndedItem: false)
+    }
+
+    /// Natural successors replace the exhausted item directly, preserving native playback continuity.
+    /// Manual selections retain their existing immediate-discard behavior.
+    private func select(_ id: UUID, retainingEndedItem: Bool) {
         guard let entry = queue.first(where: { $0.id == id }) else { return }
-        discardSelection()
+        discardSelection(retainingNativeItem: retainingEndedItem)
         selectedEntryID = id
         wantsPlayback = true
         state = .loading
@@ -192,7 +201,10 @@ final class FoundationPlayer: ObservableObject {
                 self.itemObservation = item.observe(\.status, options: [.new]) { [weak self] _, _ in
                     Task { @MainActor [weak self] in self?.refreshNativeState() }
                 }
+                let previousItem = self.nativePlayer.currentItem
                 self.nativePlayer.replaceCurrentItem(with: item)
+                previousItem?.cancelPendingSeeks()
+                previousItem?.asset.cancelLoading()
                 #if DEBUG
                     self.recordSnapshot("item.installed")
                 #endif
@@ -202,6 +214,7 @@ final class FoundationPlayer: ObservableObject {
                 guard let self, self.generation == selectionGeneration else { return }
                 self.selectionTask = nil
                 self.fail(.resolution, error: error)
+                if retainingEndedItem { self.releaseNativeItem() }
             }
         }
     }
@@ -219,6 +232,10 @@ final class FoundationPlayer: ObservableObject {
             recordSnapshot("command.previous")
         #endif
         guard let index = selectedIndex else { return }
+        if selectionTask != nil {
+            if index > 0 { select(queue[index - 1].id) }
+            return
+        }
         let position = nativePlayer.currentTime().seconds
         if position.isFinite, position > 3 {
             seek(to: 0, entryID: queue[index].id)
@@ -284,11 +301,14 @@ final class FoundationPlayer: ObservableObject {
             select(selectedEntryID)
             return
         }
+        // During natural handoff the current native item is exhausted, not the new selection.
+        if selectionTask != nil {
+            wantsPlayback = true
+            state = .loading
+            return
+        }
         guard nativePlayer.currentItem != nil else {
-            if selectionTask != nil {
-                wantsPlayback = true
-                state = .loading
-            } else if let selectedEntryID {
+            if let selectedEntryID {
                 select(selectedEntryID)
             }
             return
@@ -342,7 +362,7 @@ final class FoundationPlayer: ObservableObject {
             rejectionDuringStart = true
             return
         }
-        guard wantsPlayback, nativePlayer.currentItem != nil,
+        guard selectionTask == nil, wantsPlayback, nativePlayer.currentItem != nil,
             nativePlayer.currentItem?.status != .failed,
             nativePlayer.timeControlStatus == .paused, nativePlayer.rate == 0,
             state != .failed, state != .ended
@@ -354,7 +374,7 @@ final class FoundationPlayer: ObservableObject {
         #endif
     }
 
-    private func discardSelection() {
+    private func discardSelection(retainingNativeItem: Bool = false) {
         generation &+= 1
         #if DEBUG
             recordSnapshot("discard.cancelRequested")
@@ -363,14 +383,20 @@ final class FoundationPlayer: ObservableObject {
         selectionTask = nil
         wantsPlayback = false
         itemObservation = nil
-        nativePlayer.pause()
+        if !retainingNativeItem {
+            nativePlayer.pause()
+            releaseNativeItem()
+        }
+        elapsed = 0
+        duration = 0
+        errorMessage = nil
+    }
+
+    private func releaseNativeItem() {
         let oldItem = nativePlayer.currentItem
         nativePlayer.replaceCurrentItem(with: nil)
         oldItem?.cancelPendingSeeks()
         oldItem?.asset.cancelLoading()
-        elapsed = 0
-        duration = 0
-        errorMessage = nil
     }
 
     private func refreshNativeState() {
@@ -378,6 +404,10 @@ final class FoundationPlayer: ObservableObject {
             defer { recordSnapshot("native.observed") }
         #endif
         guard state != .failed, state != .ended else { return }
+        if selectionTask != nil {
+            state = wantsPlayback ? .loading : .paused
+            return
+        }
         guard let item = nativePlayer.currentItem else {
             state = selectionTask == nil ? .idle : (wantsPlayback ? .loading : .paused)
             return
@@ -400,6 +430,7 @@ final class FoundationPlayer: ObservableObject {
     }
 
     private func refreshTime() {
+        guard selectionTask == nil else { return }
         let seconds = nativePlayer.currentTime().seconds
         let length = nativePlayer.currentItem?.duration.seconds ?? 0
         elapsed = seconds.isFinite ? max(0, seconds) : 0
@@ -408,12 +439,15 @@ final class FoundationPlayer: ObservableObject {
 
     // Native callback identity is the only end-of-item seam; no simulated transport state.
     func didReachEnd(_ item: AVPlayerItem) {
-        guard nativePlayer.currentItem === item, state != .failed else { return }
+        guard nativePlayer.currentItem === item, selectionTask == nil, state != .failed
+        else { return }
         #if DEBUG
             recordSnapshot("item.ended")
         #endif
         if let index = selectedIndex, queue.indices.contains(index + 1) {
-            next()
+            let shouldPlay = wantsPlayback
+            select(queue[index + 1].id, retainingEndedItem: shouldPlay)
+            if !shouldPlay { pause() }
         } else {
             wantsPlayback = false
             nativePlayer.pause()
