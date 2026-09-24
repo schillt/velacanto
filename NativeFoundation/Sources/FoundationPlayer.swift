@@ -56,7 +56,7 @@ final class FoundationPlayer: ObservableObject {
         activateSession: @escaping () async throws -> Void = {
             #if os(iOS)
                 let session = AVAudioSession.sharedInstance()
-                try session.setCategory(.playback, mode: .default)
+                try session.setCategory(.playback, mode: .default, policy: .longFormAudio)
                 guard try await session.activate(options: []) else {
                     throw AudioSessionFailure.activationDeclined
                 }
