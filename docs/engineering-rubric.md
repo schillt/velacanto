@@ -37,4 +37,3 @@ warning suppression and comments that narrate obvious syntax. Function docs shou
 be concise multiline blocks describing contract and nonobvious ownership or
 cancellation behavior. Keep P3 formatting/proven-unused-code removal separate from
 runtime fixes; flag structural concerns instead of folding them into polish.
-
