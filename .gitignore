@@ -24,3 +24,10 @@ xcuserdata/
 !.env.example
 Secrets.xcconfig
 *.mobileprovision
+
+# Inventoried local reference builds and generated diagnostics (issue #176)
+/.local-baselines/
+/default.profraw
+/Velacanto/Resources/CanvasPreview.xcconfig
+/Velacanto/Resources/Info-Debug.plist
+/Velacanto.xcodeproj/xcshareddata/xcodecloud/

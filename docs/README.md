@@ -6,6 +6,7 @@
 - [Known issues](0.3-known-issues.md)
 - [Dependency inventory](0.3-dependencies.md)
 - [Architecture](architecture.md)
+- [Publication safety](publication-safety.md)
 - [Current release plan](0.3-plan.md)
 - [Decision records](decisions/README.md)
 - [Historical Foundation notes](archive/foundation-development/README.md)
