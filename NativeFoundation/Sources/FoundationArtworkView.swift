@@ -2,6 +2,15 @@ import SwiftUI
 
 /// One view-owned image read. Failure remains a local placeholder; no retries.
 struct FoundationCatalogArtwork: View {
+    enum Source {
+        case catalog
+        case current(FoundationCurrentArtwork.Result?)
+    }
+    var source: Source = .catalog
+    private var currentResultID: UUID? {
+        if case .current(let result) = source { return result?.id }
+        return nil
+    }
     let item: FoundationItem
     let library: any FoundationLibrary
     let isActive: Bool
@@ -34,7 +43,13 @@ struct FoundationCatalogArtwork: View {
             RoundedRectangle(cornerRadius: isHero ? 0 : (item.kind == .artist ? size / 2 : 6))
         )
         .accessibilityHidden(true)
+        .task(id: currentResultID) {
+            if case .current(let result) = source {
+                installImage(result?.image)
+            }
+        }
         .task(id: isActive) {
+            guard case .catalog = source else { return }
             #if DEBUG
                 await FoundationTrace.withPage(origin: traceOrigin, page: .artwork) {
                     guard isActive, !completed, !Task.isCancelled else { return }
@@ -64,20 +79,24 @@ struct FoundationCatalogArtwork: View {
     private func installArtwork(_ data: Data?) {
         #if os(iOS)
             let native = data.flatMap { UIImage(data: $0) }
-            image = native.map { Image(uiImage: $0) }
-            loadedImage?.wrappedValue = image
-            guard sampledColor != nil || upperEdgeColors != nil, let cgImage = native?.cgImage
-            else {
-                return
-            }
+            let cgImage = native?.cgImage
+            let displayed = native.map { Image(uiImage: $0) }
         #else
             let native = data.flatMap { NSImage(data: $0) }
-            image = native.map { Image(nsImage: $0) }
-            loadedImage?.wrappedValue = image
-            guard sampledColor != nil || upperEdgeColors != nil,
-                let cgImage = native?.cgImage(forProposedRect: nil, context: nil, hints: nil)
-            else { return }
+            let cgImage = native?.cgImage(forProposedRect: nil, context: nil, hints: nil)
+            let displayed = native.map { Image(nsImage: $0) }
         #endif
+        installImage(cgImage, displayImage: displayed)
+    }
+
+    private func installImage(_ cgImage: CGImage?, displayImage: Image? = nil) {
+        image = displayImage ?? cgImage.map { Image(decorative: $0, scale: 1) }
+        loadedImage?.wrappedValue = image
+        guard let cgImage else {
+            sampledColor?.wrappedValue = Color(white: 0.12)
+            upperEdgeColors?.wrappedValue = nil
+            return
+        }
         if let upperEdgeColors,
             let border = cgImage.cropping(
                 to: CGRect(

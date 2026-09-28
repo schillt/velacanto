@@ -29,6 +29,7 @@ struct FoundationLibraryView: View {
     @State private var displayedQueue: [FoundationQueueEntry] = []
     @State private var displayedEntryID: UUID?
     @State private var displayedState: FoundationPlayer.State = .idle
+    @EnvironmentObject private var currentArtwork: FoundationCurrentArtwork
     @EnvironmentObject private var actions: FoundationLibraryActions
     @StateObject private var albums = FoundationBrowseModel()
     @StateObject private var artists = FoundationBrowseModel()
@@ -410,6 +411,7 @@ struct FoundationLibraryView: View {
                         if let item {
                             let cover = item.catalogArtworkItem
                             FoundationCatalogArtwork(
+                                source: .current(currentArtwork.result(for: item)),
                                 item: cover, library: library, isActive: true, size: 34
                             ).id(cover.id + (cover.primaryImageTag ?? ""))
                         } else {
@@ -420,8 +422,11 @@ struct FoundationLibraryView: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(item?.title ?? "Nothing Playing").font(.callout.weight(.medium))
                             .lineLimit(1)
-                        Text(displayedState == .playing ? (item?.subtitle ?? "") : displayedState.label)
-                            .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                        Text(
+                            displayedState == .playing
+                                ? (item?.subtitle ?? "") : displayedState.label
+                        )
+                        .font(.caption).foregroundStyle(.secondary).lineLimit(1)
                     }.frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
                 }.contentShape(Rectangle())
             }
