@@ -133,6 +133,31 @@ an advisory failure as success of that advisory. The OS 27 gate is the current
 product gate; legacy toolchain advisory status is reported separately. Never
 remove tests or make failures optional to merge a change.
 
+## Public publication boundary
+
+The repository is **public**; the development Project is private. A private
+Project does not make linked issues, PRs, commits, Actions logs or release assets
+private. Follow [Publication safety](docs/publication-safety.md) before staging
+or posting. Inspect exact owned paths, stage them explicitly, then review the
+staged names and complete diff locally. Never use broad `git add .`, `git add -A`
+or force-add ignored local material as a shortcut.
+
+Ignored/untracked files are not tracked release content. Ignore rules do not
+remove already tracked files or sanitize history. Inventory local artifacts
+without publishing contents or identifying paths; keep deliberate source,
+examples and synthetic test fixtures trackable. Review the exact candidate and
+intended release artifacts, not the entire private filesystem. Report bounded
+categories/counts and limitations, never credentials, private origins, personal
+media, stable device/account IDs, raw traces or unnecessary local home paths.
+
+Sanitize issue/PR/comment text before posting: an edit can leave the earlier
+value visible in GitHub revision history. If remediation is needed, use GitHub's
+revision-removal workflow or an authorized sanitized replacement plus removal
+of the old comment; verify the exposed revisions are no longer visible. Do not
+quote the value again, rewrite Git history or change credentials without the
+separately authorized response. Local review, PR publication and owner-approved
+merge remain separate steps; this guardrail grants no publication permission.
+
 ## Builds, devices and release provenance
 
 Use per-worktree derived data from `./scripts/build.sh`. The maintainer serializes
