@@ -2,6 +2,21 @@ import CryptoKit
 import NowPlaying
 import SwiftUI
 
+@MainActor
+enum FoundationSignOutPolicy {
+    static func begin(
+        startRevocation: () -> Task<Bool, Never>, clear: () throws -> Void
+    ) -> (localCleared: Bool, revocation: Task<Bool, Never>) {
+        let revocation = startRevocation()
+        do {
+            try clear()
+        } catch {
+            return (false, revocation)
+        }
+        return (true, revocation)
+    }
+}
+
 @main
 struct VelacantoFoundationApp: App {
     @StateObject private var model = FoundationAppModel()
@@ -21,7 +36,9 @@ final class FoundationAppModel: ObservableObject {
     @Published private(set) var actions: FoundationLibraryActions?
     @Published private(set) var currentArtwork: FoundationCurrentArtwork?
     @Published var credentialError: String?
+    @Published var signOutNotice: String?
     private var restored = false
+    private var accountEpoch = 0
     private var nowPlaying: FoundationNowPlaying?
     private var mediaSession: MediaSession<FoundationNowPlaying>?
 
@@ -52,6 +69,8 @@ final class FoundationAppModel: ObservableObject {
     }
 
     private func open(_ session: FoundationSession) {
+        accountEpoch += 1
+        signOutNotice = nil
         nowPlaying?.invalidate()
         currentArtwork?.invalidate()
         currentArtwork = nil
@@ -83,21 +102,46 @@ final class FoundationAppModel: ObservableObject {
     }
 
     func signOut() {
+        guard let session = library?.session else { return }
         player?.stop()
-        do {
+        let epoch = accountEpoch
+        let attempt = FoundationSignOutPolicy.begin {
+            // Keep the captured session until this bounded attempt completes.
+            Task.detached(priority: .userInitiated) {
+                let adapter = FoundationJellyfinLibrary(
+                    session: session, load: FoundationJellyfinLibrary.signOutLoad)
+                do {
+                    try await adapter.endSession()
+                    return true
+                } catch {
+                    return false
+                }
+            }
+        } clear: {
             try FoundationCredentials.clear()
-            actions?.invalidate()
-            actions = nil
-            nowPlaying?.invalidate()
-            currentArtwork?.invalidate()
-            currentArtwork = nil
-            mediaSession = nil
-            nowPlaying = nil
-            player = nil
-            library = nil
-            credentialError = nil
-        } catch {
-            credentialError = "Saved sign-in could not be removed. Please try again."
+        }
+        guard attempt.localCleared else {
+            credentialError = "Sign-out failed here. Jellyfin may have ended the session."
+            return
+        }
+        actions?.invalidate()
+        actions = nil
+        nowPlaying?.invalidate()
+        currentArtwork?.invalidate()
+        currentArtwork = nil
+        mediaSession = nil
+        nowPlaying = nil
+        player = nil
+        library = nil
+        credentialError = nil
+        Task { [weak self] in
+            let serverAccepted = await attempt.revocation.value
+            guard let self, self.accountEpoch == epoch, self.library == nil else { return }
+            if serverAccepted {
+                self.signOutNotice = "Signed out here. Jellyfin accepted the sign-out request."
+            } else {
+                self.signOutNotice = "Signed out here. Jellyfin sign-out could not be confirmed."
+            }
         }
     }
 }
@@ -120,15 +164,23 @@ struct FoundationRootView: View {
         }
         .task { model.restore() }
         .alert(
-            "Sign-in",
+            model.signOutNotice == nil ? "Account" : "Sign-out",
             isPresented: Binding(
-                get: { model.credentialError != nil },
-                set: { if !$0 { model.credentialError = nil } }
+                get: { model.credentialError != nil || model.signOutNotice != nil },
+                set: {
+                    if !$0 {
+                        model.credentialError = nil
+                        model.signOutNotice = nil
+                    }
+                }
             )
         ) {
-            Button("OK") { model.credentialError = nil }
+            Button("OK") {
+                model.credentialError = nil
+                model.signOutNotice = nil
+            }
         } message: {
-            Text(model.credentialError ?? "")
+            Text(model.credentialError ?? model.signOutNotice ?? "")
         }
     }
 }
