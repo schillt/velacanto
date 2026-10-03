@@ -12,6 +12,67 @@ final class FoundationLibraryTests: XCTestCase {
             deviceID: "00000000-0000-0000-0000-000000000003")
     }
 
+    func testSessionEndUsesAuthenticatedFixedPathAndAcceptsNoContent() async throws {
+        let recorder = Recorder()
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            await recorder.append(request)
+            return (Data(), Self.response(request, status: 204))
+        }
+        try await library.endSession()
+        let requests = await recorder.requests
+        XCTAssertEqual(requests.count, 1)
+        let request = try XCTUnwrap(requests.first)
+        XCTAssertEqual(request.httpMethod, "POST")
+        XCTAssertEqual(request.url?.path, "/proxy/jellyfin/Sessions/Logout")
+        XCTAssertTrue(request.url?.query?.isEmpty ?? true)
+        XCTAssertFalse(request.url?.absoluteString.contains(session.accessToken) ?? true)
+        XCTAssertTrue(
+            request.value(forHTTPHeaderField: "Authorization")?.contains(session.accessToken)
+                ?? false)
+    }
+
+    func testSessionEndFailureIsUnconfirmedWithoutRetry() async {
+        let recorder = Recorder()
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            await recorder.append(request)
+            throw URLError(.notConnectedToInternet)
+        }
+        do {
+            try await library.endSession()
+            XCTFail("Expected network failure")
+        } catch {
+            XCTAssertEqual(error as? FoundationLibraryError, .network)
+        }
+        let count = await recorder.requests.count
+        XCTAssertEqual(count, 1)
+    }
+
+    @MainActor
+    func testSignOutPolicyClearsLocallyWithoutWaitingForServerAndReportsClearFailure() async {
+        var order: [String] = []
+        let offline = FoundationSignOutPolicy.begin {
+            order.append("start")
+            return Task { false }
+        } clear: {
+            order.append("clear")
+        }
+        XCTAssertTrue(offline.localCleared)
+        XCTAssertEqual(order, ["start", "clear"])
+        let serverAccepted = await offline.revocation.value
+        XCTAssertFalse(serverAccepted)
+
+        order.removeAll()
+        let clearFailed = FoundationSignOutPolicy.begin {
+            order.append("start")
+            return Task { true }
+        } clear: {
+            order.append("clear")
+            throw FoundationLibraryError.credentials
+        }
+        XCTAssertFalse(clearFailed.localCleared)
+        XCTAssertEqual(order, ["start", "clear"])
+    }
+
     func testAlbumAndTrackPagesUseOneRequestEachAndExplicitBounds() async throws {
         let recorder = Recorder()
         let library = FoundationJellyfinLibrary(session: session) { request in

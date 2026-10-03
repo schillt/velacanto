@@ -219,6 +219,12 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
             serverURL: base, accessToken: token, userID: userID, deviceID: deviceID)
     }
 
+    /// Jellyfin's session logout route reads the token from the Authorization header.
+    /// Do not use SDK signOut(): SDK 3.1.0 puts the token in the request path.
+    func endSession() async throws {
+        _ = try await responseData(Paths.reportSessionEnded)
+    }
+
     func search(
         query: String, kind: FoundationItem.Kind, startIndex: Int, limit: Int
     ) async throws -> FoundationPage {
@@ -890,6 +896,20 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
 
     static let nativeLoad: Load = { request in
         try await nativeSession.data(for: request, delegate: RejectRedirects())
+    }
+
+    private static let signOutSession: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.waitsForConnectivity = false
+        configuration.timeoutIntervalForRequest = 8
+        configuration.timeoutIntervalForResource = 8
+        configuration.httpCookieStorage = nil
+        configuration.urlCredentialStorage = nil
+        return URLSession(configuration: configuration)
+    }()
+
+    static let signOutLoad: Load = { request in
+        try await signOutSession.data(for: request, delegate: RejectRedirects())
     }
 }
 
