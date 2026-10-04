@@ -58,8 +58,11 @@ struct FoundationSettingsView: View {
                 Section {
                     Button("Sign out", role: .destructive, action: signOut)
                 } footer: {
-                    Text(Self.versionLabel)
-                        .frame(maxWidth: .infinity, alignment: .center)
+                    VStack(spacing: 12) {
+                        Text("Signing out removes saved pins from this device.")
+                        Text(Self.versionLabel)
+                            .frame(maxWidth: .infinity, alignment: .center)
+                    }
                 }
             }
             .formStyle(.grouped)

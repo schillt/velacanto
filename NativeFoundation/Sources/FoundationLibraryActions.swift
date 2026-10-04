@@ -1,6 +1,32 @@
 import Combine
 import Foundation
 
+enum FoundationPinStorageError: LocalizedError {
+    case couldNotRemovePins
+
+    var errorDescription: String? { "Saved pins could not be removed from this device." }
+}
+
+/// Pin snapshots are local preferences while signed in, not account history.
+enum FoundationPinStorage {
+    static let keyPrefix = "Velacanto.Foundation.Pins.v1."
+
+    static func key(for sourceScope: String) -> String { keyPrefix + sourceScope }
+
+    /// Also removes keys left by older sign-outs for other account scopes.
+    @discardableResult
+    static func removeStoredPins(
+        retaining sourceScope: String? = nil, defaults: UserDefaults = .standard
+    ) -> Bool {
+        let retainedKey = sourceScope.map(key(for:))
+        let keys = defaults.dictionaryRepresentation().keys.filter {
+            $0.hasPrefix(keyPrefix) && $0 != retainedKey
+        }
+        for key in keys { defaults.removeObject(forKey: key) }
+        return keys.allSatisfy { defaults.object(forKey: $0) == nil }
+    }
+}
+
 /// One source's local pins and explicit, pessimistic favorite changes.
 @MainActor
 final class FoundationLibraryActions: ObservableObject {
@@ -70,7 +96,7 @@ final class FoundationLibraryActions: ObservableObject {
         mutateFavorite: @escaping @Sendable (FoundationItem, Bool) async throws -> Void
     ) {
         // Scope must be an opaque source/account identity, never an origin or credential.
-        storageKey = "Velacanto.Foundation.Pins.v1." + sourceScope
+        storageKey = FoundationPinStorage.key(for: sourceScope)
         self.write = write
         self.mutateFavorite = mutateFavorite
         do {

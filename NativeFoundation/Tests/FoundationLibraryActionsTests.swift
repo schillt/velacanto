@@ -25,6 +25,61 @@ final class FoundationLibraryActionsTests: XCTestCase {
         XCTAssertEqual(make("source-a").pins, [artist])
     }
 
+    func testLegacyScopedPinsAreRemovedWithoutTouchingCurrentAccountOrOtherPreferences() {
+        let defaults = UserDefaults(suiteName: "Velacanto.PinTests.\(UUID().uuidString)")!
+        let currentKey = FoundationPinStorage.key(for: "current")
+        let oldKey = FoundationPinStorage.key(for: "old-account")
+        let unrelatedKey = "Velacanto.Foundation.OtherPreference"
+        defer {
+            for key in [currentKey, oldKey, unrelatedKey] { defaults.removeObject(forKey: key) }
+        }
+        let make: (String) -> FoundationLibraryActions = { scope in
+            FoundationLibraryActions(
+                sourceScope: scope, read: { defaults.data(forKey: $0) },
+                write: { defaults.set($1, forKey: $0) },
+                mutateFavorite: { _, _ in XCTFail("Pinning must not call the provider") })
+        }
+        make("current").togglePin(album)
+        defaults.set(Data("synthetic-old-pin".utf8), forKey: oldKey)
+        defaults.set("keep", forKey: unrelatedKey)
+
+        // Relaunch with a saved session keeps only its own pins.
+        XCTAssertTrue(
+            FoundationPinStorage.removeStoredPins(retaining: "current", defaults: defaults))
+        XCTAssertEqual(make("current").pins, [album])
+        XCTAssertNil(defaults.object(forKey: oldKey))
+        XCTAssertEqual(defaults.string(forKey: unrelatedKey), "keep")
+
+        // Sign-out (including offline sign-out) leaves no scoped pin snapshots.
+        XCTAssertTrue(FoundationPinStorage.removeStoredPins(defaults: defaults))
+        XCTAssertTrue(make("current").pins.isEmpty)
+        XCTAssertNil(defaults.object(forKey: currentKey))
+        XCTAssertEqual(defaults.string(forKey: unrelatedKey), "keep")
+    }
+
+    func testAccountSwitchRemovesPreviousPinSnapshotBeforeNewScopeLoads() {
+        let defaults = UserDefaults(suiteName: "Velacanto.PinTests.\(UUID().uuidString)")!
+        let previousKey = FoundationPinStorage.key(for: "previous")
+        let nextKey = FoundationPinStorage.key(for: "next")
+        defer {
+            defaults.removeObject(forKey: previousKey)
+            defaults.removeObject(forKey: nextKey)
+        }
+        let previous = FoundationLibraryActions(
+            sourceScope: "previous", read: { defaults.data(forKey: $0) },
+            write: { defaults.set($1, forKey: $0) }, mutateFavorite: { _, _ in })
+        previous.togglePin(album)
+        XCTAssertNotNil(defaults.object(forKey: previousKey))
+
+        XCTAssertTrue(FoundationPinStorage.removeStoredPins(defaults: defaults))
+        previous.invalidate()
+        let next = FoundationLibraryActions(
+            sourceScope: "next", read: { defaults.data(forKey: $0) },
+            write: { defaults.set($1, forKey: $0) }, mutateFavorite: { _, _ in })
+        XCTAssertNil(defaults.object(forKey: previousKey))
+        XCTAssertTrue(next.pins.isEmpty)
+    }
+
     func testPinWriteFailureRetainsPriorStateAndTrackCannotPin() {
         let actions = FoundationLibraryActions(
             sourceScope: "source", read: { _ in nil },

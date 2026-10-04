@@ -55,9 +55,13 @@ final class FoundationLibraryTests: XCTestCase {
             return Task { false }
         } clear: {
             order.append("clear")
+        } clearPins: {
+            order.append("pins")
+            return true
         }
         XCTAssertTrue(offline.localCleared)
-        XCTAssertEqual(order, ["start", "clear"])
+        XCTAssertTrue(offline.pinsCleared)
+        XCTAssertEqual(order, ["start", "clear", "pins"])
         let serverAccepted = await offline.revocation.value
         XCTAssertFalse(serverAccepted)
 
@@ -68,9 +72,23 @@ final class FoundationLibraryTests: XCTestCase {
         } clear: {
             order.append("clear")
             throw FoundationLibraryError.credentials
+        } clearPins: {
+            order.append("pins")
+            return false
         }
         XCTAssertFalse(clearFailed.localCleared)
-        XCTAssertEqual(order, ["start", "clear"])
+        XCTAssertFalse(clearFailed.pinsCleared)
+        XCTAssertEqual(order, ["start", "clear", "pins"])
+
+        let pinsFailed = FoundationSignOutPolicy.begin {
+            Task { false }
+        } clear: {
+            // Local sign-out must still complete when pin storage rejects removal.
+        } clearPins: {
+            false
+        }
+        XCTAssertTrue(pinsFailed.localCleared)
+        XCTAssertFalse(pinsFailed.pinsCleared)
     }
 
     func testAlbumAndTrackPagesUseOneRequestEachAndExplicitBounds() async throws {

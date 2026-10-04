@@ -5,15 +5,19 @@ import SwiftUI
 @MainActor
 enum FoundationSignOutPolicy {
     static func begin(
-        startRevocation: () -> Task<Bool, Never>, clear: () throws -> Void
-    ) -> (localCleared: Bool, revocation: Task<Bool, Never>) {
+        startRevocation: () -> Task<Bool, Never>, clear: () throws -> Void,
+        clearPins: () -> Bool
+    ) -> (localCleared: Bool, pinsCleared: Bool, revocation: Task<Bool, Never>) {
         let revocation = startRevocation()
+        let localCleared: Bool
         do {
             try clear()
+            localCleared = true
         } catch {
-            return (false, revocation)
+            localCleared = false
         }
-        return (true, revocation)
+        // Pin cleanup is independent of both Keychain and server results.
+        return (localCleared, clearPins(), revocation)
     }
 }
 
@@ -54,9 +58,22 @@ final class FoundationAppModel: ObservableObject {
             guard !ProcessInfo.processInfo.arguments.contains("-foundationTesting") else { return }
         #endif
         do {
-            if let session = try FoundationCredentials.load() { open(session) }
+            if let session = try FoundationCredentials.load() {
+                let scope = Self.sourceScope(for: session)
+                if !FoundationPinStorage.removeStoredPins(retaining: scope) {
+                    credentialError = "Older saved pins could not be removed from this device."
+                }
+                open(session, sourceScope: scope)
+            } else if !FoundationPinStorage.removeStoredPins() {
+                credentialError = "Saved pins could not be removed from this device."
+            }
         } catch {
             credentialError = "Saved sign-in could not be read. Please sign in again."
+            if !FoundationPinStorage.removeStoredPins() {
+                credentialError =
+                    "Saved sign-in could not be read. Please sign in again. "
+                    + "Saved pins could not be removed from this device."
+            }
         }
         #if DEBUG
             FoundationJournal.shared.record("app phase=opened")
@@ -64,11 +81,21 @@ final class FoundationAppModel: ObservableObject {
     }
 
     func accept(_ session: FoundationSession) throws {
+        guard FoundationPinStorage.removeStoredPins() else {
+            throw FoundationPinStorageError.couldNotRemovePins
+        }
         try FoundationCredentials.save(session)
-        open(session)
+        open(session, sourceScope: Self.sourceScope(for: session))
     }
 
-    private func open(_ session: FoundationSession) {
+    private static func sourceScope(for session: FoundationSession) -> String {
+        // Persist only a digest of source/account identity, never the server or credentials.
+        let identity = "jellyfin\0" + session.serverURL.absoluteString + "\0" + session.userID
+        return SHA256.hash(data: Data(identity.utf8))
+            .map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func open(_ session: FoundationSession, sourceScope: String) {
         accountEpoch += 1
         signOutNotice = nil
         nowPlaying?.invalidate()
@@ -79,11 +106,7 @@ final class FoundationAppModel: ObservableObject {
         actions?.invalidate()
         player?.stop()
         let library = FoundationJellyfinLibrary(session: session)
-        // Persist only a digest of source/account identity, never the server or credentials.
-        let identity = "jellyfin\0" + session.serverURL.absoluteString + "\0" + session.userID
-        let scope = SHA256.hash(data: Data(identity.utf8))
-            .map { String(format: "%02x", $0) }.joined()
-        self.actions = FoundationLibraryActions(sourceScope: scope) { item, favorite in
+        self.actions = FoundationLibraryActions(sourceScope: sourceScope) { item, favorite in
             try await library.setFavorite(for: item, isFavorite: favorite)
         }
         self.library = library
@@ -119,9 +142,17 @@ final class FoundationAppModel: ObservableObject {
             }
         } clear: {
             try FoundationCredentials.clear()
+        } clearPins: {
+            FoundationPinStorage.removeStoredPins()
         }
         guard attempt.localCleared else {
-            credentialError = "Sign-out failed here. Jellyfin may have ended the session."
+            let pinResult =
+                attempt.pinsCleared
+                ? "Saved pins were removed from this device."
+                : "Saved pins could not be removed from this device."
+            credentialError =
+                "Sign-out failed here. \(pinResult) "
+                + "Jellyfin may have ended the session."
             return
         }
         actions?.invalidate()
@@ -137,10 +168,20 @@ final class FoundationAppModel: ObservableObject {
         Task { [weak self] in
             let serverAccepted = await attempt.revocation.value
             guard let self, self.accountEpoch == epoch, self.library == nil else { return }
-            if serverAccepted {
-                self.signOutNotice = "Signed out here. Jellyfin accepted the sign-out request."
+            let pinResult: String
+            if attempt.pinsCleared {
+                pinResult = "Saved pins were removed from this device."
             } else {
-                self.signOutNotice = "Signed out here. Jellyfin sign-out could not be confirmed."
+                pinResult = "Saved pins could not be removed from this device."
+            }
+            if serverAccepted {
+                self.signOutNotice =
+                    "Signed out here. \(pinResult) "
+                    + "Jellyfin accepted the sign-out request."
+            } else {
+                self.signOutNotice =
+                    "Signed out here. \(pinResult) "
+                    + "Jellyfin sign-out could not be confirmed."
             }
         }
     }
@@ -259,7 +300,11 @@ private struct FoundationSignInView: View {
                 } catch {
                     guard !Task.isCancelled, signingIn, attempt == owner else { return }
                     signingIn = false
-                    errorMessage = FoundationLibraryError.category(error).errorDescription
+                    if let pinError = error as? FoundationPinStorageError {
+                        errorMessage = pinError.errorDescription
+                    } else {
+                        errorMessage = FoundationLibraryError.category(error).errorDescription
+                    }
                 }
             }
         }
