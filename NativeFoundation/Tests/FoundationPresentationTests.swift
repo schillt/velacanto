@@ -4,6 +4,28 @@ import XCTest
 
 @MainActor
 final class FoundationPresentationTests: XCTestCase {
+    func testAccountAlertDismissalDefersModelChangeAndKeepsNewNotice() async {
+        let model = FoundationAppModel()
+        model.signOutNotice = "First sign-out result"
+        let view = FoundationRootView(model: model)
+
+        view.accountAlertPresented.wrappedValue = false
+        XCTAssertEqual(model.signOutNotice, "First sign-out result")
+        model.signOutNotice = "New sign-out result"
+        await nextMainQueueTurn()
+        XCTAssertEqual(model.signOutNotice, "New sign-out result")
+
+        view.accountAlertPresented.wrappedValue = false
+        await nextMainQueueTurn()
+        XCTAssertNil(model.signOutNotice)
+    }
+
+    private func nextMainQueueTurn() async {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.main.async { continuation.resume() }
+        }
+    }
+
     func testMixedFavoritesQueueUsesOnlyLoadedTracksAndPreservesDuplicateSelection() async {
         let model = FoundationBrowseModel()
         let track = FoundationItem(

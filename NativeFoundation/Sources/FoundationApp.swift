@@ -144,10 +144,31 @@ final class FoundationAppModel: ObservableObject {
             }
         }
     }
+
+    func dismissAccountAlertAfterUpdate() {
+        let dismissedError = credentialError
+        let dismissedNotice = signOutNotice
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            if let dismissedError, self.credentialError == dismissedError {
+                self.credentialError = nil
+            }
+            if let dismissedNotice, self.signOutNotice == dismissedNotice {
+                self.signOutNotice = nil
+            }
+        }
+    }
 }
 
 struct FoundationRootView: View {
     @ObservedObject var model: FoundationAppModel
+
+    var accountAlertPresented: Binding<Bool> {
+        Binding(
+            get: { model.credentialError != nil || model.signOutNotice != nil },
+            set: { if !$0 { model.dismissAccountAlertAfterUpdate() } }
+        )
+    }
 
     var body: some View {
         Group {
@@ -165,20 +186,9 @@ struct FoundationRootView: View {
         .task { model.restore() }
         .alert(
             model.signOutNotice == nil ? "Account" : "Sign-out",
-            isPresented: Binding(
-                get: { model.credentialError != nil || model.signOutNotice != nil },
-                set: {
-                    if !$0 {
-                        model.credentialError = nil
-                        model.signOutNotice = nil
-                    }
-                }
-            )
+            isPresented: accountAlertPresented
         ) {
-            Button("OK") {
-                model.credentialError = nil
-                model.signOutNotice = nil
-            }
+            Button("OK") { model.dismissAccountAlertAfterUpdate() }
         } message: {
             Text(model.credentialError ?? model.signOutNotice ?? "")
         }
