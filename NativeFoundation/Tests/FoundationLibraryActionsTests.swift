@@ -80,6 +80,41 @@ final class FoundationLibraryActionsTests: XCTestCase {
         XCTAssertTrue(next.pins.isEmpty)
     }
 
+    func testFailedLocalSignOutKeepsActivePinsAndStoredPinsCoherent() {
+        var storage: [String: Data] = [:]
+        let key = FoundationPinStorage.key(for: "current")
+        let make: () -> FoundationLibraryActions = {
+            FoundationLibraryActions(
+                sourceScope: "current", read: { storage[$0] },
+                write: { storage[$0] = $1 }, mutateFavorite: { _, _ in })
+        }
+        let actions = make()
+        actions.togglePin(album)
+        let savedBeforeAttempt = storage[key]
+        var cleanupCalls = 0
+
+        let attempt = FoundationSignOutPolicy.begin {
+            Task { false }
+        } clear: {
+            throw FoundationLibraryError.credentials
+        } clearPins: {
+            cleanupCalls += 1
+            storage.removeValue(forKey: key)
+            return true
+        }
+        XCTAssertFalse(attempt.localCleared)
+        XCTAssertFalse(attempt.pinsCleared)
+        XCTAssertEqual(cleanupCalls, 0)
+        XCTAssertEqual(storage[key], savedBeforeAttempt)
+        XCTAssertEqual(actions.pins, [album])
+
+        let artist = FoundationItem(
+            id: "synthetic-artist", title: "Synthetic", subtitle: "", kind: .artist,
+            duration: nil)
+        actions.togglePin(artist)
+        XCTAssertEqual(make().pins, [album, artist])
+    }
+
     func testPinWriteFailureRetainsPriorStateAndTrackCannotPin() {
         let actions = FoundationLibraryActions(
             sourceScope: "source", read: { _ in nil },

@@ -12,6 +12,23 @@ final class FoundationLibraryTests: XCTestCase {
             deviceID: "00000000-0000-0000-0000-000000000003")
     }
 
+    @MainActor
+    func testFailedPinCleanupPreventsServerAuthentication() async {
+        var authenticated = false
+        do {
+            _ = try await FoundationSignInPolicy.authenticate {
+                false
+            } signIn: {
+                authenticated = true
+                return session
+            }
+            XCTFail("Expected local pin cleanup failure")
+        } catch {
+            XCTAssertTrue(error is FoundationPinStorageError)
+        }
+        XCTAssertFalse(authenticated)
+    }
+
     func testSessionEndUsesAuthenticatedFixedPathAndAcceptsNoContent() async throws {
         let recorder = Recorder()
         let library = FoundationJellyfinLibrary(session: session) { request in
@@ -78,7 +95,7 @@ final class FoundationLibraryTests: XCTestCase {
         }
         XCTAssertFalse(clearFailed.localCleared)
         XCTAssertFalse(clearFailed.pinsCleared)
-        XCTAssertEqual(order, ["start", "clear", "pins"])
+        XCTAssertEqual(order, ["start", "clear"])
 
         let pinsFailed = FoundationSignOutPolicy.begin {
             Task { false }

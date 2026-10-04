@@ -3,6 +3,16 @@ import NowPlaying
 import SwiftUI
 
 @MainActor
+enum FoundationSignInPolicy {
+    static func authenticate(
+        clearPins: () -> Bool, signIn: @MainActor () async throws -> FoundationSession
+    ) async throws -> FoundationSession {
+        guard clearPins() else { throw FoundationPinStorageError.couldNotRemovePins }
+        return try await signIn()
+    }
+}
+
+@MainActor
 enum FoundationSignOutPolicy {
     static func begin(
         startRevocation: () -> Task<Bool, Never>, clear: () throws -> Void,
@@ -16,8 +26,10 @@ enum FoundationSignOutPolicy {
         } catch {
             localCleared = false
         }
-        // Pin cleanup is independent of both Keychain and server results.
-        return (localCleared, clearPins(), revocation)
+        // Keep storage in sync with the still-active account if Keychain removal fails.
+        guard localCleared else { return (false, false, revocation) }
+        // Pin cleanup is independent of the server result.
+        return (true, clearPins(), revocation)
     }
 }
 
@@ -80,10 +92,7 @@ final class FoundationAppModel: ObservableObject {
         #endif
     }
 
-    func accept(_ session: FoundationSession) throws {
-        guard FoundationPinStorage.removeStoredPins() else {
-            throw FoundationPinStorageError.couldNotRemovePins
-        }
+    fileprivate func accept(_ session: FoundationSession) throws {
         try FoundationCredentials.save(session)
         open(session, sourceScope: Self.sourceScope(for: session))
     }
@@ -146,12 +155,8 @@ final class FoundationAppModel: ObservableObject {
             FoundationPinStorage.removeStoredPins()
         }
         guard attempt.localCleared else {
-            let pinResult =
-                attempt.pinsCleared
-                ? "Saved pins were removed from this device."
-                : "Saved pins could not be removed from this device."
             credentialError =
-                "Sign-out failed here. \(pinResult) "
+                "Sign-out failed here. Saved pins remain on this device. "
                 + "Jellyfin may have ended the session."
             return
         }
@@ -290,8 +295,12 @@ private struct FoundationSignInView: View {
                         let url = URL(
                             string: address.trimmingCharacters(in: .whitespacesAndNewlines))
                     else { throw URLError(.badURL) }
-                    let session = try await FoundationJellyfinLibrary.signIn(
-                        serverURL: url, username: username, password: password)
+                    let session = try await FoundationSignInPolicy.authenticate {
+                        FoundationPinStorage.removeStoredPins()
+                    } signIn: {
+                        try await FoundationJellyfinLibrary.signIn(
+                            serverURL: url, username: username, password: password)
+                    }
                     try Task.checkCancellation()
                     guard signingIn, attempt == owner else { return }
                     try model.accept(session)
