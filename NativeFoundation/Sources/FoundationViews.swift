@@ -274,10 +274,10 @@ struct FoundationLibraryView: View {
                             symbol: "music.note")
                     }
                     NavigationLink {
-                        FoundationCatalogView(
-                            title: "Playlists", model: playlists, library: library, player: player,
-                            isActive: selectedTab == .library
-                        ) { try await library.playlists(startIndex: $0) }
+                        FoundationPlaylistIndex(
+                            library: library, player: player, isActive: selectedTab == .library,
+                            model: playlists
+                        )
                         #if os(iOS)
                             .toolbar(.visible, for: .navigationBar)
                         #endif
@@ -713,6 +713,7 @@ struct FoundationLibraryItemRow: View {
     var navigate: ((FoundationItem) -> Void)?
     var currentPageKind: FoundationItem.Kind?
     var subtitleOverride: String? = nil
+    @State private var addingToPlaylist = false
     @EnvironmentObject private var actions: FoundationLibraryActions
 
     private var artworkItem: FoundationItem { showsTrackArtwork ? item.catalogArtworkItem : item }
@@ -751,13 +752,17 @@ struct FoundationLibraryItemRow: View {
             }
         }
         .contextMenu { menu }
+        .sheet(isPresented: $addingToPlaylist) {
+            FoundationPlaylistPicker(track: item, library: library)
+        }
     }
 
     private var menu: some View {
         FoundationItemMenu(
             item: item, actions: actions, initialFavorite: item.isFavorite,
             open: item.kind == .track ? nil : open, play: play, library: library, player: player,
-            navigate: navigate, currentPageKind: currentPageKind
+            navigate: navigate, currentPageKind: currentPageKind,
+            addToPlaylist: { addingToPlaylist = true }
         )
     }
 }
@@ -823,18 +828,48 @@ private struct FoundationCollectionView: View {
     let player: FoundationPlayer
     let isActive: Bool
     @StateObject private var tracks = FoundationBrowseModel()
+    @State private var managingPlaylist = false
+    @State private var playlistName: String?
+    @Environment(\.dismiss) private var dismiss
+
+    private var displayItem: FoundationItem {
+        var copy = item
+        copy.title = playlistName ?? item.title
+        return copy
+    }
 
     var body: some View {
         FoundationTrackList(
-            title: item.title, tracks: tracks, player: player, library: library, isActive: isActive,
-            collection: item
-        ) {
-            offset in
-            if item.kind == .playlist {
-                return try await library.playlistTracks(playlistID: item.id, startIndex: offset)
+            title: displayItem.title, tracks: tracks, player: player, library: library,
+            isActive: isActive,
+            collection: displayItem,
+            loader: { offset in
+                if item.kind == .playlist {
+                    return try await library.playlistTracks(playlistID: item.id, startIndex: offset)
+                }
+                return try await library.tracks(albumID: item.id, startIndex: offset)
             }
-            return try await library.tracks(albumID: item.id, startIndex: offset)
+        )
+        .toolbar {
+            if item.kind == .playlist {
+                Button("Manage Playlist", systemImage: "pencil") { managingPlaylist = true }
+                    .disabled(!library.supportsPlaylistManagement)
+            }
         }
+        .sheet(
+            isPresented: $managingPlaylist,
+            onDismiss: {
+                Task {
+                    await tracks.load(.refresh) {
+                        try await library.playlistTracks(playlistID: item.id, startIndex: $0)
+                    }
+                }
+            },
+            content: {
+                FoundationPlaylistEditor(
+                    playlist: displayItem, onDeleted: { dismiss() },
+                    onRenamed: { playlistName = $0 }, library: library)
+            })
     }
 }
 

@@ -12,6 +12,7 @@ struct FoundationItemMenu: View {
     var player: FoundationPlayer?
     var navigate: ((FoundationItem) -> Void)?
     var currentPageKind: FoundationItem.Kind?
+    var addToPlaylist: (() -> Void)?
 
     var body: some View {
         if let open {
@@ -38,6 +39,10 @@ struct FoundationItemMenu: View {
         if item.kind == .track || item.kind == .album, let navigate {
             FoundationRelatedDestinations(
                 item: item, navigate: navigate, currentPageKind: currentPageKind)
+        }
+        if item.kind == .track, let addToPlaylist {
+            Button("Add to Playlist", systemImage: "music.note.list", action: addToPlaylist)
+                .disabled(library?.supportsPlaylistManagement != true)
         }
         if item.kind != .genre {
             let favorite = actions.favoriteState(for: item, initial: initialFavorite)
