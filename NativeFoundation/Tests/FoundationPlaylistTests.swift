@@ -166,8 +166,11 @@ final class FoundationPlaylistTests: XCTestCase {
         }
         let before = try await FoundationPlaylistSnapshot.load(id: playlistID, library: library)
         XCTAssertEqual(before.map(\.id), ["sibling", "target"])
+        var displayedTrack = before[1].item
+        displayedTrack.title = "Previously loaded title"
+        let selected = FoundationPlaylistEntry(id: before[1].id, item: displayedTrack)
         try await FoundationPlaylistMutation.remove(
-            playlistID: playlistID, entry: before[1], library: library)
+            playlistID: playlistID, entry: selected, library: library)
         let after = try await FoundationPlaylistSnapshot.load(id: playlistID, library: library)
         XCTAssertEqual(after.map(\.id), ["sibling"])
     }

@@ -66,13 +66,16 @@ enum FoundationPlaylistMutation {
         playlistID: String, entry: FoundationPlaylistEntry, library: any FoundationLibrary
     ) async throws {
         let before = try await FoundationPlaylistSnapshot.load(id: playlistID, library: library)
-        guard before.contains(entry) else { throw FoundationPlaylistError.changed }
+        guard before.contains(where: { $0.id == entry.id && $0.item.id == entry.item.id }) else {
+            throw FoundationPlaylistError.changed
+        }
         let siblingIDs = Set(
             before.filter { $0.item.id == entry.item.id && $0.id != entry.id }.map(\.id))
         try await library.removeEntry(from: playlistID, entryID: entry.id)
         let after = try await FoundationPlaylistSnapshot.load(id: playlistID, library: library)
         let remainingIDs = Set(after.map(\.id))
-        guard !remainingIDs.contains(entry.id), siblingIDs.isSubset(of: remainingIDs) else {
+        let remainingSiblingIDs = Set(after.filter { $0.item.id == entry.item.id }.map(\.id))
+        guard !remainingIDs.contains(entry.id), siblingIDs.isSubset(of: remainingSiblingIDs) else {
             throw FoundationPlaylistError.changed
         }
     }
