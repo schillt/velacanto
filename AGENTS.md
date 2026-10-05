@@ -16,6 +16,13 @@ Do not follow those older instructions from archived documents or stale worktree
 Current owner instructions can change scope; reconcile their approved contract in
 GitHub before dependent work begins. Do not silently promote unpublished plans.
 
+Before editing, compare the fetched alpha guide, applicable nested guides, current
+owner instructions and the issue contract. Check that board workflow descriptions
+agree. Report material conflicts before dependent work; never replace a dirty
+checkout's instructions to make them appear current. Explicit owner instructions
+take precedence, but a scoped exception does not permanently change the default
+workflow. Record its scope and reconcile shared documentation.
+
 Velacanto 0.3.5 follows the 0.3.0 (108) Foundation replacement. The maintained
 app is `NativeFoundation/VelacantoFoundation.xcodeproj`, scheme
 `VelacantoFoundation`, product `Velacanto`. Read `NativeFoundation/AGENTS.md`,
@@ -57,6 +64,12 @@ acceptance criteria and privacy constraints. Separate issues use separate
 worktrees. Workers within one issue require non-overlapping write ownership;
 never edit a file concurrently. Read-only review/research can run alongside
 implementation. Resolve conflicts before writes; preserve others' dirty work.
+Report completion or blockers promptly to the coordinating agent with the exact
+candidate and next owner; do not wait for the owner to ask for status. For a small
+patch, use focused implementation, one independent acceptance pass, an integrated
+build and the relevant physical sanity check. Repeat gates only for changed scope,
+failures or unresolved evidence. Keep runtime candidates local until buildable
+and physically sanity-checked unless the owner authorizes earlier publication.
 
 All agents currently using one GitHub account are one GitHub identity. Their
 independent reports are useful evidence but cannot satisfy an approving review
@@ -120,6 +133,10 @@ requires the relevant repo/project scopes; query field and option IDs rather tha
 copying stale values. Stop on actual missing authorization or a rejected push;
 do not retry blindly, change credentials or use copied tokens/cookies. A sandbox
 network failure is not invalid authentication if `gh auth status` succeeds.
+A sandbox/keychain restriction can also make that command report an invalid token.
+Before asking for reauthentication, verify it in the approved host/network context
+using the normal permission mechanism. If it still fails there, stop and report
+that actual failure; never extract credentials or work around authorization.
 
 Desired protection on alpha/main: PR required, required current `Quality Gate`,
 up-to-date base, resolved conversations, no force pushes/deletion or routine
@@ -158,6 +175,20 @@ quote the value again, rewrite Git history or change credentials without the
 separately authorized response. Local review, PR publication and owner-approved
 merge remain separate steps; this guardrail grants no publication permission.
 
+Keep publication exposure, runtime data handling and server/proxy logging separate
+in privacy reports. State the reviewed snapshots/artifacts, categories and limits;
+use “no secrets found in the reviewed scope,” not “everything is sanitized.”
+GitHub source archives contain the tracked tag snapshot, not live Keychain or
+UserDefaults contents. Synthetic API routes/test fixtures are not evidence of
+private data solely because a broad scanner matches them. Review matches locally
+before reporting, without copying their contents into public evidence. HTTPS
+protects transit; it does not establish safe endpoint logging or local retention.
+
+The current LICENSE makes Velacanto public-source proprietary software, not an
+open-source-licensed app. Check the candidate LICENSE and third-party notices;
+do not change licensing, grant rights or describe dependencies as covered by the
+app's license without authorization.
+
 ## Builds, devices and release provenance
 
 Use per-worktree derived data from `./scripts/build.sh`. The maintainer serializes
@@ -175,6 +206,14 @@ leave a required check indefinitely pending through workflow path filters. Scope
 verification proportionately for documentation; runtime/interface changes require
 relevant regression, platform and physical evidence. Compiler/test success does
 not prove streaming, audibility, signed distribution or accessibility.
+
+For physical checks, record the installed candidate, action order, debugger and
+Mirroring state, route and user-confirmed audible outcome in sanitized evidence.
+If the installed build or intervening actions are uncertain, mark the result
+unverified and repeat only the affected check. A defect absent in TestFlight is
+an observation, not proof of an SDK/compiler cause or a fix; retain its disposition
+until controlled comparison establishes the result. Do not start TestFlight or
+release publication merely to verify a local patch.
 
 Freeze an exact release candidate from accepted alpha. Record source SHA,
 version/build, toolchain, signing mode, artifact hashes, test results, known issues
@@ -207,6 +246,16 @@ offline audio, playlist mutation, CarPlay, new providers or reporting outside th
 assigned scope. Keep credentials, origins, full request URLs, personal media and
 account/item IDs out of issues, PRs and shared logs. Detailed diagnostics stay
 bounded and DEBUG-only; use sanitized aggregate evidence.
+
+Account privacy changes must preserve coherent credential, account-model, task and
+account-owned metadata lifetimes, including explicit cleanup/failure outcomes.
+Read [Sign-out privacy](docs/sign-out-privacy.md) and
+[Pin storage privacy](docs/pin-storage-privacy.md) when changing those paths.
+Successful local cleanup does not erase old backups or prove server revocation.
+Keep playback credential/delivery changes isolated from account-cleanup patches;
+follow [Playback URL privacy](docs/playback-url-privacy.md), use supported Apple
+APIs and require seeking, background, queue and AirPlay acceptance before combining
+transport changes. Do not replace media delivery speculatively to satisfy an audit.
 
 Final handoff: base and final SHA, PR/issue, owned paths, tests/results, privacy
 review, pending gates, integration status and next owner. Report local, published,
