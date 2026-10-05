@@ -106,7 +106,8 @@ final class FoundationNowPlayingTests: XCTestCase {
             FoundationTestTones.resolve(FoundationTestTones.items[0]))
         let source = NowPlayingHandoffProbe(file: file)
         let player = FoundationPlayer(
-            resolve: { _ in await source.resolve() }, activateSession: {}, deactivateSession: {})
+            resolve: { _ in try await source.resolve() }, activateSession: {}, deactivateSession: {}
+        )
         player.nativePlayer.volume = 0
         player.setQueue([track, track], selectedIndex: 0)
         await waitForPlayback(player)
@@ -118,11 +119,20 @@ final class FoundationNowPlayingTests: XCTestCase {
         defer {
             bridge.invalidate()
             player.stop()
+            Task { await source.complete() }
         }
         await bridge.primacyTask?.value
         XCTAssertEqual(requests, 1)
         player.didReachEnd(try XCTUnwrap(player.nativePlayer.currentItem))
-        await source.waitForPending()
+        let handoff = await source.waitForPending()
+        guard handoff == .completed else {
+            let calls = await source.calls
+            await source.complete()
+            XCTFail(
+                "Natural handoff did not reach the second source resolve; observed \(calls) resolves"
+            )
+            return
+        }
         await bridge.updateTask?.value
         XCTAssertEqual(player.state, .loading)
         XCTAssertTrue(player.wantsPlayback)
@@ -140,6 +150,49 @@ final class FoundationNowPlayingTests: XCTestCase {
         await bridge.updateTask?.value
         await bridge.primacyTask?.value
         XCTAssertEqual(requests, 2)
+    }
+
+    func testHandoffProbeMissingSecondResolveHasFiniteTimeout() async throws {
+        let source = NowPlayingHandoffProbe(file: URL(fileURLWithPath: "/synthetic"))
+        _ = try await source.resolve()
+        let outcome = await source.waitForPending(timeout: 0.01)
+        XCTAssertEqual(outcome, .timedOut)
+        let calls = await source.calls
+        XCTAssertEqual(calls, 1, "The missing event is the second source resolve")
+        await source.complete()
+    }
+
+    func testHandoffProbeCancellationReleasesHeldResolve() async throws {
+        let source = NowPlayingHandoffProbe(file: URL(fileURLWithPath: "/synthetic"))
+        _ = try await source.resolve()
+        let finished = XCTestExpectation(description: "Cancelled source resolve completed")
+        let resolving = Task {
+            defer { finished.fulfill() }
+            return try await source.resolve()
+        }
+        let outcome = await source.waitForPending(timeout: 2)
+        guard outcome == .completed else {
+            resolving.cancel()
+            await source.complete()
+            XCTFail("Fixture did not hold the second source resolve")
+            return
+        }
+        resolving.cancel()
+        let cancelled = await XCTWaiter.fulfillment(of: [finished], timeout: 2)
+        guard cancelled == .completed else {
+            await source.complete()
+            XCTFail("Cancellation did not release the held second source resolve")
+            return
+        }
+        do {
+            _ = try await resolving.value
+            XCTFail("Cancelled fixture returned a playable source")
+        } catch is CancellationError {} catch {
+            XCTFail("Unexpected fixture cancellation error")
+        }
+        let isPending = await source.isPending
+        XCTAssertFalse(isPending)
+        await source.complete()
     }
 
     func testPauseBeforeQueuedPrimacyPreventsRequest() async throws {
@@ -206,25 +259,34 @@ private actor NowPlayingSourceProbe {
 
 private actor NowPlayingHandoffProbe {
     let file: URL
-    private var calls = 0
-    private var pending: CheckedContinuation<URL, Never>?
-    private var waiter: CheckedContinuation<Void, Never>?
+    private(set) var calls = 0
+    private var pending: CheckedContinuation<URL, Error>?
+    private let pendingEvent = XCTestExpectation(description: "Second source resolve reached")
+    var isPending: Bool { pending != nil }
 
     init(file: URL) { self.file = file }
 
-    func resolve() async -> URL {
+    func resolve() async throws -> URL {
+        try Task.checkCancellation()
         calls += 1
         guard calls == 2 else { return file }
-        return await withCheckedContinuation { continuation in
-            pending = continuation
-            waiter?.resume()
-            waiter = nil
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                pending = continuation
+                pendingEvent.fulfill()
+            }
+        } onCancel: {
+            Task { await self.cancelPending() }
         }
     }
 
-    func waitForPending() async {
-        guard pending == nil else { return }
-        await withCheckedContinuation { waiter = $0 }
+    func waitForPending(timeout: TimeInterval = 10) async -> XCTWaiter.Result {
+        await XCTWaiter.fulfillment(of: [pendingEvent], timeout: timeout)
+    }
+
+    private func cancelPending() {
+        pending?.resume(throwing: CancellationError())
+        pending = nil
     }
 
     func complete() {
