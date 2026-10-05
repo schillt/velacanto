@@ -6,8 +6,10 @@ struct FoundationPlaylistPermissions: Sendable, Equatable {
     let canDelete: Bool
 }
 
+/// Local occurrence identity is separate from the server mutation identity.
 struct FoundationPlaylistEntry: Identifiable, Sendable, Equatable {
     let id: String
+    let mutationID: String
     let item: FoundationItem
 }
 
@@ -17,19 +19,27 @@ struct FoundationPlaylistPage: Sendable {
 }
 
 enum FoundationPlaylistError: Error, LocalizedError {
-    case tooLarge, changed
+    case tooLarge, changed, ambiguousMemberships, alreadyPresent
     var errorDescription: String? {
         switch self {
         case .tooLarge:
             "This playlist is too large to verify changes here. Manage it on the server."
         case .changed:
             "The playlist changed or the update could not be confirmed. Refresh before trying again."
+        case .ambiguousMemberships:
+            "This playlist contains repeated tracks that this server cannot edit individually. Track editing is read-only here."
+        case .alreadyPresent:
+            "This track is already in the playlist. This server keeps one copy of each track."
         }
     }
 }
 
 /// Explicit reconciliation is finite and cancellable, never a background scan.
 enum FoundationPlaylistSnapshot {
+    static func hasAmbiguousMemberships(_ entries: [FoundationPlaylistEntry]) -> Bool {
+        Set(entries.map(\.mutationID)).count != entries.count
+    }
+
     static func load(id: String, library: any FoundationLibrary, limit: Int = 10_000) async throws
         -> [FoundationPlaylistEntry]
     {
@@ -66,19 +76,53 @@ enum FoundationPlaylistMutation {
         playlistID: String, entry: FoundationPlaylistEntry, library: any FoundationLibrary
     ) async throws {
         let before = try await FoundationPlaylistSnapshot.load(id: playlistID, library: library)
-        guard before.contains(where: { $0.id == entry.id && $0.item.id == entry.item.id }) else {
+        guard !FoundationPlaylistSnapshot.hasAmbiguousMemberships(before) else {
+            throw FoundationPlaylistError.ambiguousMemberships
+        }
+        guard
+            before.contains(where: {
+                $0.mutationID == entry.mutationID && $0.item.id == entry.item.id
+            })
+        else {
             throw FoundationPlaylistError.changed
         }
         let siblingIDs = Set(
-            before.filter { $0.item.id == entry.item.id && $0.id != entry.id }.map(\.id))
-        try await library.removeEntry(from: playlistID, entryID: entry.id)
+            before.filter { $0.item.id == entry.item.id && $0.mutationID != entry.mutationID }.map(
+                \.mutationID))
+        try await library.removeEntry(from: playlistID, entryID: entry.mutationID)
         let after = try await FoundationPlaylistSnapshot.load(id: playlistID, library: library)
-        let remainingIDs = Set(after.map(\.id))
-        let remainingSiblingIDs = Set(after.filter { $0.item.id == entry.item.id }.map(\.id))
-        guard !remainingIDs.contains(entry.id), siblingIDs.isSubset(of: remainingSiblingIDs) else {
+        let remainingIDs = Set(after.map(\.mutationID))
+        let remainingSiblingIDs = Set(
+            after.filter { $0.item.id == entry.item.id }.map(\.mutationID))
+        guard !FoundationPlaylistSnapshot.hasAmbiguousMemberships(after),
+            !remainingIDs.contains(entry.mutationID), siblingIDs.isSubset(of: remainingSiblingIDs)
+        else {
             throw FoundationPlaylistError.changed
         }
     }
+
+    static func add(playlistID: String, track: FoundationItem, library: any FoundationLibrary)
+        async throws
+    {
+        let permission = try await library.playlistPermissions(id: playlistID)
+        guard permission.canEdit else { throw FoundationLibraryError.authentication }
+        let before = try await FoundationPlaylistSnapshot.load(id: playlistID, library: library)
+        guard !FoundationPlaylistSnapshot.hasAmbiguousMemberships(before) else {
+            throw FoundationPlaylistError.ambiguousMemberships
+        }
+        let beforeCount = before.filter { $0.item.id == track.id }.count
+        guard library.supportsRepeatedPlaylistTracks || beforeCount == 0 else {
+            throw FoundationPlaylistError.alreadyPresent
+        }
+        try await library.addTracks(to: playlistID, tracks: [track])
+        let after = try await FoundationPlaylistSnapshot.load(id: playlistID, library: library)
+        guard !FoundationPlaylistSnapshot.hasAmbiguousMemberships(after),
+            after.filter({ $0.item.id == track.id }).count > beforeCount
+        else {
+            throw FoundationPlaylistError.changed
+        }
+    }
+
 }
 
 enum FoundationPlaylistName {
@@ -198,7 +242,9 @@ struct FoundationPlaylistEditor: View {
     @State private var name = ""
     @State private var permissions: FoundationPlaylistPermissions?
     @State private var entries: [FoundationPlaylistEntry] = []
-    @State private var nextStartIndex: Int?
+    @State private var visibleCount = 100
+    @State private var membershipEditable = false
+    @State private var membershipMessage: String?
     @State private var confirmDelete = false
     @State private var deleted = false
     @StateObject private var operation = FoundationPlaylistOperation()
@@ -213,7 +259,10 @@ struct FoundationPlaylistEditor: View {
                         operation.run {
                             let requestedName = try FoundationPlaylistName.validated(name)
                             try await library.renamePlaylist(id: playlist.id, name: requestedName)
-                            try await refresh()
+                            let refreshed = try await library.playlistPermissions(id: playlist.id)
+                            try Task.checkCancellation()
+                            permissions = refreshed
+                            name = refreshed.name
                             guard name == requestedName else {
                                 throw FoundationLibraryError.invalidResponse
                             }
@@ -229,7 +278,8 @@ struct FoundationPlaylistEditor: View {
                     }
                 }
                 Section("Tracks") {
-                    ForEach(entries) { entry in
+                    if let membershipMessage { Text(membershipMessage).font(.caption) }
+                    ForEach(Array(entries.prefix(visibleCount))) { entry in
                         HStack {
                             VStack(alignment: .leading) {
                                 Text(entry.item.title)
@@ -242,24 +292,11 @@ struct FoundationPlaylistEditor: View {
                                         playlistID: playlist.id, entry: entry, library: library)
                                     try await refresh()
                                 }
-                            }.disabled(permissions?.canEdit != true)
+                            }.disabled(permissions?.canEdit != true || !membershipEditable)
                         }
                     }
-                    if let offset = nextStartIndex {
-                        Button("Load More") {
-                            operation.run {
-                                let page = try await library.playlistEntries(
-                                    id: playlist.id, startIndex: offset)
-                                try Task.checkCancellation()
-                                guard
-                                    Set(entries.map(\.id)).isDisjoint(with: page.entries.map(\.id))
-                                else {
-                                    throw FoundationLibraryError.invalidResponse
-                                }
-                                entries.append(contentsOf: page.entries)
-                                nextStartIndex = page.nextStartIndex
-                            }
-                        }
+                    if visibleCount < entries.count {
+                        Button("Load More") { visibleCount += 100 }
                     }
                     Text("Add tracks from a song’s Actions menu.").font(.caption)
                 }
@@ -298,13 +335,27 @@ struct FoundationPlaylistEditor: View {
 
     private func refresh() async throws {
         let permission = try await library.playlistPermissions(id: playlist.id)
-        let page = try await library.playlistEntries(id: playlist.id, startIndex: 0)
         try Task.checkCancellation()
         permissions = permission
         name = permission.name
-        entries = page.entries
-        nextStartIndex = page.nextStartIndex
+        membershipEditable = false
+        do {
+            let snapshot = try await FoundationPlaylistSnapshot.load(
+                id: playlist.id, library: library)
+            try Task.checkCancellation()
+            entries = snapshot
+            visibleCount = 100
+            membershipEditable = !FoundationPlaylistSnapshot.hasAmbiguousMemberships(snapshot)
+            membershipMessage =
+                membershipEditable
+                ? nil : FoundationPlaylistError.ambiguousMemberships.errorDescription
+        } catch {
+            try Task.checkCancellation()
+            membershipMessage = (error as? FoundationPlaylistError)?.errorDescription
+            throw error
+        }
     }
+
 }
 
 struct FoundationPlaylistPicker: View {
@@ -319,16 +370,8 @@ struct FoundationPlaylistPicker: View {
                 ForEach(playlists.items) { playlist in
                     Button(playlist.title) {
                         operation.run {
-                            let permission = try await library.playlistPermissions(id: playlist.id)
-                            guard permission.canEdit else {
-                                throw FoundationLibraryError.authentication
-                            }
-                            let before = try await occurrenceCount(in: playlist.id)
-                            try await library.addTracks(to: playlist.id, tracks: [track])
-                            let after = try await occurrenceCount(in: playlist.id)
-                            guard after > before else {
-                                throw FoundationLibraryError.invalidResponse
-                            }
+                            try await FoundationPlaylistMutation.add(
+                                playlistID: playlist.id, track: track, library: library)
                         }
                     }.disabled(operation.isPending || operation.succeeded)
                 }
@@ -349,11 +392,6 @@ struct FoundationPlaylistPicker: View {
                 .task { await playlists.load(.initial, using: library.playlists) }
         }.frame(minWidth: 300, minHeight: 350)
             .onDisappear { operation.cancel() }
-    }
-
-    private func occurrenceCount(in playlistID: String) async throws -> Int {
-        let entries = try await FoundationPlaylistSnapshot.load(id: playlistID, library: library)
-        return entries.filter { $0.item.id == track.id }.count
     }
 
 }

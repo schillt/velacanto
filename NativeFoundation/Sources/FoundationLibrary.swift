@@ -37,6 +37,7 @@ struct FoundationSession: Codable, Sendable {
 
 protocol FoundationLibrary: Sendable {
     var supportsPlaylistManagement: Bool { get }
+    var supportsRepeatedPlaylistTracks: Bool { get }
     func playlistPermissions(id: String) async throws -> FoundationPlaylistPermissions
     func playlistEntries(id: String, startIndex: Int) async throws -> FoundationPlaylistPage
     func createPlaylist(name: String) async throws -> FoundationItem
@@ -80,6 +81,7 @@ protocol FoundationLibrary: Sendable {
 
 extension FoundationLibrary {
     var supportsPlaylistManagement: Bool { false }
+    var supportsRepeatedPlaylistTracks: Bool { false }
     func playlistPermissions(id: String) async throws -> FoundationPlaylistPermissions {
         throw FoundationLibraryError.unavailable
     }
@@ -253,17 +255,16 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
                 playlistID: id,
                 parameters: .init(userID: session.userID, startIndex: startIndex, limit: 100)))
         let page = try mappedPage(result, kinds: [.track], startIndex: startIndex, limit: 100)
-        let entries = try zip(page.items, result.items ?? []).map { item, source in
+        let entries = try zip(page.items, result.items ?? []).enumerated().map { index, pair in
+            let (item, source) = pair
             guard let entryID = source.playlistItemID, !entryID.isEmpty,
                 entryID.utf8.count <= 128,
                 entryID.unicodeScalars.allSatisfy({
                     CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_")).contains($0)
                 })
             else { throw FoundationLibraryError.invalidResponse }
-            return FoundationPlaylistEntry(id: entryID, item: item)
-        }
-        guard Set(entries.map(\.id)).count == entries.count else {
-            throw FoundationLibraryError.invalidResponse
+            return FoundationPlaylistEntry(
+                id: "\(startIndex + index):\(entryID)", mutationID: entryID, item: item)
         }
         return FoundationPlaylistPage(entries: entries, nextStartIndex: page.nextStartIndex)
     }

@@ -32,9 +32,9 @@ final class FoundationPlaylistTests: XCTestCase {
             return (data, Self.response(request))
         }
         let page = try await library.playlistEntries(id: playlistID, startIndex: 0)
-        XCTAssertEqual(page.entries.map(\.id), ["entry-one", "entry-two"])
+        XCTAssertEqual(page.entries.map(\.id), ["0:entry-one", "1:entry-two"])
         XCTAssertEqual(page.entries.map(\.item.id), [trackID, trackID])
-        try await library.removeEntry(from: playlistID, entryID: page.entries[1].id)
+        try await library.removeEntry(from: playlistID, entryID: page.entries[1].mutationID)
         let requestValue = await recorder.last()
         let request = try XCTUnwrap(requestValue)
         let query = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)?
@@ -43,7 +43,7 @@ final class FoundationPlaylistTests: XCTestCase {
         XCTAssertFalse(request.url?.absoluteString.contains("synthetic") ?? true)
     }
 
-    func testCreateIsPrivateRenamePreservesMembershipAndAddKeepsDuplicates() async throws {
+    func testCreateIsPrivateRenamePreservesMembershipAndAddUsesGeneratedEncoding() async throws {
         let recorder = PlaylistRecorder()
         let library = FoundationJellyfinLibrary(session: session) { request in
             await recorder.append(request)
@@ -165,14 +165,15 @@ final class FoundationPlaylistTests: XCTestCase {
             return (data, Self.response(request))
         }
         let before = try await FoundationPlaylistSnapshot.load(id: playlistID, library: library)
-        XCTAssertEqual(before.map(\.id), ["sibling", "target"])
+        XCTAssertEqual(before.map(\.mutationID), ["sibling", "target"])
         var displayedTrack = before[1].item
         displayedTrack.title = "Previously loaded title"
-        let selected = FoundationPlaylistEntry(id: before[1].id, item: displayedTrack)
+        let selected = FoundationPlaylistEntry(
+            id: before[1].id, mutationID: before[1].mutationID, item: displayedTrack)
         try await FoundationPlaylistMutation.remove(
             playlistID: playlistID, entry: selected, library: library)
         let after = try await FoundationPlaylistSnapshot.load(id: playlistID, library: library)
-        XCTAssertEqual(after.map(\.id), ["sibling"])
+        XCTAssertEqual(after.map(\.mutationID), ["sibling"])
     }
 
     func testRemovalRejectsSuccessfulAckWhenLaterPageStillContainsTarget() async throws {
@@ -187,6 +188,69 @@ final class FoundationPlaylistTests: XCTestCase {
                 playlistID: playlistID, entry: before[1], library: library)
             XCTFail("Acknowledgement alone must not confirm removal")
         } catch { XCTAssertTrue(error is FoundationPlaylistError) }
+    }
+
+    func testAmbiguousServerIDsRenderOccurrencesAndPreventRemoval() async throws {
+        let recorder = PlaylistRecorder()
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            await recorder.append(request)
+            return (
+                Data(
+                    """
+                    {"Items":[
+                    {"Id":"00000000000000000000000000000002","Type":"Audio","PlaylistItemId":"same"},
+                    {"Id":"00000000000000000000000000000002","Type":"Audio","PlaylistItemId":"same"}],
+                    "StartIndex":0,"TotalRecordCount":2}
+                    """.utf8), Self.response(request)
+            )
+        }
+        let snapshot = try await FoundationPlaylistSnapshot.load(id: playlistID, library: library)
+        XCTAssertEqual(snapshot.map(\.id), ["0:same", "1:same"])
+        XCTAssertTrue(FoundationPlaylistSnapshot.hasAmbiguousMemberships(snapshot))
+        do {
+            try await FoundationPlaylistMutation.remove(
+                playlistID: playlistID, entry: snapshot[1], library: library)
+            XCTFail("Ambiguous membership must not be removed")
+        } catch { XCTAssertTrue(error is FoundationPlaylistError) }
+        let last = await recorder.last()
+        XCTAssertEqual(last?.httpMethod, "GET")
+        let count = await recorder.count
+        XCTAssertEqual(count, 2)
+    }
+
+    func testAlreadyPresentTrackIsHonestWithoutSendingMutation() async {
+        let recorder = PlaylistRecorder()
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            await recorder.append(request)
+            let json: String
+            if request.url?.path.hasPrefix("/Playlists") == true
+                && request.url?.path.contains("/Users/") == true
+            {
+                json = "{\"UserId\":\"00000000000000000000000000000003\",\"CanEdit\":true}"
+            } else if request.url?.path.hasPrefix("/Items/") == true {
+                json =
+                    "{\"Id\":\"00000000000000000000000000000001\",\"Type\":\"Playlist\",\"Name\":\"Fixture\",\"CanDelete\":true}"
+            } else {
+                json = """
+                    {"Items":[{"Id":"00000000000000000000000000000002","Type":"Audio","PlaylistItemId":"present"}],
+                    "StartIndex":0,"TotalRecordCount":1}
+                    """
+            }
+            return (Data(json.utf8), Self.response(request))
+        }
+        do {
+            try await FoundationPlaylistMutation.add(
+                playlistID: playlistID, track: track, library: library)
+            XCTFail("Already-present track must not be claimed added")
+        } catch {
+            XCTAssertEqual(
+                (error as? FoundationPlaylistError)?.errorDescription,
+                FoundationPlaylistError.alreadyPresent.errorDescription)
+        }
+        let last = await recorder.last()
+        XCTAssertEqual(last?.httpMethod, "GET")
+        let count = await recorder.count
+        XCTAssertEqual(count, 3)
     }
 
     @MainActor
