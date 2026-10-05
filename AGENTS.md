@@ -102,14 +102,15 @@ history or rewrite them as part of routine cleanup.
    if it has advanced, resolve conflicts in the task worktree, and rerun affected
    verification. Review evidence must identify the current SHA. Material edits
    invalidate affected acceptance and require re-review.
-6. Merge only after the required `Quality Gate` passes on the up-to-date PR/test
-   merge candidate, discussions are resolved, scoped P0/P1 findings are closed and
-   required physical gates plus owner/authorized merge decision are recorded.
-   Merge one PR at a time; do not use bypass/admin overrides or skip failed checks.
-7. **Squash-merge focused task PRs** into alpha. Record resulting integrated SHA;
-   verify post-merge CI on it before using it as an accepted dependency. PR-head
-   tests are not proof of the new integrated commit. If it fails, stop dependent
-   integration and submit a focused fix/revert PR; do not push a hidden repair.
+6. Merge ordinary development changes after relevant local checks, resolved
+   discussions, scoped P0/P1 disposition and required physical gates plus the
+   owner/authorized merge decision. Hosted checks are required only for release
+   candidates, as described below. Merge one PR at a time; do not use bypass/admin
+   overrides or ignore failed applicable checks.
+7. **Squash-merge focused task PRs** into alpha. Record the integrated SHA and run
+   affected local integration checks before using it as an accepted dependency.
+   PR-head tests are not proof of the integrated commit. If integration fails,
+   stop dependent work and submit a focused fix/revert PR; do not hide a repair.
 8. Update the issue, milestone/Project and release checklist after actual merge and
    applicable verification. Distinguish code integrated from feature accepted and
    release ready. Delete the merged task branch and clean worktree only after
@@ -138,10 +139,12 @@ Before asking for reauthentication, verify it in the approved host/network conte
 using the normal permission mechanism. If it still fails there, stop and report
 that actual failure; never extract credentials or work around authorization.
 
-Desired protection on alpha/main: PR required, required current `Quality Gate`,
-up-to-date base, resolved conversations, no force pushes/deletion or routine
-bypass. Require eligible independent approvals when available. Until repository
-settings enforce these rules, agents must enforce them procedurally and report
+Desired protection on alpha/main: PR required, up-to-date base, resolved
+conversations, no force pushes/deletion or routine bypass. Do not require a hosted
+`Quality Gate` on ordinary development PRs when it is intentionally release-only.
+Enforce the exact-candidate hosted gate at release promotion/publication. Require
+eligible independent approvals when available. Until repository settings enforce
+these rules, agents must enforce them procedurally and report
 that distinction. This file alone does not install branch protection.
 
 Check actual rulesets/protection and required-check names before changing settings.
@@ -200,12 +203,22 @@ parallel testing. Protect original-reference apps and Foundation106. Physical
 or delete archives/unintegrated work to make room for tests.
 
 Local checks include `./scripts/preflight.sh --skip-xcode`, `git diff --check`,
-lint and relevant tests/builds. CI must validate PR candidates and integrated
-alpha/main commits. Required checks must actually run on relevant changes; do not
-leave a required check indefinitely pending through workflow path filters. Scope
-verification proportionately for documentation; runtime/interface changes require
-relevant regression, platform and physical evidence. Compiler/test success does
+lint and relevant tests/builds. Ordinary patches, documentation changes, task PRs
+and development integrations use local verification; do not dispatch, wait for or
+rerun hosted quality gates for them. Scope verification proportionately for
+documentation; runtime/interface changes require relevant regression, platform
+and physical evidence. Compiler/test success does
 not prove streaming, audibility, signed distribution or accessibility.
+
+Hosted quality gates are reserved for owner-approved release candidates/builds,
+including prereleases and hotfix releases. Run them on the frozen exact source SHA
+before publication, record the result and rerun only if that candidate changes or
+a diagnosed failure requires it. The workflow runs for immutable `rc-*` candidate
+tags; creating such a tag requires release-candidate authorization. Manual dispatch
+is also supported once the workflow's dispatch trigger is integrated into GitHub's
+default branch. Never create a candidate tag just to check a routine patch. A local
+Release configuration build is not, by itself, a release candidate. Keep hosted
+validation, signed distribution and TestFlight authorization separate.
 
 For physical checks, record the installed candidate, action order, debugger and
 Mirroring state, route and user-confirmed audible outcome in sanitized evidence.

@@ -1,16 +1,15 @@
-name: Velacanto Quality
+name: Velacanto Release Quality
 
 on:
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
   push:
-    branches: [alpha, main]
+    tags: ['rc-*']
 
 permissions:
   contents: read
 
 concurrency:
-  group: pull-request-quality-${{ github.event.pull_request.number || github.ref }}
+  group: release-quality-${{ github.sha }}
   cancel-in-progress: true
 
 jobs:
