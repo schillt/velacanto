@@ -84,7 +84,7 @@ final class FoundationLibraryActions: ObservableObject {
     private let mutateFavorite: @Sendable (FoundationItem, Bool) async throws -> Void
     private var tasks: [Key: Task<Void, Error>] = [:]
     private var active = true
-    private var queueTask: Task<Void, Never>?
+    private(set) var queueTask: Task<Void, Never>?
     private var playbackPreparation: AnyCancellable?
 
     init(
@@ -180,6 +180,9 @@ final class FoundationLibraryActions: ObservableObject {
             queueErrorMessage = "This item cannot be added to the queue."
             return
         }
+        playbackPreparation = player.sessionChanged.sink { [weak self] in
+            self?.queueTask?.cancel()
+        }
         loadCollection(item, library: library) { player.enqueue($0, position: position) }
     }
 
@@ -188,7 +191,7 @@ final class FoundationLibraryActions: ObservableObject {
         player: FoundationPlayer
     ) {
         guard active, !isQueueLoading else { return }
-        playbackPreparation = player.$selectedEntryID.dropFirst().sink { [weak self] _ in
+        playbackPreparation = player.sessionChanged.sink { [weak self] in
             self?.queueTask?.cancel()
         }
         loadCollection(item, library: library) { items in
