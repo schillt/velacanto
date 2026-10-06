@@ -103,8 +103,11 @@ final class FoundationCurrentArtwork: ObservableObject {
     }
 
     /// Reject oversized input before decoding; retain at most one bounded image and payload.
-    static func decode(_ data: Data, id: UUID = UUID()) -> Result? {
-        guard !data.isEmpty, data.count <= maximumBytes,
+    static func decode(_ data: Data, id: UUID = UUID(), maximumPixels: Int = requestedPixels)
+        -> Result?
+    {
+        guard maximumPixels > 0, maximumPixels <= requestedPixels,
+            !data.isEmpty, data.count <= maximumBytes,
             let source = CGImageSourceCreateWithData(
                 data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
             CGImageSourceGetCount(source) == 1,
@@ -117,7 +120,7 @@ final class FoundationCurrentArtwork: ObservableObject {
                 [
                     kCGImageSourceCreateThumbnailFromImageAlways: true,
                     kCGImageSourceCreateThumbnailWithTransform: true,
-                    kCGImageSourceThumbnailMaxPixelSize: requestedPixels,
+                    kCGImageSourceThumbnailMaxPixelSize: maximumPixels,
                     kCGImageSourceShouldCacheImmediately: true,
                 ] as CFDictionary)
         else { return nil }
