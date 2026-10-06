@@ -242,7 +242,7 @@ final class FoundationAppModel: ObservableObject {
         Task { [weak self] in
             let downloadsCleared: Bool
             if let retiringDownloads {
-                downloadsCleared = await retiringDownloads.clearAccount()
+                downloadsCleared = await retiringDownloads.clearAccount(waitForPlayback: true)
             } else {
                 downloadsCleared = FoundationDownloads.clearStoredDownloads()
             }

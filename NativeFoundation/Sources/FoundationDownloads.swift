@@ -59,6 +59,7 @@ final class FoundationDownloads: ObservableObject {
     private var isLive = true
     private var generation: UInt = 0
     private var pendingClear = false
+    private var leaseWaiters: [UUID: CheckedContinuation<Bool, Never>] = [:]
     private var storageUsable = true
 
     init(
@@ -522,6 +523,12 @@ final class FoundationDownloads: ObservableObject {
 
     private func releaseLease(_ id: String) {
         leases[id] = max(0, (leases[id] ?? 0) - 1)
+        if leases.values.allSatisfy({ $0 == 0 }), !leaseWaiters.isEmpty {
+            let waiters = leaseWaiters.values
+            leaseWaiters.removeAll()
+            for waiter in waiters { waiter.resume(returning: true) }
+            return
+        }
         if pendingClear, leases.values.allSatisfy({ $0 == 0 }) {
             do {
                 try FileManager.default.removeItem(at: directory)
@@ -653,13 +660,41 @@ final class FoundationDownloads: ObservableObject {
         }
     }
 
-    func clearAccount() async -> Bool {
+    /// Account teardown has already stopped playback; wait for its asynchronous lease releases.
+    private func waitForPlaybackLeases() async -> Bool {
+        let id = UUID()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                if Task.isCancelled {
+                    continuation.resume(returning: false)
+                } else if leases.values.allSatisfy({ $0 == 0 }) {
+                    continuation.resume(returning: true)
+                } else {
+                    leaseWaiters[id] = continuation
+                }
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                self?.leaseWaiters.removeValue(forKey: id)?.resume(returning: false)
+            }
+        }
+    }
+
+    func clearAccount(waitForPlayback: Bool = false) async -> Bool {
         invalidate()
         await worker?.value
         await syncTask?.value
         await inventoryTask?.value
         inventoryTask = nil
         isLoading = false
+        if waitForPlayback {
+            pendingClear = false
+            let released = await waitForPlaybackLeases()
+            if !released, leases.values.contains(where: { $0 > 0 }) {
+                pendingClear = true
+                return false
+            }
+        }
         guard leases.values.allSatisfy({ $0 == 0 }) else {
             pendingClear = true
             return false

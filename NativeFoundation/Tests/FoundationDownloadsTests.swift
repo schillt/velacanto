@@ -57,6 +57,77 @@ final class FoundationDownloadsTests: XCTestCase {
         _ = await manager.clearAccount()
     }
 
+    func testAccountCleanupWaitsForAllPlaybackLeasesBeforeReportingSuccess() async throws {
+        let track = item("track")
+        let directory = try root()
+        let account = FoundationDownloadStorage.directory(scope: "fixture", root: directory)
+        let manager = FoundationDownloads(
+            scope: "fixture", library: DownloadsLibrary(tracks: [track]), root: directory,
+            transfer: transfer, monitorConnectivity: false)
+        manager.updateConnectivity(isAllowed: true)
+        manager.download(track)
+        try await waitUntil { manager.isReady(track) }
+        let first = try await manager.playbackResource(for: track)
+        let second = try await manager.playbackResource(for: track)
+        var result: Bool?
+        let cleanup = Task { result = await manager.clearAccount(waitForPlayback: true) }
+        // The account is retired immediately, while native items still own both files leases.
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertNil(result)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: first.url.path))
+        await first.release()
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertNil(result)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: second.url.path))
+        await second.release()
+        await cleanup.value
+        XCTAssertEqual(result, true)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: account.path))
+        XCTAssertTrue(manager.owners.isEmpty)
+        XCTAssertEqual(manager.storageBytes, 0)
+    }
+
+    func testCancelledAccountCleanupWaitDoesNotHangOrDeleteLeasedAudio() async throws {
+        let track = item("track")
+        let directory = try root()
+        let account = FoundationDownloadStorage.directory(scope: "fixture", root: directory)
+        let manager = FoundationDownloads(
+            scope: "fixture", library: DownloadsLibrary(tracks: [track]), root: directory,
+            transfer: transfer, monitorConnectivity: false)
+        manager.updateConnectivity(isAllowed: true)
+        manager.download(track)
+        try await waitUntil { manager.isReady(track) }
+        let resource = try await manager.playbackResource(for: track)
+        let cleanup = Task { await manager.clearAccount(waitForPlayback: true) }
+        for _ in 0..<20 { await Task.yield() }
+        cleanup.cancel()
+        let cleared = await cleanup.value
+        XCTAssertFalse(cleared)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: resource.url.path))
+        await resource.release()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: account.path))
+    }
+
+    func testCancellationRacingFinalLeaseReleaseStillRemovesAccountFiles() async throws {
+        let track = item("track")
+        let directory = try root()
+        let account = FoundationDownloadStorage.directory(scope: "fixture", root: directory)
+        let manager = FoundationDownloads(
+            scope: "fixture", library: DownloadsLibrary(tracks: [track]), root: directory,
+            transfer: transfer, monitorConnectivity: false)
+        manager.updateConnectivity(isAllowed: true)
+        manager.download(track)
+        try await waitUntil { manager.isReady(track) }
+        let resource = try await manager.playbackResource(for: track)
+        let cleanup = Task { await manager.clearAccount(waitForPlayback: true) }
+        for _ in 0..<20 { await Task.yield() }
+        cleanup.cancel()
+        // Deliberately release before joining cleanup, unlike the retained-lease cancellation case.
+        await resource.release()
+        _ = await cleanup.value
+        XCTAssertFalse(FileManager.default.fileExists(atPath: account.path))
+    }
+
     func testCellularDefaultCancellationAndExplicitRetry() async throws {
         let track = item("track")
         let manager = FoundationDownloads(
