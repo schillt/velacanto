@@ -11,3 +11,35 @@ The opaque account directory in Application Support holds a versioned JSON manif
 Artwork is optional and is not persisted by this first download implementation. Offline artwork can remain a neutral placeholder. The existing current-artwork owner remains the sole shared owner; no cache, second downloader or prefetch is introduced. Storage totals include manifest/media/staging bytes.
 
 Focused automated evidence belongs to the exact candidate handoff. Physical offline playback/seek, lock/background/routes, signed file protection/backup exclusion, actual storage pressure and sign-out/relaunch remain separate acceptance checks. Compiler/test success does not establish those outcomes or distribution availability.
+
+## Repeatable simulator acceptance
+
+Use the existing authorized iOS simulator and run:
+
+```sh
+VELACANTO_IOS_SIMULATOR_DESTINATION='platform=iOS Simulator,id=<existing-simulator-id>' ./scripts/test-downloads-ui.sh
+```
+
+The dedicated `VelacantoDownloadsUI` scheme uses the `UITesting` configuration and
+`com.chameleonenterprise.velacanto.uitesting`, preserving the installed production
+app. It exercises the production download views, manager and native player with
+injected synthetic playlist entries and generated PCM audio. No server request or
+real credential store is used. Fixture entry requires DEBUG, the simulator, the
+isolated bundle identity and a UUID run identifier. Each test cleans only its own
+fixture directory, including after failures; relaunch within a test retains it.
+Release verification rejects fixture markers.
+
+The ordinary feature suite can also run in this isolated app by selecting the
+`VelacantoFoundation` scheme with `-configuration UITesting`. Use simulator signing
+(`CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=-`) for the disposable Keychain CRUD
+check. It uses a unique service and synthetic bytes, deleting the entry afterward;
+it never reads the application's session. The historical simulator sign-in failure
+was resolved by normal Xcode signing (see the archived UI-STEP-14 record), not by
+weakening Keychain accessibility. The generic build script's unsigned default is
+not evidence of successful live authentication.
+
+Simulator tests do not establish physical Data Protection. The physical-iOS test
+reports an explicit skip in Simulator, where protection attributes are unavailable;
+backup-exclusion and persistence assertions still run. Live server acceptance also
+requires a separately authorized QA account/session. Enter its credentials directly
+in the app; never put them in test launch arguments, fixtures, logs or source.

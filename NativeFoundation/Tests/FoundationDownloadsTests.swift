@@ -173,12 +173,8 @@ final class FoundationDownloadsTests: XCTestCase {
                     try url.resourceValues(forKeys: [.isExcludedFromBackupKey])
                         .isExcludedFromBackup,
                     true)
-                let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
-                #if os(iOS)
-                    XCTAssertEqual(
-                        attributes[.protectionKey] as? FileProtectionType,
-                        .completeUntilFirstUserAuthentication)
-                #else
+                #if os(macOS)
+                    let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
                     XCTAssertEqual(
                         (attributes[.posixPermissions] as? NSNumber)?.intValue,
                         url == account ? 0o700 : 0o600)
@@ -189,6 +185,40 @@ final class FoundationDownloadsTests: XCTestCase {
         let cleared = await manager.clearAccount()
         XCTAssertTrue(cleared)
     }
+
+    #if os(iOS)
+        func testPhysicalIOSStorageProtection() async throws {
+            #if targetEnvironment(simulator)
+                throw XCTSkip(
+                    "Simulator does not expose iOS Data Protection; requires a signed device run")
+            #else
+                let track = item("track")
+                let directory = try root()
+                let account = FoundationDownloadStorage.directory(scope: "fixture", root: directory)
+                let manager = FoundationDownloads(
+                    scope: "fixture", library: DownloadsLibrary(tracks: [track]), root: directory,
+                    transfer: transfer, monitorConnectivity: false)
+                manager.updateConnectivity(isAllowed: true)
+                manager.download(track)
+                try await waitUntil { manager.isReady(track) }
+                let resource = try await manager.playbackResource(for: track)
+                for cellular in [true, false] {
+                    manager.setAllowsCellular(cellular)
+                    for url in [
+                        account, account.appendingPathComponent("manifest.json"), resource.url,
+                    ] {
+                        let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+                        XCTAssertEqual(
+                            attributes[.protectionKey] as? FileProtectionType,
+                            .completeUntilFirstUserAuthentication)
+                    }
+                }
+                await resource.release()
+                let cleared = await manager.clearAccount()
+                XCTAssertTrue(cleared)
+            #endif
+        }
+    #endif
 
     func testAccountCleanupDoesNotRemoveAnotherScopesReadyFile() async throws {
         let track = item("track")

@@ -51,8 +51,21 @@ struct VelacantoFoundationApp: App {
 
     var body: some Scene {
         WindowGroup {
-            FoundationRootView(model: model)
-                .frame(minWidth: 320, minHeight: 480)
+            #if DEBUG && os(iOS) && targetEnvironment(simulator)
+                if FoundationDownloadsTestHarness.enabled {
+                    if ProcessInfo.processInfo.arguments.contains("-fixtureCleanup") {
+                        FoundationDownloadsTestCleanup()
+                    } else {
+                        FoundationDownloadsTestHarness()
+                    }
+                } else {
+                    FoundationRootView(model: model)
+                        .frame(minWidth: 320, minHeight: 480)
+                }
+            #else
+                FoundationRootView(model: model)
+                    .frame(minWidth: 320, minHeight: 480)
+            #endif
         }
     }
 }
