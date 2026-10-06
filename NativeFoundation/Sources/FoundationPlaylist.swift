@@ -72,6 +72,39 @@ enum FoundationPlaylistSnapshot {
 }
 
 enum FoundationPlaylistMutation {
+    static func create(name: String, library: any FoundationLibrary) async throws {
+        let requestedName = try FoundationPlaylistName.validated(name)
+        let created = try await library.createPlaylist(name: requestedName)
+        let confirmed = try await library.playlistPermissions(id: created.id)
+        try Task.checkCancellation()
+        guard confirmed.name == requestedName else { throw FoundationPlaylistError.changed }
+    }
+
+    static func delete(id: String, library: any FoundationLibrary) async throws {
+        try await library.deletePlaylist(id: id)
+        var offset = 0
+        var seen: Set<String> = []
+        for _ in 0..<100 {
+            try Task.checkCancellation()
+            let page = try await library.playlists(startIndex: offset)
+            try Task.checkCancellation()
+            guard page.items.count <= 100, seen.count + page.items.count <= 10_000 else {
+                throw FoundationPlaylistError.tooLarge
+            }
+            for item in page.items {
+                guard item.kind == .playlist, item.id != id, seen.insert(item.id).inserted else {
+                    throw FoundationPlaylistError.changed
+                }
+            }
+            guard let next = page.nextStartIndex else { return }
+            guard !page.items.isEmpty, next == offset + page.items.count else {
+                throw FoundationPlaylistError.changed
+            }
+            offset = next
+        }
+        throw FoundationPlaylistError.tooLarge
+    }
+
     static func remove(
         playlistID: String, entry: FoundationPlaylistEntry, library: any FoundationLibrary
     ) async throws {
@@ -220,8 +253,7 @@ private struct FoundationPlaylistCreate: View {
                 TextField("Playlist name", text: $name)
                 Button("Create") {
                     operation.run {
-                        _ = try await library.createPlaylist(name: name)
-                        _ = try await library.playlists(startIndex: 0)
+                        try await FoundationPlaylistMutation.create(name: name, library: library)
                     }
                 }.disabled(
                     operation.isPending || operation.succeeded
@@ -316,8 +348,8 @@ struct FoundationPlaylistEditor: View {
             ) {
                 Button("Delete Playlist", role: .destructive) {
                     operation.run {
-                        try await library.deletePlaylist(id: playlist.id)
-                        _ = try await library.playlists(startIndex: 0)
+                        try await FoundationPlaylistMutation.delete(
+                            id: playlist.id, library: library)
                         try Task.checkCancellation()
                         deleted = true
                         dismiss()

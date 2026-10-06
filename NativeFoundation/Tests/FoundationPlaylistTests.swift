@@ -75,6 +75,88 @@ final class FoundationPlaylistTests: XCTestCase {
         XCTAssertEqual(query?.filter { $0.name == "ids" }.compactMap(\.value), [trackID, trackID])
     }
 
+    func testCreateRejectsAcknowledgementWithoutAuthoritativePlaylist() async {
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            if request.httpMethod == "POST" {
+                return (
+                    Data("{\"Id\":\"00000000000000000000000000000001\"}".utf8),
+                    Self.response(request)
+                )
+            }
+            return (Data(), Self.response(request, status: 404))
+        }
+        do {
+            try await FoundationPlaylistMutation.create(name: "Fixture", library: library)
+            XCTFail("Acknowledgement alone must not confirm creation")
+        } catch { XCTAssertEqual(error as? FoundationLibraryError, .unavailable) }
+    }
+
+    func testCreateConfirmsReturnedIdentityAndRequestedName() async throws {
+        let recorder = PlaylistRecorder()
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            await recorder.append(request)
+            let json: String
+            if request.httpMethod == "POST" {
+                json = "{\"Id\":\"00000000000000000000000000000001\"}"
+            } else if request.url?.path.contains("/Users/") == true {
+                json = "{\"UserId\":\"00000000000000000000000000000003\",\"CanEdit\":true}"
+            } else {
+                json =
+                    "{\"Id\":\"00000000000000000000000000000001\",\"Type\":\"Playlist\",\"Name\":\"Fixture\",\"CanDelete\":true}"
+            }
+            return (Data(json.utf8), Self.response(request))
+        }
+        try await FoundationPlaylistMutation.create(name: " Fixture ", library: library)
+        let confirmedRequest = await recorder.last()
+        XCTAssertEqual(confirmedRequest?.url?.path, "/Items/\(playlistID)")
+        let count = await recorder.count
+        XCTAssertEqual(count, 3)
+    }
+
+    func testDeleteRejectsAcknowledgementWhenTargetRemainsOnLaterPage() async {
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            guard request.httpMethod == "GET" else { return (Data(), Self.response(request)) }
+            let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems
+            let later = query?.first(where: { $0.name == "startIndex" })?.value == "1"
+            let id = later ? "00000000000000000000000000000001" : "00000000000000000000000000000004"
+            let json =
+                "{\"Items\":[{\"Id\":\"\(id)\",\"Type\":\"Playlist\"}],\"StartIndex\":\(later ? 1 : 0),\"TotalRecordCount\":2}"
+            return (Data(json.utf8), Self.response(request))
+        }
+        do {
+            try await FoundationPlaylistMutation.delete(id: playlistID, library: library)
+            XCTFail("Acknowledgement alone must not confirm deletion")
+        } catch { XCTAssertTrue(error is FoundationPlaylistError) }
+    }
+
+    func testDeleteCompletesOnlyAfterFullEnumerationProvesAbsence() async throws {
+        let recorder = PlaylistRecorder()
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            await recorder.append(request)
+            guard request.httpMethod == "GET" else { return (Data(), Self.response(request)) }
+            let offset =
+                URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems?
+                .first(where: { $0.name == "startIndex" })?.value ?? "0"
+            let id =
+                offset == "0"
+                ? "00000000000000000000000000000004" : "00000000000000000000000000000005"
+            return (
+                Data(
+                    """
+                    {"Items":[{"Id":"\(id)","Type":"Playlist"}],"StartIndex":\(offset),"TotalRecordCount":2}
+                    """.utf8), Self.response(request)
+            )
+        }
+        try await FoundationPlaylistMutation.delete(id: playlistID, library: library)
+        let count = await recorder.count
+        XCTAssertEqual(count, 3)
+        let last = await recorder.last()
+        XCTAssertEqual(
+            URLComponents(url: try XCTUnwrap(last?.url), resolvingAgainstBaseURL: false)?
+                .queryItems?
+                .first(where: { $0.name == "startIndex" })?.value, "1")
+    }
+
     func testPermissionFailureHasSafeCategoryAndDoesNotRetry() async {
         let recorder = PlaylistRecorder()
         let library = FoundationJellyfinLibrary(session: session) { request in
