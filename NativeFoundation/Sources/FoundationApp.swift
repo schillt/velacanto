@@ -7,14 +7,21 @@ import SwiftUI
 enum FoundationSignInPolicy {
     static func authenticate(
         clearPins: () -> Bool, clearPlaybackSessions: () -> Bool = { true },
+        clearDownloads: () -> Bool = { true },
         signIn: @MainActor () async throws -> FoundationSession
     ) async throws -> FoundationSession {
         guard clearPins() else { throw FoundationPinStorageError.couldNotRemovePins }
         guard clearPlaybackSessions() else {
             throw FoundationPlaybackSessionStore.StorageError.cleanupFailed
         }
+        guard clearDownloads() else { throw FoundationDownloadAccountError.cleanupFailed }
         return try await signIn()
     }
+}
+
+enum FoundationDownloadAccountError: LocalizedError {
+    case cleanupFailed
+    var errorDescription: String? { "Downloaded music could not be removed from this device." }
 }
 
 @MainActor
@@ -56,6 +63,8 @@ final class FoundationAppModel: ObservableObject {
     @Published private(set) var player: FoundationPlayer?
     @Published private(set) var actions: FoundationLibraryActions?
     @Published private(set) var currentArtwork: FoundationCurrentArtwork?
+    @Published private(set) var downloads: FoundationDownloads?
+    @Published private(set) var isCleaningDownloads = false
     @Published var credentialError: String?
     @Published var signOutNotice: String?
     private var playbackSessionSubscription: AnyCancellable?
@@ -65,6 +74,7 @@ final class FoundationAppModel: ObservableObject {
     private var mediaSession: MediaSession<FoundationNowPlaying>?
 
     isolated deinit {
+        downloads?.invalidate()
         nowPlaying?.invalidate()
         currentArtwork?.invalidate()
     }
@@ -75,8 +85,11 @@ final class FoundationAppModel: ObservableObject {
         #if DEBUG
             guard !ProcessInfo.processInfo.arguments.contains("-foundationTesting") else { return }
         #endif
+        var credentialReadCompleted = false
         do {
-            if let session = try FoundationCredentials.load() {
+            let savedSession = try FoundationCredentials.load()
+            credentialReadCompleted = true
+            if let session = savedSession {
                 let scope = Self.sourceScope(for: session)
                 if !FoundationPinStorage.removeStoredPins(retaining: scope) {
                     credentialError = "Older saved pins could not be removed from this device."
@@ -84,6 +97,10 @@ final class FoundationAppModel: ObservableObject {
                 if !FoundationPlaybackSessionStore.clear(retaining: scope) {
                     credentialError =
                         "Older playback sessions could not be removed from this device."
+                }
+                if !FoundationDownloads.clearStoredDownloads(retaining: scope) {
+                    credentialError =
+                        "Older downloaded music could not be removed from this device."
                 }
                 open(session, sourceScope: scope)
             } else if !FoundationPinStorage.removeStoredPins() {
@@ -99,6 +116,9 @@ final class FoundationAppModel: ObservableObject {
         }
         if library == nil, !FoundationPlaybackSessionStore.clear() {
             credentialError = "Saved playback sessions could not be removed from this device."
+        }
+        if credentialReadCompleted, library == nil, !FoundationDownloads.clearStoredDownloads() {
+            credentialError = FoundationDownloadAccountError.cleanupFailed.errorDescription
         }
         #if DEBUG
             FoundationJournal.shared.record("app phase=opened")
@@ -128,12 +148,16 @@ final class FoundationAppModel: ObservableObject {
         nowPlaying = nil
         actions?.invalidate()
         player?.stop()
+        downloads?.invalidate()
         let library = FoundationJellyfinLibrary(session: session)
         self.actions = FoundationLibraryActions(sourceScope: sourceScope) { item, favorite in
             try await library.setFavorite(for: item, isFavorite: favorite)
         }
         self.library = library
-        self.player = FoundationPlayer(library: library)
+        let downloads = FoundationDownloads(scope: sourceScope, library: library)
+        self.downloads = downloads
+        self.player = FoundationPlayer(
+            library: library, resolveResource: { try await downloads.playbackResource(for: $0) })
         if let player = self.player {
             let store = FoundationPlaybackSessionStore(scope: sourceScope)
             do {
@@ -186,6 +210,10 @@ final class FoundationAppModel: ObservableObject {
                 + "Jellyfin may have ended the session."
             return
         }
+        let retiringDownloads = downloads
+        retiringDownloads?.invalidate()
+        downloads = nil
+        isCleaningDownloads = true
         playbackSessionSubscription = nil
         let playbackSessionsCleared = FoundationPlaybackSessionStore.clear()
         actions?.invalidate()
@@ -199,8 +227,19 @@ final class FoundationAppModel: ObservableObject {
         library = nil
         credentialError = nil
         Task { [weak self] in
+            let downloadsCleared: Bool
+            if let retiringDownloads {
+                downloadsCleared = await retiringDownloads.clearAccount()
+            } else {
+                downloadsCleared = FoundationDownloads.clearStoredDownloads()
+            }
+            guard let self, self.accountEpoch == epoch else { return }
+            self.isCleaningDownloads = false
+            if !downloadsCleared {
+                self.credentialError = FoundationDownloadAccountError.cleanupFailed.errorDescription
+            }
             let serverAccepted = await attempt.revocation.value
-            guard let self, self.accountEpoch == epoch, self.library == nil else { return }
+            guard self.accountEpoch == epoch, self.library == nil else { return }
             let pinResult: String
             if attempt.pinsCleared {
                 pinResult = "Saved pins were removed from this device."
@@ -211,13 +250,17 @@ final class FoundationAppModel: ObservableObject {
                 playbackSessionsCleared
                 ? "Saved playback sessions were removed."
                 : "Saved playback sessions could not be removed from this device."
+            let downloadResult =
+                downloadsCleared
+                ? "Downloaded music was removed."
+                : "Downloaded music could not be removed from this device."
             if serverAccepted {
                 self.signOutNotice =
-                    "Signed out here. \(pinResult) \(sessionResult) "
+                    "Signed out here. \(pinResult) \(sessionResult) \(downloadResult) "
                     + "Jellyfin accepted the sign-out request."
             } else {
                 self.signOutNotice =
-                    "Signed out here. \(pinResult) \(sessionResult) "
+                    "Signed out here. \(pinResult) \(sessionResult) \(downloadResult) "
                     + "Jellyfin sign-out could not be confirmed."
             }
         }
@@ -240,6 +283,7 @@ final class FoundationAppModel: ObservableObject {
 
 struct FoundationRootView: View {
     @ObservedObject var model: FoundationAppModel
+    @Environment(\.scenePhase) private var scenePhase
 
     var accountAlertPresented: Binding<Bool> {
         Binding(
@@ -251,17 +295,23 @@ struct FoundationRootView: View {
     var body: some View {
         Group {
             if let library = model.library, let player = model.player, let actions = model.actions,
-                let artwork = model.currentArtwork
+                let artwork = model.currentArtwork, let downloads = model.downloads
             {
                 FoundationLibraryView(library: library, player: player, signOut: model.signOut)
                     .environmentObject(actions)
                     .environmentObject(artwork)
+                    .environmentObject(downloads)
                     .id(ObjectIdentifier(actions))
+            } else if model.isCleaningDownloads {
+                ProgressView("Removing downloaded music…")
             } else {
                 FoundationSignInView(model: model)
             }
         }
         .task { model.restore() }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { model.downloads?.reconcilePlaylists() }
+        }
         .alert(
             model.signOutNotice == nil ? "Account" : "Sign-out",
             isPresented: accountAlertPresented
@@ -331,6 +381,8 @@ private struct FoundationSignInView: View {
                         FoundationPinStorage.removeStoredPins()
                     } clearPlaybackSessions: {
                         FoundationPlaybackSessionStore.clear()
+                    } clearDownloads: {
+                        FoundationDownloads.clearStoredDownloads()
                     } signIn: {
                         try await FoundationJellyfinLibrary.signIn(
                             serverURL: url, username: username, password: password)
@@ -343,7 +395,9 @@ private struct FoundationSignInView: View {
                 } catch {
                     guard !Task.isCancelled, signingIn, attempt == owner else { return }
                     signingIn = false
-                    if let pinError = error as? FoundationPinStorageError {
+                    if let downloadError = error as? FoundationDownloadAccountError {
+                        errorMessage = downloadError.errorDescription
+                    } else if let pinError = error as? FoundationPinStorageError {
                         errorMessage = pinError.errorDescription
                     } else if let storageError = error
                         as? FoundationPlaybackSessionStore.StorageError

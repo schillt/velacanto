@@ -12,6 +12,7 @@ struct FoundationItemMenu: View {
     var player: FoundationPlayer?
     var navigate: ((FoundationItem) -> Void)?
     var currentPageKind: FoundationItem.Kind?
+    @EnvironmentObject private var downloads: FoundationDownloads
     @Environment(\.foundationAddToPlaylist) private var addToPlaylist
 
     var body: some View {
@@ -42,6 +43,9 @@ struct FoundationItemMenu: View {
         }
         if item.kind == .track || item.kind == .album, let addToPlaylist {
             Button("Add to Playlist", systemImage: "music.note.list") { addToPlaylist(item) }
+        }
+        if item.kind == .track || item.kind == .album || item.kind == .playlist {
+            Button("Download", systemImage: "arrow.down.circle") { downloads.download(item) }
         }
         if item.kind != .genre {
             let favorite = actions.favoriteState(for: item, initial: initialFavorite)

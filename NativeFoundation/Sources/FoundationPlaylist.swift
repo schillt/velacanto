@@ -377,6 +377,7 @@ private struct FoundationPlaylistCreate: View {
 }
 
 struct FoundationPlaylistEditor: View {
+    @EnvironmentObject private var downloads: FoundationDownloads
     let playlist: FoundationItem
     var onDeleted: () -> Void = {}
     var onRenamed: (String) -> Void = { _ in }
@@ -408,6 +409,7 @@ struct FoundationPlaylistEditor: View {
                             guard name == requestedName else {
                                 throw FoundationLibraryError.invalidResponse
                             }
+                            downloads.reconcilePlaylists()
                             onRenamed(name)
                         }
                     }.disabled(
@@ -432,6 +434,7 @@ struct FoundationPlaylistEditor: View {
                                 operation.run {
                                     try await FoundationPlaylistMutation.remove(
                                         playlistID: playlist.id, entry: entry, library: library)
+                                    downloads.reconcilePlaylists()
                                     try await refresh()
                                 }
                             }.disabled(permissions?.canEdit != true || !membershipEditable)
@@ -461,6 +464,7 @@ struct FoundationPlaylistEditor: View {
                         try await FoundationPlaylistMutation.delete(
                             id: playlist.id, library: library)
                         try Task.checkCancellation()
+                        downloads.reconcilePlaylists()
                         deleted = true
                         dismiss()
                         onDeleted()

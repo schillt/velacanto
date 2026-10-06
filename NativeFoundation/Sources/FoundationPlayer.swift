@@ -2,6 +2,17 @@ import AVFoundation
 import Combine
 import Foundation
 
+/// A resolved URL and its account-owned file lease. Remote resources use the no-op release.
+struct FoundationPlaybackResource: Sendable {
+    let url: URL
+    let release: @Sendable () async -> Void
+
+    init(url: URL, release: @escaping @Sendable () async -> Void = {}) {
+        self.url = url
+        self.release = release
+    }
+}
+
 struct FoundationQueueEntry: Identifiable, Equatable, Sendable {
     let id: UUID
 
@@ -105,7 +116,8 @@ final class FoundationPlayer: ObservableObject {
         }
     #endif
     private var generation: UInt64 = 0
-    private let resolve: @Sendable (FoundationItem) async throws -> URL
+    private let resolve: @Sendable (FoundationItem) async throws -> FoundationPlaybackResource
+    private var installedResource: FoundationPlaybackResource?
     private let makeItem: (URL) -> AVPlayerItem
     private let activateSession: () async throws -> Void
     private let deactivateSession: () async throws -> Void
@@ -125,13 +137,19 @@ final class FoundationPlayer: ObservableObject {
 
     convenience init(
         library: any FoundationLibrary,
+        resolveResource: (@Sendable (FoundationItem) async throws -> FoundationPlaybackResource)? =
+            nil,
         makeItem: @escaping (URL) -> AVPlayerItem = { AVPlayerItem(url: $0) }
     ) {
-        self.init(resolve: { try await library.playbackURL(for: $0) }, makeItem: makeItem)
+        self.init(
+            resolve: { try await library.playbackURL(for: $0) },
+            resolveResource: resolveResource, makeItem: makeItem)
     }
 
     init(
         resolve: @escaping @Sendable (FoundationItem) async throws -> URL,
+        resolveResource: (@Sendable (FoundationItem) async throws -> FoundationPlaybackResource)? =
+            nil,
         makeItem: @escaping (URL) -> AVPlayerItem = { AVPlayerItem(url: $0) },
         activateSession: @escaping () async throws -> Void = {
             #if os(iOS)
@@ -152,7 +170,7 @@ final class FoundationPlayer: ObservableObject {
         },
         startPlayback: @escaping (AVPlayer) -> Void = { $0.play() }
     ) {
-        self.resolve = resolve
+        self.resolve = resolveResource ?? { FoundationPlaybackResource(url: try await resolve($0)) }
         self.makeItem = makeItem
         self.activateSession = activateSession
         self.startPlayback = startPlayback
@@ -272,6 +290,7 @@ final class FoundationPlayer: ObservableObject {
         nativePlayer.pause()
         nativePlayer.currentItem?.asset.cancelLoading()
         nativePlayer.replaceCurrentItem(with: nil)
+        if let resource = installedResource { Task { await resource.release() } }
     }
 
     func setQueue(_ items: [FoundationItem], selectedIndex: Int) {
@@ -335,10 +354,16 @@ final class FoundationPlayer: ObservableObject {
         selectionTask = Task { [weak self] in
             do {
                 try Task.checkCancellation()
-                let url = try await resolve(entry.item)
-                try Task.checkCancellation()
-                guard let self, self.generation == selectionGeneration else { return }
-                let item = self.makeItem(url)
+                let resource = try await resolve(entry.item)
+                guard !Task.isCancelled, let self, self.generation == selectionGeneration else {
+                    await resource.release()
+                    return
+                }
+                // No suspension between accepting the lease and installing its native item.
+                // The old lease remains alive throughout a natural handoff.
+                let previousResource = self.installedResource
+                self.installedResource = resource
+                let item = self.makeItem(resource.url)
                 self.itemObservation = item.observe(\.status, options: [.new]) { [weak self] _, _ in
                     Task { @MainActor [weak self] in self?.refreshNativeState() }
                 }
@@ -346,6 +371,7 @@ final class FoundationPlayer: ObservableObject {
                 self.nativePlayer.replaceCurrentItem(with: item)
                 previousItem?.cancelPendingSeeks()
                 previousItem?.asset.cancelLoading()
+                if let previousResource { Task { await previousResource.release() } }
                 #if DEBUG
                     self.recordSnapshot("item.installed")
                 #endif
@@ -598,6 +624,9 @@ final class FoundationPlayer: ObservableObject {
         nativePlayer.replaceCurrentItem(with: nil)
         oldItem?.cancelPendingSeeks()
         oldItem?.asset.cancelLoading()
+        let resource = installedResource
+        installedResource = nil
+        if let resource { Task { await resource.release() } }
     }
 
     private func refreshNativeState() {
@@ -677,6 +706,10 @@ final class FoundationPlayer: ObservableObject {
         wantsPlayback = false
         nativePlayer.pause()
         state = .failed
+        if category == .nativeItem || category == .nativePlayer || category == .nativeEnd {
+            itemObservation = nil
+            releaseNativeItem()
+        }
         errorMessage = "Playback failed. Select a track to try again."
         #if DEBUG
             let errorKind: String

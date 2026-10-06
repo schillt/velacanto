@@ -10,6 +10,147 @@ final class FoundationPlayerTests: XCTestCase {
     private let track = FoundationItem(
         id: "synthetic", title: "", subtitle: "", kind: .track, duration: nil)
 
+    func testResourceLeaseSurvivesNaturalHandoffAndReleasesOnceAfterReplacementAndStop()
+        async throws
+    {
+        let resources = PlaybackResourceProbe()
+        let player = FoundationPlayer(
+            resolve: { _ in throw URLError(.unknown) },
+            resolveResource: { _ in try await resources.resolve() },
+            makeItem: { _ in AVPlayerItem(asset: AVMutableComposition()) },
+            activateSession: {}, deactivateSession: {}, startPlayback: { _ in })
+        player.setQueue([track, track], selectedIndex: 0)
+        let first = player.selectionTask
+        try await resources.waitForCalls(1)
+        await resources.succeed(0)
+        await first?.value
+        await player.playTask?.value
+        let oldItem = try XCTUnwrap(player.nativePlayer.currentItem)
+        player.didReachEnd(oldItem)
+        let successor = player.selectionTask
+        try await resources.waitForCalls(2)
+        XCTAssertTrue(player.nativePlayer.currentItem === oldItem)
+        let retained = await resources.releases
+        XCTAssertEqual(retained, [])
+        await resources.succeed(1)
+        await successor?.value
+        await player.playTask?.value
+        try await resources.waitForReleases(1)
+        XCTAssertFalse(player.nativePlayer.currentItem === oldItem)
+        player.stop()
+        player.stop()
+        try await resources.waitForReleases(2)
+        let released = await resources.releases
+        XCTAssertEqual(released.sorted(), [0, 1])
+        XCTAssertNil(player.nativePlayer.currentItem)
+    }
+
+    func testCancelledLateResourceCannotReplaceSelectionAndReleasesItsLease() async throws {
+        let resources = PlaybackResourceProbe()
+        let player = FoundationPlayer(
+            resolve: { _ in throw URLError(.unknown) },
+            resolveResource: { _ in try await resources.resolve() },
+            makeItem: { _ in AVPlayerItem(asset: AVMutableComposition()) },
+            activateSession: {}, deactivateSession: {}, startPlayback: { _ in })
+        player.setQueue([track, track], selectedIndex: 0)
+        let obsolete = player.selectionTask
+        try await resources.waitForCalls(1)
+        player.next()
+        let current = player.selectionTask
+        try await resources.waitForCalls(2)
+        await resources.succeed(1)
+        await current?.value
+        await player.playTask?.value
+        let item = player.nativePlayer.currentItem
+        await resources.succeed(0)
+        await obsolete?.value
+        try await resources.waitForReleases(1)
+        XCTAssertTrue(player.nativePlayer.currentItem === item)
+        let released = await resources.releases
+        XCTAssertEqual(released, [0])
+        player.stop()
+        try await resources.waitForReleases(2)
+        let allReleased = await resources.releases
+        XCTAssertEqual(allReleased.sorted(), [0, 1])
+    }
+
+    func testTeardownReleasesInstalledAndLateResolvingResources() async throws {
+        let resources = PlaybackResourceProbe()
+        var player: FoundationPlayer? = FoundationPlayer(
+            resolve: { _ in throw URLError(.unknown) },
+            resolveResource: { _ in try await resources.resolve() },
+            makeItem: { _ in AVPlayerItem(asset: AVMutableComposition()) },
+            activateSession: {}, deactivateSession: {}, startPlayback: { _ in })
+        player?.setQueue([track, track], selectedIndex: 0)
+        let first = player?.selectionTask
+        try await resources.waitForCalls(1)
+        await resources.succeed(0)
+        await first?.value
+        await player?.playTask?.value
+        player?.didReachEnd(try XCTUnwrap(player?.nativePlayer.currentItem))
+        let pending = player?.selectionTask
+        try await resources.waitForCalls(2)
+        weak let retired = player
+        player = nil
+        XCTAssertNil(retired)
+        try await resources.waitForReleases(1)
+        await resources.succeed(1)
+        await pending?.value
+        try await resources.waitForReleases(2)
+        let released = await resources.releases
+        XCTAssertEqual(released.sorted(), [0, 1])
+    }
+
+    func testNativeFailureDetachesItemBeforeReleasingResource() async throws {
+        let resources = PlaybackResourceProbe()
+        let player = FoundationPlayer(
+            resolve: { _ in throw URLError(.unknown) },
+            resolveResource: { _ in try await resources.resolve() },
+            makeItem: { _ in AVPlayerItem(asset: AVMutableComposition()) },
+            activateSession: {}, deactivateSession: {}, startPlayback: { _ in })
+        player.setQueue([track], selectedIndex: 0)
+        let selection = player.selectionTask
+        try await resources.waitForCalls(1)
+        await resources.succeed(0)
+        await selection?.value
+        await player.playTask?.value
+        let item = try XCTUnwrap(player.nativePlayer.currentItem)
+        NotificationCenter.default.post(
+            name: AVPlayerItem.failedToPlayToEndTimeNotification, object: item)
+        try await resources.waitForReleases(1)
+        XCTAssertNil(player.nativePlayer.currentItem)
+        XCTAssertEqual(player.state, .failed)
+        player.stop()
+        let released = await resources.releases
+        XCTAssertEqual(released, [0])
+    }
+
+    func testFailedNaturalSuccessorReleasesRetainedResource() async throws {
+        let resources = PlaybackResourceProbe()
+        let player = FoundationPlayer(
+            resolve: { _ in throw URLError(.unknown) },
+            resolveResource: { _ in try await resources.resolve() },
+            makeItem: { _ in AVPlayerItem(asset: AVMutableComposition()) },
+            activateSession: {}, deactivateSession: {}, startPlayback: { _ in })
+        player.setQueue([track, track], selectedIndex: 0)
+        let first = player.selectionTask
+        try await resources.waitForCalls(1)
+        await resources.succeed(0)
+        await first?.value
+        await player.playTask?.value
+        player.didReachEnd(try XCTUnwrap(player.nativePlayer.currentItem))
+        let successor = player.selectionTask
+        try await resources.waitForCalls(2)
+        await resources.fail(1)
+        await successor?.value
+        try await resources.waitForReleases(1)
+        XCTAssertEqual(player.state, .failed)
+        XCTAssertNil(player.nativePlayer.currentItem)
+        player.stop()
+        let released = await resources.releases
+        XCTAssertEqual(released, [0])
+    }
+
     #if os(macOS)
         func testPlayerVolumeRejectsNonfiniteClampsAndDoesNotTouchPlaybackOwnership() async throws {
             let resolution = PlayerResolutionProbe()
@@ -1281,5 +1422,49 @@ enum FoundationTestTones {
             append(Int16(sin(phase) * fade * 0.08 * Double(Int16.max)))
         }
         return data
+    }
+}
+
+/// A deliberately cancellation-insensitive resolver exercises late lease ownership.
+private actor PlaybackResourceProbe {
+    private var calls = 0
+    private var pending: [Int: CheckedContinuation<FoundationPlaybackResource, Error>] = [:]
+    private(set) var releases: [Int] = []
+
+    func resolve() async throws -> FoundationPlaybackResource {
+        let index = calls
+        calls += 1
+        return try await withCheckedThrowingContinuation { pending[index] = $0 }
+    }
+
+    func succeed(_ index: Int) {
+        pending.removeValue(forKey: index)?.resume(
+            returning: FoundationPlaybackResource(url: URL(fileURLWithPath: "/synthetic")) {
+                await self.recordRelease(index)
+            })
+    }
+
+    func fail(_ index: Int) {
+        pending.removeValue(forKey: index)?.resume(throwing: URLError(.cannotOpenFile))
+    }
+
+    private func recordRelease(_ index: Int) { releases.append(index) }
+
+    func waitForCalls(_ count: Int) async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(5))
+        while calls < count {
+            guard clock.now < deadline else { throw URLError(.timedOut) }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+    }
+
+    func waitForReleases(_ count: Int) async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(5))
+        while releases.count < count {
+            guard clock.now < deadline else { throw URLError(.timedOut) }
+            try await Task.sleep(for: .milliseconds(10))
+        }
     }
 }

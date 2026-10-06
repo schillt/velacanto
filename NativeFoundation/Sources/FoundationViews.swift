@@ -30,6 +30,7 @@ struct FoundationLibraryView: View {
     @State private var displayedEntryID: UUID?
     @State private var displayedState: FoundationPlayer.State = .idle
     @EnvironmentObject private var currentArtwork: FoundationCurrentArtwork
+    @EnvironmentObject private var downloads: FoundationDownloads
     @EnvironmentObject private var actions: FoundationLibraryActions
     @StateObject private var albums = FoundationBrowseModel()
     @StateObject private var artists = FoundationBrowseModel()
@@ -72,6 +73,9 @@ struct FoundationLibraryView: View {
                     )
                 }
             #endif
+            .onChange(of: playlistChanges.revisions) { _, _ in
+                downloads.reconcilePlaylists()
+            }
             .onChange(of: actions.favoriteRevision) { _, _ in
                 favorites.request(.refresh)
                 homeFavorites.request(.refresh)
@@ -253,6 +257,13 @@ struct FoundationLibraryView: View {
                 }
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Your Music").font(.title2.bold()).padding(.bottom, 4)
+                    NavigationLink {
+                        FoundationDownloadsView(player: player)
+                    } label: {
+                        categoryRow(
+                            "On Device", subtitle: "Downloads and storage",
+                            symbol: "arrow.down.circle")
+                    }
                     NavigationLink {
                         FoundationCatalogView(
                             title: "Albums", model: albums, library: library, player: player,

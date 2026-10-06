@@ -36,6 +36,7 @@ struct FoundationSession: Codable, Sendable {
 }
 
 protocol FoundationLibrary: Sendable {
+    func downloadSource(for item: FoundationItem) async throws -> FoundationDownloadSource
     var supportsPlaylistManagement: Bool { get }
     var supportsRepeatedPlaylistTracks: Bool { get }
     func playlistPermissions(id: String) async throws -> FoundationPlaylistPermissions
@@ -80,6 +81,9 @@ protocol FoundationLibrary: Sendable {
 }
 
 extension FoundationLibrary {
+    func downloadSource(for item: FoundationItem) async throws -> FoundationDownloadSource {
+        throw FoundationDownloadError.unsupported
+    }
     var supportsPlaylistManagement: Bool { false }
     var supportsRepeatedPlaylistTracks: Bool { false }
     func playlistPermissions(id: String) async throws -> FoundationPlaylistPermissions {
@@ -680,6 +684,40 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
         } catch {
             throw FoundationLibraryError.category(error)
         }
+    }
+
+    func downloadSource(for item: FoundationItem) async throws -> FoundationDownloadSource {
+        guard item.kind == .track, Self.validID(item.id) else {
+            throw FoundationDownloadError.unsupported
+        }
+        let metadata = try await send(Paths.getItem(itemID: item.id, userID: session.userID))
+        try Task.checkCancellation()
+        guard metadata.id == item.id, metadata.type == .audio, metadata.canDownload == true,
+            let sources = metadata.mediaSources, sources.count == 1, let source = sources.first,
+            source.protocol == .file, source.isRemote != true, source.isInfiniteStream != true,
+            source.requiresOpening != true,
+            let container = source.container?.lowercased(),
+            let streams = source.mediaStreams ?? metadata.mediaStreams,
+            let audio = streams.first(where: { $0.type == .audio }),
+            let codec = audio.codec?.lowercased(),
+            FoundationDownloadTransport.supports(container: container, codec: codec),
+            let size = source.size, size > 0
+        else { throw FoundationDownloadError.unsupported }
+        let safe = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+        guard !session.accessToken.isEmpty,
+            session.accessToken.unicodeScalars.allSatisfy({ safe.contains($0) }),
+            session.deviceID.unicodeScalars.allSatisfy({ safe.contains($0) })
+        else { throw FoundationDownloadError.permission }
+        var request = URLRequest(
+            url: try Self.url(Paths.getDownload(itemID: item.id), base: session.serverURL))
+        request.httpMethod = "GET"
+        request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
+        request.setValue(
+            "MediaBrowser Client=\"Velacanto Native\", Device=\"Apple\", DeviceId=\"\(session.deviceID)\", Version=\"1\", Token=\"\(session.accessToken)\"",
+            forHTTPHeaderField: "Authorization")
+        return FoundationDownloadSource(
+            request: request, fileExtension: container == "mp4" ? "m4a" : container,
+            expectedBytes: Int64(size))
     }
 
     func playbackURL(for item: FoundationItem) async throws -> URL {
