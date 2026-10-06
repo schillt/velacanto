@@ -335,6 +335,58 @@ final class FoundationPlaylistTests: XCTestCase {
         XCTAssertEqual(count, 3)
     }
 
+    private var album: FoundationItem {
+        FoundationItem(
+            id: "00000000000000000000000000000005", title: "Fixture Album", subtitle: "",
+            kind: .album, duration: nil)
+    }
+
+    func testAlbumAdditionLoadsAllPagesSkipsPresentAndBatchesInOrder() async throws {
+        let fixture = PlaylistAlbumFixture(count: 102, existing: [1])
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            try await fixture.response(request)
+        }
+        let result = try await FoundationPlaylistMutation.add(
+            playlistID: playlistID, source: album, library: library)
+        XCTAssertEqual(result.added, 101)
+        XCTAssertEqual(result.alreadyPresent, 1)
+        let batches = await fixture.batches
+        XCTAssertEqual(batches.map(\.count), [100, 1])
+        XCTAssertEqual(batches.flatMap { $0 }, (2...102).map(PlaylistAlbumFixture.id))
+    }
+
+    func testAlbumPartialFailureIsTruthfulAndDoesNotRetry() async {
+        let fixture = PlaylistAlbumFixture(count: 101, failBatch: 2)
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            try await fixture.response(request)
+        }
+        do {
+            _ = try await FoundationPlaylistMutation.add(
+                playlistID: playlistID, source: album, library: library)
+            XCTFail("Partial addition must not claim completion")
+        } catch {
+            XCTAssertEqual(
+                (error as? FoundationPlaylistError)?.errorDescription,
+                FoundationPlaylistError.partialAddition.errorDescription)
+        }
+        let batches = await fixture.batches
+        XCTAssertEqual(batches.map(\.count), [100, 1])
+    }
+
+    func testAlbumCancellationDuringExpansionPreventsMutation() async {
+        let fixture = PlaylistAlbumFixture(count: 101, cancelExpansion: true)
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            try await fixture.response(request)
+        }
+        do {
+            _ = try await FoundationPlaylistMutation.add(
+                playlistID: playlistID, source: album, library: library)
+            XCTFail("Cancelled expansion must not write")
+        } catch { XCTAssertEqual(error as? FoundationLibraryError, .cancelled) }
+        let batches = await fixture.batches
+        XCTAssertTrue(batches.isEmpty)
+    }
+
     @MainActor
     func testCancelledLateCompletionCannotReplaceNewOperationState() async {
         let operation = FoundationPlaylistOperation()
@@ -394,5 +446,66 @@ private actor PlaylistRemovalFixture {
             {"Items":[{"Id":"00000000000000000000000000000002","Type":"Audio","PlaylistItemId":"\(entry)"}],
             "StartIndex":\(offset),"TotalRecordCount":\(total)}
             """.utf8)
+    }
+}
+
+private actor PlaylistAlbumFixture {
+    let count: Int
+    let failBatch: Int?
+    let cancelExpansion: Bool
+    private var members: [String]
+    private(set) var batches: [[String]] = []
+
+    init(count: Int, existing: [Int] = [], failBatch: Int? = nil, cancelExpansion: Bool = false) {
+        self.count = count
+        self.failBatch = failBatch
+        self.cancelExpansion = cancelExpansion
+        members = existing.map(Self.id)
+    }
+
+    nonisolated static func id(_ number: Int) -> String {
+        String(format: "%032x", number + 100)
+    }
+
+    func response(_ request: URLRequest) throws -> (Data, HTTPURLResponse) {
+        let url = request.url!
+        let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        let offset = Int(query.first(where: { $0.name == "startIndex" })?.value ?? "0") ?? 0
+        let json: String
+        if url.path.contains("/Users/"), url.path.hasPrefix("/Playlists") {
+            json = "{\"UserId\":\"00000000000000000000000000000003\",\"CanEdit\":true}"
+        } else if url.path == "/Items/00000000000000000000000000000001" {
+            json =
+                "{\"Id\":\"00000000000000000000000000000001\",\"Type\":\"Playlist\",\"Name\":\"Fixture\"}"
+        } else if request.httpMethod == "POST" {
+            let ids = query.filter { $0.name == "ids" }.compactMap(\.value)
+            batches.append(ids)
+            if batches.count == failBatch { throw URLError(.networkConnectionLost) }
+            members.append(contentsOf: ids)
+            json = ""
+        } else {
+            let isAlbum = query.contains { $0.name == "parentId" }
+            if isAlbum, offset > 0, cancelExpansion { throw CancellationError() }
+            let ids = isAlbum ? (1...count).map(Self.id) : members
+            let page = Array(ids.dropFirst(offset).prefix(100))
+            let rows = page.map { id in
+                var row = ["Id": id, "Type": "Audio"]
+                if !isAlbum { row["PlaylistItemId"] = id }
+                return row
+            }
+            let object: [String: Any] = [
+                "Items": rows, "StartIndex": offset, "TotalRecordCount": ids.count,
+            ]
+            let data = try JSONSerialization.data(withJSONObject: object)
+            return (
+                data,
+                HTTPURLResponse(
+                    url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil)!
+            )
+        }
+        return (
+            Data(json.utf8),
+            HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil)!
+        )
     }
 }

@@ -52,6 +52,7 @@ struct FoundationLibraryView: View {
     @Namespace private var playerTransition
     @State private var showingPlayer = false
     @State private var showingSettings = false
+    @State private var playlistSource: FoundationItem?
     @State private var profileName = ""
     @State private var profileImage: Image?
     @State private var showingFavorites = false
@@ -81,6 +82,16 @@ struct FoundationLibraryView: View {
                 FoundationSettingsView(
                     name: profileName, image: profileImage, signOut: signOut)
             }
+            .sheet(
+                isPresented: Binding(
+                    get: { playlistSource != nil },
+                    set: { if !$0 { playlistSource = nil } })
+            ) {
+                if let source = playlistSource {
+                    FoundationPlaylistPicker(source: source, library: library)
+                }
+            }
+            .environment(\.foundationAddToPlaylist, playlistPresentation)
             .environment(\.foundationPlayerTransition, playerTransition)
             .environment(
                 \.foundationOpenLibraryItem,
@@ -89,6 +100,11 @@ struct FoundationLibraryView: View {
                     playerDestinationTab = selectedTab
                     playerDestination = item
                 })
+    }
+
+    private var playlistPresentation: (@MainActor @Sendable (FoundationItem) -> Void)? {
+        guard library.supportsPlaylistManagement else { return nil }
+        return { playlistSource = $0 }
     }
 
     @ViewBuilder private var shell: some View {
@@ -713,7 +729,6 @@ struct FoundationLibraryItemRow: View {
     var navigate: ((FoundationItem) -> Void)?
     var currentPageKind: FoundationItem.Kind?
     var subtitleOverride: String? = nil
-    @State private var addingToPlaylist = false
     @EnvironmentObject private var actions: FoundationLibraryActions
 
     private var artworkItem: FoundationItem { showsTrackArtwork ? item.catalogArtworkItem : item }
@@ -752,17 +767,13 @@ struct FoundationLibraryItemRow: View {
             }
         }
         .contextMenu { menu }
-        .sheet(isPresented: $addingToPlaylist) {
-            FoundationPlaylistPicker(track: item, library: library)
-        }
     }
 
     private var menu: some View {
         FoundationItemMenu(
             item: item, actions: actions, initialFavorite: item.isFavorite,
             open: item.kind == .track ? nil : open, play: play, library: library, player: player,
-            navigate: navigate, currentPageKind: currentPageKind,
-            addToPlaylist: { addingToPlaylist = true }
+            navigate: navigate, currentPageKind: currentPageKind
         )
     }
 }

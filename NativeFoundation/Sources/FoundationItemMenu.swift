@@ -12,7 +12,7 @@ struct FoundationItemMenu: View {
     var player: FoundationPlayer?
     var navigate: ((FoundationItem) -> Void)?
     var currentPageKind: FoundationItem.Kind?
-    var addToPlaylist: (() -> Void)?
+    @Environment(\.foundationAddToPlaylist) private var addToPlaylist
 
     var body: some View {
         if let open {
@@ -40,9 +40,8 @@ struct FoundationItemMenu: View {
             FoundationRelatedDestinations(
                 item: item, navigate: navigate, currentPageKind: currentPageKind)
         }
-        if item.kind == .track, let addToPlaylist {
-            Button("Add to Playlist", systemImage: "music.note.list", action: addToPlaylist)
-                .disabled(library?.supportsPlaylistManagement != true)
+        if item.kind == .track || item.kind == .album, let addToPlaylist {
+            Button("Add to Playlist", systemImage: "music.note.list") { addToPlaylist(item) }
         }
         if item.kind != .genre {
             let favorite = actions.favoriteState(for: item, initial: initialFavorite)
@@ -89,5 +88,16 @@ struct FoundationRelatedDestinations: View {
                         duration: nil, primaryImageTag: artist.primaryImageTag))
             }
         }
+    }
+}
+
+private struct FoundationAddToPlaylistKey: EnvironmentKey {
+    static let defaultValue: (@MainActor @Sendable (FoundationItem) -> Void)? = nil
+}
+
+extension EnvironmentValues {
+    var foundationAddToPlaylist: (@MainActor @Sendable (FoundationItem) -> Void)? {
+        get { self[FoundationAddToPlaylistKey.self] }
+        set { self[FoundationAddToPlaylistKey.self] = newValue }
     }
 }

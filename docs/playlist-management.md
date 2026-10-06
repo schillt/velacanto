@@ -1,11 +1,18 @@
 # Basic playlist management — 0.4 scope
 
 The maintained native app provides playlist creation, rename, deletion, and
-track addition/removal through the provider-neutral library boundary. Playlist
+song/album addition and track removal through the provider-neutral library boundary. Playlist
 editing does not alter active playback or the local Up Next queue. Playlist
 reordering remains deferred. Creation confirms the returned identity and requested
 name against authoritative playlist metadata. Deletion completes only after a
 bounded full playlist enumeration confirms that the target is absent.
+
+Song and album actions share one account-owned picker, including album/playlist
+track details and existing card, row and header menus. Album expansion is explicit,
+cancellable and limited to 100 pages/10,000 tracks. Additions use batches of at most
+100 tracks and verify membership after each batch. Already-present tracks are
+skipped on deduplicating servers; the result reports added/skipped counts. Partial
+failure never reports completion and requires refresh before explicit retry.
 
 ## Membership and supported operations
 

@@ -19,7 +19,7 @@ struct FoundationPlaylistPage: Sendable {
 }
 
 enum FoundationPlaylistError: Error, LocalizedError {
-    case tooLarge, changed, ambiguousMemberships, alreadyPresent
+    case tooLarge, changed, ambiguousMemberships, alreadyPresent, partialAddition, emptyAlbum
     var errorDescription: String? {
         switch self {
         case .tooLarge:
@@ -29,7 +29,11 @@ enum FoundationPlaylistError: Error, LocalizedError {
         case .ambiguousMemberships:
             "This playlist contains repeated tracks that this server cannot edit individually. Track editing is read-only here."
         case .alreadyPresent:
-            "This track is already in the playlist. This server keeps one copy of each track."
+            "These tracks are already in the playlist. This server keeps one copy of each track."
+        case .partialAddition:
+            "The addition could not be completed. Some tracks may have been added; refresh before trying again."
+        case .emptyAlbum:
+            "This album has no tracks to add."
         }
     }
 }
@@ -137,22 +141,93 @@ enum FoundationPlaylistMutation {
     static func add(playlistID: String, track: FoundationItem, library: any FoundationLibrary)
         async throws
     {
+        _ = try await add(playlistID: playlistID, source: track, library: library)
+    }
+
+    struct Addition: Sendable {
+        let added: Int
+        let alreadyPresent: Int
+        var message: String {
+            "Added \(added) tracks. \(alreadyPresent) already in the playlist."
+        }
+    }
+
+    static func sourceTracks(_ source: FoundationItem, library: any FoundationLibrary)
+        async throws -> [FoundationItem]
+    {
+        if source.kind == .track { return [source] }
+        guard source.kind == .album else { throw FoundationLibraryError.invalidResponse }
+        var tracks: [FoundationItem] = []
+        var offset = 0
+        for _ in 0..<100 {
+            try Task.checkCancellation()
+            let page = try await library.tracks(albumID: source.id, startIndex: offset)
+            try Task.checkCancellation()
+            guard page.items.count <= 100, tracks.count + page.items.count <= 10_000,
+                page.items.allSatisfy({ $0.kind == .track })
+            else { throw FoundationPlaylistError.tooLarge }
+            tracks.append(contentsOf: page.items)
+            guard let next = page.nextStartIndex else {
+                guard !tracks.isEmpty else { throw FoundationPlaylistError.emptyAlbum }
+                return tracks
+            }
+            guard !page.items.isEmpty, next == offset + page.items.count else {
+                throw FoundationPlaylistError.changed
+            }
+            offset = next
+        }
+        throw FoundationPlaylistError.tooLarge
+    }
+
+    static func add(playlistID: String, source: FoundationItem, library: any FoundationLibrary)
+        async throws -> Addition
+    {
+        let tracks = try await sourceTracks(source, library: library)
         let permission = try await library.playlistPermissions(id: playlistID)
         guard permission.canEdit else { throw FoundationLibraryError.authentication }
-        let before = try await FoundationPlaylistSnapshot.load(id: playlistID, library: library)
-        guard !FoundationPlaylistSnapshot.hasAmbiguousMemberships(before) else {
+        var snapshot = try await FoundationPlaylistSnapshot.load(id: playlistID, library: library)
+        guard !FoundationPlaylistSnapshot.hasAmbiguousMemberships(snapshot) else {
             throw FoundationPlaylistError.ambiguousMemberships
         }
-        let beforeCount = before.filter { $0.item.id == track.id }.count
-        guard library.supportsRepeatedPlaylistTracks || beforeCount == 0 else {
-            throw FoundationPlaylistError.alreadyPresent
+        var knownIDs = Set(snapshot.map { $0.item.id })
+        let pending = tracks.filter {
+            library.supportsRepeatedPlaylistTracks || knownIDs.insert($0.id).inserted
         }
-        try await library.addTracks(to: playlistID, tracks: [track])
-        let after = try await FoundationPlaylistSnapshot.load(id: playlistID, library: library)
-        guard !FoundationPlaylistSnapshot.hasAmbiguousMemberships(after),
-            after.filter({ $0.item.id == track.id }).count > beforeCount
-        else {
-            throw FoundationPlaylistError.changed
+        guard !pending.isEmpty else { throw FoundationPlaylistError.alreadyPresent }
+        guard snapshot.count + pending.count <= 10_000 else {
+            throw FoundationPlaylistError.tooLarge
+        }
+        var attemptedWrite = false
+        do {
+            for offset in stride(from: 0, to: pending.count, by: 100) {
+                try Task.checkCancellation()
+                let batch = Array(pending[offset..<min(offset + 100, pending.count)])
+                let expected = snapshot.reduce(into: [String: Int]()) {
+                    $0[$1.item.id, default: 0] += 1
+                }
+                attemptedWrite = true
+                try await library.addTracks(to: playlistID, tracks: batch)
+                let refreshed = try await FoundationPlaylistSnapshot.load(
+                    id: playlistID, library: library)
+                guard !FoundationPlaylistSnapshot.hasAmbiguousMemberships(refreshed) else {
+                    throw FoundationPlaylistError.changed
+                }
+                var required = expected
+                for track in batch { required[track.id, default: 0] += 1 }
+                let actual = refreshed.reduce(into: [String: Int]()) {
+                    $0[$1.item.id, default: 0] += 1
+                }
+                guard required.allSatisfy({ actual[$0.key, default: 0] >= $0.value }) else {
+                    throw FoundationPlaylistError.changed
+                }
+                snapshot = refreshed
+            }
+            try Task.checkCancellation()
+            return Addition(added: pending.count, alreadyPresent: tracks.count - pending.count)
+        } catch {
+            if error is CancellationError { throw error }
+            if attemptedWrite { throw FoundationPlaylistError.partialAddition }
+            throw error
         }
     }
 
@@ -175,7 +250,10 @@ final class FoundationPlaylistOperation: ObservableObject {
     private var task: Task<Void, Never>?
     private var revision = UUID()
 
-    func run(_ operation: @escaping @MainActor () async throws -> Void) {
+    func run(
+        successMessage: @escaping @MainActor () -> String = { "Completed." },
+        _ operation: @escaping @MainActor () async throws -> Void
+    ) {
         guard !isPending else { return }
         let owner = UUID()
         revision = owner
@@ -188,7 +266,7 @@ final class FoundationPlaylistOperation: ObservableObject {
                 try Task.checkCancellation()
                 guard let self, self.revision == owner else { return }
                 self.succeeded = true
-                self.message = "Completed."
+                self.message = successMessage()
             } catch {
                 guard let self, self.revision == owner else { return }
                 if let playlistError = error as? FoundationPlaylistError {
@@ -391,9 +469,10 @@ struct FoundationPlaylistEditor: View {
 }
 
 struct FoundationPlaylistPicker: View {
-    let track: FoundationItem
+    let source: FoundationItem
     let library: any FoundationLibrary
     @StateObject private var playlists = FoundationBrowseModel()
+    @State private var additionSummary = "Completed."
     @StateObject private var operation = FoundationPlaylistOperation()
     @Environment(\.dismiss) private var dismiss
     var body: some View {
@@ -401,9 +480,10 @@ struct FoundationPlaylistPicker: View {
             List {
                 ForEach(playlists.items) { playlist in
                     Button(playlist.title) {
-                        operation.run {
-                            try await FoundationPlaylistMutation.add(
-                                playlistID: playlist.id, track: track, library: library)
+                        operation.run(successMessage: { additionSummary }) {
+                            let result = try await FoundationPlaylistMutation.add(
+                                playlistID: playlist.id, source: source, library: library)
+                            additionSummary = result.message
                         }
                     }.disabled(operation.isPending || operation.succeeded)
                 }
