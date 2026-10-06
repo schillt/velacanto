@@ -1,5 +1,19 @@
 import SwiftUI
 
+/// A read-only presentation adapter: artwork is supplied by the shared retained-artwork view.
+/// It cannot request remote catalog data, metadata, or audio when Downloads is browsed online.
+private struct FoundationDownloadedCatalogLibrary: FoundationLibrary {
+    func albums(startIndex: Int) async throws -> FoundationPage {
+        throw FoundationLibraryError.unavailable
+    }
+    func tracks(albumID: String, startIndex: Int) async throws -> FoundationPage {
+        throw FoundationLibraryError.unavailable
+    }
+    func playbackURL(for item: FoundationItem) async throws -> URL {
+        throw FoundationLibraryError.unavailable
+    }
+}
+
 /// Browsing downloads never expands a collection or requests a remote catalog page.
 struct FoundationDownloadsView: View {
     @EnvironmentObject private var downloads: FoundationDownloads
@@ -8,19 +22,6 @@ struct FoundationDownloadsView: View {
 
     var body: some View {
         List {
-            if connectivity.localOnly {
-                Section {
-                    Label("Downloaded Music", systemImage: "wifi.slash").font(.headline)
-                    Text(
-                        connectivity.statusMessage
-                            ?? "Online browsing is unavailable. Showing downloaded music."
-                    )
-                    .foregroundStyle(.secondary)
-                    Button("Retry Online", systemImage: "arrow.clockwise") {
-                        Task { await connectivity.retryOnline() }
-                    }.disabled(connectivity.isRetrying)
-                }
-            }
             if downloads.isLoading {
                 Section { ProgressView("Verifying downloaded files…") }
             }
@@ -61,10 +62,8 @@ struct FoundationDownloadsView: View {
                 Section { Text(error).foregroundStyle(.red) }
             }
         }
-        .navigationTitle("Downloads")
-        #if os(iOS)
-            .toolbar(.visible, for: .navigationBar)
-        #endif
+        .foundationCatalogHeader("Downloads")
+        .environment(\.foundationDownloadedBrowsing, true)
     }
 }
 
@@ -73,34 +72,19 @@ private struct FoundationDownloadTransferRow: View {
     @EnvironmentObject private var connectivity: FoundationConnectivity
     let owner: FoundationDownloadOwner
     let player: FoundationPlayer
+    @State private var openedItem: FoundationItem?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            NavigationLink {
-                FoundationDownloadedCollectionView(item: owner.item, player: player)
-            } label: {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(owner.item.title).font(.headline)
-                    Text(owner.state == .ready ? "Saved download" : owner.status).font(.subheadline)
-                        .foregroundStyle(.secondary)
-                    if downloads.availability(for: owner.item) != .unavailable
-                        || owner.state == .ready
-                    {
-                        FoundationDownloadBadge(item: owner.item, showsTransferStatus: false)
-                    }
-                    if downloads.readyTracks(ownerID: owner.id).isEmpty {
-                        Text("No tracks available offline yet").font(.caption).foregroundStyle(
-                            .secondary)
-                    }
-                }
-            }
+            FoundationLibraryItemRow(
+                item: owner.item, library: FoundationDownloadedCatalogLibrary(), isActive: true,
+                open: { openedItem = owner.item }, player: player, showsTrackArtwork: true,
+                navigate: { openedItem = $0 },
+                subtitleOverride: owner.state == .ready ? nil : owner.status)
             switch owner.state {
             case .queued, .expanding, .waitingForWiFi, .downloading:
-                ProgressView(value: min(1, max(0, owner.progress))) {
-                    Text("Download progress")
-                }
-                Button("Cancel") { downloads.cancel(ownerID: owner.id) }
-                    .buttonStyle(.borderless)
+                ProgressView(value: min(1, max(0, owner.progress))) { Text("Download progress") }
+                Button("Cancel") { downloads.cancel(ownerID: owner.id) }.buttonStyle(.borderless)
             case .cancelled, .failed:
                 Button("Retry Download") { downloads.retry(ownerID: owner.id) }
                     .buttonStyle(.borderless).disabled(connectivity.localOnly)
@@ -108,12 +92,22 @@ private struct FoundationDownloadTransferRow: View {
                 EmptyView()
             }
         }.padding(.vertical, 4)
+            .navigationDestination(isPresented: destinationPresented) {
+                if let openedItem {
+                    FoundationDownloadedCollectionView(item: openedItem, player: player)
+                }
+            }
+    }
+
+    private var destinationPresented: Binding<Bool> {
+        Binding(get: { openedItem != nil }, set: { if !$0 { openedItem = nil } })
     }
 }
 
 private struct FoundationDownloadedSongsView: View {
     @EnvironmentObject private var downloads: FoundationDownloads
     let player: FoundationPlayer
+    @State private var openedItem: FoundationItem?
 
     var body: some View {
         List {
@@ -125,47 +119,69 @@ private struct FoundationDownloadedSongsView: View {
                 }
                 ForEach(Array(downloads.downloadedSongs.enumerated()), id: \.element.id) {
                     index, item in
-                    Button {
-                        player.setQueue(downloads.downloadedSongs, selectedIndex: index)
-                    } label: {
-                        FoundationDownloadedTrackLabel(item: item, available: true)
-                    }
-                    .buttonStyle(.plain)
+                    FoundationLibraryItemRow(
+                        item: item, library: FoundationDownloadedCatalogLibrary(), isActive: true,
+                        open: {},
+                        play: { player.setQueue(downloads.downloadedSongs, selectedIndex: index) },
+                        player: player, showsTrackArtwork: true, navigate: { openedItem = $0 })
                 }
             }
-        }.navigationTitle("Songs")
+        }
+        .listStyle(.plain)
+        .foundationCatalogHeader("Songs")
+        .environment(\.foundationDownloadedBrowsing, true)
+        .navigationDestination(
+            isPresented: Binding(
+                get: { openedItem != nil }, set: { if !$0 { openedItem = nil } })
+        ) {
+            if let openedItem {
+                FoundationDownloadedCollectionView(item: openedItem, player: player)
+            }
+        }
     }
 }
 
 private struct FoundationDownloadedCollectionsView: View {
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @EnvironmentObject private var downloads: FoundationDownloads
     let kind: FoundationItem.Kind
     let player: FoundationPlayer
+    @State private var openedItem: FoundationItem?
     private var items: [FoundationItem] {
         kind == .album ? downloads.downloadedAlbums : downloads.downloadedPlaylists
     }
 
     var body: some View {
-        List {
+        ScrollView {
             if items.isEmpty {
                 ContentUnavailableView(
                     kind == .album ? "No Downloaded Albums" : "No Downloaded Playlists",
                     systemImage: kind == .album ? "opticaldisc" : "music.note.list")
-            }
-            ForEach(items, id: \.id) { item in
-                NavigationLink {
-                    FoundationDownloadedCollectionView(item: item, player: player)
-                } label: {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(item.title).font(.headline)
-                        if !item.subtitle.isEmpty {
-                            Text(item.subtitle).font(.subheadline).foregroundStyle(.secondary)
-                        }
-                        FoundationDownloadBadge(item: item)
+            } else {
+                LazyVGrid(
+                    columns: foundationCollectionColumns(for: dynamicTypeSize),
+                    alignment: .leading, spacing: 22
+                ) {
+                    ForEach(items, id: \.id) { item in
+                        FoundationCollectionCard(
+                            item: item, library: FoundationDownloadedCatalogLibrary(),
+                            player: player,
+                            isActive: true, open: { openedItem = item },
+                            navigate: { openedItem = $0 })
                     }
-                }
+                }.padding()
             }
-        }.navigationTitle(kind == .album ? "Albums" : "Playlists")
+        }
+        .foundationCatalogHeader(kind == .album ? "Albums" : "Playlists")
+        .environment(\.foundationDownloadedBrowsing, true)
+        .navigationDestination(
+            isPresented: Binding(
+                get: { openedItem != nil }, set: { if !$0 { openedItem = nil } })
+        ) {
+            if let openedItem {
+                FoundationDownloadedCollectionView(item: openedItem, player: player)
+            }
+        }
     }
 }
 
@@ -174,69 +190,94 @@ struct FoundationDownloadedCollectionView: View {
     @EnvironmentObject private var connectivity: FoundationConnectivity
     let item: FoundationItem
     let player: FoundationPlayer
+    @State private var detailTint = Color(white: 0.12)
+    @State private var openedItem: FoundationItem?
     private var owner: FoundationDownloadOwner? {
         downloads.owners.first { $0.item.id == item.id && $0.item.kind == item.kind }
     }
-    private var tracks: [FoundationItem] { owner?.tracks ?? downloads.browseTracks(for: item) }
+    private var tracks: [FoundationItem] {
+        if let owner { return owner.tracks }
+        if item.kind == .track { return [item] }
+        // A derived album is only the known local subset; include unavailable saved occurrences.
+        var seen: Set<String> = []
+        return downloads.owners.flatMap(\.tracks).filter {
+            $0.album?.id == item.id && seen.insert($0.id).inserted
+        }
+    }
 
     var body: some View {
         List {
+            FoundationDetailHero(
+                item: item, library: FoundationDownloadedCatalogLibrary(), isActive: true,
+                tint: $detailTint
+            ) {
+                FoundationDetailActions(
+                    item: item, library: FoundationDownloadedCatalogLibrary(), player: player)
+            }
+            .listRowInsets(EdgeInsets())
+            .listRowBackground(Color.clear)
+            .listRowSeparator(.hidden)
             Section {
-                FoundationDownloadBadge(item: item, showsTransferStatus: false)
-                if let owner {
-                    Text(owner.state == .ready ? "Saved download" : owner.status).foregroundStyle(
-                        .secondary)
+                if let owner, owner.state != .ready {
+                    Text(owner.status).foregroundStyle(.secondary)
+                    transferControls(owner)
                 }
-                Button("Play Available Tracks", systemImage: "play.fill") {
-                    let ready = downloads.browseTracks(for: item)
-                    guard !ready.isEmpty else { return }
-                    player.setQueue(ready, selectedIndex: 0)
-                }.disabled(downloads.browseTracks(for: item).isEmpty)
                 if downloads.availability(for: item) != .ready {
                     Button("Download Again", systemImage: "arrow.down.circle") {
                         downloads.downloadAgain(item)
                     }.disabled(connectivity.localOnly)
                 }
-                Text(
-                    "Only downloaded tracks play here. Collection order is the last saved snapshot; online changes may not be included."
-                )
-                .font(.caption).foregroundStyle(.secondary)
-            }
+                Text("Showing the saved collection on this device.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }.listRowBackground(Color.clear)
             Section("Tracks") {
                 ForEach(Array(tracks.enumerated()), id: \.offset) { index, track in
-                    Button {
-                        let ready = tracks.filter { downloads.isReady($0) }
-                        let selected = tracks.prefix(index).filter { downloads.isReady($0) }.count
-                        guard downloads.isReady(track), ready.indices.contains(selected) else {
-                            return
-                        }
-                        player.setQueue(ready, selectedIndex: selected)
-                    } label: {
-                        FoundationDownloadedTrackLabel(
-                            item: track, available: downloads.isReady(track))
-                    }.buttonStyle(.plain).disabled(!downloads.isReady(track))
+                    FoundationLibraryItemRow(
+                        item: track, library: FoundationDownloadedCatalogLibrary(), isActive: true,
+                        open: {}, play: { play(index) }, player: player, showsTrackArtwork: true,
+                        navigate: { openedItem = $0 }, currentPageKind: item.kind,
+                        isPlayable: downloads.isReady(track),
+                        availabilityMessage: downloads.isReady(track)
+                            ? nil : "Not available offline"
+                    )
+                    .listRowBackground(Color.clear)
                 }
                 if tracks.isEmpty { Text("No saved tracks available.").foregroundStyle(.secondary) }
             }
-        }.navigationTitle(item.title)
+        }
+        .listStyle(.plain)
+        .foundationDetailPresentation(title: item.title, immersive: true, tint: detailTint)
+        .modifier(FoundationDetailTitle(item: item))
+        .environment(\.foundationDownloadedBrowsing, true)
+        .navigationDestination(
+            isPresented: Binding(
+                get: { openedItem != nil }, set: { if !$0 { openedItem = nil } })
+        ) {
+            if let openedItem {
+                FoundationDownloadedCollectionView(item: openedItem, player: player)
+            }
+        }
     }
-}
 
-private struct FoundationDownloadedTrackLabel: View {
-    let item: FoundationItem
-    let available: Bool
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(item.title).font(.body)
-            if !item.subtitle.isEmpty {
-                Text(item.subtitle).font(.subheadline).foregroundStyle(.secondary)
-            }
-            if available {
-                FoundationDownloadBadge(item: item)
-            } else {
-                Label("Not available offline", systemImage: "exclamationmark.circle")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-        }.padding(.vertical, 4)
+    @ViewBuilder private func transferControls(_ owner: FoundationDownloadOwner) -> some View {
+        switch owner.state {
+        case .queued, .expanding, .waitingForWiFi, .downloading:
+            ProgressView(value: min(1, max(0, owner.progress))) { Text("Download progress") }
+            Button("Cancel") { downloads.cancel(ownerID: owner.id) }.buttonStyle(.borderless)
+        case .cancelled, .failed:
+            Button("Retry Download") { downloads.retry(ownerID: owner.id) }
+                .buttonStyle(.borderless).disabled(connectivity.localOnly)
+        case .ready:
+            EmptyView()
+        }
+    }
+
+    private func play(_ index: Int) {
+        let snapshot = tracks
+        guard snapshot.indices.contains(index), downloads.isReady(snapshot[index]) else { return }
+        let ready = snapshot.filter { downloads.isReady($0) }
+        let selected = snapshot.prefix(index).filter { downloads.isReady($0) }.count
+        guard ready.indices.contains(selected) else { return }
+        player.setQueue(ready, selectedIndex: selected)
     }
 }

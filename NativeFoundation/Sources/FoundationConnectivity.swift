@@ -89,9 +89,11 @@ final class FoundationConnectivity: ObservableObject {
         case .connecting: statusMessage = "Connecting. Downloaded music remains available."
         case .available: statusMessage = nil
         case .unavailable:
-            statusMessage = "Network connection unavailable. Showing downloaded music."
+            statusMessage =
+                "Offline. Downloaded music is in Library."
         case .restricted:
-            statusMessage = "Network access is restricted. Showing downloaded music."
+            statusMessage =
+                "Network access is restricted. Downloaded music is in Library."
         }
     }
 
@@ -107,7 +109,7 @@ final class FoundationConnectivity: ObservableObject {
             publish(.available)
         } catch {
             guard isLive, epoch == generation else { return }
-            statusMessage = "The server could not be reached. Downloaded music remains available."
+            statusMessage = "Server unavailable. Downloaded music is in Library."
         }
     }
 

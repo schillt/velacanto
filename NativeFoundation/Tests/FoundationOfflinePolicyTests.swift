@@ -58,7 +58,7 @@ final class FoundationOfflinePolicyTests: XCTestCase {
         XCTAssertTrue(connectivity.isConnected)
         XCTAssertEqual(
             connectivity.statusMessage,
-            "The server could not be reached. Downloaded music remains available.")
+            "Server unavailable. Downloaded music is in Library.")
         connectivity.invalidate()
     }
 

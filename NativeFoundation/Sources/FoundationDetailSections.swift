@@ -2,6 +2,7 @@ import SwiftUI
 
 /// Optional item text owns one visible-page read; presenting it adds no work.
 struct FoundationOverviewSection: View {
+    @EnvironmentObject private var connectivity: FoundationConnectivity
     let item: FoundationItem
     let library: any FoundationLibrary
     let isActive: Bool
@@ -56,8 +57,10 @@ struct FoundationOverviewSection: View {
                 }
             }
         }
-        .task(id: isActive) {
-            guard isActive, item.kind == .artist || item.kind == .album, !loaded else { return }
+        .task(id: isActive && !connectivity.localOnly) {
+            guard isActive, !connectivity.localOnly, item.kind == .artist || item.kind == .album,
+                !loaded
+            else { return }
             do {
                 let text = try await library.overview(for: item)
                 try Task.checkCancellation()
@@ -72,6 +75,7 @@ struct FoundationOverviewSection: View {
 
 /// Reuses catalog ownership and cards; each optional shelf fails independently.
 struct FoundationRelatedSection<Card: View>: View {
+    @EnvironmentObject private var connectivity: FoundationConnectivity
     let title: String
     let isActive: Bool
     var twoRows = false
@@ -103,8 +107,12 @@ struct FoundationRelatedSection<Card: View>: View {
                 }.scrollIndicators(.hidden)
             }
             if let error = model.errorMessage {
-                Text(error).font(.caption).foregroundStyle(.secondary).padding(.horizontal)
-                Button("Retry") { request(model.retryRequest) }.padding(.horizontal)
+                if connectivity.localOnly {
+                    if model.items.isEmpty { FoundationOfflineNotice().padding(.horizontal) }
+                } else {
+                    Text(error).font(.caption).foregroundStyle(.secondary).padding(.horizontal)
+                    Button("Retry") { request(model.retryRequest) }.padding(.horizontal)
+                }
             }
             if model.isLoading {
                 VStack(spacing: 20) {
@@ -113,17 +121,20 @@ struct FoundationRelatedSection<Card: View>: View {
                 }.padding(.horizontal)
             }
             if model.nextStartIndex != nil {
-                Button("Load more") { request(.more) }.disabled(model.isLoading).padding(
+                Button("Load more") { request(.more) }.disabled(
+                    model.isLoading || connectivity.localOnly
+                ).padding(
                     .horizontal)
             }
         }
         .padding(.vertical, model.items.isEmpty && model.errorMessage == nil ? 0 : 12)
-        .task(id: isActive ? revision : nil) {
-            await model.loadPending(ifActive: isActive, using: loader)
+        .task(id: isActive && !connectivity.localOnly ? revision : nil) {
+            await model.loadPending(ifActive: isActive && !connectivity.localOnly, using: loader)
         }
     }
 
     private func request(_ request: FoundationBrowseModel.Request) {
+        guard !connectivity.localOnly else { return }
         model.request(request)
         revision += 1
     }
@@ -131,6 +142,8 @@ struct FoundationRelatedSection<Card: View>: View {
 
 /// A bounded personal-history shelf; it never expands the artist's catalog.
 struct FoundationArtistMostPlayed: View {
+    @EnvironmentObject private var downloads: FoundationDownloads
+    @EnvironmentObject private var connectivity: FoundationConnectivity
     let artist: FoundationItem
     let library: any FoundationLibrary
     @ObservedObject var player: FoundationPlayer
@@ -168,17 +181,18 @@ struct FoundationArtistMostPlayed: View {
             if let error = model.errorMessage {
                 Text(error).font(.caption).foregroundStyle(.secondary).padding(.horizontal)
                 Button("Retry") {
+                    guard !connectivity.localOnly else { return }
                     model.request(model.retryRequest)
                     revision += 1
-                }.padding(.horizontal)
+                }.disabled(connectivity.localOnly).padding(.horizontal)
             }
             if model.isLoading {
                 FoundationLoadingPlaceholder().padding(.horizontal)
             }
         }
         .padding(.vertical, model.items.isEmpty && model.errorMessage == nil ? 0 : 12)
-        .task(id: isActive ? revision : nil) {
-            await model.loadPending(ifActive: isActive) { _ in
+        .task(id: isActive && !connectivity.localOnly ? revision : nil) {
+            await model.loadPending(ifActive: isActive && !connectivity.localOnly) { _ in
                 try await library.mostPlayed(artistID: artist.id)
             }
         }
@@ -186,7 +200,15 @@ struct FoundationArtistMostPlayed: View {
 
     private func play(_ index: Int) {
         guard let selection = model.trackQueue(selecting: index) else { return }
-        player.setQueue(selection.items, selectedIndex: selection.index)
+        if connectivity.localOnly {
+            guard downloads.isReady(selection.items[selection.index]) else { return }
+            let ready = selection.items.filter { downloads.isReady($0) }
+            let index = selection.items.prefix(selection.index).filter { downloads.isReady($0) }
+                .count
+            player.setQueue(ready, selectedIndex: index)
+        } else {
+            player.setQueue(selection.items, selectedIndex: selection.index)
+        }
 
     }
 }

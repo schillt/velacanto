@@ -2,6 +2,7 @@ import SwiftUI
 
 /// Home composes independently owned, visible catalog sections around the existing player.
 struct FoundationHomeView<Profile: View>: View {
+    @EnvironmentObject private var connectivity: FoundationConnectivity
     let profile: Profile
     let library: any FoundationLibrary
     let player: FoundationPlayer
@@ -10,6 +11,7 @@ struct FoundationHomeView<Profile: View>: View {
     @ObservedObject var recentAlbums: FoundationBrowseModel
     @ObservedObject var genres: FoundationBrowseModel
     let isActive: Bool
+    var hasQueue = false
     @State private var isVisible = false
     @State private var genreRetryRevision = 0
     @State private var showingPlayer = false
@@ -19,6 +21,11 @@ struct FoundationHomeView<Profile: View>: View {
     var body: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 28) {
+                if connectivity.localOnly, recentTracks.items.isEmpty, favorites.items.isEmpty,
+                    recentAlbums.items.isEmpty, genres.items.isEmpty, !hasQueue
+                {
+                    FoundationOfflineNotice()
+                }
                 FoundationContinueListening(
                     player: player, library: library, isActive: isActive && isVisible,
                     showingPlayer: $showingPlayer)
@@ -88,20 +95,24 @@ struct FoundationHomeView<Profile: View>: View {
             if let error = genres.errorMessage {
                 Text(error).foregroundStyle(.red)
                 Button("Retry genres") {
+                    guard !connectivity.localOnly else { return }
                     genres.request(genres.retryRequest)
                     genreRetryRevision += 1
-                }
+                }.disabled(connectivity.localOnly)
             }
         }
-        .task(id: isActive && isVisible ? genreRetryRevision : nil) {
+        .task(id: isActive && isVisible && !connectivity.localOnly ? genreRetryRevision : nil) {
             #if DEBUG
                 await FoundationTrace.withPage(origin: .home, page: .genreIndex) {
-                    await genres.loadPending(ifActive: isActive && isVisible) { _ in
+                    await genres.loadPending(
+                        ifActive: isActive && isVisible && !connectivity.localOnly
+                    ) { _ in
                         try await library.homeGenres()
                     }
                 }
             #else
-                await genres.loadPending(ifActive: isActive && isVisible) { _ in
+                await genres.loadPending(ifActive: isActive && isVisible && !connectivity.localOnly)
+                { _ in
                     try await library.homeGenres()
                 }
             #endif
@@ -150,7 +161,6 @@ private struct FoundationContinueListening: View {
                                 + (item.catalogArtworkItem.primaryImageTag ?? ""))
                         VStack(alignment: .leading, spacing: 4) {
                             Text(item.title).font(.headline).lineLimit(2)
-                            FoundationDownloadBadge(item: item)
                             Text(
                                 player.state == .playing || player.state == .paused
                                     ? item.subtitle : player.state.label
@@ -211,6 +221,8 @@ private struct FoundationHomeGenreShelf: View {
 }
 
 private struct FoundationHomeShelf: View {
+    @EnvironmentObject private var downloads: FoundationDownloads
+    @EnvironmentObject private var connectivity: FoundationConnectivity
     let title: String
     @ObservedObject var model: FoundationBrowseModel
     let library: any FoundationLibrary
@@ -286,9 +298,10 @@ private struct FoundationHomeShelf: View {
             if let error = model.errorMessage {
                 Text(error).foregroundStyle(.red)
                 Button("Retry") {
+                    guard !connectivity.localOnly else { return }
                     model.request(model.retryRequest)
                     retryRevision += 1
-                }
+                }.disabled(connectivity.localOnly)
             } else if model.loaded, model.items.isEmpty {
                 Text("No items yet.").foregroundStyle(.secondary)
             }
@@ -306,19 +319,23 @@ private struct FoundationHomeShelf: View {
             #endif
         }
         .onChange(of: actions.favoriteRevision) { _, _ in
-            if isFavorites, isActive, isVisible {
+            if isFavorites, isActive, isVisible, !connectivity.localOnly {
                 model.request(.refresh)
                 retryRevision += 1
             }
         }
-        .task(id: isActive && isVisible ? retryRevision : nil) {
+        .task(id: isActive && isVisible && !connectivity.localOnly ? retryRevision : nil) {
             #if DEBUG
                 await FoundationTrace.withPage(origin: .home, page: .shelf) {
-                    guard isActive, isVisible, !Task.isCancelled else { return }
+                    guard isActive, isVisible, !connectivity.localOnly, !Task.isCancelled else {
+                        return
+                    }
                     await model.loadPending(using: loader)
                 }
             #else
-                guard isActive, isVisible, !Task.isCancelled else { return }
+                guard isActive, isVisible, !connectivity.localOnly, !Task.isCancelled else {
+                    return
+                }
                 await model.loadPending(using: loader)
             #endif
         }
@@ -368,7 +385,15 @@ private struct FoundationHomeShelf: View {
 
     private func playRecent(_ index: Int) {
         guard let selection = model.trackQueue(selecting: index) else { return }
-        player.setQueue(selection.items, selectedIndex: selection.index)
+        if connectivity.localOnly {
+            guard downloads.isReady(selection.items[selection.index]) else { return }
+            let ready = selection.items.filter { downloads.isReady($0) }
+            let index = selection.items.prefix(selection.index).filter { downloads.isReady($0) }
+                .count
+            player.setQueue(ready, selectedIndex: index)
+        } else {
+            player.setQueue(selection.items, selectedIndex: selection.index)
+        }
     }
 
     private func recentMenu(_ item: FoundationItem, index: Int) -> some View {

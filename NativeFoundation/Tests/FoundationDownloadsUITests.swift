@@ -41,8 +41,19 @@ final class FoundationDownloadsUITests: XCTestCase {
         add(attachment)
     }
 
+    private func assertOfflineIconIsAccessible(in app: XCUIApplication) {
+        let badge = app.descendants(matching: .any).matching(
+            NSPredicate(format: "label CONTAINS %@", "Available offline")
+        ).firstMatch
+        XCTAssertTrue(badge.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.staticTexts["Downloaded"].exists)
+    }
+
     private func waitForSavedDownload(_ app: XCUIApplication) {
-        XCTAssertTrue(app.staticTexts["Saved download"].waitForExistence(timeout: 10))
+        let available = app.descendants(matching: .any).matching(
+            NSPredicate(format: "label CONTAINS %@", "Available offline")
+        ).firstMatch
+        XCTAssertTrue(available.waitForExistence(timeout: 10))
     }
 
     private func openFixturePlaylist(_ app: XCUIApplication) {
@@ -139,18 +150,20 @@ final class FoundationDownloadsUITests: XCTestCase {
         waitForSavedDownload(app)
         capture("Downloads in Your Music production navigation", in: app)
         app.switches["Simulate unavailable network"].switches.firstMatch.tap()
-        XCTAssertTrue(app.buttons["Retry Online"].waitForExistence(timeout: 5))
-        XCTAssertTrue(
-            app.staticTexts[
-                "Network connection unavailable. Showing downloaded music."
-            ].exists)
-        capture("Limited offline production shell", in: app)
+        XCTAssertTrue(app.navigationBars["Downloads"].exists)
+        XCTAssertFalse(app.buttons["Retry Online"].exists)
+        capture("Offline preserves useful Downloads without a banner", in: app)
         app.buttons["Search"].firstMatch.tap()
         XCTAssertTrue(app.buttons["Retry Online"].waitForExistence(timeout: 5))
-        XCTAssertFalse(app.textFields["Albums, artists, and songs"].exists)
+        XCTAssertTrue(app.staticTexts["Search"].firstMatch.exists)
+        XCTAssertTrue(app.staticTexts["Offline. Downloaded music is in Library."].exists)
+        XCTAssertTrue(app.buttons["Open Library"].exists)
+        let search = app.textFields["Search music"]
+        if search.exists { XCTAssertFalse(search.isEnabled) }
+        capture("Offline preserves Search and explains unavailable content", in: app)
         app.buttons["Profile and settings"].tap()
-        XCTAssertTrue(app.navigationBars["Profile & Settings"].waitForExistence(timeout: 5))
         capture("Offline Profile and Settings", in: app)
+        XCTAssertTrue(app.navigationBars["Profile & Settings"].waitForExistence(timeout: 5))
         app.buttons["Downloaded Music"].tap()
         XCTAssertTrue(app.navigationBars["Downloaded Music"].waitForExistence(timeout: 5))
         app.navigationBars.buttons.firstMatch.tap()
@@ -158,8 +171,105 @@ final class FoundationDownloadsUITests: XCTestCase {
         app.buttons["Done"].tap()
         XCTAssertTrue(app.buttons["Retry Online"].waitForExistence(timeout: 5))
         app.buttons["Retry Online"].tap()
-        XCTAssertTrue(app.textFields["Albums, artists, and songs"].waitForExistence(timeout: 5))
+        XCTAssertTrue(search.waitForExistence(timeout: 5))
+        XCTAssertTrue(search.isEnabled)
+        XCTAssertTrue(app.staticTexts["Search"].firstMatch.exists)
         XCTAssertEqual(app.switches["Simulate unavailable network"].value as? String, "0")
+    }
+
+    func testOfflinePreservesAlbumHomeAndPlayerWithoutPlaybackBadges() {
+        continueAfterFailure = false
+        let app = launch(productionShell: true)
+        app.buttons["Queue fixture playlist"].tap()
+        app.buttons["Library"].firstMatch.tap()
+        let downloads = app.buttons.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "Downloads")
+        ).firstMatch
+        tapVisible(downloads, in: app)
+        waitForSavedDownload(app)
+        app.navigationBars.buttons.firstMatch.tap()
+        let albums = app.buttons.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "Albums")
+        ).firstMatch
+        tapVisible(albums, in: app)
+        XCTAssertTrue(app.navigationBars["Albums"].waitForExistence(timeout: 5))
+        let album = app.buttons.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "Fixture Album")
+        ).firstMatch
+        XCTAssertTrue(album.waitForExistence(timeout: 5))
+        album.tap()
+        XCTAssertTrue(app.buttons["Shuffle"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Fixture Album"].firstMatch.exists)
+        app.switches["Simulate unavailable network"].switches.firstMatch.tap()
+        XCTAssertTrue(app.buttons["Play"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Fixture Album"].firstMatch.exists)
+        XCTAssertFalse(app.navigationBars["Downloads"].exists)
+        capture("Offline preserves the open album detail", in: app)
+        app.buttons["Play"].tap()
+        let backToAlbums = app.navigationBars.buttons["Albums"].firstMatch
+        XCTAssertTrue(backToAlbums.waitForExistence(timeout: 5))
+        backToAlbums.tap()
+        capture("Offline album grid retained after playback", in: app)
+        XCTAssertTrue(app.navigationBars["Albums"].waitForExistence(timeout: 5))
+        app.navigationBars.buttons.firstMatch.tap()
+        app.buttons["Home"].firstMatch.tap()
+        XCTAssertTrue(app.staticTexts["Home"].firstMatch.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["Retry Online"].exists)
+        let resume = app.buttons["Open Now Playing"]
+        XCTAssertTrue(resume.waitForExistence(timeout: 5))
+        XCTAssertFalse(resume.label.contains("Available offline"))
+        XCTAssertFalse((resume.value as? String ?? "").contains("Available offline"))
+        XCTAssertFalse(resume.images["Available offline"].exists)
+        capture("Offline Home retains Continue Listening without a download badge", in: app)
+        resume.tap()
+        XCTAssertTrue(app.buttons["Show queue"].waitForExistence(timeout: 5))
+        capture("Now Playing excludes download badges", in: app)
+        // The hierarchy may retain background catalog elements during the native zoom transition.
+        XCTAssertTrue(
+            app.images.matching(identifier: "Available offline")
+                .allElementsBoundByIndex.allSatisfy { !$0.isHittable })
+        XCTAssertFalse(app.staticTexts["Downloaded"].exists)
+    }
+
+    func testDownloadedPlaylistGridDetailAndSongsUseAccessibleIconBadges() {
+        continueAfterFailure = false
+        let app = launch(largeText: true)
+        XCTAssertEqual(
+            app.staticTexts["fixture-dynamic-type-size"].label,
+            "Synthetic Dynamic Type: accessibility3")
+        app.buttons["Queue fixture playlist"].tap()
+        openDownloads(app)
+        enableCellular(app)
+        waitForSavedDownload(app)
+        app.buttons["Playlists"].tap()
+        XCTAssertTrue(app.navigationBars["Playlists"].waitForExistence(timeout: 5))
+        let playlist = app.buttons.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "Fixture Playlist")
+        ).firstMatch
+        XCTAssertTrue(playlist.waitForExistence(timeout: 5))
+        assertOfflineIconIsAccessible(in: app)
+        capture("Accessibility-sized shared downloaded playlist grid", in: app)
+        playlist.tap()
+        XCTAssertTrue(app.buttons["Play Available Tracks"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["Shuffle"].exists)
+        capture("Accessibility-sized shared downloaded playlist hero", in: app)
+        app.swipeUp()
+        let track = app.buttons.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "Fixture Tone")
+        ).firstMatch
+        for _ in 0..<5 {
+            if track.exists && track.isHittable { break }
+            app.swipeUp()
+        }
+        XCTAssertTrue(track.exists && track.isHittable)
+        assertOfflineIconIsAccessible(in: app)
+        capture("Accessibility-sized shared downloaded playlist song rows", in: app)
+        returnToFixtureRoot(app)
+        openDownloads(app)
+        app.buttons["Songs"].tap()
+        XCTAssertTrue(app.navigationBars["Songs"].waitForExistence(timeout: 5))
+        assertOfflineIconIsAccessible(in: app)
+        capture("Accessibility-sized downloaded Songs icon badge", in: app)
     }
 
     func testAccessibilitySizedStorageRowsSupportSelectionAndCancel() {

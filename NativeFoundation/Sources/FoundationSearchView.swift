@@ -2,6 +2,7 @@ import SwiftUI
 
 /// Native search controls with the existing catalog owner, rows and destinations.
 struct FoundationSearchView<Profile: View>: View {
+    @EnvironmentObject private var connectivity: FoundationConnectivity
     let profile: Profile
     @FocusState private var searchFocused: Bool
     let library: any FoundationLibrary
@@ -26,10 +27,13 @@ struct FoundationSearchView<Profile: View>: View {
         }
         .foundationSearchHeader(profile: profile, search: searchField, keepsVisible: searchFocused)
         .onChange(of: activation, initial: true) { _, value in
-            if isActive, value > 0 { searchFocused = true }
+            if isActive, value > 0, !connectivity.localOnly { searchFocused = true }
         }
         .onChange(of: isActive) { _, active in
-            if !active { searchFocused = false }
+            if !active || connectivity.localOnly { searchFocused = false }
+        }
+        .onChange(of: connectivity.localOnly) { _, localOnly in
+            if localOnly { searchFocused = false }
         }
         #if os(iOS)
             .onScrollPhaseChange { _, phase in
@@ -45,6 +49,7 @@ struct FoundationSearchView<Profile: View>: View {
             TextField("Albums, artists, and songs", text: $query)
                 .textFieldStyle(.plain)
                 .focused($searchFocused)
+                .disabled(connectivity.localOnly)
                 .autocorrectionDisabled()
                 .submitLabel(.search)
                 #if os(iOS)
@@ -57,7 +62,8 @@ struct FoundationSearchView<Profile: View>: View {
                 } label: {
                     Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
                         .frame(width: 44, height: 44)
-                }.buttonStyle(.plain).accessibilityLabel("Clear search")
+                }.buttonStyle(.plain).disabled(connectivity.localOnly).accessibilityLabel(
+                    "Clear search")
             }
         }
         .padding(.leading, 14).padding(.trailing, query.isEmpty ? 14 : 0)
@@ -84,6 +90,7 @@ struct FoundationSearchView<Profile: View>: View {
 
 /// Search and Library share card layout, ownership, pagination and local recovery.
 struct FoundationGenreIndex: View {
+    @EnvironmentObject private var connectivity: FoundationConnectivity
     @ObservedObject var genres: FoundationBrowseModel
     let library: any FoundationLibrary
     @ObservedObject var player: FoundationPlayer
@@ -100,6 +107,7 @@ struct FoundationGenreIndex: View {
     var body: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 16) {
+                if connectivity.localOnly, genres.items.isEmpty { FoundationOfflineNotice() }
                 LazyVGrid(
                     columns: [
                         GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12),
@@ -118,13 +126,15 @@ struct FoundationGenreIndex: View {
                     }
                 }
                 if genres.nextStartIndex != nil {
-                    Button("Load more") { reloadGenres(.more) }.disabled(genres.isLoading)
+                    Button("Load more") { reloadGenres(.more) }.disabled(
+                        genres.isLoading || connectivity.localOnly)
                 }
                 if genres.isLoading { FoundationLoadingPlaceholder(layout: .genreCards) }
                 if genres.loaded, genres.items.isEmpty { Text("No genres found.") }
                 if let error = genres.errorMessage {
                     Text(error).foregroundStyle(.red)
-                    Button("Retry") { reloadGenres(genres.retryRequest) }
+                    Button("Retry") { reloadGenres(genres.retryRequest) }.disabled(
+                        connectivity.localOnly)
                 }
                 if let error = actions.pinErrorMessage { Text(error).foregroundStyle(.red) }
             }.padding(.horizontal).padding(.bottom)
@@ -143,18 +153,21 @@ struct FoundationGenreIndex: View {
                 #endif
             }
         }
-        .task(id: isActive && isVisible ? genreRevision : nil) {
+        .task(id: isActive && isVisible && !connectivity.localOnly ? genreRevision : nil) {
             #if DEBUG
                 await FoundationTrace.withPage(origin: traceOrigin, page: .genreIndex) {
-                    await genres.loadPending(ifActive: isActive && isVisible, using: loader)
+                    await genres.loadPending(
+                        ifActive: isActive && isVisible && !connectivity.localOnly, using: loader)
                 }
             #else
-                await genres.loadPending(ifActive: isActive && isVisible, using: loader)
+                await genres.loadPending(
+                    ifActive: isActive && isVisible && !connectivity.localOnly, using: loader)
             #endif
         }
     }
 
     private func reloadGenres(_ request: FoundationBrowseModel.Request) {
+        guard !connectivity.localOnly else { return }
         genres.request(request)
         genreRevision += 1
     }
@@ -216,6 +229,8 @@ struct FoundationGenreCard: View {
 
 /// Three small, sequential, independently recoverable result sections.
 private struct FoundationSearchOverview: View {
+    @EnvironmentObject private var downloads: FoundationDownloads
+    @EnvironmentObject private var connectivity: FoundationConnectivity
     let query: String
     let library: any FoundationLibrary
     @ObservedObject var player: FoundationPlayer
@@ -235,6 +250,9 @@ private struct FoundationSearchOverview: View {
     var body: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 24) {
+                if connectivity.localOnly, sections.allSatisfy({ $0.model.items.isEmpty }) {
+                    FoundationOfflineNotice()
+                }
                 ForEach(sections, id: \.title) { section in
                     if !section.model.items.isEmpty || section.model.errorMessage != nil {
                         resultSection(section.title, kind: section.kind, model: section.model)
@@ -262,8 +280,8 @@ private struct FoundationSearchOverview: View {
                 #endif
             }
         }
-        .task(id: isActive && isVisible ? revision : nil) {
-            guard isActive, isVisible else { return }
+        .task(id: isActive && isVisible && !connectivity.localOnly ? revision : nil) {
+            guard isActive, isVisible, !connectivity.localOnly else { return }
             do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
             #if DEBUG
                 await FoundationTrace.withPage(origin: .search, page: .catalog) {
@@ -277,7 +295,7 @@ private struct FoundationSearchOverview: View {
 
     private func loadSections() async {
         for section in sections {
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled, !connectivity.localOnly else { return }
             await section.model.loadPending {
                 try await library.search(
                     query: query, kind: section.kind, startIndex: $0, limit: 5)
@@ -311,7 +329,18 @@ private struct FoundationSearchOverview: View {
                     play: item.kind == .track
                         ? {
                             guard let selection = model.trackQueue(selecting: index) else { return }
-                            player.setQueue(selection.items, selectedIndex: selection.index)
+                            if connectivity.localOnly {
+                                guard downloads.isReady(selection.items[selection.index]) else {
+                                    return
+                                }
+                                let ready = selection.items.filter { downloads.isReady($0) }
+                                let index = selection.items.prefix(selection.index).filter {
+                                    downloads.isReady($0)
+                                }.count
+                                player.setQueue(ready, selectedIndex: index)
+                            } else {
+                                player.setQueue(selection.items, selectedIndex: selection.index)
+                            }
 
                         } : nil, player: player, showsTrackArtwork: true,
                     navigate: { openedItem = $0 })
@@ -319,9 +348,10 @@ private struct FoundationSearchOverview: View {
             if let error = model.errorMessage {
                 Text(error).foregroundStyle(.red)
                 Button("Retry") {
+                    guard !connectivity.localOnly else { return }
                     model.request(model.retryRequest)
                     revision += 1
-                }
+                }.disabled(connectivity.localOnly)
             }
         }
     }

@@ -326,33 +326,46 @@ final class FoundationPlaylistOperation: ObservableObject {
 }
 
 struct FoundationPlaylistIndex: View {
+    @EnvironmentObject private var connectivity: FoundationConnectivity
     let library: any FoundationLibrary
     let player: FoundationPlayer
     let isActive: Bool
     @ObservedObject var model: FoundationBrowseModel
     @State private var creating = false
+    @State private var refreshRevision = 0
+    @State private var refreshPending = false
 
     var body: some View {
         FoundationCatalogView(
             title: "Playlists", model: model, library: library, player: player,
             isActive: isActive, loader: { try await library.playlists(startIndex: $0) }
         )
-        .onAppear {
-            if model.loaded { Task { await model.load(.refresh, using: library.playlists) } }
+        .onAppear { refreshPending = model.loaded }
+        .task(id: "\(isActive && !connectivity.localOnly)-\(refreshRevision)") {
+            guard isActive, !connectivity.localOnly, refreshPending else { return }
+            refreshPending = false
+            await model.load(.refresh, using: library.playlists)
         }
         .toolbar {
             Button("Create Playlist", systemImage: "plus") { creating = true }
-                .disabled(!library.supportsPlaylistManagement)
+                .disabled(connectivity.localOnly || !library.supportsPlaylistManagement)
         }
         .sheet(
             isPresented: $creating,
             onDismiss: {
-                Task { await model.load(.refresh, using: library.playlists) }
-            }, content: { FoundationPlaylistCreate(library: library) })
+                guard !connectivity.localOnly else { return }
+                refreshPending = true
+                refreshRevision += 1
+            }, content: { FoundationPlaylistCreate(library: library) }
+        )
+        .onChange(of: connectivity.localOnly) { _, localOnly in
+            if localOnly { creating = false }
+        }
     }
 }
 
 private struct FoundationPlaylistCreate: View {
+    @EnvironmentObject private var connectivity: FoundationConnectivity
     let library: any FoundationLibrary
     @State private var name = ""
     @StateObject private var operation = FoundationPlaylistOperation()
@@ -362,21 +375,27 @@ private struct FoundationPlaylistCreate: View {
             Form {
                 TextField("Playlist name", text: $name)
                 Button("Create") {
+                    guard !connectivity.localOnly else { return }
                     operation.run {
+                        guard !connectivity.localOnly else { throw CancellationError() }
                         try await FoundationPlaylistMutation.create(name: name, library: library)
                     }
                 }.disabled(
-                    operation.isPending || operation.succeeded
+                    connectivity.localOnly || operation.isPending || operation.succeeded
                         || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 FoundationPlaylistStatus(operation: operation)
             }.navigationTitle("Create Playlist")
                 .toolbar { Button("Done") { dismiss() } }
         }.frame(minWidth: 300, minHeight: 260)
             .onDisappear { operation.cancel() }
+            .onChange(of: connectivity.localOnly) { _, localOnly in
+                if localOnly { operation.cancel() }
+            }
     }
 }
 
 struct FoundationPlaylistEditor: View {
+    @EnvironmentObject private var connectivity: FoundationConnectivity
     @EnvironmentObject private var downloads: FoundationDownloads
     let playlist: FoundationItem
     var onDeleted: () -> Void = {}
@@ -399,9 +418,13 @@ struct FoundationPlaylistEditor: View {
                 Section("Playlist") {
                     TextField("Name", text: $name)
                     Button("Rename") {
+                        guard !connectivity.localOnly else { return }
                         operation.run {
+                            guard !connectivity.localOnly else { throw CancellationError() }
                             let requestedName = try FoundationPlaylistName.validated(name)
                             try await library.renamePlaylist(id: playlist.id, name: requestedName)
+                            try Task.checkCancellation()
+                            guard !connectivity.localOnly else { throw CancellationError() }
                             let refreshed = try await library.playlistPermissions(id: playlist.id)
                             try Task.checkCancellation()
                             permissions = refreshed
@@ -413,10 +436,10 @@ struct FoundationPlaylistEditor: View {
                             onRenamed(name)
                         }
                     }.disabled(
-                        permissions?.canEdit != true
+                        connectivity.localOnly || permissions?.canEdit != true
                             || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     Button("Delete Playlist", role: .destructive) { confirmDelete = true }
-                        .disabled(permissions?.canDelete != true)
+                        .disabled(connectivity.localOnly || permissions?.canDelete != true)
                     if let permissions, !permissions.canEdit {
                         Text("This playlist is read-only for this account.")
                     }
@@ -432,13 +455,17 @@ struct FoundationPlaylistEditor: View {
                             }
                             Spacer()
                             Button("Remove", role: .destructive) {
+                                guard !connectivity.localOnly else { return }
                                 operation.run {
+                                    guard !connectivity.localOnly else { throw CancellationError() }
                                     try await FoundationPlaylistMutation.remove(
                                         playlistID: playlist.id, entry: entry, library: library)
                                     downloads.reconcilePlaylists()
                                     try await refresh()
                                 }
-                            }.disabled(permissions?.canEdit != true || !membershipEditable)
+                            }.disabled(
+                                connectivity.localOnly || permissions?.canEdit != true
+                                    || !membershipEditable)
                         }
                     }
                     if visibleCount < entries.count {
@@ -452,7 +479,7 @@ struct FoundationPlaylistEditor: View {
             .navigationTitle("Manage Playlist")
             .toolbar {
                 Button("Refresh") { operation.run { try await refresh() } }.disabled(
-                    operation.isPending || deleted)
+                    connectivity.localOnly || operation.isPending || deleted)
                 Button("Done") { dismiss() }
                 if operation.isPending { Button("Cancel Request") { operation.cancel() } }
             }
@@ -461,7 +488,9 @@ struct FoundationPlaylistEditor: View {
                 titleVisibility: .visible
             ) {
                 Button("Delete Playlist", role: .destructive) {
+                    guard !connectivity.localOnly else { return }
                     operation.run {
+                        guard !connectivity.localOnly else { throw CancellationError() }
                         try await FoundationPlaylistMutation.delete(
                             id: playlist.id, library: library)
                         try Task.checkCancellation()
@@ -475,18 +504,26 @@ struct FoundationPlaylistEditor: View {
         }.frame(minWidth: 320, minHeight: 400)
             .onAppear {
                 name = playlist.title
-                operation.run { try await refresh() }
+                if !connectivity.localOnly { operation.run { try await refresh() } }
             }
             .onDisappear { operation.cancel() }
+            .onChange(of: connectivity.localOnly) { _, localOnly in
+                if localOnly {
+                    confirmDelete = false
+                    operation.cancel()
+                }
+            }
     }
 
     private func refresh() async throws {
+        guard !connectivity.localOnly else { throw CancellationError() }
         let permission = try await library.playlistPermissions(id: playlist.id)
         try Task.checkCancellation()
         permissions = permission
         name = permission.name
         membershipEditable = false
         do {
+            guard !connectivity.localOnly else { throw CancellationError() }
             let snapshot = try await FoundationPlaylistSnapshot.load(
                 id: playlist.id, library: library)
             try Task.checkCancellation()
@@ -506,11 +543,13 @@ struct FoundationPlaylistEditor: View {
 }
 
 struct FoundationPlaylistPicker: View {
+    @EnvironmentObject private var connectivity: FoundationConnectivity
     @EnvironmentObject private var changes: FoundationPlaylistChanges
     let source: FoundationItem
     let library: any FoundationLibrary
     @StateObject private var playlists = FoundationBrowseModel()
     @State private var additionSummary = "Completed."
+    @State private var revision = 0
     @StateObject private var operation = FoundationPlaylistOperation()
     @Environment(\.dismiss) private var dismiss
     var body: some View {
@@ -518,30 +557,42 @@ struct FoundationPlaylistPicker: View {
             List {
                 ForEach(playlists.items) { playlist in
                     Button(playlist.title) {
+                        guard !connectivity.localOnly else { return }
                         operation.run(successMessage: { additionSummary }) {
+                            guard !connectivity.localOnly else { throw CancellationError() }
                             let result = try await changes.add(
                                 playlistID: playlist.id, source: source, library: library)
                             additionSummary = result.message
                         }
-                    }.disabled(operation.isPending || operation.succeeded)
+                    }.disabled(connectivity.localOnly || operation.isPending || operation.succeeded)
                 }
                 if playlists.nextStartIndex != nil {
                     Button("Load More") {
-                        Task { await playlists.load(.more, using: library.playlists) }
+                        guard !connectivity.localOnly else { return }
+                        playlists.request(.more)
+                        revision += 1
                     }
-                    .disabled(playlists.isLoading)
+                    .disabled(connectivity.localOnly || playlists.isLoading)
                 }
                 if let error = playlists.errorMessage { Text(error).foregroundStyle(.red) }
                 if playlists.isLoading { ProgressView() }
                 Button("Refresh") {
-                    Task { await playlists.load(.refresh, using: library.playlists) }
-                }
+                    guard !connectivity.localOnly else { return }
+                    playlists.request(.refresh)
+                    revision += 1
+                }.disabled(connectivity.localOnly)
                 FoundationPlaylistStatus(operation: operation)
             }.navigationTitle("Add to Playlist")
                 .toolbar { Button("Done") { dismiss() } }
-                .task { await playlists.load(.initial, using: library.playlists) }
+                .task(id: !connectivity.localOnly ? revision : nil) {
+                    await playlists.loadPending(
+                        ifActive: !connectivity.localOnly, using: library.playlists)
+                }
         }.frame(minWidth: 300, minHeight: 350)
             .onDisappear { operation.cancel() }
+            .onChange(of: connectivity.localOnly) { _, localOnly in
+                if localOnly { operation.cancel() }
+            }
     }
 
 }

@@ -241,6 +241,7 @@ struct FoundationPlayerView: View {
                     .allowsHitTesting(false).accessibilityHidden(true)
             #endif
         }
+        .environment(\.foundationShowsDownloadBadges, false)
         .interactiveDismissDisabled(scrubbing)
         .accessibilityAction(.escape) { dismiss() }
         .task {
@@ -348,8 +349,11 @@ struct FoundationPlayerView: View {
                 if let current {
                     let favorite = actions.favoriteState(for: current, initial: current.isFavorite)
                     Button {
-                        guard let favorite else { return }
-                        Task { await actions.setFavorite(for: current, isFavorite: !favorite) }
+                        guard !connectivity.localOnly, let favorite else { return }
+                        Task {
+                            guard !connectivity.localOnly else { return }
+                            await actions.setFavorite(for: current, isFavorite: !favorite)
+                        }
                     } label: {
                         Image(systemName: favorite == true ? "star.fill" : "star")
                             .frame(width: 44, height: 44)
@@ -360,7 +364,6 @@ struct FoundationPlayerView: View {
                 }
             }
             if let current {
-                FoundationDownloadBadge(item: current)
                 Text(
                     [current.subtitle, album?.title].compactMap { $0 }
                         .filter { !$0.isEmpty }.joined(separator: " · ")
@@ -545,7 +548,6 @@ private struct FoundationQueueView: View {
                     VStack(alignment: .leading) {
                         Text(entry.item.title).font(.body.weight(.semibold)).lineLimit(2)
                         Text(entry.item.subtitle).font(.caption).foregroundStyle(.secondary)
-                        FoundationDownloadBadge(item: entry.item)
                     }
                     Spacer()
                     if entry.id == player.selectedEntryID {

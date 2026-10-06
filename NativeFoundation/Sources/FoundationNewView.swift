@@ -2,6 +2,8 @@ import SwiftUI
 
 /// Recent content reuses the catalog page owners, destinations, menus and player.
 struct FoundationNewView<Profile: View>: View {
+    @EnvironmentObject private var downloads: FoundationDownloads
+    @EnvironmentObject private var connectivity: FoundationConnectivity
     let profile: Profile
     let library: any FoundationLibrary
     @ObservedObject var player: FoundationPlayer
@@ -17,6 +19,9 @@ struct FoundationNewView<Profile: View>: View {
     var body: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 28) {
+                if connectivity.localOnly, tracks.items.isEmpty, albums.items.isEmpty {
+                    FoundationOfflineNotice()
+                }
                 trackSection
                 albumSection
                 genreSection
@@ -65,7 +70,18 @@ struct FoundationNewView<Profile: View>: View {
                     open: {},
                     play: {
                         guard let selection = tracks.trackQueue(selecting: index) else { return }
-                        player.setQueue(selection.items, selectedIndex: selection.index)
+                        if connectivity.localOnly {
+                            guard downloads.isReady(selection.items[selection.index]) else {
+                                return
+                            }
+                            let ready = selection.items.filter { downloads.isReady($0) }
+                            let index = selection.items.prefix(selection.index).filter {
+                                downloads.isReady($0)
+                            }.count
+                            player.setQueue(ready, selectedIndex: index)
+                        } else {
+                            player.setQueue(selection.items, selectedIndex: selection.index)
+                        }
 
                     }, player: player, showsTrackArtwork: true)
                 if index < min(5, tracks.items.count - 1) { Divider() }
@@ -75,15 +91,18 @@ struct FoundationNewView<Profile: View>: View {
                 trackRevision += 1
             }
         }
-        .task(id: isActive && isVisible ? trackRevision : nil) {
+        .task(id: isActive && isVisible && !connectivity.localOnly ? trackRevision : nil) {
             #if DEBUG
                 await FoundationTrace.withPage(origin: .new, page: .shelf) {
-                    await tracks.loadPending(ifActive: isActive && isVisible) {
+                    await tracks.loadPending(
+                        ifActive: isActive && isVisible && !connectivity.localOnly
+                    ) {
                         try await library.recentTracks(startIndex: $0)
                     }
                 }
             #else
-                await tracks.loadPending(ifActive: isActive && isVisible) {
+                await tracks.loadPending(ifActive: isActive && isVisible && !connectivity.localOnly)
+                {
                     try await library.recentTracks(startIndex: $0)
                 }
             #endif
@@ -115,15 +134,18 @@ struct FoundationNewView<Profile: View>: View {
                 albumRevision += 1
             }
         }
-        .task(id: isActive && isVisible ? albumRevision : nil) {
+        .task(id: isActive && isVisible && !connectivity.localOnly ? albumRevision : nil) {
             #if DEBUG
                 await FoundationTrace.withPage(origin: .new, page: .shelf) {
-                    await albums.loadPending(ifActive: isActive && isVisible) {
+                    await albums.loadPending(
+                        ifActive: isActive && isVisible && !connectivity.localOnly
+                    ) {
                         try await library.recentAlbums(startIndex: $0)
                     }
                 }
             #else
-                await albums.loadPending(ifActive: isActive && isVisible) {
+                await albums.loadPending(ifActive: isActive && isVisible && !connectivity.localOnly)
+                {
                     try await library.recentAlbums(startIndex: $0)
                 }
             #endif
@@ -207,7 +229,10 @@ struct FoundationNewView<Profile: View>: View {
         }
         if let error = model.errorMessage {
             Text(error).foregroundStyle(.red)
-            Button("Retry", action: retry)
+            Button("Retry") {
+                guard !connectivity.localOnly else { return }
+                retry()
+            }.disabled(connectivity.localOnly)
         } else if model.loaded, model.items.isEmpty {
             Text("No recently added items.").foregroundStyle(.secondary)
         }
@@ -217,6 +242,7 @@ struct FoundationNewView<Profile: View>: View {
 
 /// A retained, bounded album ranking independent of New and Home.
 struct FoundationLibraryMostPlayedAlbums: View {
+    @EnvironmentObject private var connectivity: FoundationConnectivity
     @ObservedObject var model: FoundationBrowseModel
     let library: any FoundationLibrary
     @ObservedObject var player: FoundationPlayer
@@ -244,9 +270,10 @@ struct FoundationLibraryMostPlayedAlbums: View {
             if let error = model.errorMessage {
                 Text(error).foregroundStyle(.red)
                 Button("Retry") {
+                    guard !connectivity.localOnly else { return }
                     model.request(model.retryRequest)
                     revision += 1
-                }
+                }.disabled(connectivity.localOnly)
             } else if model.loaded, model.items.isEmpty {
                 Text("No album listening history yet.").foregroundStyle(.secondary)
             }
@@ -265,15 +292,18 @@ struct FoundationLibraryMostPlayedAlbums: View {
                 #endif
             }
         }
-        .task(id: isActive && isVisible ? revision : nil) {
+        .task(id: isActive && isVisible && !connectivity.localOnly ? revision : nil) {
             #if DEBUG
                 await FoundationTrace.withPage(origin: .library, page: .shelf) {
-                    await model.loadPending(ifActive: isActive && isVisible) { _ in
+                    await model.loadPending(
+                        ifActive: isActive && isVisible && !connectivity.localOnly
+                    ) { _ in
                         try await library.mostPlayedAlbums()
                     }
                 }
             #else
-                await model.loadPending(ifActive: isActive && isVisible) { _ in
+                await model.loadPending(ifActive: isActive && isVisible && !connectivity.localOnly)
+                { _ in
                     try await library.mostPlayedAlbums()
                 }
             #endif
