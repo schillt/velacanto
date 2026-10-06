@@ -431,7 +431,7 @@ struct FoundationPlayerView: View {
                 Image(systemName: "forward.fill").frame(width: 60, height: 60)
             }
             .accessibilityLabel("Next").disabled(
-                selectedIndex == nil || selectedIndex == player.queue.count - 1)
+                !player.canAdvance)
             Spacer()
         }.font(.title).buttonStyle(.plain)
     }
@@ -464,81 +464,104 @@ private struct FoundationQueueView: View {
             HStack {
                 Text("Queue").font(.headline)
                 Spacer()
-                Text("\(player.queue.count) songs").font(.subheadline).foregroundStyle(
-                    .white.opacity(0.85))
+                Button {
+                    player.setShuffle(!player.shuffleEnabled)
+                } label: {
+                    Image(systemName: "shuffle").frame(width: 44, height: 44)
+                }
+                .opacity(player.shuffleEnabled ? 1 : 0.5)
+                .accessibilityLabel("Shuffle")
+                .accessibilityValue(player.shuffleEnabled ? "On" : "Off")
+                .accessibilityAddTraits(player.shuffleEnabled ? .isSelected : [])
+                Menu {
+                    ForEach(FoundationPlayer.RepeatMode.allCases, id: \.self) { mode in
+                        Button(mode.rawValue.capitalized) { player.setRepeat(mode) }
+                    }
+                } label: {
+                    Image(systemName: player.repeatMode == .one ? "repeat.1" : "repeat")
+                        .frame(width: 44, height: 44)
+                }
+                .opacity(player.repeatMode == .off ? 0.5 : 1)
+                .accessibilityLabel("Repeat")
+                .accessibilityValue(player.repeatMode.rawValue.capitalized)
             }
+            .buttonStyle(.plain)
             .padding(.horizontal, 24)
             .padding(.vertical, 12)
-            ScrollViewReader { proxy in
-                List {
-                    ForEach(Array(player.queue.enumerated()), id: \.element.id) { index, entry in
-                        HStack {
-                            Button {
-                                guard isPresented else { return }
-                                player.select(entry.id)
-                            } label: {
-                                HStack {
-                                    Text("\(index + 1)").font(.caption).foregroundStyle(
-                                        .white.opacity(0.85))
-                                    VStack(alignment: .leading) {
-                                        Text(entry.item.title).font(.body.weight(.semibold))
-                                            .lineLimit(2)
-                                        Text(entry.item.subtitle).font(.caption).foregroundStyle(
-                                            .white.opacity(0.85))
-                                    }
-                                    Spacer()
-                                    if entry.id == player.selectedEntryID {
-                                        Image(systemName: "speaker.wave.2.fill")
-                                    }
-                                }.contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityValue(
-                                entry.id == player.selectedEntryID ? "Current track" : ""
-                            )
-                            .accessibilityAddTraits(
-                                entry.id == player.selectedEntryID ? .isSelected : [])
-                            Menu {
-                                menu(entry)
-                            } label: {
-                                Image(systemName: "ellipsis").frame(width: 44, height: 44)
-                            }
-                            .menuStyle(.borderlessButton).accessibilityLabel(
-                                "Queue actions for " + entry.item.title)
-                        }
-                        .frame(minHeight: 44)
-                        .listRowInsets(EdgeInsets(top: 8, leading: 24, bottom: 8, trailing: 24))
-                        .listRowBackground(Color.clear)
-                        .id(entry.id)
-                        .contextMenu { menu(entry) }
+            .background(.regularMaterial)
+            .environment(\.colorScheme, .dark)
+            List {
+                if !player.history.isEmpty {
+                    Section("History") {
+                        ForEach(player.history) { row($0) }
                     }
                 }
-                .listStyle(.plain)
-                .scrollContentBackground(.hidden)
-                .mask { FoundationPlayerContentFade() }
-                .onAppear {
-                    if let selected = player.selectedEntryID {
-                        proxy.scrollTo(selected, anchor: .center)
-                    }
+                if let current = player.queue.first(where: { $0.id == player.selectedEntryID }) {
+                    Section("Now Playing") { row(current) }
+                }
+                Section("Up Next") {
+                    ForEach(player.upcoming) { row($0) }
+                        .reorderable()
                 }
             }
+            .reorderContainer(for: FoundationQueueEntry.self, isEnabled: isPresented) {
+                difference in
+                switch difference.destination.position {
+                case .before(let id): player.reorderUpcoming(difference.sources, before: id)
+                case .end: player.reorderUpcoming(difference.sources, before: nil)
+                }
+            }
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
+            .clipped()
+            .mask { FoundationPlayerContentFade() }
         }
         .disabled(!isPresented)
         .allowsHitTesting(isPresented)
         .accessibilityHidden(!isPresented)
     }
 
+    private func row(_ entry: FoundationQueueEntry) -> some View {
+        HStack {
+            Button {
+                guard isPresented else { return }
+                player.select(entry.id)
+            } label: {
+                HStack {
+                    VStack(alignment: .leading) {
+                        Text(entry.item.title).font(.body.weight(.semibold)).lineLimit(2)
+                        Text(entry.item.subtitle).font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    if entry.id == player.selectedEntryID {
+                        Image(systemName: "speaker.wave.2.fill")
+                    }
+                }.contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityValue(entry.id == player.selectedEntryID ? "Current track" : "")
+            .accessibilityAddTraits(entry.id == player.selectedEntryID ? .isSelected : [])
+            Menu {
+                menu(entry)
+            } label: {
+                Image(systemName: "ellipsis").frame(width: 44, height: 44)
+            }
+            .menuStyle(.borderlessButton)
+            .accessibilityLabel("Queue actions for " + entry.item.title)
+        }
+        .frame(minHeight: 44)
+        .listRowInsets(EdgeInsets(top: 8, leading: 24, bottom: 8, trailing: 24))
+        .listRowBackground(Color.clear)
+        .id(entry.id)
+        .contextMenu { menu(entry) }
+    }
+
     @ViewBuilder private func menu(_ entry: FoundationQueueEntry) -> some View {
-        Group {
-            Button("Play Next") {
-                guard isPresented else { return }
-                player.moveQueuedEntry(entry.id, position: .next)
-            }
-            Button("Play Last") {
-                guard isPresented else { return }
-                player.moveQueuedEntry(entry.id, position: .last)
-            }
-        }.disabled(entry.id == player.selectedEntryID)
+        if player.upcoming.contains(where: { $0.id == entry.id }) {
+            Button("Play Next") { player.moveQueuedEntry(entry.id, position: .next) }
+            Button("Play Last") { player.moveQueuedEntry(entry.id, position: .last) }
+            Button("Remove from Up Next", role: .destructive) { player.removeUpcoming(entry.id) }
+        }
         FoundationRelatedDestinations(item: entry.item, navigate: openItem)
     }
 }
