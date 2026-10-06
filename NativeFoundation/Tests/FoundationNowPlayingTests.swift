@@ -10,6 +10,33 @@ final class FoundationNowPlayingTests: XCTestCase {
     private let track = FoundationItem(
         id: "synthetic", title: "Test title", subtitle: "Test artist", kind: .track, duration: 8)
 
+    func testRepeatAllEnablesSystemNextAtEndAndWrapsOccurrence() async throws {
+        let source = NowPlayingSourceProbe()
+        let player = FoundationPlayer(
+            resolve: { _ in await source.resolve() },
+            makeItem: { _ in AVPlayerItem(asset: AVMutableComposition()) },
+            activateSession: {}, deactivateSession: {}, startPlayback: { _ in })
+        let bridge = FoundationNowPlaying(player: player)
+        defer {
+            bridge.invalidate()
+            player.stop()
+        }
+        player.setQueue([track, track], selectedIndex: 1)
+        await player.selectionTask?.value
+        await player.playTask?.value
+        await bridge.updateTask?.value
+        let last = try XCTUnwrap(player.selectedEntryID)
+        XCTAssertFalse(bridge.availability.next)
+        player.setRepeat(.all)
+        await bridge.updateTask?.value
+        XCTAssertTrue(bridge.availability.next)
+        try bridge.perform(.next, entryID: last)
+        await player.selectionTask?.value
+        await player.playTask?.value
+        XCTAssertEqual(player.selectedEntryID, player.queue.first?.id)
+        XCTAssertThrowsError(try bridge.perform(.next, entryID: last))
+    }
+
     func testTextCommandsBoundariesAndDuplicateOccurrenceOwnership() async throws {
         let source = NowPlayingSourceProbe()
         let player = FoundationPlayer(

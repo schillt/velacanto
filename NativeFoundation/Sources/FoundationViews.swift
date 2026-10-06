@@ -52,6 +52,8 @@ struct FoundationLibraryView: View {
     @Namespace private var playerTransition
     @State private var showingPlayer = false
     @State private var showingSettings = false
+    @State private var playlistSource: FoundationItem?
+    @StateObject private var playlistChanges = FoundationPlaylistChanges()
     @State private var profileName = ""
     @State private var profileImage: Image?
     @State private var showingFavorites = false
@@ -81,6 +83,17 @@ struct FoundationLibraryView: View {
                 FoundationSettingsView(
                     name: profileName, image: profileImage, signOut: signOut)
             }
+            .sheet(
+                isPresented: Binding(
+                    get: { playlistSource != nil },
+                    set: { if !$0 { playlistSource = nil } })
+            ) {
+                if let source = playlistSource {
+                    FoundationPlaylistPicker(source: source, library: library)
+                }
+            }
+            .environmentObject(playlistChanges)
+            .environment(\.foundationAddToPlaylist, playlistPresentation)
             .environment(\.foundationPlayerTransition, playerTransition)
             .environment(
                 \.foundationOpenLibraryItem,
@@ -89,6 +102,11 @@ struct FoundationLibraryView: View {
                     playerDestinationTab = selectedTab
                     playerDestination = item
                 })
+    }
+
+    private var playlistPresentation: (@MainActor @Sendable (FoundationItem) -> Void)? {
+        guard library.supportsPlaylistManagement else { return nil }
+        return { playlistSource = $0 }
     }
 
     @ViewBuilder private var shell: some View {
@@ -274,10 +292,10 @@ struct FoundationLibraryView: View {
                             symbol: "music.note")
                     }
                     NavigationLink {
-                        FoundationCatalogView(
-                            title: "Playlists", model: playlists, library: library, player: player,
-                            isActive: selectedTab == .library
-                        ) { try await library.playlists(startIndex: $0) }
+                        FoundationPlaylistIndex(
+                            library: library, player: player, isActive: selectedTab == .library,
+                            model: playlists
+                        )
                         #if os(iOS)
                             .toolbar(.visible, for: .navigationBar)
                         #endif
@@ -818,23 +836,55 @@ private struct FoundationArtistView: View {
 }
 
 private struct FoundationCollectionView: View {
+    @EnvironmentObject private var playlistChanges: FoundationPlaylistChanges
     let item: FoundationItem
     let library: any FoundationLibrary
     let player: FoundationPlayer
     let isActive: Bool
     @StateObject private var tracks = FoundationBrowseModel()
+    @State private var managingPlaylist = false
+    @State private var playlistName: String?
+    @Environment(\.dismiss) private var dismiss
+
+    private var displayItem: FoundationItem {
+        var copy = item
+        copy.title = playlistName ?? item.title
+        return copy
+    }
 
     var body: some View {
         FoundationTrackList(
-            title: item.title, tracks: tracks, player: player, library: library, isActive: isActive,
-            collection: item
-        ) {
-            offset in
-            if item.kind == .playlist {
-                return try await library.playlistTracks(playlistID: item.id, startIndex: offset)
+            title: displayItem.title, tracks: tracks, player: player, library: library,
+            isActive: isActive,
+            collection: displayItem,
+            playlistRevision: item.kind == .playlist ? playlistChanges.revision(for: item.id) : 0,
+            loader: { offset in
+                if item.kind == .playlist {
+                    return try await library.playlistTracks(playlistID: item.id, startIndex: offset)
+                }
+                return try await library.tracks(albumID: item.id, startIndex: offset)
             }
-            return try await library.tracks(albumID: item.id, startIndex: offset)
+        )
+        .toolbar {
+            if item.kind == .playlist {
+                Button("Manage Playlist", systemImage: "pencil") { managingPlaylist = true }
+                    .disabled(!library.supportsPlaylistManagement)
+            }
         }
+        .sheet(
+            isPresented: $managingPlaylist,
+            onDismiss: {
+                Task {
+                    await tracks.load(.refresh) {
+                        try await library.playlistTracks(playlistID: item.id, startIndex: $0)
+                    }
+                }
+            },
+            content: {
+                FoundationPlaylistEditor(
+                    playlist: displayItem, onDeleted: { dismiss() },
+                    onRenamed: { playlistName = $0 }, library: library)
+            })
     }
 }
 
@@ -849,6 +899,8 @@ private struct FoundationTrackList: View {
     let library: any FoundationLibrary
     let isActive: Bool
     var collection: FoundationItem?
+    var playlistRevision = 0
+    @State private var loadedPlaylistRevision = 0
     @State private var detailTint = Color(white: 0.12)
     let loader: (Int) async throws -> FoundationPage
     @State private var revision = 0
@@ -970,13 +1022,14 @@ private struct FoundationTrackList: View {
         }
         .onAppear { isVisible = true }
         .onDisappear { isVisible = false }
-        .task(id: isActive ? revision : nil) {
+        .task(id: [isActive ? 1 : 0, isVisible ? 1 : 0, revision, playlistRevision]) {
+            guard isActive, isVisible else { return }
             #if DEBUG
                 await FoundationTrace.withPage(origin: traceOrigin, page: .tracks) {
-                    await tracks.loadPending(ifActive: isActive, using: loader)
+                    await loadTracks()
                 }
             #else
-                await tracks.loadPending(ifActive: isActive, using: loader)
+                await loadTracks()
             #endif
         }
         .navigationDestination(
@@ -987,6 +1040,17 @@ private struct FoundationTrackList: View {
                 FoundationItemDestination(
                     item: item, library: library, player: player, isActive: isActive)
             }
+        }
+    }
+
+    private func loadTracks() async {
+        if loadedPlaylistRevision != playlistRevision {
+            await tracks.load(.refresh, using: loader)
+            if !Task.isCancelled, tracks.errorMessage == nil {
+                loadedPlaylistRevision = playlistRevision
+            }
+        } else {
+            await tracks.loadPending(ifActive: isActive, using: loader)
         }
     }
 

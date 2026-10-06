@@ -77,16 +77,10 @@ struct FoundationCatalogArtwork: View {
     }
 
     private func installArtwork(_ data: Data?) {
-        #if os(iOS)
-            let native = data.flatMap { UIImage(data: $0) }
-            let cgImage = native?.cgImage
-            let displayed = native.map { Image(uiImage: $0) }
-        #else
-            let native = data.flatMap { NSImage(data: $0) }
-            let cgImage = native?.cgImage(forProposedRect: nil, context: nil, hints: nil)
-            let displayed = native.map { Image(nsImage: $0) }
-        #endif
-        installImage(cgImage, displayImage: displayed)
+        let result = data.flatMap {
+            FoundationCurrentArtwork.decode($0, maximumPixels: isHero ? 640 : 160)
+        }
+        installImage(result?.image)
     }
 
     private func installImage(_ cgImage: CGImage?, displayImage: Image? = nil) {

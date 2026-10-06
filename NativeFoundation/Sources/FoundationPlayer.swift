@@ -3,7 +3,12 @@ import Combine
 import Foundation
 
 struct FoundationQueueEntry: Identifiable, Equatable, Sendable {
-    let id = UUID()
+    let id: UUID
+
+    init(id: UUID = UUID(), item: FoundationItem) {
+        self.id = id
+        self.item = item
+    }
     let item: FoundationItem
 }
 
@@ -11,6 +16,68 @@ struct FoundationQueueEntry: Identifiable, Equatable, Sendable {
 final class FoundationPlayer: ObservableObject {
     enum State: String { case idle, loading, paused, waiting, playing, failed, ended }
     enum QueuePosition { case next, last }
+    enum RepeatMode: String, Codable, CaseIterable { case off, all, one }
+
+    @Published private(set) var shuffleEnabled = false
+    @Published private(set) var repeatMode: RepeatMode = .off
+    let sessionChanged = PassthroughSubject<Void, Never>()
+
+    var history: [FoundationQueueEntry] { selectedIndex.map { Array(queue.prefix($0)) } ?? [] }
+    var upcoming: [FoundationQueueEntry] {
+        selectedIndex.map { Array(queue.dropFirst($0 + 1)) } ?? queue
+    }
+    var canAdvance: Bool { !upcoming.isEmpty || (repeatMode == .all && !queue.isEmpty) }
+
+    func setShuffle(_ enabled: Bool) {
+        guard enabled != shuffleEnabled else { return }
+        shuffleEnabled = enabled
+        if enabled {
+            let prefixCount = selectedIndex.map { $0 + 1 } ?? 0
+            queue = Array(queue.prefix(prefixCount)) + upcoming.shuffled()
+        }
+        sessionChanged.send()
+    }
+
+    func setRepeat(_ mode: RepeatMode) {
+        repeatMode = mode
+        sessionChanged.send()
+    }
+
+    func removeUpcoming(_ id: UUID) {
+        guard upcoming.contains(where: { $0.id == id }) else { return }
+        queue.removeAll { $0.id == id }
+        sessionChanged.send()
+    }
+
+    /// IDs are validated against the live upcoming region, rejecting stale drag results.
+    func reorderUpcoming(_ ids: [UUID], before destination: UUID?) {
+        let live = upcoming
+        let sources = Set(ids)
+        guard !ids.isEmpty, sources.count == ids.count,
+            sources.isSubset(of: Set(live.map(\.id))),
+            destination == nil || live.contains(where: { $0.id == destination }),
+            destination.map({ !sources.contains($0) }) ?? true
+        else { return }
+        let moved = live.filter { sources.contains($0.id) }
+        var remaining = live.filter { !sources.contains($0.id) }
+        let insertion =
+            destination.flatMap { target in remaining.firstIndex { $0.id == target } }
+            ?? remaining.endIndex
+        remaining.insert(contentsOf: moved, at: insertion)
+        queue = history + queue.filter { $0.id == selectedEntryID } + remaining
+        sessionChanged.send()
+    }
+
+    func restoreSession(_ snapshot: FoundationPlaybackSnapshot) {
+        guard snapshot.isValid else { return }
+        discardSelection()
+        queue = snapshot.entries.map(\.entry)
+        selectedEntryID = snapshot.selectedEntryID
+        shuffleEnabled = snapshot.shuffleEnabled
+        repeatMode = snapshot.repeatMode
+        state = selectedEntryID == nil ? .idle : .paused
+        sessionChanged.send()
+    }
 
     @Published private(set) var queue: [FoundationQueueEntry] = []
     @Published private(set) var selectedEntryID: UUID?
@@ -211,12 +278,22 @@ final class FoundationPlayer: ObservableObject {
         #if DEBUG
             recordSnapshot("command.setQueue")
         #endif
+        guard items.allSatisfy({ $0.kind == .track }) else { return }
         discardSelection()
         queue = items.map { FoundationQueueEntry(item: $0) }
         selectedEntryID = nil
         state = .idle
-        guard queue.indices.contains(selectedIndex) else { return }
-        select(queue[selectedIndex].id)
+        guard queue.indices.contains(selectedIndex) else {
+            sessionChanged.send()
+            return
+        }
+        let selected = queue[selectedIndex].id
+        if shuffleEnabled {
+            queue =
+                Array(queue.prefix(selectedIndex + 1))
+                + Array(queue.dropFirst(selectedIndex + 1)).shuffled()
+        }
+        select(selected)
     }
 
     /// Extend the queue without replacing the selected occurrence or native item.
@@ -226,19 +303,14 @@ final class FoundationPlayer: ObservableObject {
         let insertion = position == .next ? selectedIndex.map { $0 + 1 } ?? 0 : queue.endIndex
         queue.insert(contentsOf: entries, at: insertion)
         if selectedEntryID == nil { select(entries[0].id) }
+        sessionChanged.send()
     }
 
     /// Move this occurrence, preserving duplicate tracks and the current native selection.
     func moveQueuedEntry(_ id: UUID, position: QueuePosition) {
-        guard id != selectedEntryID, let index = queue.firstIndex(where: { $0.id == id }) else {
-            return
-        }
-        var updated = queue
-        let entry = updated.remove(at: index)
-        let currentIndex = updated.firstIndex { $0.id == selectedEntryID }
-        let insertion = position == .next ? currentIndex.map { $0 + 1 } ?? 0 : updated.endIndex
-        updated.insert(entry, at: insertion)
-        queue = updated
+        guard upcoming.contains(where: { $0.id == id }) else { return }
+        let target = position == .next ? upcoming.first(where: { $0.id != id })?.id : nil
+        reorderUpcoming([id], before: target)
     }
 
     func select(_ id: UUID) {
@@ -252,6 +324,7 @@ final class FoundationPlayer: ObservableObject {
         discardSelection(retainingNativeItem: retainingEndedItem)
         isInterrupted = false
         selectedEntryID = id
+        sessionChanged.send()
         wantsPlayback = true
         state = .loading
         let selectionGeneration = generation
@@ -291,8 +364,12 @@ final class FoundationPlayer: ObservableObject {
         #if DEBUG
             recordSnapshot("command.next")
         #endif
-        guard let index = selectedIndex, queue.indices.contains(index + 1) else { return }
-        select(queue[index + 1].id)
+        guard let index = selectedIndex else { return }
+        if queue.indices.contains(index + 1) {
+            select(queue[index + 1].id)
+        } else if repeatMode == .all, let first = queue.first {
+            select(first.id)
+        }
     }
 
     func previous() {
@@ -533,7 +610,10 @@ final class FoundationPlayer: ObservableObject {
             return
         }
         guard let item = nativePlayer.currentItem else {
-            state = selectionTask == nil ? .idle : (wantsPlayback ? .loading : .paused)
+            state =
+                selectionTask != nil
+                ? (wantsPlayback ? .loading : .paused)
+                : (state == .paused && selectedEntryID != nil ? .paused : .idle)
             return
         }
         if nativePlayer.status == .failed {
@@ -568,9 +648,17 @@ final class FoundationPlayer: ObservableObject {
         #if DEBUG
             recordSnapshot("item.ended")
         #endif
-        if let index = selectedIndex, queue.indices.contains(index + 1) {
+        let successor: UUID?
+        if repeatMode == .one {
+            successor = selectedEntryID
+        } else if let index = selectedIndex, queue.indices.contains(index + 1) {
+            successor = queue[index + 1].id
+        } else {
+            successor = repeatMode == .all ? queue.first?.id : nil
+        }
+        if let successor {
             let shouldPlay = wantsPlayback
-            select(queue[index + 1].id, retainingEndedItem: shouldPlay)
+            select(successor, retainingEndedItem: shouldPlay)
             if !shouldPlay { pause() }
         } else {
             wantsPlayback = false
@@ -700,4 +788,76 @@ final class FoundationPlayer: ObservableObject {
         }
     #endif
 
+}
+
+/// Account-owned metadata only: no credentials, origins, media URLs or playback position.
+struct FoundationPlaybackSnapshot: Codable {
+    struct Reference: Codable {
+        let id: String
+        let title: String
+        let primaryImageTag: String?
+        init(_ value: FoundationItemReference) {
+            id = value.id
+            title = value.title
+            primaryImageTag = value.primaryImageTag
+        }
+        var reference: FoundationItemReference {
+            FoundationItemReference(id: id, title: title, primaryImageTag: primaryImageTag)
+        }
+    }
+    struct Entry: Codable {
+        let id: UUID
+        let itemID: String
+        let title: String
+        let subtitle: String
+        let duration: Double?
+        let primaryImageTag: String?
+        let album: Reference?
+        let artist: Reference?
+        let genres: [Reference]
+        let isFavorite: Bool?
+        let playCount: Int
+
+        init(_ entry: FoundationQueueEntry) {
+            id = entry.id
+            itemID = entry.item.id
+            title = entry.item.title
+            subtitle = entry.item.subtitle
+            duration = entry.item.duration
+            primaryImageTag = entry.item.primaryImageTag
+            album = entry.item.album.map(Reference.init)
+            artist = entry.item.artist.map(Reference.init)
+            genres = entry.item.genres.map(Reference.init)
+            isFavorite = entry.item.isFavorite
+            playCount = entry.item.playCount
+        }
+
+        var entry: FoundationQueueEntry {
+            FoundationQueueEntry(
+                id: id,
+                item: FoundationItem(
+                    id: itemID, title: title, subtitle: subtitle, kind: .track,
+                    duration: duration, primaryImageTag: primaryImageTag, isFavorite: isFavorite,
+                    album: album?.reference, artist: artist?.reference,
+                    genres: genres.map(\.reference), playCount: playCount))
+        }
+    }
+    let version: Int
+    let entries: [Entry]
+    let selectedEntryID: UUID?
+    let shuffleEnabled: Bool
+    let repeatMode: FoundationPlayer.RepeatMode
+
+    @MainActor init(player: FoundationPlayer) {
+        version = 1
+        entries = player.queue.map(Entry.init)
+        selectedEntryID = player.selectedEntryID
+        shuffleEnabled = player.shuffleEnabled
+        repeatMode = player.repeatMode
+    }
+
+    var isValid: Bool {
+        version == 1 && Set(entries.map(\.id)).count == entries.count
+            && (selectedEntryID == nil || entries.contains { $0.id == selectedEntryID })
+    }
 }
