@@ -129,7 +129,11 @@ final class FoundationNowPlaying: MediaSessionRepresentable {
             case .idle, .ended, .failed: state = .stopped
             case .loading, .waiting: state = .buffering
             case .paused: state = .paused
-            case .playing: state = .playing(rate: player.nativePlayer.rate)
+            case .playing:
+                // Native rate can reach zero before the queued player-state callback.
+                // A playing snapshot requires an advancing clock; never publish a zero rate.
+                let rate = player.nativePlayer.rate
+                state = rate.isFinite && rate != 0 ? .playing(rate: rate) : .paused
             }
         }
         let nativeTime = player.selectionTask == nil ? player.nativePlayer.currentTime().seconds : 0

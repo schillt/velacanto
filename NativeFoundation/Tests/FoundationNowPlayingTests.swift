@@ -128,6 +128,36 @@ final class FoundationNowPlayingTests: XCTestCase {
         XCTAssertEqual(player.nativePlayer.currentTime().seconds, 3, accuracy: 0.3)
     }
 
+    func testNativePauseBeforePublishedStateKeepsSnapshotValid() async throws {
+        let file = try XCTUnwrap(FoundationTestTones.resolve(FoundationTestTones.items[0]))
+        let player = FoundationPlayer(
+            resolve: { _ in file }, activateSession: {}, deactivateSession: {})
+        player.nativePlayer.volume = 0
+        player.setQueue([track], selectedIndex: 0)
+        await waitForPlayback(player)
+        // Native changes precede the queued MainActor callback updating published state.
+        player.nativePlayer.pause()
+        XCTAssertEqual(player.state, .playing)
+        XCTAssertEqual(player.nativePlayer.rate, 0)
+        let bridge = FoundationNowPlaying(player: player)
+        defer {
+            bridge.invalidate()
+            player.stop()
+        }
+        XCTAssertNotNil(bridge.playbackSnapshot)
+        XCTAssertTrue(player.wantsPlayback, "Presentation must not change playback intent")
+        XCTAssertTrue(bridge.availability.pause)
+        let paused = XCTestExpectation(description: "Native pause reaches published player state")
+        let subscription = player.$state.filter { $0 == .paused }.first()
+            .sink { _ in paused.fulfill() }
+        let result = await XCTWaiter.fulfillment(of: [paused], timeout: 5)
+        subscription.cancel()
+        XCTAssertEqual(result, .completed)
+        await bridge.updateTask?.value
+        XCTAssertEqual(player.state, .paused)
+        XCTAssertNotNil(bridge.playbackSnapshot)
+    }
+
     func testDeniedPrimacyDoesNotRetryDuringNaturalHandoff() async throws {
         let file = try XCTUnwrap(
             FoundationTestTones.resolve(FoundationTestTones.items[0]))
