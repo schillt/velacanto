@@ -119,6 +119,109 @@ final class FoundationDownloadsTests: XCTestCase {
         _ = await restored.clearAccount()
     }
 
+    func testOfflineRelaunchRetainsReadyOccurrencesWithoutAnotherTransfer() async throws {
+        let track = item("track")
+        let directory = try root()
+        let library = DownloadsLibrary(tracks: [track, track])
+        let manager = FoundationDownloads(
+            scope: "fixture", library: library, root: directory, transfer: transfer,
+            monitorConnectivity: false)
+        manager.updateConnectivity(isAllowed: true)
+        manager.download(item("playlist", kind: .playlist))
+        try await waitUntil { manager.owners.first?.state == .ready }
+        manager.invalidate()
+        await library.setFailure(true)
+
+        let restored = FoundationDownloads(
+            scope: "fixture", library: library, root: directory,
+            transfer: { _, _, _, _ in
+                XCTFail("Offline restoration must not start another transfer")
+                throw FoundationLibraryError.unavailable
+            }, monitorConnectivity: false)
+        try await waitUntil { !restored.isLoading }
+        XCTAssertEqual(restored.owners.first?.state, .ready)
+        XCTAssertEqual(
+            restored.readyTracks(ownerID: "playlist:playlist").map(\.id), ["track", "track"])
+        XCTAssertFalse(restored.allowsCellular)
+        let resource = try await restored.playbackResource(for: track)
+        XCTAssertTrue(resource.url.isFileURL)
+        XCTAssertEqual(try Data(contentsOf: resource.url), Data("synthetic audio".utf8))
+        await resource.release()
+        let cleared = await restored.clearAccount()
+        XCTAssertTrue(cleared)
+    }
+
+    func testStoredFilesRetainProtectionAfterManifestReplacement() async throws {
+        let track = item("track")
+        let directory = try root()
+        let account = FoundationDownloadStorage.directory(scope: "fixture", root: directory)
+        let manager = FoundationDownloads(
+            scope: "fixture", library: DownloadsLibrary(tracks: [track]), root: directory,
+            transfer: transfer, monitorConnectivity: false)
+        manager.updateConnectivity(isAllowed: true)
+        manager.download(track)
+        try await waitUntil { manager.owners.first?.state == .ready }
+        let resource = try await manager.playbackResource(for: track)
+        let manifest = account.appendingPathComponent("manifest.json")
+        for cellular in [true, false] {
+            // Each settings save atomically replaces the manifest, so verify the resulting inode.
+            manager.setAllowsCellular(cellular)
+            XCTAssertEqual(
+                try FoundationDownloadStorage.load(directory: account).allowsCellular, cellular)
+            for url in [account, manifest, resource.url] {
+                XCTAssertEqual(
+                    try url.resourceValues(forKeys: [.isExcludedFromBackupKey])
+                        .isExcludedFromBackup,
+                    true)
+                let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+                #if os(iOS)
+                    XCTAssertEqual(
+                        attributes[.protectionKey] as? FileProtectionType,
+                        .completeUntilFirstUserAuthentication)
+                #else
+                    XCTAssertEqual(
+                        (attributes[.posixPermissions] as? NSNumber)?.intValue,
+                        url == account ? 0o700 : 0o600)
+                #endif
+            }
+        }
+        await resource.release()
+        let cleared = await manager.clearAccount()
+        XCTAssertTrue(cleared)
+    }
+
+    func testAccountCleanupDoesNotRemoveAnotherScopesReadyFile() async throws {
+        let track = item("track")
+        let directory = try root()
+        let library = DownloadsLibrary(tracks: [track])
+        let first = FoundationDownloads(
+            scope: "first-account", library: library, root: directory, transfer: transfer,
+            monitorConnectivity: false)
+        let second = FoundationDownloads(
+            scope: "second-account", library: library, root: directory, transfer: transfer,
+            monitorConnectivity: false)
+        first.updateConnectivity(isAllowed: true)
+        first.download(track)
+        try await waitUntil { first.isReady(track) }
+        XCTAssertFalse(second.isReady(track))
+        second.updateConnectivity(isAllowed: true)
+        second.download(track)
+        try await waitUntil { second.isReady(track) }
+        let resource = try await second.playbackResource(for: track)
+        let cleared = await first.clearAccount()
+        XCTAssertTrue(cleared)
+        XCTAssertTrue(second.isReady(track))
+        XCTAssertEqual(try Data(contentsOf: resource.url), Data("synthetic audio".utf8))
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath: FoundationDownloadStorage.directory(
+                    scope: "first-account", root: directory
+                ).path))
+        await resource.release()
+        let secondCleared = await second.clearAccount()
+        XCTAssertTrue(secondCleared)
+    }
+
     func testStorageFailureStaysUnavailableAndCanBeExplicitlyRetried() async throws {
         let track = item("track")
         let manager = FoundationDownloads(
