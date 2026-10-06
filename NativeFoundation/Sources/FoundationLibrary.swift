@@ -5,7 +5,7 @@ import JellyfinAPI
 struct FoundationItem: Identifiable, Equatable, Sendable {
     enum Kind: Sendable { case album, artist, track, playlist, genre }
     let id: String
-    let title: String
+    var title: String
     let subtitle: String
     let kind: Kind
     let duration: Double?
@@ -36,6 +36,16 @@ struct FoundationSession: Codable, Sendable {
 }
 
 protocol FoundationLibrary: Sendable {
+    var supportsPlaylistManagement: Bool { get }
+    var supportsRepeatedPlaylistTracks: Bool { get }
+    func playlistPermissions(id: String) async throws -> FoundationPlaylistPermissions
+    func playlistEntries(id: String, startIndex: Int) async throws -> FoundationPlaylistPage
+    func createPlaylist(name: String) async throws -> FoundationItem
+    func renamePlaylist(id: String, name: String) async throws
+    func deletePlaylist(id: String) async throws
+    func addTracks(to playlistID: String, tracks: [FoundationItem]) async throws
+    func removeEntry(from playlistID: String, entryID: String) async throws
+
     func lyrics(for item: FoundationItem) async throws -> FoundationLyrics?
     func overview(for item: FoundationItem) async throws -> String?
     func appearances(artistID: String, startIndex: Int) async throws -> FoundationPage
@@ -70,6 +80,28 @@ protocol FoundationLibrary: Sendable {
 }
 
 extension FoundationLibrary {
+    var supportsPlaylistManagement: Bool { false }
+    var supportsRepeatedPlaylistTracks: Bool { false }
+    func playlistPermissions(id: String) async throws -> FoundationPlaylistPermissions {
+        throw FoundationLibraryError.unavailable
+    }
+    func playlistEntries(id: String, startIndex: Int) async throws -> FoundationPlaylistPage {
+        throw FoundationLibraryError.unavailable
+    }
+    func createPlaylist(name: String) async throws -> FoundationItem {
+        throw FoundationLibraryError.unavailable
+    }
+    func renamePlaylist(id: String, name: String) async throws {
+        throw FoundationLibraryError.unavailable
+    }
+    func deletePlaylist(id: String) async throws { throw FoundationLibraryError.unavailable }
+    func addTracks(to playlistID: String, tracks: [FoundationItem]) async throws {
+        throw FoundationLibraryError.unavailable
+    }
+    func removeEntry(from playlistID: String, entryID: String) async throws {
+        throw FoundationLibraryError.unavailable
+    }
+
     func lyrics(for item: FoundationItem) async throws -> FoundationLyrics? {
         throw FoundationLibraryError.unavailable
     }
@@ -197,6 +229,90 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
     init(session: FoundationSession, load: @escaping Load = nativeLoad) {
         self.session = session
         self.load = load
+    }
+
+    var supportsPlaylistManagement: Bool { true }
+
+    func playlistPermissions(id: String) async throws -> FoundationPlaylistPermissions {
+        guard Self.validID(id) else { throw FoundationLibraryError.invalidResponse }
+        let permission = try await send(
+            Paths.getPlaylistUser(playlistID: id, userID: session.userID))
+        let item = try await send(Paths.getItem(itemID: id, userID: session.userID))
+        guard item.id == id, item.type == .playlist, permission.userID == session.userID else {
+            throw FoundationLibraryError.invalidResponse
+        }
+        return FoundationPlaylistPermissions(
+            name: item.name ?? "Untitled", canEdit: permission.canEdit == true,
+            canDelete: item.canDelete == true)
+    }
+
+    func playlistEntries(id: String, startIndex: Int) async throws -> FoundationPlaylistPage {
+        guard Self.validID(id), startIndex >= 0 else {
+            throw FoundationLibraryError.invalidResponse
+        }
+        let result = try await send(
+            Paths.getPlaylistItems(
+                playlistID: id,
+                parameters: .init(userID: session.userID, startIndex: startIndex, limit: 100)))
+        let page = try mappedPage(result, kinds: [.track], startIndex: startIndex, limit: 100)
+        let entries = try zip(page.items, result.items ?? []).enumerated().map { index, pair in
+            let (item, source) = pair
+            guard let entryID = source.playlistItemID, !entryID.isEmpty,
+                entryID.utf8.count <= 128,
+                entryID.unicodeScalars.allSatisfy({
+                    CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_")).contains($0)
+                })
+            else { throw FoundationLibraryError.invalidResponse }
+            return FoundationPlaylistEntry(
+                id: "\(startIndex + index):\(entryID)", mutationID: entryID, item: item)
+        }
+        return FoundationPlaylistPage(entries: entries, nextStartIndex: page.nextStartIndex)
+    }
+
+    func createPlaylist(name: String) async throws -> FoundationItem {
+        let name = try FoundationPlaylistName.validated(name)
+        let result = try await send(
+            Paths.createPlaylist(
+                CreatePlaylistDto(
+                    isPublic: false, mediaType: .audio, name: name, userID: session.userID)))
+        guard let id = result.id, Self.validID(id) else {
+            throw FoundationLibraryError.invalidResponse
+        }
+        return FoundationItem(id: id, title: name, subtitle: "", kind: .playlist, duration: nil)
+    }
+
+    func renamePlaylist(id: String, name: String) async throws {
+        guard Self.validID(id) else { throw FoundationLibraryError.invalidResponse }
+        let name = try FoundationPlaylistName.validated(name)
+        _ = try await responseData(
+            Paths.updatePlaylist(playlistID: id, UpdatePlaylistDto(name: name)))
+    }
+
+    func deletePlaylist(id: String) async throws {
+        guard Self.validID(id) else { throw FoundationLibraryError.invalidResponse }
+        _ = try await responseData(Paths.deleteItem(itemID: id))
+    }
+
+    func addTracks(to playlistID: String, tracks: [FoundationItem]) async throws {
+        guard Self.validID(playlistID), !tracks.isEmpty, tracks.count <= 100,
+            tracks.allSatisfy({ $0.kind == .track && Self.validID($0.id) })
+        else {
+            throw FoundationLibraryError.invalidResponse
+        }
+        _ = try await responseData(
+            Paths.addItemToPlaylist(
+                playlistID: playlistID,
+                parameters: .init(ids: tracks.map(\.id), userID: session.userID)))
+    }
+
+    func removeEntry(from playlistID: String, entryID: String) async throws {
+        guard Self.validID(playlistID), !entryID.isEmpty, entryID.utf8.count <= 128,
+            entryID.unicodeScalars.allSatisfy({
+                CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_")).contains($0)
+            })
+        else { throw FoundationLibraryError.invalidResponse }
+        _ = try await responseData(
+            Paths.removeItemFromPlaylist(playlistID: playlistID, entryIDs: [entryID]))
     }
 
     static func signIn(
