@@ -312,6 +312,23 @@ final class FoundationCurrentArtworkTests: XCTestCase {
         let finalCount = await probe.count
         XCTAssertEqual(finalCount, 1)
     }
+
+    func testCatalogDecodeBoundsRetainedPixelsAndRejectsInvalidLimits() throws {
+        let data = try imageData(width: 1_024, height: 512)
+        let thumbnail = try XCTUnwrap(FoundationCurrentArtwork.decode(data, maximumPixels: 160))
+        XCTAssertEqual(thumbnail.image.width, 160)
+        XCTAssertEqual(thumbnail.image.height, 80)
+        XCTAssertLessThanOrEqual(
+            thumbnail.image.bytesPerRow * thumbnail.image.height, 160 * 160 * 4)
+        let hero = try XCTUnwrap(FoundationCurrentArtwork.decode(data, maximumPixels: 640))
+        XCTAssertEqual(hero.image.width, 640)
+        XCTAssertEqual(hero.image.height, 320)
+        XCTAssertLessThanOrEqual(hero.image.bytesPerRow * hero.image.height, 640 * 640 * 4)
+        XCTAssertNil(FoundationCurrentArtwork.decode(data, maximumPixels: 0))
+        XCTAssertNil(FoundationCurrentArtwork.decode(data, maximumPixels: 641))
+        XCTAssertNil(
+            FoundationCurrentArtwork.decode(Data("offline failure".utf8), maximumPixels: 160))
+    }
 }
 
 private actor ArtworkProbe {

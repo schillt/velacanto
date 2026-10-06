@@ -7,6 +7,77 @@ final class FoundationLibraryActionsTests: XCTestCase {
     private let album = FoundationItem(
         id: "synthetic", title: "Synthetic", subtitle: "", kind: .album, duration: nil)
 
+    func testDelayedCollectionPlayAndEnqueueCannotOverwriteExplicitUpcomingEdits() async throws {
+        for startsPlayback in [true, false] {
+            for removesEntry in [true, false] {
+                let gate = CollectionGate()
+                let session = FoundationSession(
+                    serverURL: URL(string: "https://example.invalid")!, accessToken: "synthetic",
+                    userID: "00000000000000000000000000000001", deviceID: "synthetic")
+                let library = FoundationJellyfinLibrary(session: session) { request in
+                    await gate.hold()
+                    let body = """
+                        {"Items":[{"Id":"00000000000000000000000000000002","Type":"Audio"}],"TotalRecordCount":1}
+                        """
+                    return (
+                        Data(body.utf8),
+                        HTTPURLResponse(
+                            url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+                    )
+                }
+                let player = FoundationPlayer(resolve: { _ in throw CancellationError() })
+                let track = FoundationItem(
+                    id: "synthetic-track", title: "", subtitle: "", kind: .track, duration: nil)
+                player.setQueue([track, track, track, track], selectedIndex: 1)
+                await player.selectionTask?.value
+                let actions = FoundationLibraryActions(
+                    sourceScope: "synthetic", read: { _ in nil }, write: { _, _ in },
+                    mutateFavorite: { _, _ in })
+                let collection = FoundationItem(
+                    id: "00000000000000000000000000000003", title: "", subtitle: "", kind: .album,
+                    duration: nil)
+                if startsPlayback {
+                    actions.play(collection, shuffled: false, library: library, player: player)
+                } else {
+                    actions.enqueue(collection, position: .last, library: library, player: player)
+                }
+                let expansion = try XCTUnwrap(actions.queueTask)
+                try await gate.waitUntilStarted()
+                let selected = player.selectedEntryID
+                if removesEntry {
+                    player.removeUpcoming(player.upcoming[0].id)
+                } else {
+                    player.reorderUpcoming([player.upcoming[0].id], before: nil)
+                }
+                let edited = player.queue
+                XCTAssertTrue(expansion.isCancelled)
+                await gate.release()
+                await expansion.value
+                XCTAssertEqual(player.queue, edited)
+                XCTAssertEqual(player.selectedEntryID, selected)
+                XCTAssertFalse(actions.isQueueLoading)
+                XCTAssertNil(actions.queueErrorMessage)
+            }
+        }
+    }
+
+    private actor CollectionGate {
+        private var held: CheckedContinuation<Void, Never>?
+        func hold() async { await withCheckedContinuation { held = $0 } }
+        func waitUntilStarted() async throws {
+            let clock = ContinuousClock()
+            let deadline = clock.now.advanced(by: .seconds(5))
+            while held == nil {
+                guard clock.now < deadline else { throw Failure.synthetic }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+        }
+        func release() {
+            held?.resume()
+            held = nil
+        }
+    }
+
     func testPinsPersistWithinSourceAndSeparateKindsWithoutNetwork() {
         var storage: [String: Data] = [:]
         let make: (String) -> FoundationLibraryActions = { scope in
