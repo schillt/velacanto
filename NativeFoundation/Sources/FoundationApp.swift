@@ -1,3 +1,4 @@
+import Combine
 import CryptoKit
 import NowPlaying
 import SwiftUI
@@ -5,9 +6,13 @@ import SwiftUI
 @MainActor
 enum FoundationSignInPolicy {
     static func authenticate(
-        clearPins: () -> Bool, signIn: @MainActor () async throws -> FoundationSession
+        clearPins: () -> Bool, clearPlaybackSessions: () -> Bool = { true },
+        signIn: @MainActor () async throws -> FoundationSession
     ) async throws -> FoundationSession {
         guard clearPins() else { throw FoundationPinStorageError.couldNotRemovePins }
+        guard clearPlaybackSessions() else {
+            throw FoundationPlaybackSessionStore.StorageError.cleanupFailed
+        }
         return try await signIn()
     }
 }
@@ -53,6 +58,7 @@ final class FoundationAppModel: ObservableObject {
     @Published private(set) var currentArtwork: FoundationCurrentArtwork?
     @Published var credentialError: String?
     @Published var signOutNotice: String?
+    private var playbackSessionSubscription: AnyCancellable?
     private var restored = false
     private var accountEpoch = 0
     private var nowPlaying: FoundationNowPlaying?
@@ -75,6 +81,10 @@ final class FoundationAppModel: ObservableObject {
                 if !FoundationPinStorage.removeStoredPins(retaining: scope) {
                     credentialError = "Older saved pins could not be removed from this device."
                 }
+                if !FoundationPlaybackSessionStore.clear(retaining: scope) {
+                    credentialError =
+                        "Older playback sessions could not be removed from this device."
+                }
                 open(session, sourceScope: scope)
             } else if !FoundationPinStorage.removeStoredPins() {
                 credentialError = "Saved pins could not be removed from this device."
@@ -86,6 +96,9 @@ final class FoundationAppModel: ObservableObject {
                     "Saved sign-in could not be read. Please sign in again. "
                     + "Saved pins could not be removed from this device."
             }
+        }
+        if library == nil, !FoundationPlaybackSessionStore.clear() {
+            credentialError = "Saved playback sessions could not be removed from this device."
         }
         #if DEBUG
             FoundationJournal.shared.record("app phase=opened")
@@ -105,6 +118,7 @@ final class FoundationAppModel: ObservableObject {
     }
 
     private func open(_ session: FoundationSession, sourceScope: String) {
+        playbackSessionSubscription = nil
         accountEpoch += 1
         signOutNotice = nil
         nowPlaying?.invalidate()
@@ -121,6 +135,18 @@ final class FoundationAppModel: ObservableObject {
         self.library = library
         self.player = FoundationPlayer(library: library)
         if let player = self.player {
+            let store = FoundationPlaybackSessionStore(scope: sourceScope)
+            do {
+                if let snapshot = try store.load() { player.restoreSession(snapshot) }
+            } catch {
+                credentialError = "Saved playback session could not be read on this device."
+            }
+            playbackSessionSubscription = player.sessionChanged.sink { [weak self, weak player] in
+                guard let self, let player else { return }
+                if !store.save(FoundationPlaybackSnapshot(player: player)) {
+                    self.credentialError = "Playback session could not be saved on this device."
+                }
+            }
             let artwork = FoundationCurrentArtwork(player: player) { item in
                 try await library.artwork(for: item, size: 640)
             }
@@ -160,6 +186,8 @@ final class FoundationAppModel: ObservableObject {
                 + "Jellyfin may have ended the session."
             return
         }
+        playbackSessionSubscription = nil
+        let playbackSessionsCleared = FoundationPlaybackSessionStore.clear()
         actions?.invalidate()
         actions = nil
         nowPlaying?.invalidate()
@@ -179,13 +207,17 @@ final class FoundationAppModel: ObservableObject {
             } else {
                 pinResult = "Saved pins could not be removed from this device."
             }
+            let sessionResult =
+                playbackSessionsCleared
+                ? "Saved playback sessions were removed."
+                : "Saved playback sessions could not be removed from this device."
             if serverAccepted {
                 self.signOutNotice =
-                    "Signed out here. \(pinResult) "
+                    "Signed out here. \(pinResult) \(sessionResult) "
                     + "Jellyfin accepted the sign-out request."
             } else {
                 self.signOutNotice =
-                    "Signed out here. \(pinResult) "
+                    "Signed out here. \(pinResult) \(sessionResult) "
                     + "Jellyfin sign-out could not be confirmed."
             }
         }
@@ -297,6 +329,8 @@ private struct FoundationSignInView: View {
                     else { throw URLError(.badURL) }
                     let session = try await FoundationSignInPolicy.authenticate {
                         FoundationPinStorage.removeStoredPins()
+                    } clearPlaybackSessions: {
+                        FoundationPlaybackSessionStore.clear()
                     } signIn: {
                         try await FoundationJellyfinLibrary.signIn(
                             serverURL: url, username: username, password: password)
@@ -311,11 +345,96 @@ private struct FoundationSignInView: View {
                     signingIn = false
                     if let pinError = error as? FoundationPinStorageError {
                         errorMessage = pinError.errorDescription
+                    } else if let storageError = error
+                        as? FoundationPlaybackSessionStore.StorageError
+                    {
+                        errorMessage = storageError.errorDescription
                     } else {
                         errorMessage = FoundationLibraryError.category(error).errorDescription
                     }
                 }
             }
         }
+    }
+}
+
+/// Persistent personal metadata belongs in protected, backup-excluded account files.
+@MainActor
+struct FoundationPlaybackSessionStore {
+    enum StorageError: LocalizedError {
+        case cleanupFailed, invalidSnapshot
+        var errorDescription: String? {
+            switch self {
+            case .cleanupFailed: "Saved playback sessions could not be removed from this device."
+            case .invalidSnapshot: "Saved playback session could not be read on this device."
+            }
+        }
+    }
+    let scope: String
+    var root: URL = Self.defaultRoot
+    static var defaultRoot: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Velacanto/PlaybackSessions", isDirectory: true)
+    }
+    var directory: URL { root.appendingPathComponent(scope, isDirectory: true) }
+    var file: URL { directory.appendingPathComponent("session-v1.json") }
+
+    func load() throws -> FoundationPlaybackSnapshot? {
+        guard FileManager.default.fileExists(atPath: file.path) else { return nil }
+        let value = try JSONDecoder().decode(
+            FoundationPlaybackSnapshot.self, from: Data(contentsOf: file))
+        guard value.isValid else { throw StorageError.invalidSnapshot }
+        return value
+    }
+
+    func save(_ snapshot: FoundationPlaybackSnapshot) -> Bool {
+        guard snapshot.isValid else { return false }
+        do {
+            try FileManager.default.createDirectory(
+                at: directory, withIntermediateDirectories: true)
+            try Self.protect(root)
+            try Self.protect(directory)
+            let data = try JSONEncoder().encode(snapshot)
+            #if os(iOS)
+                try data.write(
+                    to: file,
+                    options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+            #else
+                try data.write(to: file, options: .atomic)
+            #endif
+            try Self.protect(file)
+            return true
+        } catch { return false }
+    }
+
+    private static func protect(_ url: URL) throws {
+        var protectedURL = url
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        try protectedURL.setResourceValues(values)
+        try FileManager.default.setAttributes(
+            [
+                .posixPermissions: url.hasDirectoryPath ? 0o700 : 0o600
+            ], ofItemAtPath: url.path)
+        #if os(iOS)
+            try FileManager.default.setAttributes(
+                [
+                    .protectionKey: FileProtectionType.completeUntilFirstUserAuthentication
+                ], ofItemAtPath: url.path)
+        #endif
+    }
+
+    static func clear(retaining scope: String? = nil, root: URL = defaultRoot) -> Bool {
+        let manager = FileManager.default
+        guard manager.fileExists(atPath: root.path) else { return true }
+        do {
+            let directories = try manager.contentsOfDirectory(
+                at: root, includingPropertiesForKeys: nil)
+            for directory in directories where directory.lastPathComponent != scope {
+                try manager.removeItem(at: directory)
+            }
+            return try manager.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
+                .allSatisfy { $0.lastPathComponent == scope }
+        } catch { return false }
     }
 }
