@@ -13,6 +13,11 @@ cancellable and limited to 100 pages/10,000 tracks. Additions use batches of at 
 100 tracks and verify membership after each batch. Already-present tracks are
 skipped on deduplicating servers; the result reports added/skipped counts. Partial
 failure never reports completion and requires refresh before explicit retry.
+An account-owned change signal invalidates the affected retained playlist detail
+on successful addition or an uncertain partial/cancelled outcome. Visible active
+details refresh once for that change; hidden details refresh when revisited.
+Failed refreshes remain visible for explicit retry. The signal never rewrites
+playback and cannot invalidate another account's retained views.
 
 ## Membership and supported operations
 

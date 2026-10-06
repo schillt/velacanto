@@ -405,6 +405,65 @@ final class FoundationPlaylistTests: XCTestCase {
         XCTAssertTrue(message?.contains("permissions") ?? false)
     }
 
+    @MainActor
+    func testAdditionInvalidatesOnlyItsPlaylistAndAccount() async throws {
+        let fixture = PlaylistAlbumFixture(count: 2)
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            try await fixture.response(request)
+        }
+        let changes = FoundationPlaylistChanges()
+        let otherAccount = FoundationPlaylistChanges()
+        let result = try await changes.add(playlistID: playlistID, source: album, library: library)
+        XCTAssertEqual(result.added, 2)
+        XCTAssertEqual(changes.revision(for: playlistID), 1)
+        XCTAssertEqual(changes.revision(for: "another-playlist"), 0)
+        XCTAssertEqual(otherAccount.revision(for: playlistID), 0)
+
+        do {
+            _ = try await changes.add(playlistID: playlistID, source: album, library: library)
+            XCTFail("Already-present tracks should not trigger another invalidation")
+        } catch {
+            XCTAssertEqual(error as? FoundationPlaylistError, .alreadyPresent)
+        }
+        XCTAssertEqual(changes.revision(for: playlistID), 1)
+    }
+
+    @MainActor
+    func testPartialAdditionInvalidatesWithoutClaimingSuccess() async {
+        let fixture = PlaylistAlbumFixture(count: 101, failBatch: 2)
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            try await fixture.response(request)
+        }
+        let changes = FoundationPlaylistChanges()
+        do {
+            _ = try await changes.add(playlistID: playlistID, source: album, library: library)
+            XCTFail("Partial addition must remain a failure")
+        } catch {
+            XCTAssertEqual(error as? FoundationPlaylistError, .partialAddition)
+        }
+        XCTAssertEqual(changes.revision(for: playlistID), 1)
+        let batches = await fixture.batches
+        XCTAssertEqual(batches.map(\.count), [100, 1])
+    }
+
+    @MainActor
+    func testCancellationInvalidatesConservativelyWithoutMutationRetry() async {
+        let fixture = PlaylistAlbumFixture(count: 101, cancelExpansion: true)
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            try await fixture.response(request)
+        }
+        let changes = FoundationPlaylistChanges()
+        do {
+            _ = try await changes.add(playlistID: playlistID, source: album, library: library)
+            XCTFail("Cancellation must remain visible")
+        } catch {
+            XCTAssertEqual(error as? FoundationLibraryError, .cancelled)
+        }
+        XCTAssertEqual(changes.revision(for: playlistID), 1)
+        let batches = await fixture.batches
+        XCTAssertTrue(batches.isEmpty)
+    }
+
     private static func response(_ request: URLRequest, status: Int = 200) -> HTTPURLResponse {
         HTTPURLResponse(
             url: request.url!, statusCode: status, httpVersion: "HTTP/1.1", headerFields: nil)!

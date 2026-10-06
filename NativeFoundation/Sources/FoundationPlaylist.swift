@@ -18,7 +18,7 @@ struct FoundationPlaylistPage: Sendable {
     let nextStartIndex: Int?
 }
 
-enum FoundationPlaylistError: Error, LocalizedError {
+enum FoundationPlaylistError: Error, LocalizedError, Equatable {
     case tooLarge, changed, ambiguousMemberships, alreadyPresent, partialAddition, emptyAlbum
     var errorDescription: String? {
         switch self {
@@ -231,6 +231,38 @@ enum FoundationPlaylistMutation {
         }
     }
 
+}
+
+/// Account-owned invalidation; retained details reload only after a relevant edit.
+@MainActor
+final class FoundationPlaylistChanges: ObservableObject {
+    @Published private(set) var revisions: [String: Int] = [:]
+
+    func revision(for id: String) -> Int { revisions[id, default: 0] }
+
+    func add(playlistID: String, source: FoundationItem, library: any FoundationLibrary)
+        async throws -> FoundationPlaylistMutation.Addition
+    {
+        do {
+            let result = try await FoundationPlaylistMutation.add(
+                playlistID: playlistID, source: source, library: library)
+            invalidate(playlistID)
+            return result
+        } catch {
+            // A cancelled or partially completed write may already be on the server.
+            // Invalidate without claiming success or automatically retrying a mutation.
+            if error is CancellationError || (error as? FoundationLibraryError) == .cancelled
+                || (error as? FoundationPlaylistError) == .partialAddition
+            {
+                invalidate(playlistID)
+            }
+            throw error
+        }
+    }
+
+    private func invalidate(_ id: String) {
+        revisions[id, default: 0] += 1
+    }
 }
 
 enum FoundationPlaylistName {
@@ -469,6 +501,7 @@ struct FoundationPlaylistEditor: View {
 }
 
 struct FoundationPlaylistPicker: View {
+    @EnvironmentObject private var changes: FoundationPlaylistChanges
     let source: FoundationItem
     let library: any FoundationLibrary
     @StateObject private var playlists = FoundationBrowseModel()
@@ -481,7 +514,7 @@ struct FoundationPlaylistPicker: View {
                 ForEach(playlists.items) { playlist in
                     Button(playlist.title) {
                         operation.run(successMessage: { additionSummary }) {
-                            let result = try await FoundationPlaylistMutation.add(
+                            let result = try await changes.add(
                                 playlistID: playlist.id, source: source, library: library)
                             additionSummary = result.message
                         }
