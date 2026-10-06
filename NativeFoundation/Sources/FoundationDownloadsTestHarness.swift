@@ -21,6 +21,8 @@
         }
 
         @StateObject private var fixture = FoundationDownloadUIFixture()
+        var onSignedOut: (() -> Void)?
+        @State private var cleaningAccount = false
 
         var body: some View {
             NavigationStack {
@@ -33,10 +35,72 @@
                         FoundationDownloadsView(player: fixture.player)
                     }
                     FoundationDownloadUIPlaybackStatus(player: fixture.player)
+                    if let onSignedOut {
+                        Button(cleaningAccount ? "Cleaning fixture account…" : "Sign out fixture") {
+                            cleaningAccount = true
+                            fixture.player.stop()
+                            Task {
+                                let cleared = await fixture.downloads.clearAccount(
+                                    waitForPlayback: true)
+                                cleaningAccount = false
+                                if cleared { onSignedOut() }
+                            }
+                        }.disabled(cleaningAccount)
+                    }
                 }
                 .navigationTitle("Download Test Library")
             }
             .environmentObject(fixture.downloads)
+        }
+    }
+
+    /// Production sign-in form with a bounded in-memory authenticator; no Keychain or server.
+    struct FoundationAccountUITestHarness: View {
+        @State private var signedIn = false
+        @State private var failedOnce = false
+        @State private var notice: String?
+
+        var body: some View {
+            if signedIn {
+                FoundationDownloadsTestHarness {
+                    let result = FoundationSignOutPolicy.begin {
+                        Task { true }
+                    } clear: {
+                        signedIn = false
+                    } clearPins: {
+                        true
+                    }
+                    if result.localCleared {
+                        notice = "Fixture account cleanup complete"
+                    }
+                }
+            } else {
+                VStack {
+                    if let notice { Text(notice) }
+                    FoundationSignInView { url, username, password in
+                        guard url.host == "example.invalid", username == "synthetic-ui",
+                            password == "synthetic-not-a-password"
+                        else { throw FoundationLibraryError.authentication }
+                        let delayed = ProcessInfo.processInfo.arguments.contains(
+                            "-fixtureDelayedAuth")
+                        if delayed {
+                            // Return a successful response even after cancellation to exercise the form guard.
+                            try? await Task.sleep(for: .seconds(3))
+                        } else {
+                            try await Task.sleep(for: .milliseconds(500))
+                            try Task.checkCancellation()
+                            if !failedOnce {
+                                failedOnce = true
+                                throw FoundationLibraryError.authentication
+                            }
+                        }
+                        return {
+                            notice = nil
+                            signedIn = true
+                        }
+                    }
+                }
+            }
         }
     }
 

@@ -17,4 +17,4 @@ derived_data_path=${VELACANTO_DERIVED_DATA_PATH:-"${TMPDIR:-/private/tmp}/Velaca
   -scheme VelacantoDownloadsUI -derivedDataPath "$derived_data_path" \
   -disableAutomaticPackageResolution CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- \
   -destination "$VELACANTO_IOS_SIMULATOR_DESTINATION" \
-  -parallel-testing-enabled NO -collect-test-diagnostics never test
+  -parallel-testing-enabled NO -collect-test-diagnostics never test "$@"

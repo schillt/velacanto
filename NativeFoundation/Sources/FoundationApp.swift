@@ -55,6 +55,8 @@ struct VelacantoFoundationApp: App {
                 if FoundationDownloadsTestHarness.enabled {
                     if ProcessInfo.processInfo.arguments.contains("-fixtureCleanup") {
                         FoundationDownloadsTestCleanup()
+                    } else if ProcessInfo.processInfo.arguments.contains("-fixtureAccount") {
+                        FoundationAccountUITestHarness()
                     } else {
                         FoundationDownloadsTestHarness()
                     }
@@ -336,8 +338,29 @@ struct FoundationRootView: View {
     }
 }
 
-private struct FoundationSignInView: View {
-    @ObservedObject var model: FoundationAppModel
+struct FoundationSignInView: View {
+    typealias Acceptance = @MainActor () throws -> Void
+    private let authenticate: @MainActor (URL, String, String) async throws -> Acceptance
+
+    init(model: FoundationAppModel) {
+        self.init { url, username, password in
+            let session = try await FoundationSignInPolicy.authenticate {
+                FoundationPinStorage.removeStoredPins()
+            } clearPlaybackSessions: {
+                FoundationPlaybackSessionStore.clear()
+            } clearDownloads: {
+                FoundationDownloads.clearStoredDownloads()
+            } signIn: {
+                try await FoundationJellyfinLibrary.signIn(
+                    serverURL: url, username: username, password: password)
+            }
+            return { try model.accept(session) }
+        }
+    }
+
+    init(authenticate: @escaping @MainActor (URL, String, String) async throws -> Acceptance) {
+        self.authenticate = authenticate
+    }
     @State private var address = ""
     @State private var username = ""
     @State private var password = ""
@@ -390,19 +413,10 @@ private struct FoundationSignInView: View {
                         let url = URL(
                             string: address.trimmingCharacters(in: .whitespacesAndNewlines))
                     else { throw URLError(.badURL) }
-                    let session = try await FoundationSignInPolicy.authenticate {
-                        FoundationPinStorage.removeStoredPins()
-                    } clearPlaybackSessions: {
-                        FoundationPlaybackSessionStore.clear()
-                    } clearDownloads: {
-                        FoundationDownloads.clearStoredDownloads()
-                    } signIn: {
-                        try await FoundationJellyfinLibrary.signIn(
-                            serverURL: url, username: username, password: password)
-                    }
+                    let accept = try await authenticate(url, username, password)
                     try Task.checkCancellation()
                     guard signingIn, attempt == owner else { return }
-                    try model.accept(session)
+                    try accept()
                     password = ""
                     signingIn = false
                 } catch {

@@ -20,6 +20,7 @@ markers = (
     b"foundation-journal.log", b"-foundationTesting", b"seek.request direction=",
     b"seek.complete direction=", b"FoundationSystemMediaControlsTests",
     b"-foundationDownloadsUITesting", b"DownloadUITestFixtures", b"FoundationDownloadUIFixture",
+    b"FoundationAccountUITestHarness", b"synthetic-not-a-password",
 )
 for binary in [executable, *app.rglob("*.dylib")]:
     content = binary.read_bytes()

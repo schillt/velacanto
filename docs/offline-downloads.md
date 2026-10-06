@@ -43,3 +43,12 @@ reports an explicit skip in Simulator, where protection attributes are unavailab
 backup-exclusion and persistence assertions still run. Live server acceptance also
 requires a separately authorized QA account/session. Enter its credentials directly
 in the app; never put them in test launch arguments, fixtures, logs or source.
+
+The same isolated UI suite exercises the production sign-in form with a mocked
+in-memory authenticator and synthetic field values, then repeats download/local
+playback/sign-out cleanup twice. It covers rejected authentication, explicit retry,
+cancelled authentication despite a late successful response, and a fresh form after
+teardown. Password-save prompts are dismissed without saving the synthetic values.
+The fixture never saves a session to Keychain or
+contacts a server. These cases do not establish live password authentication,
+server token revocation or real-account separation.
