@@ -13,6 +13,7 @@ struct FoundationItemMenu: View {
     var navigate: ((FoundationItem) -> Void)?
     var currentPageKind: FoundationItem.Kind?
     @EnvironmentObject private var downloads: FoundationDownloads
+    @EnvironmentObject private var connectivity: FoundationConnectivity
     @Environment(\.foundationAddToPlaylist) private var addToPlaylist
 
     var body: some View {
@@ -25,27 +26,51 @@ struct FoundationItemMenu: View {
             case .track: EmptyView()
             }
         }
-        if let play { Button("Play", systemImage: "play.fill", action: play) }
+        if let play {
+            Button("Play", systemImage: "play.fill") {
+                if connectivity.localOnly, let player {
+                    let ready = downloads.browseTracks(for: item)
+                    if !ready.isEmpty { player.setQueue(ready, selectedIndex: 0) }
+                } else {
+                    play()
+                }
+            }.disabled(connectivity.localOnly && downloads.browseTracks(for: item).isEmpty)
+        }
         if let player,
             item.kind == .track
                 || ((item.kind == .album || item.kind == .playlist) && library != nil)
         {
             Button("Play Next", systemImage: "text.line.first.and.arrowtriangle.forward") {
-                actions.enqueue(item, position: .next, library: library, player: player)
-            }.disabled(actions.isQueueLoading)
+                if connectivity.localOnly {
+                    player.enqueue(downloads.browseTracks(for: item), position: .next)
+                } else {
+                    actions.enqueue(item, position: .next, library: library, player: player)
+                }
+            }.disabled(
+                actions.isQueueLoading
+                    || (connectivity.localOnly && downloads.browseTracks(for: item).isEmpty))
             Button("Play Last", systemImage: "text.line.last.and.arrowtriangle.forward") {
-                actions.enqueue(item, position: .last, library: library, player: player)
-            }.disabled(actions.isQueueLoading)
+                if connectivity.localOnly {
+                    player.enqueue(downloads.browseTracks(for: item), position: .last)
+                } else {
+                    actions.enqueue(item, position: .last, library: library, player: player)
+                }
+            }.disabled(
+                actions.isQueueLoading
+                    || (connectivity.localOnly && downloads.browseTracks(for: item).isEmpty))
         }
         if item.kind == .track || item.kind == .album, let navigate {
             FoundationRelatedDestinations(
                 item: item, navigate: navigate, currentPageKind: currentPageKind)
         }
-        if item.kind == .track || item.kind == .album, let addToPlaylist {
+        if !connectivity.localOnly, item.kind == .track || item.kind == .album, let addToPlaylist {
             Button("Add to Playlist", systemImage: "music.note.list") { addToPlaylist(item) }
         }
         if item.kind == .track || item.kind == .album || item.kind == .playlist {
-            Button("Download", systemImage: "arrow.down.circle") { downloads.download(item) }
+            Button(
+                downloads.availability(for: item) == .unavailable ? "Download" : "Download Again",
+                systemImage: "arrow.down.circle"
+            ) { downloads.downloadAgain(item) }.disabled(connectivity.localOnly)
         }
         if item.kind != .genre {
             let favorite = actions.favoriteState(for: item, initial: initialFavorite)
@@ -56,7 +81,7 @@ struct FoundationItemMenu: View {
                 guard let favorite else { return }
                 Task { await actions.setFavorite(for: item, isFavorite: !favorite) }
             }
-            .disabled(favorite == nil || actions.isPending(item))
+            .disabled(connectivity.localOnly || favorite == nil || actions.isPending(item))
         }
         if item.kind != .track {
             Button(
@@ -73,18 +98,19 @@ struct FoundationRelatedDestinations: View {
     let item: FoundationItem
     let navigate: (FoundationItem) -> Void
     var currentPageKind: FoundationItem.Kind?
+    @EnvironmentObject private var connectivity: FoundationConnectivity
+    @EnvironmentObject private var downloads: FoundationDownloads
 
     var body: some View {
         if currentPageKind != .album, let album = item.album {
-            Button("View Album", systemImage: "square.stack") {
-                navigate(
-                    FoundationItem(
-                        id: album.id, title: album.title, subtitle: item.artist?.title ?? "",
-                        kind: .album, duration: nil, primaryImageTag: album.primaryImageTag,
-                        artist: item.artist))
-            }
+            let albumItem = FoundationItem(
+                id: album.id, title: album.title, subtitle: item.artist?.title ?? "",
+                kind: .album, duration: nil, primaryImageTag: album.primaryImageTag,
+                artist: item.artist)
+            Button("View Album", systemImage: "square.stack") { navigate(albumItem) }
+                .disabled(connectivity.localOnly && downloads.browseTracks(for: albumItem).isEmpty)
         }
-        if currentPageKind != .artist, let artist = item.artist {
+        if !connectivity.localOnly, currentPageKind != .artist, let artist = item.artist {
             Button("View Artist", systemImage: "music.mic") {
                 navigate(
                     FoundationItem(

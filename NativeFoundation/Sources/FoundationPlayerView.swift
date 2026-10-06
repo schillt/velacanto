@@ -5,6 +5,8 @@ struct FoundationPlayerView: View {
     let library: any FoundationLibrary
     @EnvironmentObject private var currentArtwork: FoundationCurrentArtwork
     @EnvironmentObject private var actions: FoundationLibraryActions
+    @EnvironmentObject private var connectivity: FoundationConnectivity
+    @EnvironmentObject private var downloads: FoundationDownloads
     @Environment(\.dismiss) private var dismiss
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
@@ -163,7 +165,7 @@ struct FoundationPlayerView: View {
                                     .font(.title2)
                                     .frame(width: 44, height: 44)
                             }
-                            .disabled(current == nil)
+                            .disabled(current == nil || connectivity.localOnly)
                             .accessibilityLabel(
                                 lyricsPresentation == nil ? "Show lyrics" : "Show artwork"
                             )
@@ -261,6 +263,12 @@ struct FoundationPlayerView: View {
                 FoundationTrace.event("surface origin=nowPlaying queueInline=\(shown ? 1 : 0)")
             }
         #endif
+        .onChange(of: connectivity.localOnly) { _, localOnly in
+            if localOnly {
+                lyricsPresentation?.model.cancel()
+                lyricsPresentation = nil
+            }
+        }
         .preferredColorScheme(.dark)
         #if os(macOS)
             .frame(minWidth: 420, idealWidth: 520, minHeight: 660, idealHeight: 800)
@@ -324,10 +332,14 @@ struct FoundationPlayerView: View {
                 Menu {
                     Button("View Album", systemImage: "square.stack") {
                         if let album { openLibraryItem?(album) }
-                    }.disabled(album == nil || openLibraryItem == nil)
+                    }.disabled(
+                        album == nil || openLibraryItem == nil
+                            || (connectivity.localOnly
+                                && album.map { downloads.browseTracks(for: $0).isEmpty } == true)
+                    )
                     Button("View Artist", systemImage: "music.mic") {
                         if let artist { openLibraryItem?(artist) }
-                    }.disabled(artist == nil || openLibraryItem == nil)
+                    }.disabled(connectivity.localOnly || artist == nil || openLibraryItem == nil)
                 } label: {
                     Image(systemName: "ellipsis").frame(width: 44, height: 44)
                 }
@@ -343,10 +355,12 @@ struct FoundationPlayerView: View {
                             .frame(width: 44, height: 44)
                     }
                     .accessibilityLabel(favorite == true ? "Unfavorite" : "Favorite")
-                    .disabled(favorite == nil || actions.isPending(current))
+                    .disabled(
+                        connectivity.localOnly || favorite == nil || actions.isPending(current))
                 }
             }
             if let current {
+                FoundationDownloadBadge(item: current)
                 Text(
                     [current.subtitle, album?.title].compactMap { $0 }
                         .filter { !$0.isEmpty }.joined(separator: " · ")
@@ -531,6 +545,7 @@ private struct FoundationQueueView: View {
                     VStack(alignment: .leading) {
                         Text(entry.item.title).font(.body.weight(.semibold)).lineLimit(2)
                         Text(entry.item.subtitle).font(.caption).foregroundStyle(.secondary)
+                        FoundationDownloadBadge(item: entry.item)
                     }
                     Spacer()
                     if entry.id == player.selectedEntryID {

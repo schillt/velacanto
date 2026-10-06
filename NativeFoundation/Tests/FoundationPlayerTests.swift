@@ -10,6 +10,60 @@ final class FoundationPlayerTests: XCTestCase {
     private let track = FoundationItem(
         id: "synthetic", title: "", subtitle: "", kind: .track, duration: nil)
 
+    func testStreamingPolicyChangePreservesPendingAndInstalledLocalResource() async throws {
+        let resources = PlaybackResourceProbe()
+        let player = FoundationPlayer(
+            resolve: { _ in throw URLError(.unknown) },
+            resolveResource: { _ in try await resources.resolve() },
+            makeItem: { _ in AVPlayerItem(asset: AVMutableComposition()) },
+            activateSession: {}, deactivateSession: {}, startPlayback: { _ in })
+        player.setQueue([track], selectedIndex: 0)
+        let selection = player.selectionTask
+        try await resources.waitForCalls(1)
+        player.invalidateRemoteItemForPolicyChange()
+        XCTAssertFalse(selection?.isCancelled ?? true)
+        await resources.succeed(0)
+        await selection?.value
+        await player.playTask?.value
+        let item = try XCTUnwrap(player.nativePlayer.currentItem)
+        player.invalidateRemoteItemForPolicyChange()
+        XCTAssertTrue(player.nativePlayer.currentItem === item)
+        XCTAssertNil(player.errorMessage)
+        player.stop()
+        try await resources.waitForReleases(1)
+    }
+
+    func testStreamingPolicyChangeDetachesRemoteItemButRetainsQueueOccurrence() async throws {
+        let resources = PlaybackResourceProbe()
+        let player = FoundationPlayer(
+            resolve: { _ in throw URLError(.unknown) },
+            resolveResource: { _ in try await resources.resolve() },
+            makeItem: { _ in AVPlayerItem(asset: AVMutableComposition()) },
+            activateSession: {}, deactivateSession: {}, startPlayback: { _ in })
+        player.setQueue([track], selectedIndex: 0)
+        let selection = player.selectionTask
+        try await resources.waitForCalls(1)
+        await resources.succeed(0, url: URL(string: "https://example.invalid/audio")!)
+        await selection?.value
+        await player.playTask?.value
+        let selected = player.selectedEntryID
+        player.invalidateRemoteItemForPolicyChange()
+        XCTAssertNil(player.nativePlayer.currentItem)
+        XCTAssertEqual(player.selectedEntryID, selected)
+        XCTAssertEqual(player.queue.count, 1)
+        XCTAssertEqual(player.state, .failed)
+        try await resources.waitForReleases(1)
+        player.play()
+        let retry = player.selectionTask
+        try await resources.waitForCalls(2)
+        await resources.succeed(1)
+        await retry?.value
+        await player.playTask?.value
+        XCTAssertNotNil(player.nativePlayer.currentItem)
+        player.stop()
+        try await resources.waitForReleases(2)
+    }
+
     func testResourceLeaseSurvivesNaturalHandoffAndReleasesOnceAfterReplacementAndStop()
         async throws
     {
@@ -1437,9 +1491,9 @@ private actor PlaybackResourceProbe {
         return try await withCheckedThrowingContinuation { pending[index] = $0 }
     }
 
-    func succeed(_ index: Int) {
+    func succeed(_ index: Int, url: URL = URL(fileURLWithPath: "/synthetic")) {
         pending.removeValue(forKey: index)?.resume(
-            returning: FoundationPlaybackResource(url: URL(fileURLWithPath: "/synthetic")) {
+            returning: FoundationPlaybackResource(url: url) {
                 await self.recordRelease(index)
             })
     }

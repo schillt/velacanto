@@ -29,6 +29,35 @@ final class FoundationLibraryTests: XCTestCase {
         XCTAssertFalse(authenticated)
     }
 
+    func testRetainedArtworkRequestsEnforceIndependentDownloadNetworkPolicy() async throws {
+        let recorder = Recorder()
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            await recorder.append(request)
+            return (Data(), Self.response(request))
+        }
+        let album = FoundationItem(
+            id: itemID, title: "", subtitle: "", kind: .album, duration: nil,
+            primaryImageTag: "synthetic-tag")
+        _ = try await library.downloadArtwork(for: album, size: 640, allowsCellular: false)
+        _ = try await library.downloadArtwork(for: album, size: 640, allowsCellular: true)
+        _ = try await library.artwork(for: album, size: 160)
+        let requests = await recorder.requests
+        XCTAssertEqual(requests.count, 3)
+        XCTAssertFalse(requests[0].allowsCellularAccess)
+        XCTAssertFalse(requests[0].allowsExpensiveNetworkAccess)
+        XCTAssertFalse(requests[0].allowsConstrainedNetworkAccess)
+        XCTAssertTrue(requests[1].allowsCellularAccess)
+        XCTAssertTrue(requests[1].allowsExpensiveNetworkAccess)
+        XCTAssertFalse(requests[1].allowsConstrainedNetworkAccess)
+        // Normal catalog image reads keep their existing independent policy.
+        XCTAssertTrue(requests[2].allowsCellularAccess)
+        for request in requests {
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Accept"), "image/jpeg")
+            XCTAssertNotNil(request.value(forHTTPHeaderField: "Authorization"))
+            XCTAssertFalse(request.url?.absoluteString.contains(session.accessToken) ?? true)
+        }
+    }
+
     func testSessionEndUsesAuthenticatedFixedPathAndAcceptsNoContent() async throws {
         let recorder = Recorder()
         let library = FoundationJellyfinLibrary(session: session) { request in

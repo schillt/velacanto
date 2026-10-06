@@ -6,7 +6,7 @@ import NowPlaying
 /// One account-owned result serves the current player and system artwork requests.
 @MainActor
 final class FoundationCurrentArtwork: ObservableObject {
-    struct Result {
+    nonisolated struct Result: Sendable {
         let id: UUID
         let data: Data
         let image: CGImage
@@ -16,8 +16,8 @@ final class FoundationCurrentArtwork: ObservableObject {
         let item: String
         let tag: String?
     }
-    static let maximumBytes = 2 * 1_024 * 1_024
-    static let requestedPixels = 640
+    nonisolated static let maximumBytes = 2 * 1_024 * 1_024
+    nonisolated static let requestedPixels = 640
     @Published private(set) var result: Result?
     private(set) var updateTask: Task<Void, Never>?
     private(set) var loadTask: Task<Void, Never>?
@@ -64,11 +64,15 @@ final class FoundationCurrentArtwork: ObservableObject {
             tag: imageItem.primaryImageTag.flatMap { $0.isEmpty ? nil : $0 })
     }
 
-    private func refreshSelection() {
+    func refreshRetainedArtwork() {
+        refreshSelection(force: true)
+    }
+
+    private func refreshSelection(force: Bool = false) {
         guard isLive else { return }
         let item = player.queue.first { $0.id == player.selectedEntryID }?.item
         let nextKey = item.flatMap(identity)
-        guard nextKey != key else { return }
+        guard force || nextKey != key else { return }
         generation &+= 1
         loadTask?.cancel()
         loadTask = nil
@@ -103,7 +107,9 @@ final class FoundationCurrentArtwork: ObservableObject {
     }
 
     /// Reject oversized input before decoding; retain at most one bounded image and payload.
-    static func decode(_ data: Data, id: UUID = UUID(), maximumPixels: Int = requestedPixels)
+    nonisolated static func decode(
+        _ data: Data, id: UUID = UUID(), maximumPixels: Int = requestedPixels
+    )
         -> Result?
     {
         guard maximumPixels > 0, maximumPixels <= requestedPixels,

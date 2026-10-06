@@ -1,4 +1,5 @@
 import CryptoKit
+import Darwin
 import Foundation
 
 /// Private, recoverable download metadata. Requests and credentials never enter this representation.
@@ -58,7 +59,14 @@ nonisolated struct FoundationDownloadManifest: Codable, Sendable {
         let bytes: Int64
         let digest: String
     }
-    var version = 1
+    struct Artwork: Codable, Sendable {
+        let item: FoundationStoredDownloadItem
+        let file: File
+    }
+    var artwork: [String: Artwork]? = nil
+    var version = 2
+    // Optional for version-one manifests; absence means no deliberate local removals.
+    var excludedTrackIDs: Set<String>? = nil
     var allowsCellular = false
     var owners: [Owner] = []
     var files: [String: File] = [:]
@@ -161,16 +169,30 @@ nonisolated enum FoundationDownloadStorage {
 
     static func save(_ manifest: FoundationDownloadManifest, directory: URL) throws {
         let target = directory.appendingPathComponent("manifest.json")
-        // Data's atomic write replaces the target only after the complete JSON is written.
+        if FileManager.default.fileExists(atPath: target.path) {
+            let values = try target.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+            guard values.isRegularFile == true, values.isSymbolicLink != true else {
+                throw CocoaError(.fileWriteUnknown)
+            }
+        }
         let data = try JSONEncoder().encode(manifest)
         guard data.count <= 16 * 1_024 * 1_024 else { throw CocoaError(.fileWriteOutOfSpace) }
+        let stage = directory.appendingPathComponent(
+            "stage-manifest-" + UUID().uuidString + ".json")
+        defer { try? FileManager.default.removeItem(at: stage) }
         #if os(iOS)
             try data.write(
-                to: target, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+                to: stage, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
         #else
-            try data.write(to: target, options: .atomic)
+            try data.write(to: stage, options: .atomic)
         #endif
-        try protect(target)
+        try protect(stage)
+        // Same-directory POSIX rename atomically publishes the already-protected inode.
+        // No fallible work follows publication, so a thrown save leaves the previous manifest intact.
+        let result = stage.path.withCString { source in
+            target.path.withCString { destination in Darwin.rename(source, destination) }
+        }
+        guard result == 0 else { throw CocoaError(.fileWriteUnknown) }
     }
 
     static func load(directory: URL) throws -> FoundationDownloadManifest {
@@ -183,12 +205,15 @@ nonisolated enum FoundationDownloadStorage {
         else {
             throw CocoaError(.fileReadCorruptFile)
         }
-        let manifest = try JSONDecoder().decode(
+        var manifest = try JSONDecoder().decode(
             FoundationDownloadManifest.self, from: Data(contentsOf: manifestURL))
-        guard manifest.version == 1, manifest.owners.count <= 10_000,
+        guard (1...2).contains(manifest.version), manifest.owners.count <= 10_000,
+            (manifest.excludedTrackIDs?.count ?? 0) <= 100_000,
+            (manifest.artwork?.count ?? 0) <= 100_000,
             Set(manifest.owners.map(\.id)).count == manifest.owners.count,
             manifest.owners.allSatisfy({ $0.tracks.count <= 10_000 })
         else { throw CocoaError(.fileReadCorruptFile) }
+        manifest.version = 2
         return manifest
     }
 }

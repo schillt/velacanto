@@ -79,6 +79,10 @@ final class FoundationAppModel: ObservableObject {
     @Published private(set) var actions: FoundationLibraryActions?
     @Published private(set) var currentArtwork: FoundationCurrentArtwork?
     @Published private(set) var downloads: FoundationDownloads?
+    @Published private(set) var connectivity: FoundationConnectivity?
+    let playbackPreferences = FoundationPlaybackPreferences()
+    private var policySubscriptions: Set<AnyCancellable> = []
+    private var currentRetainedArtworkIdentity: String?
     @Published private(set) var isCleaningDownloads = false
     @Published var credentialError: String?
     @Published var signOutNotice: String?
@@ -90,6 +94,7 @@ final class FoundationAppModel: ObservableObject {
 
     isolated deinit {
         downloads?.invalidate()
+        connectivity?.invalidate()
         nowPlaying?.invalidate()
         currentArtwork?.invalidate()
     }
@@ -164,15 +169,45 @@ final class FoundationAppModel: ObservableObject {
         actions?.invalidate()
         player?.stop()
         downloads?.invalidate()
+        connectivity?.invalidate()
+        policySubscriptions.removeAll()
+        currentRetainedArtworkIdentity = nil
         let library = FoundationJellyfinLibrary(session: session)
         self.actions = FoundationLibraryActions(sourceScope: sourceScope) { item, favorite in
             try await library.setFavorite(for: item, isFavorite: favorite)
         }
         self.library = library
-        let downloads = FoundationDownloads(scope: sourceScope, library: library)
+        let downloads = FoundationDownloads(
+            scope: sourceScope, library: library, monitorConnectivity: false)
         self.downloads = downloads
+        let connectivity = FoundationConnectivity {
+            _ = try await library.songs(startIndex: 0)
+        }
+        self.connectivity = connectivity
+        let preferences = playbackPreferences
+        downloads.setAllowsCellular(preferences.allowsCellularDownloads)
         self.player = FoundationPlayer(
-            library: library, resolveResource: { try await downloads.playbackResource(for: $0) })
+            library: library,
+            resolveResource: { item in
+                try await downloads.playbackResource(
+                    for: item, allowsRemoteFallback: !connectivity.localOnly)
+            }, makeItem: { preferences.makePlayerItem(for: $0) })
+        connectivity.objectWillChange.sink { [weak downloads, weak connectivity] in
+            Task { @MainActor in
+                guard let downloads, let connectivity else { return }
+                downloads.updateConnectivity(
+                    isConnected: connectivity.isConnected,
+                    usesWiFi: connectivity.usesWiFiOrWired)
+            }
+        }.store(in: &policySubscriptions)
+        preferences.$allowsCellularDownloads.dropFirst().sink { [weak downloads] value in
+            Task { @MainActor in downloads?.setAllowsCellular(value) }
+        }.store(in: &policySubscriptions)
+        preferences.$allowsCellularStreaming.dropFirst().sink { [weak player = self.player] _ in
+            Task { @MainActor [weak player] in
+                player?.invalidateRemoteItemForPolicyChange()
+            }
+        }.store(in: &policySubscriptions)
         if let player = self.player {
             let store = FoundationPlaybackSessionStore(scope: sourceScope)
             do {
@@ -187,8 +222,24 @@ final class FoundationAppModel: ObservableObject {
                 }
             }
             let artwork = FoundationCurrentArtwork(player: player) { item in
-                try await library.artwork(for: item, size: 640)
+                if let local = await downloads.retainedArtwork(for: item) { return local }
+                guard await !connectivity.localOnly else { return nil }
+                return try await library.artwork(for: item, size: 640)
             }
+            downloads.$artworkRevision.dropFirst().sink {
+                [weak self, weak artwork, weak player, weak downloads] _ in
+                Task { @MainActor in
+                    guard let self, let artwork, let player, let downloads,
+                        let item = player.queue.first(where: { $0.id == player.selectedEntryID })?
+                            .item,
+                        let identity = downloads.retainedArtworkIdentity(for: item)
+                    else { return }
+                    let selectedIdentity = item.catalogArtworkItem.id + ":" + identity
+                    guard self.currentRetainedArtworkIdentity != selectedIdentity else { return }
+                    self.currentRetainedArtworkIdentity = selectedIdentity
+                    artwork.refreshRetainedArtwork()
+                }
+            }.store(in: &policySubscriptions)
             self.currentArtwork = artwork
             let bridge = FoundationNowPlaying(player: player, artwork: artwork)
             let mediaSession = MediaSession(bridge)
@@ -227,6 +278,10 @@ final class FoundationAppModel: ObservableObject {
         }
         let retiringDownloads = downloads
         retiringDownloads?.invalidate()
+        connectivity?.invalidate()
+        connectivity = nil
+        policySubscriptions.removeAll()
+        currentRetainedArtworkIdentity = nil
         downloads = nil
         isCleaningDownloads = true
         playbackSessionSubscription = nil
@@ -310,12 +365,15 @@ struct FoundationRootView: View {
     var body: some View {
         Group {
             if let library = model.library, let player = model.player, let actions = model.actions,
-                let artwork = model.currentArtwork, let downloads = model.downloads
+                let artwork = model.currentArtwork, let downloads = model.downloads,
+                let connectivity = model.connectivity
             {
                 FoundationLibraryView(library: library, player: player, signOut: model.signOut)
                     .environmentObject(actions)
                     .environmentObject(artwork)
                     .environmentObject(downloads)
+                    .environmentObject(connectivity)
+                    .environmentObject(model.playbackPreferences)
                     .id(ObjectIdentifier(actions))
             } else if model.isCleaningDownloads {
                 ProgressView("Removing downloaded music…")
@@ -325,7 +383,10 @@ struct FoundationRootView: View {
         }
         .task { model.restore() }
         .onChange(of: scenePhase) { _, phase in
-            if phase == .active { model.downloads?.reconcilePlaylists() }
+            if phase == .active {
+                model.playbackPreferences.refresh()
+                model.downloads?.reconcilePlaylists()
+            }
         }
         .alert(
             model.signOutNotice == nil ? "Account" : "Sign-out",

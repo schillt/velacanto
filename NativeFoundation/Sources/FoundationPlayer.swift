@@ -452,6 +452,15 @@ final class FoundationPlayer: ObservableObject {
         }
     }
 
+    /// A newly selected policy must not leave an old remote asset fetching on cellular.
+    /// Keep the selected queue occurrence; the next explicit Play constructs a fresh asset.
+    func invalidateRemoteItemForPolicyChange() {
+        guard installedResource?.url.isFileURL == false else { return }
+        discardSelection()
+        state = .failed
+        errorMessage = "Streaming settings changed. Play again to use the new connection policy."
+    }
+
     func stop() {
         isInterrupted = false
         discardSelection()

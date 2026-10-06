@@ -78,6 +78,8 @@ protocol FoundationLibrary: Sendable {
     func playbackURL(for item: FoundationItem) async throws -> URL
     func artwork(for item: FoundationItem) async throws -> Data?
     func artwork(for item: FoundationItem, size: Int) async throws -> Data?
+    func downloadArtwork(for item: FoundationItem, size: Int, allowsCellular: Bool) async throws
+        -> Data?
 }
 
 extension FoundationLibrary {
@@ -185,6 +187,11 @@ extension FoundationLibrary {
     func artwork(for item: FoundationItem) async throws -> Data? { nil }
     func artwork(for item: FoundationItem, size: Int) async throws -> Data? {
         try await artwork(for: item)
+    }
+    func downloadArtwork(for item: FoundationItem, size: Int, allowsCellular: Bool) async throws
+        -> Data?
+    {
+        try await artwork(for: item, size: size)
     }
 
 }
@@ -748,6 +755,18 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
     }
 
     func artwork(for item: FoundationItem, size: Int) async throws -> Data? {
+        try await readArtwork(for: item, size: size, allowsCellular: nil)
+    }
+
+    func downloadArtwork(for item: FoundationItem, size: Int, allowsCellular: Bool) async throws
+        -> Data?
+    {
+        try await readArtwork(for: item, size: size, allowsCellular: allowsCellular)
+    }
+
+    private func readArtwork(for item: FoundationItem, size: Int, allowsCellular: Bool?)
+        async throws -> Data?
+    {
         try Task.checkCancellation()
         let tag = item.primaryImageTag.flatMap { $0.isEmpty ? nil : $0 }
         // Artist and album references may omit image tags. Jellyfin accepts
@@ -760,7 +779,7 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
             Paths.getItemImage(
                 itemID: item.id, imageType: "Primary",
                 parameters: .init(maxWidth: pixels, maxHeight: pixels, tag: tag, format: .jpg)),
-            accept: "image/jpeg")
+            accept: "image/jpeg", allowsCellular: allowsCellular)
     }
 
     private func page(
@@ -920,7 +939,7 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
 
     private func responseData<Response>(
         _ endpoint: Request<Response>, accept: String = "application/json",
-        notFoundIsEmpty: Bool = false
+        notFoundIsEmpty: Bool = false, allowsCellular: Bool? = nil
     ) async throws -> Data {
         #if DEBUG
             let operationID = UUID().uuidString
@@ -937,6 +956,11 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
             try Task.checkCancellation()
             var request = URLRequest(url: try Self.url(endpoint, base: session.serverURL))
             request.httpMethod = endpoint.method.rawValue
+            if let allowsCellular {
+                request.allowsCellularAccess = allowsCellular
+                request.allowsExpensiveNetworkAccess = allowsCellular
+                request.allowsConstrainedNetworkAccess = false
+            }
             request.setValue(accept, forHTTPHeaderField: "Accept")
             // Reject header syntax instead of altering account authentication values.
             let safe = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))

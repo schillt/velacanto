@@ -150,6 +150,7 @@ private struct FoundationContinueListening: View {
                                 + (item.catalogArtworkItem.primaryImageTag ?? ""))
                         VStack(alignment: .leading, spacing: 4) {
                             Text(item.title).font(.headline).lineLimit(2)
+                            FoundationDownloadBadge(item: item)
                             Text(
                                 player.state == .playing || player.state == .paused
                                     ? item.subtitle : player.state.label
@@ -341,6 +342,7 @@ private struct FoundationHomeShelf: View {
                             VStack(alignment: .leading, spacing: 3) {
                                 Text(item.title).font(.body.weight(.medium))
                                     .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 1)
+                                FoundationDownloadBadge(item: item)
                                 Text(item.subtitle).font(.subheadline).foregroundStyle(.secondary)
                                     .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 1)
                             }.frame(maxWidth: .infinity, alignment: .leading)

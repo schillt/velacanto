@@ -1,9 +1,16 @@
 import Combine
 import Foundation
+import ImageIO
 import Network
 
 nonisolated enum FoundationDownloadState: String, Sendable {
     case queued, expanding, waitingForWiFi, downloading, ready, cancelled, failed
+}
+
+nonisolated enum FoundationDownloadAvailability: Equatable, Sendable {
+    case unavailable
+    case partial(ready: Int, total: Int)
+    case ready
 }
 
 struct FoundationDownloadOwner: Identifiable {
@@ -12,13 +19,19 @@ struct FoundationDownloadOwner: Identifiable {
     var tracks: [FoundationItem]
     var state: FoundationDownloadState
     var progress: Double = 0
+    var availability: FoundationDownloadAvailability = .unavailable
     var status: String {
         switch state {
         case .queued: "Waiting"
         case .expanding: "Reading tracks"
         case .waitingForWiFi: "Waiting for Wi-Fi"
         case .downloading: "Downloading"
-        case .ready: "On Device"
+        case .ready:
+            switch availability {
+            case .ready: "On Device"
+            case .partial: "Partially On Device"
+            case .unavailable: "No tracks On Device"
+            }
         case .cancelled: "Cancelled — downloaded tracks are retained"
         case .failed: "Download incomplete — retry when ready"
         }
@@ -39,6 +52,7 @@ final class FoundationDownloads: ObservableObject {
     @Published private(set) var isLoading = false
     @Published private(set) var storageBytes: Int64 = 0
     @Published private(set) var errorMessage: String?
+    @Published private(set) var artworkRevision: UInt = 0
     private let library: any FoundationLibrary
     private let directory: URL
     private let transfer: Transfer
@@ -47,6 +61,9 @@ final class FoundationDownloads: ObservableObject {
     private var expanded: Set<String> = []
     private var leases: [String: Int] = [:]
     private var pendingDeletion: Set<String> = []
+    private var readyFileIDs: Set<String> = []
+    private(set) var artworkTask: Task<Void, Never>?
+    private var attemptedArtwork: Set<String> = []
     private var worker: Task<Void, Never>?
     private var inventoryTask: Task<Void, Never>?
     private var resetting = false
@@ -85,7 +102,7 @@ final class FoundationDownloads: ObservableObject {
                         id: saved.id, item: saved.item.item, tracks: saved.tracks.map(\.item),
                         state: saved.paused ? .cancelled : .queued))
             }
-            if manifest.files.isEmpty {
+            if manifest.files.isEmpty && (manifest.artwork?.isEmpty ?? true) {
                 try finishInventory()
             } else {
                 beginInventory()
@@ -111,6 +128,7 @@ final class FoundationDownloads: ObservableObject {
     }
 
     isolated deinit {
+        artworkTask?.cancel()
         worker?.cancel()
         syncTask?.cancel()
         inventoryTask?.cancel()
@@ -120,17 +138,22 @@ final class FoundationDownloads: ObservableObject {
     private func beginInventory() {
         isLoading = true
         let files = manifest.files
+        let artwork = manifest.artwork ?? [:]
         let directory = directory
         let epoch = generation
         inventoryTask = Task { [weak self] in
             do {
                 let verified = try await FoundationDownloadStorage.verifiedFiles(
                     files, directory: directory)
+                let verifiedArtwork = try await FoundationDownloadStorage.verifiedFiles(
+                    artwork.mapValues(\.file), directory: directory)
                 guard let self, self.isLive, self.generation == epoch else { return }
+                self.manifest.artwork = artwork.filter { verifiedArtwork[$0.key] != nil }
                 self.manifest.files = verified
                 self.isLoading = false
                 try self.finishInventory()
                 self.inventoryTask = nil
+                self.scheduleArtwork()
                 self.schedule()
                 if self.syncPending { self.reconcilePlaylists() }
             } catch {
@@ -145,7 +168,9 @@ final class FoundationDownloads: ObservableObject {
     }
 
     private func finishInventory() throws {
-        let retained = Set(manifest.files.values.map(\.name)).union(["manifest.json"])
+        readyFileIDs = Set(manifest.files.keys)
+        let retained = Set(manifest.files.values.map(\.name))
+            .union((manifest.artwork ?? [:]).values.map { $0.file.name }).union(["manifest.json"])
         for url in try FileManager.default.contentsOfDirectory(
             at: directory, includingPropertiesForKeys: nil
         ) where !retained.contains(url.lastPathComponent) {
@@ -155,6 +180,7 @@ final class FoundationDownloads: ObservableObject {
         refreshStates()
         collectUnusedFiles()
         refreshBytes()
+        artworkRevision &+= 1
     }
 
     private var allowed: Bool { connected && (wifi || allowsCellular) }
@@ -175,10 +201,12 @@ final class FoundationDownloads: ObservableObject {
         self.wifi = wifi
         if !allowed {
             worker?.cancel()
+            artworkTask?.cancel()
             syncTask?.cancel()
         }
         refreshStates()
         if allowed {
+            scheduleArtwork()
             schedule()
             if !previous { reconcilePlaylists() }
         }
@@ -195,9 +223,11 @@ final class FoundationDownloads: ObservableObject {
         }
         // Restart even when the new policy remains allowed so in-flight requests use it.
         worker?.cancel()
+        artworkTask?.cancel()
         syncTask?.cancel()
         refreshStates()
         if allowed {
+            scheduleArtwork()
             schedule()
             reconcilePlaylists()
         }
@@ -267,8 +297,180 @@ final class FoundationDownloads: ObservableObject {
         schedule()
     }
 
+    private func isExcluded(_ id: String) -> Bool {
+        manifest.excludedTrackIDs?.contains(id) == true
+    }
+
+    private var retainedTrackIDs: Set<String> {
+        Set(owners.flatMap(\.tracks).map(\.id).filter { !isExcluded($0) })
+    }
+
+    /// Physical files are shared; the Songs projection never repeats playlist occurrences.
+    var downloadedSongs: [FoundationItem] {
+        var seen: Set<String> = []
+        return owners.flatMap(\.tracks).filter { isReady($0) && seen.insert($0.id).inserted }
+    }
+
+    var downloadedPlaylists: [FoundationItem] {
+        guard isLive, storageUsable else { return [] }
+        // Saved snapshots remain browsable after their final local track is removed.
+        return owners.filter { $0.item.kind == .playlist && expanded.contains($0.id) }.map(\.item)
+    }
+
+    var downloadedAlbums: [FoundationItem] {
+        guard isLive, storageUsable else { return [] }
+        var items = owners.filter {
+            $0.item.kind == .album && expanded.contains($0.id)
+        }.map(\.item)
+        var seen = Set(items.map(\.id))
+        for song in downloadedSongs {
+            if let album = song.album, seen.insert(album.id).inserted {
+                items.append(
+                    FoundationItem(
+                        id: album.id, title: album.title, subtitle: song.subtitle,
+                        kind: .album, duration: nil, primaryImageTag: album.primaryImageTag))
+            }
+        }
+        return items
+    }
+
+    private func snapshotTracks(for item: FoundationItem) -> [FoundationItem] {
+        if item.kind == .track { return [item] }
+        if let owner = owners.first(where: { $0.id == ownerID(item) }),
+            item.kind != .album || expanded.contains(owner.id) || !owner.tracks.isEmpty
+        {
+            return owner.tracks
+        }
+        if item.kind == .album {
+            var seen: Set<String> = []
+            return owners.flatMap(\.tracks).filter {
+                $0.album?.id == item.id && seen.insert($0.id).inserted
+            }
+        }
+        return []
+    }
+
+    func browseTracks(for item: FoundationItem) -> [FoundationItem] {
+        snapshotTracks(for: item).filter { isReady($0) }
+    }
+
+    func availability(for item: FoundationItem) -> FoundationDownloadAvailability {
+        if item.kind == .track { return isReady(item) ? .ready : .unavailable }
+        let tracks = snapshotTracks(for: item)
+        let ready = tracks.filter { isReady($0) }.count
+        guard ready > 0 else { return .unavailable }
+        // Derived album groups cannot prove full server album membership.
+        let explicit = owners.contains { $0.id == ownerID(item) && expanded.contains($0.id) }
+        if explicit && ready == tracks.count { return .ready }
+        return .partial(ready: ready, total: tracks.count)
+    }
+
+    func itemBytes(_ item: FoundationItem) -> Int64 {
+        let tracks = browseTracks(for: item)
+        let ids = Set(tracks.map(\.id))
+        let artworkKeys = Set(([item] + tracks).map { artworkKey($0) })
+        return ids.reduce(0) { $0 + (manifest.files[$1]?.bytes ?? 0) }
+            + artworkKeys.reduce(0) { $0 + (manifest.artwork?[$1]?.file.bytes ?? 0) }
+    }
+
+    /// Bytes actually deletable now, excluding shared references and active playback leases.
+    func reclaimableBytes(ownerIDs: Set<String>, trackIDs: Set<String>) -> Int64 {
+        let selected = Set(owners.filter { ownerIDs.contains($0.id) }.flatMap(\.tracks).map(\.id))
+            .union(trackIDs)
+        let remaining = Set(
+            owners.filter { !ownerIDs.contains($0.id) }
+                .flatMap(\.tracks).map(\.id).filter { !isExcluded($0) && !trackIDs.contains($0) })
+        let selectedItems =
+            owners.filter { ownerIDs.contains($0.id) }.flatMap { [$0.item] + $0.tracks }
+            + owners.flatMap(\.tracks).filter { trackIDs.contains($0.id) }
+        let remainingItems = owners.filter {
+            !ownerIDs.contains($0.id) && !($0.item.kind == .track && trackIDs.contains($0.item.id))
+        }.flatMap { owner in
+            [owner.item] + owner.tracks.filter { !isExcluded($0.id) && !trackIDs.contains($0.id) }
+        }
+        let removedArt = Set(selectedItems.map { artworkKey($0) })
+            .subtracting(Set(remainingItems.map { artworkKey($0) }))
+        return selected.subtracting(remaining).reduce(0) {
+            $0 + ((leases[$1] ?? 0) == 0 ? (manifest.files[$1]?.bytes ?? 0) : 0)
+        } + removedArt.reduce(0) { $0 + (manifest.artwork?[$1]?.file.bytes ?? 0) }
+    }
+
+    func removeTrack(_ item: FoundationItem) {
+        guard item.kind == .track else { return }
+        removeSelected(ownerIDs: [], trackIDs: [item.id])
+    }
+
+    /// Local exclusions preserve collection snapshots/order and survive successful reconciliation.
+    func removeSelected(ownerIDs: Set<String>, trackIDs: Set<String>) {
+        guard isLive, storageUsable else { return }
+        let previousOwners = owners
+        let previousPaused = paused
+        let previousExpanded = expanded
+        let previousManifest = manifest
+        owners.removeAll {
+            ownerIDs.contains($0.id) || ($0.item.kind == .track && trackIDs.contains($0.item.id))
+        }
+        paused.formIntersection(Set(owners.map(\.id)))
+        expanded.formIntersection(Set(owners.map(\.id)))
+        manifest.excludedTrackIDs = (manifest.excludedTrackIDs ?? []).union(trackIDs)
+        do { try save() } catch {
+            owners = previousOwners
+            paused = previousPaused
+            expanded = previousExpanded
+            manifest = previousManifest
+            reportStorageFailure()
+            return
+        }
+        worker?.cancel()
+        collectUnusedFiles()
+        refreshStates()
+        schedule()
+    }
+
+    func downloadAgain(_ item: FoundationItem) {
+        guard isLive, storageUsable, [.track, .album, .playlist].contains(item.kind) else { return }
+        let previousManifest = manifest
+        let previousOwners = owners
+        let previousPaused = paused
+        let ids = Set(snapshotTracks(for: item).map(\.id))
+        manifest.excludedTrackIDs = (manifest.excludedTrackIDs ?? []).subtracting(ids)
+        let id = ownerID(item)
+        if let index = owners.firstIndex(where: { $0.id == id }) {
+            paused.remove(id)
+            owners[index].state = .queued
+        } else {
+            owners.append(FoundationDownloadOwner(id: id, item: item, tracks: [], state: .queued))
+        }
+        do { try save() } catch {
+            manifest = previousManifest
+            owners = previousOwners
+            paused = previousPaused
+            reportStorageFailure()
+            return
+        }
+        // A leased, previously excluded file can be retained again without replacing it.
+        attemptedArtwork = attemptedArtwork.filter { attempt in
+            !snapshotTracks(for: item).contains(where: { attempt.hasPrefix(artworkKey($0) + ":") })
+        }
+        readyFileIDs.formUnion(
+            ids.filter { id in
+                snapshotTracks(for: item).first(where: { $0.id == id }).map { fileIsPresent($0) }
+                    == true
+            })
+        errorMessage = nil
+        refreshStates()
+        scheduleArtwork()
+        schedule()
+    }
+
     func isReady(_ item: FoundationItem) -> Bool {
-        guard storageUsable, !isLoading, let file = manifest.files[item.id],
+        isLive && storageUsable && !isLoading && !isExcluded(item.id)
+            && readyFileIDs.contains(item.id)
+    }
+
+    /// Inventory validates hashes; playback rechecks the filesystem before granting a new lease.
+    private func fileIsPresent(_ item: FoundationItem) -> Bool {
+        guard let file = manifest.files[item.id],
             let url = FoundationDownloadStorage.fileURL(file, directory: directory),
             let values = try? url.resourceValues(forKeys: [
                 .fileSizeKey, .isRegularFileKey, .isSymbolicLinkKey,
@@ -327,13 +529,14 @@ final class FoundationDownloads: ObservableObject {
                         expanded.remove(owner.id)
                         throw error
                     }
+                    scheduleArtwork()
                 }
                 guard let current = owners.first(where: { $0.id == owner.id }) else { continue }
                 setState(owner.id, .downloading)
                 var visited: Set<String> = []
                 for track in current.tracks where visited.insert(track.id).inserted {
                     try check(epoch: epoch, ownerID: owner.id)
-                    if isReady(track) { continue }
+                    if isExcluded(track.id) || isReady(track) { continue }
                     let source = try await library.downloadSource(for: track)
                     try check(epoch: epoch, ownerID: owner.id)
                     let ext = source.fileExtension.lowercased()
@@ -383,6 +586,7 @@ final class FoundationDownloads: ObservableObject {
                                 manifest.files[track.id] = previous
                                 throw error
                             }
+                            readyFileIDs.insert(track.id)
                             if let previous,
                                 let oldURL = FoundationDownloadStorage.fileURL(
                                     previous, directory: directory)
@@ -407,6 +611,7 @@ final class FoundationDownloads: ObservableObject {
                     refreshBytes()
                 }
                 setState(owner.id, .ready)
+                scheduleArtwork()
             } catch {
                 if !isLive || generation != epoch { return }
                 if Task.isCancelled || !allowed || paused.contains(owner.id) {
@@ -433,14 +638,20 @@ final class FoundationDownloads: ObservableObject {
     private func setState(_ id: String, _ state: FoundationDownloadState) {
         guard let index = owners.firstIndex(where: { $0.id == id }) else { return }
         owners[index].state = state
-        if state == .ready { owners[index].progress = 1 }
+        if state == .ready {
+            owners[index].progress = 1
+            owners[index].availability = availability(for: owners[index].item)
+        }
     }
 
     private func refreshStates() {
         for index in owners.indices {
             let id = owners[index].id
+            owners[index].availability = availability(for: owners[index].item)
             if paused.contains(id) { continue }
-            if expanded.contains(id), owners[index].tracks.allSatisfy({ isReady($0) }) {
+            if expanded.contains(id),
+                owners[index].tracks.allSatisfy({ isExcluded($0.id) || isReady($0) })
+            {
                 owners[index].state = .ready
                 owners[index].progress = 1
             } else if !allowed {
@@ -481,7 +692,8 @@ final class FoundationDownloads: ObservableObject {
 
     private func collectUnusedFiles() {
         guard !isLoading else { return }
-        let referenced = Set(owners.flatMap(\.tracks).map(\.id))
+        let referenced = retainedTrackIDs
+        readyFileIDs.formIntersection(referenced)
         for id in Array(manifest.files.keys) where !referenced.contains(id) {
             if (leases[id] ?? 0) > 0 {
                 pendingDeletion.insert(id)
@@ -501,12 +713,212 @@ final class FoundationDownloads: ObservableObject {
                     "Some downloaded files could not be removed. Retry removal or clear downloaded storage."
             }
         }
+        collectUnusedArtwork()
         do { try save() } catch { reportStorageFailure() }
         refreshBytes()
     }
 
-    func playbackResource(for item: FoundationItem) async throws -> FoundationPlaybackResource {
+    var audioBytes: Int64 { manifest.files.values.reduce(0) { $0 + $1.bytes } }
+    var artworkBytes: Int64 { (manifest.artwork ?? [:]).values.reduce(0) { $0 + $1.file.bytes } }
+    var otherBytes: Int64 { max(0, storageBytes - audioBytes - artworkBytes) }
+
+    private func artworkKey(_ item: FoundationItem) -> String {
+        let image = FoundationStoredDownloadItem(item.catalogArtworkItem)
+        return image.kind + ":" + image.id
+    }
+
+    private var retainedArtworkItems: [FoundationItem] {
+        var seen: Set<String> = []
+        let items = owners.filter { expanded.contains($0.id) }.flatMap { owner in
+            let collection =
+                owner.item.kind == .track && isExcluded(owner.item.id) ? [] : [owner.item]
+            return collection + owner.tracks.filter { !isExcluded($0.id) }
+        }
+        return items.map(\.catalogArtworkItem).filter {
+            $0.kind != .track && seen.insert(artworkKey($0)).inserted
+        }
+    }
+
+    /// Scoped, opaque identity for view task keys; unrelated artwork changes do not restart reads.
+    func retainedArtworkIdentity(for item: FoundationItem) -> String? {
+        guard isLive, storageUsable, !isLoading,
+            retainedArtworkItems.contains(where: { artworkKey($0) == artworkKey(item) }),
+            let record = manifest.artwork?[artworkKey(item)]
+        else { return nil }
+        return record.file.name
+    }
+
+    /// Local-only read. A failed tag refresh can keep the last validated rendition for this identity.
+    func retainedArtwork(for item: FoundationItem) async -> Data? {
+        guard isLive, storageUsable, !isLoading,
+            retainedArtworkItems.contains(where: { artworkKey($0) == artworkKey(item) }),
+            let record = manifest.artwork?[artworkKey(item)],
+            let url = FoundationDownloadStorage.fileURL(record.file, directory: directory)
+        else { return nil }
+        let epoch = generation
+        let file = record.file
+        let maximumBytes = FoundationCurrentArtwork.maximumBytes
+        let task = Task.detached(priority: .utility) {
+            guard file.bytes > 0, file.bytes <= Int64(maximumBytes),
+                let values = try? url.resourceValues(forKeys: [.fileSizeKey, .isSymbolicLinkKey]),
+                values.isSymbolicLink != true, Int64(values.fileSize ?? -1) == file.bytes
+            else { return nil as Data? }
+            return try? Data(contentsOf: url)
+        }
+        let data = await task.value
+        guard isLive, generation == epoch, !Task.isCancelled,
+            retainedArtworkItems.contains(where: { artworkKey($0) == artworkKey(item) })
+        else { return nil }
+        return data
+    }
+
+    private func scheduleArtwork() {
+        guard isLive, storageUsable, !isLoading, allowed, artworkTask == nil else { return }
+        let items = retainedArtworkItems.filter { item in
+            let attempt = artworkKey(item) + ":" + (item.primaryImageTag ?? "")
+            guard !attemptedArtwork.contains(attempt) else { return false }
+            guard let existing = manifest.artwork?[artworkKey(item)] else { return true }
+            return existing.item.artworkTag != item.primaryImageTag
+        }
+        guard !items.isEmpty else { return }
+        let epoch = generation
+        let cellular = allowsCellular
+        artworkTask = Task { [weak self] in
+            guard let self else { return }
+            for item in items {
+                guard self.isLive, self.allowed, self.generation == epoch, !Task.isCancelled else {
+                    break
+                }
+                let key = self.artworkKey(item)
+                let attempt = key + ":" + (item.primaryImageTag ?? "")
+                do {
+                    guard
+                        let data = try await self.library.downloadArtwork(
+                            for: item, size: 640, allowsCellular: cellular),
+                        let rendition = try await Self.normalizeArtwork(data)
+                    else {
+                        self.attemptedArtwork.insert(attempt)
+                        continue
+                    }
+                    try Task.checkCancellation()
+                    guard self.isLive, self.allowed, self.generation == epoch,
+                        self.retainedArtworkItems.contains(where: { self.artworkKey($0) == key })
+                    else { continue }
+                    try await self.storeArtwork(rendition, item: item, epoch: epoch)
+                    self.attemptedArtwork.insert(attempt)
+                } catch {
+                    if Task.isCancelled || !self.isLive || self.generation != epoch { break }
+                    self.attemptedArtwork.insert(attempt)
+                    // Audio readiness and previous optional artwork survive failures.
+                }
+            }
+            self.artworkTask = nil
+            self.scheduleArtwork()
+        }
+    }
+
+    nonisolated private static func normalizeArtwork(_ data: Data) async throws -> Data? {
+        let task = Task.detached(priority: .utility) { () throws -> Data? in
+            try Task.checkCancellation()
+            let decoded = FoundationCurrentArtwork.decode(data)
+            try Task.checkCancellation()
+            guard let decoded,
+                let output = CFDataCreateMutable(nil, 0),
+                let encoder = CGImageDestinationCreateWithData(
+                    output, "public.jpeg" as CFString, 1, nil)
+            else { return nil }
+            try Task.checkCancellation()
+            CGImageDestinationAddImage(
+                encoder, decoded.image,
+                [kCGImageDestinationLossyCompressionQuality: 0.9] as CFDictionary)
+            let finalized = CGImageDestinationFinalize(encoder)
+            try Task.checkCancellation()
+            guard finalized else { return nil }
+            let rendition = output as Data
+            guard rendition.count <= FoundationCurrentArtwork.maximumBytes else { return nil }
+            let valid = FoundationCurrentArtwork.decode(rendition) != nil
+            try Task.checkCancellation()
+            return valid ? rendition : nil
+        }
+        return try await withTaskCancellationHandler {
+            try await task.value
+        } onCancel: {
+            task.cancel()
+        }
+    }
+
+    private func storeArtwork(_ data: Data, item: FoundationItem, epoch: UInt) async throws {
+        let key = artworkKey(item)
+        let stage = directory.appendingPathComponent("stage-" + UUID().uuidString + ".jpg")
+        defer {
+            if FileManager.default.fileExists(atPath: stage.path) {
+                do { try FileManager.default.removeItem(at: stage) } catch {
+                    reportStorageFailure()
+                }
+            }
+        }
+        try data.write(to: stage, options: .atomic)
+        try FoundationDownloadStorage.protect(stage)
+        let digest = try await FoundationDownloadStorage.digestOffMain(stage)
+        try Task.checkCancellation()
+        guard isLive, allowed, generation == epoch,
+            retainedArtworkItems.contains(where: { artworkKey($0) == key })
+        else { throw CancellationError() }
+        let file = FoundationDownloadManifest.File(
+            name: UUID().uuidString + ".jpg", bytes: Int64(data.count), digest: digest)
+        let destination = directory.appendingPathComponent(file.name)
+        try FileManager.default.moveItem(at: stage, to: destination)
+        let previous = manifest.artwork?[key]
+        do {
+            try FoundationDownloadStorage.protect(destination)
+            if manifest.artwork == nil { manifest.artwork = [:] }
+            manifest.artwork?[key] = .init(item: FoundationStoredDownloadItem(item), file: file)
+            do { try save() } catch {
+                manifest.artwork?[key] = previous
+                throw error
+            }
+        } catch {
+            do { try FileManager.default.removeItem(at: destination) } catch {
+                reportStorageFailure()
+            }
+            throw error
+        }
+        if let previous,
+            let oldURL = FoundationDownloadStorage.fileURL(previous.file, directory: directory)
+        {
+            do { try FileManager.default.removeItem(at: oldURL) } catch { reportStorageFailure() }
+        }
+        artworkRevision &+= 1
+        refreshBytes()
+    }
+
+    private func collectUnusedArtwork() {
+        let retained = Set(retainedArtworkItems.map { artworkKey($0) })
+        attemptedArtwork = attemptedArtwork.filter { attempt in
+            retained.contains(where: { attempt.hasPrefix($0 + ":") })
+        }
+        for key in Array((manifest.artwork ?? [:]).keys) where !retained.contains(key) {
+            guard let record = manifest.artwork?[key],
+                let url = FoundationDownloadStorage.fileURL(record.file, directory: directory)
+            else { continue }
+            do {
+                if FileManager.default.fileExists(atPath: url.path) {
+                    try FileManager.default.removeItem(at: url)
+                }
+                manifest.artwork?.removeValue(forKey: key)
+                artworkRevision &+= 1
+            } catch { reportStorageFailure() }
+        }
+    }
+
+    func playbackResource(for item: FoundationItem, allowsRemoteFallback: Bool = true) async throws
+        -> FoundationPlaybackResource
+    {
         guard isLive else { throw CancellationError() }
+        if isReady(item), !fileIsPresent(item) {
+            readyFileIDs.remove(item.id)
+            refreshStates()
+        }
         if isReady(item), let file = manifest.files[item.id],
             let url = FoundationDownloadStorage.fileURL(file, directory: directory)
         {
@@ -515,6 +927,7 @@ final class FoundationDownloads: ObservableObject {
                 await releaseLease(item.id)
             }
         }
+        guard allowsRemoteFallback else { throw FoundationLibraryError.unavailable }
         let epoch = generation
         let url = try await library.playbackURL(for: item)
         guard isLive, epoch == generation else { throw CancellationError() }
@@ -580,6 +993,7 @@ final class FoundationDownloads: ObservableObject {
                     }
                     if activeOwner == owner.id { worker?.cancel() }
                     collectUnusedFiles()
+                    scheduleArtwork()
                     refreshStates()
                     schedule()
                 } catch {
@@ -592,6 +1006,7 @@ final class FoundationDownloads: ObservableObject {
     }
 
     func invalidate() {
+        artworkTask?.cancel()
         isLive = false
         generation &+= 1
         worker?.cancel()
@@ -611,8 +1026,10 @@ final class FoundationDownloads: ObservableObject {
         generation &+= 1
         syncPending = false
         inventoryTask?.cancel()
+        artworkTask?.cancel()
         worker?.cancel()
         syncTask?.cancel()
+        await artworkTask?.value
         await worker?.value
         await syncTask?.value
         await inventoryTask?.value
@@ -624,13 +1041,16 @@ final class FoundationDownloads: ObservableObject {
             let previousOwners = owners
             let previousPaused = paused
             let previousExpanded = expanded
+            let previousManifest = manifest
             owners = []
             paused = []
             expanded = []
+            manifest.excludedTrackIDs = nil
             do { try save() } catch {
                 owners = previousOwners
                 paused = previousPaused
                 expanded = previousExpanded
+                manifest = previousManifest
                 storageUsable = previouslyUsable
                 reportStorageFailure()
                 return false
@@ -645,6 +1065,9 @@ final class FoundationDownloads: ObservableObject {
             }
             try FoundationDownloadStorage.prepare(directory)
             manifest = FoundationDownloadManifest()
+            attemptedArtwork = []
+            artworkRevision &+= 1
+            readyFileIDs = []
             owners = []
             paused = []
             expanded = []
@@ -682,6 +1105,7 @@ final class FoundationDownloads: ObservableObject {
 
     func clearAccount(waitForPlayback: Bool = false) async -> Bool {
         invalidate()
+        await artworkTask?.value
         await worker?.value
         await syncTask?.value
         await inventoryTask?.value
@@ -704,7 +1128,9 @@ final class FoundationDownloads: ObservableObject {
                 try FileManager.default.removeItem(at: directory)
             }
             owners = []
+            readyFileIDs = []
             manifest = FoundationDownloadManifest()
+            artworkRevision &+= 1
             storageBytes = 0
             return true
         } catch {

@@ -6,13 +6,15 @@ struct FoundationSettingsView: View {
     let image: Image?
     let signOut: () -> Void
     @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var preferences: FoundationPlaybackPreferences
     @State private var showingLicenses = false
     #if DEBUG
         @State private var showingJournal = false
     #endif
 
     private static let versionLabel: String = {
-        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—"
+        let version =
+            Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—"
         let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "—"
         return "Version \(version) (Build \(build))"
     }()
@@ -38,6 +40,41 @@ struct FoundationSettingsView: View {
                                 .secondary)
                         }
                     }.padding(.vertical, 8)
+                }
+                Section("Music") {
+                    NavigationLink {
+                        FoundationDownloadManagementView()
+                    } label: {
+                        Label("Downloaded Music", systemImage: "internaldrive")
+                    }
+                    #if os(iOS)
+                        Button("Playback & Download Settings", systemImage: "gearshape") {
+                            if let url = URL(string: UIApplication.openSettingsURLString) {
+                                UIApplication.shared.open(url)
+                            }
+                        }
+                        Text(
+                            "Cellular streaming and cellular downloads have separate controls in system Settings."
+                        )
+                        .font(.caption).foregroundStyle(.secondary)
+                    #else
+                        Toggle(
+                            "Allow Cellular Streaming",
+                            isOn: Binding(
+                                get: { preferences.allowsCellularStreaming },
+                                set: { preferences.setAllowsCellularStreaming($0) }))
+                        Toggle(
+                            "Allow Cellular Downloads",
+                            isOn: Binding(
+                                get: { preferences.allowsCellularDownloads },
+                                set: { preferences.setAllowsCellularDownloads($0) }))
+                    #endif
+                    LabeledContent("Streaming Quality", value: "Native / AAC fallback")
+                    LabeledContent("Download Quality", value: "Original")
+                    Text(
+                        "Quality follows the current server and native playback support. Downloads preserve the original file; additional quality choices are not available."
+                    )
+                    .font(.caption).foregroundStyle(.secondary)
                 }
                 Section("About") {
                     Button {

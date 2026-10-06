@@ -427,6 +427,7 @@ struct FoundationPlaylistEditor: View {
                         HStack {
                             VStack(alignment: .leading) {
                                 Text(entry.item.title)
+                                FoundationDownloadBadge(item: entry.item)
                                 Text(entry.item.subtitle).font(.caption).foregroundStyle(.secondary)
                             }
                             Spacer()

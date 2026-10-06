@@ -6,6 +6,8 @@ struct FoundationCatalogArtwork: View {
         case catalog
         case current(FoundationCurrentArtwork.Result?)
     }
+    @EnvironmentObject private var downloads: FoundationDownloads
+    @EnvironmentObject private var connectivity: FoundationConnectivity
     var source: Source = .catalog
     private var currentResultID: UUID? {
         if case .current(let result) = source { return result?.id }
@@ -48,8 +50,18 @@ struct FoundationCatalogArtwork: View {
                 installImage(result?.image)
             }
         }
-        .task(id: isActive) {
-            guard case .catalog = source else { return }
+        .task(
+            id:
+                "\(isActive)-\(downloads.retainedArtworkIdentity(for: item) ?? "")-\(connectivity.localOnly)"
+        ) {
+            guard case .catalog = source, isActive, !Task.isCancelled else { return }
+            if let data = await downloads.retainedArtwork(for: item) {
+                guard !Task.isCancelled else { return }
+                installArtwork(data)
+                completed = true
+                return
+            }
+            guard !connectivity.localOnly else { return }
             #if DEBUG
                 await FoundationTrace.withPage(origin: traceOrigin, page: .artwork) {
                     guard isActive, !completed, !Task.isCancelled else { return }

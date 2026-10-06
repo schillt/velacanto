@@ -23,16 +23,51 @@
         @StateObject private var fixture = FoundationDownloadUIFixture()
         var onSignedOut: (() -> Void)?
         @State private var cleaningAccount = false
+        @Environment(\.dynamicTypeSize) private var systemDynamicTypeSize
+
+        private var usesAccessibilitySizedText: Bool {
+            ProcessInfo.processInfo.environment["FOUNDATION_UI_LARGE_TEXT"] == "1"
+        }
+
+        private var productionShell: Bool {
+            ProcessInfo.processInfo.arguments.contains("-fixtureProductionShell")
+        }
 
         var body: some View {
+            VStack(spacing: 0) {
+                fixtureControls
+                content
+            }
+            .environmentObject(fixture.downloads)
+            .environmentObject(fixture.preferences)
+            .environmentObject(fixture.connectivity)
+            .environmentObject(fixture.actions)
+            .environmentObject(fixture.artwork)
+            .environment(
+                \.dynamicTypeSize,
+                usesAccessibilitySizedText ? .accessibility3 : systemDynamicTypeSize)
+        }
+
+        @ViewBuilder private var content: some View {
+            if productionShell {
+                FoundationLibraryView(library: fixture.library, player: fixture.player, signOut: {})
+            } else {
+                fixtureNavigation
+            }
+        }
+
+        private var fixtureNavigation: some View {
             NavigationStack {
                 List {
                     Text("Synthetic download UI fixture — no server connection")
                     Button("Queue fixture playlist") {
                         fixture.downloads.download(fixture.playlist)
                     }
-                    NavigationLink("On Device") {
+                    NavigationLink("Downloads") {
                         FoundationDownloadsView(player: fixture.player)
+                    }
+                    NavigationLink("Downloaded Music") {
+                        FoundationDownloadManagementView()
                     }
                     FoundationDownloadUIPlaybackStatus(player: fixture.player)
                     if let onSignedOut {
@@ -50,7 +85,53 @@
                 }
                 .navigationTitle("Download Test Library")
             }
-            .environmentObject(fixture.downloads)
+        }
+
+        private var fixtureControls: some View {
+            FoundationDownloadUIControls(
+                downloads: fixture.downloads, connectivity: fixture.connectivity,
+                playlist: fixture.playlist, productionShell: productionShell)
+        }
+    }
+
+    /// Observe policy and connectivity owners directly so synthetic toggles follow external updates.
+    private struct FoundationDownloadUIControls: View {
+        @ObservedObject var downloads: FoundationDownloads
+        @ObservedObject var connectivity: FoundationConnectivity
+        let playlist: FoundationItem
+        let productionShell: Bool
+        @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
+        var body: some View {
+            VStack {
+                Text("Synthetic fixture controls").font(.caption)
+                if ProcessInfo.processInfo.environment["FOUNDATION_UI_LARGE_TEXT"] == "1" {
+                    Text(
+                        dynamicTypeSize == .accessibility3
+                            ? "Synthetic Dynamic Type: accessibility3"
+                            : "Synthetic Dynamic Type override missing"
+                    )
+                    .font(.caption)
+                    .accessibilityIdentifier("fixture-dynamic-type-size")
+                }
+                if productionShell {
+                    Button("Queue fixture playlist") { downloads.download(playlist) }
+                    Toggle(
+                        "Simulate unavailable network",
+                        isOn: Binding(
+                            get: { connectivity.localOnly },
+                            set: { offline in
+                                connectivity.update(
+                                    status: offline ? .unavailable : .available,
+                                    wifiOrWired: !offline, cellular: false)
+                            }))
+                }
+                Toggle(
+                    "Use Cellular Data",
+                    isOn: Binding(
+                        get: { downloads.allowsCellular },
+                        set: { downloads.setAllowsCellular($0) }))
+            }.padding().background(.regularMaterial)
         }
     }
 
@@ -59,49 +140,89 @@
         @State private var signedIn = false
         @State private var failedOnce = false
         @State private var notice: String?
+        @StateObject private var delayedResponse = FoundationDelayedAuthenticationResponse()
+
+        private var delayedAuthentication: Bool {
+            ProcessInfo.processInfo.arguments.contains("-fixtureDelayedAuth")
+        }
 
         var body: some View {
-            if signedIn {
-                FoundationDownloadsTestHarness {
-                    let result = FoundationSignOutPolicy.begin {
-                        Task { true }
-                    } clear: {
-                        signedIn = false
-                    } clearPins: {
-                        true
+            Group {
+                if signedIn {
+                    FoundationDownloadsTestHarness {
+                        let result = FoundationSignOutPolicy.begin {
+                            Task { true }
+                        } clear: {
+                            signedIn = false
+                        } clearPins: {
+                            true
+                        }
+                        if result.localCleared {
+                            notice = "Fixture account cleanup complete"
+                        }
                     }
-                    if result.localCleared {
-                        notice = "Fixture account cleanup complete"
-                    }
-                }
-            } else {
-                VStack {
-                    if let notice { Text(notice) }
-                    FoundationSignInView { url, username, password in
-                        guard url.host == "example.invalid", username == "synthetic-ui",
-                            password == "synthetic-not-a-password"
-                        else { throw FoundationLibraryError.authentication }
-                        let delayed = ProcessInfo.processInfo.arguments.contains(
-                            "-fixtureDelayedAuth")
-                        if delayed {
-                            // Return a successful response even after cancellation to exercise the form guard.
-                            try? await Task.sleep(for: .seconds(3))
-                        } else {
-                            try await Task.sleep(for: .milliseconds(500))
-                            try Task.checkCancellation()
-                            if !failedOnce {
-                                failedOnce = true
-                                throw FoundationLibraryError.authentication
+                } else {
+                    VStack {
+                        if let notice { Text(notice) }
+                        if delayedAuthentication {
+                            Button("Complete delayed authentication") { delayedResponse.complete() }
+                                .disabled(!delayedResponse.isWaiting)
+                            if delayedResponse.wasDelivered {
+                                Text("Delayed authentication response delivered")
                             }
                         }
-                        return {
-                            notice = nil
-                            signedIn = true
+                        FoundationSignInView { url, username, password in
+                            guard url.host == "example.invalid", username == "synthetic-ui",
+                                password == "synthetic-not-a-password"
+                            else { throw FoundationLibraryError.authentication }
+                            if delayedAuthentication {
+                                // Deliberately return success after Cancel; the production form owns rejection.
+                                try await delayedResponse.waitForCompletion()
+                            } else {
+                                try await Task.sleep(for: .milliseconds(500))
+                                try Task.checkCancellation()
+                                if !failedOnce {
+                                    failedOnce = true
+                                    throw FoundationLibraryError.authentication
+                                }
+                            }
+                            return {
+                                notice = nil
+                                signedIn = true
+                            }
                         }
                     }
                 }
             }
+            .onDisappear { delayedResponse.complete() }
         }
+    }
+
+    /// At most one pending response; the fixture view explicitly owns its completion lifetime.
+    @MainActor
+    private final class FoundationDelayedAuthenticationResponse: ObservableObject {
+        @Published private(set) var isWaiting = false
+        @Published private(set) var wasDelivered = false
+        private var continuation: CheckedContinuation<Void, Never>?
+
+        func waitForCompletion() async throws {
+            guard continuation == nil else { throw FoundationLibraryError.unavailable }
+            wasDelivered = false
+            await withCheckedContinuation { (pending: CheckedContinuation<Void, Never>) in
+                continuation = pending
+                isWaiting = true
+            }
+            wasDelivered = true
+        }
+
+        func complete() {
+            let pending = continuation
+            continuation = nil
+            isWaiting = false
+            pending?.resume()
+        }
+
+        isolated deinit { continuation?.resume() }
     }
 
     struct FoundationDownloadsTestCleanup: View {
@@ -114,6 +235,9 @@
                     if FileManager.default.fileExists(atPath: root.path) {
                         try FileManager.default.removeItem(at: root)
                     }
+                    UserDefaults.standard.removePersistentDomain(
+                        forName: "FoundationDownloadUIFixture."
+                            + ProcessInfo.processInfo.environment["FOUNDATION_UI_RUN_ID"]!)
                     status = "Fixture cleanup complete"
                 } catch {
                     status = "Fixture cleanup failed"
@@ -134,6 +258,17 @@
     private final class FoundationDownloadUIFixture: ObservableObject {
         let downloads: FoundationDownloads
         let player: FoundationPlayer
+        let library: FoundationDownloadUILibrary
+        let actions = FoundationLibraryActions(
+            sourceScope: "synthetic-ui", read: { _ in nil }, write: { _, _ in },
+            mutateFavorite: { _, _ in })
+        let artwork: FoundationCurrentArtwork
+        let preferences = FoundationPlaybackPreferences(
+            defaults: UserDefaults(
+                suiteName: "FoundationDownloadUIFixture."
+                    + ProcessInfo.processInfo.environment["FOUNDATION_UI_RUN_ID"]!)!)
+        let connectivity = FoundationConnectivity(
+            monitorConnectivity: false, settleDuration: .zero, retry: {})
         let playlist = FoundationItem(
             id: "playlist", title: "Fixture Playlist", subtitle: "Synthetic", kind: .playlist,
             duration: nil)
@@ -141,6 +276,7 @@
         init() {
             let root = FoundationDownloadsTestHarness.storageRoot
             let library = FoundationDownloadUILibrary()
+            self.library = library
             let transfer = FoundationDownloadUITransfer(
                 failOnce: ProcessInfo.processInfo.arguments.contains("-fixtureFailOnce"))
             let downloads = FoundationDownloads(
@@ -152,11 +288,23 @@
             self.player = FoundationPlayer(
                 library: library, resolveResource: { try await downloads.playbackResource(for: $0) }
             )
+            self.artwork = FoundationCurrentArtwork(player: player) { item in
+                await downloads.retainedArtwork(for: item)
+            }
             // Start on synthetic cellular; the production toggle governs transfer permission.
-            downloads.updateConnectivity(isConnected: true, usesWiFi: false)
+            let productionShell = ProcessInfo.processInfo.arguments.contains(
+                "-fixtureProductionShell")
+            downloads.updateConnectivity(isConnected: true, usesWiFi: productionShell)
+            connectivity.update(
+                status: .available, wifiOrWired: productionShell, cellular: !productionShell)
         }
 
-        isolated deinit { downloads.invalidate() }
+        isolated deinit {
+            artwork.invalidate()
+            actions.invalidate()
+            connectivity.invalidate()
+            downloads.invalidate()
+        }
     }
 
     private actor FoundationDownloadUILibrary: FoundationLibrary {
