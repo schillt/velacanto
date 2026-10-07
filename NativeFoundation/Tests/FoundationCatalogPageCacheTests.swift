@@ -167,6 +167,46 @@ final class FoundationCatalogPageCacheTests: XCTestCase {
         XCTAssertEqual(model.items, [album])
     }
 
+    func testCancelledSuspendedOwnerAllowsReplacementAppearanceToLoad() async {
+        let directory = root()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cache = FoundationCatalogPageCache(scope: "fixture", root: directory)
+        let model = FoundationBrowseModel()
+        model.configureCache(cache, key: "home")
+        let started = expectation(description: "cancelled load suspended")
+        var release: CheckedContinuation<FoundationPage, Never>?
+        let old = Task {
+            await model.loadPending { _ in
+                await withCheckedContinuation { continuation in
+                    release = continuation
+                    started.fulfill()
+                }
+            }
+        }
+        await fulfillment(of: [started], timeout: 2)
+        XCTAssertTrue(model.isLoading)
+        await model.loadPending { _ in
+            XCTFail("A genuinely live shared owner must not start a duplicate load")
+            return FoundationPage(items: [], nextStartIndex: nil)
+        }
+        old.cancel()
+        var replacementReads = 0
+        await model.loadPending { offset in
+            XCTAssertEqual(offset, 0)
+            replacementReads += 1
+            return FoundationPage(items: [self.album], nextStartIndex: nil)
+        }
+        XCTAssertEqual(replacementReads, 1)
+        XCTAssertEqual(model.items, [album])
+        XCTAssertFalse(model.isLoading)
+        release?.resume(returning: FoundationPage(items: [], nextStartIndex: 24))
+        await old.value
+        XCTAssertEqual(model.items, [album])
+        XCTAssertNil(model.nextStartIndex)
+        let persisted = await cache.read("home")
+        XCTAssertEqual(persisted?.page.items, [album])
+    }
+
     func testBoundsRejectOversizedPagesAndEvictOldest() async {
         let directory = root()
         defer { try? FileManager.default.removeItem(at: directory) }

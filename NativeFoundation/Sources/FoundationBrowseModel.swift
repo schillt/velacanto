@@ -11,6 +11,7 @@ final class FoundationBrowseModel: ObservableObject {
     private(set) var isRetainedSnapshot = false
     private var revision = UUID()
     private var writePermit = FoundationPageWritePermit()
+    private var hasLiveLoad: Bool { isLoading && writePermit.isValid }
     private var pendingRequest = Request.initial
     private(set) var retryRequest = Request.initial
 
@@ -105,10 +106,10 @@ final class FoundationBrowseModel: ObservableObject {
             return
         }
         await restoreCache()
-        guard allowsNetwork, !Task.isCancelled, !isLoading else { return }
+        guard allowsNetwork, !Task.isCancelled, !hasLiveLoad else { return }
         var request = pendingRequest
         if case .initial = request, pageCache != nil, loaded {
-            guard !isLoading,
+            guard !hasLiveLoad,
                 lastRefreshAttempt.map({ now().timeIntervalSince($0) >= refreshInterval }) ?? true
             else { return }
             request = .refresh
@@ -174,7 +175,11 @@ final class FoundationBrowseModel: ObservableObject {
                 "browse disposition=\(String(describing: request)) \(FoundationTrace.fields)")
         #endif
         do {
-            let page = try await loader(offset)
+            let page = try await withTaskCancellationHandler {
+                try await loader(offset)
+            } onCancel: {
+                permit.revoke()
+            }
             #if DEBUG
                 FoundationJournal.shared.record(
                     "browse disposition=load-returned result=success \(FoundationTrace.fields)")

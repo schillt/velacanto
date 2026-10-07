@@ -230,6 +230,7 @@ private actor FoundationPageDirectoryOwner {
 final class FoundationPageWritePermit: @unchecked Sendable {
     private let lock = NSLock()
     private var valid = true
+    var isValid: Bool { lock.withLock { valid } }
     func revoke() { lock.withLock { valid = false } }
     func ifValid(_ body: () -> Void) {
         lock.withLock { if valid { body() } }
