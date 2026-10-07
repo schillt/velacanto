@@ -336,7 +336,8 @@
         @ObservedObject var player: FoundationPlayer
         var body: some View {
             Text(
-                "Fixture identity: \(player.selectedEntryID?.uuidString ?? "none"); item \(player.queue.first { $0.id == player.selectedEntryID }?.item.id ?? "none"); intent \(player.wantsPlayback); state \(String(describing: player.state))"
+                verbatim:
+                    "Fixture identity: \(player.selectedEntryID?.uuidString ?? "none"); item \(player.queue.first { $0.id == player.selectedEntryID }?.item.id ?? "none"); intent \(player.wantsPlayback); state \(String(describing: player.state))"
             )
             .font(.caption).lineLimit(1).dynamicTypeSize(.medium)
             .accessibilityIdentifier("fixture-playback-identity")
