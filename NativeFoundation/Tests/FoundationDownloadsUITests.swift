@@ -708,7 +708,7 @@ final class FoundationDownloadsUITests: XCTestCase {
         capture("Offline album grid retained after playback", in: app)
         XCTAssertTrue(app.navigationBars["Albums"].waitForExistence(timeout: 5))
         app.navigationBars.buttons.firstMatch.tap()
-        app.buttons["Home"].firstMatch.tap()
+        selectTab("Home", in: app)
         XCTAssertTrue(app.staticTexts["Home"].firstMatch.waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["offline-retry"].waitForExistence(timeout: 5))
         let resume = app.buttons["Open Now Playing"]
@@ -832,7 +832,7 @@ final class FoundationDownloadsUITests: XCTestCase {
         for cycle in 0..<2 {
             let queue = app.buttons["Queue fixture playlist"]
             XCTAssertTrue(queue.waitForExistence(timeout: 10))
-            let savePassword = app.alerts["Save Password?"]
+            let savePassword = app.sheets["Save Password?"]
             let systemNotNow = XCUIApplication(bundleIdentifier: "com.apple.springboard").buttons[
                 "Not Now"]
             if systemNotNow.waitForExistence(timeout: 5) { systemNotNow.tap() }
