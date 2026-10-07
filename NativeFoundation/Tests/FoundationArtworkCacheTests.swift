@@ -313,7 +313,23 @@ final class FoundationArtworkCacheTests: XCTestCase {
         XCTAssertEqual(count, 1)
         let usage = await cache.usage()
         XCTAssertEqual(usage.memory, 0)
-        XCTAssertEqual(usage.disk, 0)
+        let directory = root.appendingPathComponent(
+            FoundationArtworkCache.digest("synthetic"), isDirectory: true)
+        let files = try FileManager.default.contentsOfDirectory(
+            at: directory, includingPropertiesForKeys: [.fileSizeKey])
+        XCTAssertTrue(files.allSatisfy { $0.lastPathComponent == "revisions.plist" })
+        let metadataBytes = try files.reduce(0) { total, file in
+            let values = try file.resourceValues(forKeys: [.fileSizeKey])
+            return total + (values.fileSize ?? 0)
+        }
+        XCTAssertEqual(usage.disk, metadataBytes)
+        XCTAssertLessThanOrEqual(metadataBytes, 65_536)
+        let cold = FoundationArtworkCache(scope: "synthetic", root: root)
+        let restored = try await cold.result(
+            for: item(tag: nil), pixels: 160, allowsNetwork: false, load: probe.load)
+        XCTAssertNil(restored)
+        let restoredCount = await probe.count
+        XCTAssertEqual(restoredCount, 1)
     }
     func testUntaggedExpiryAndBoundedFailureSuppression() async throws {
         let root = root()

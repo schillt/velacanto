@@ -510,7 +510,9 @@ private actor FoundationArtworkDisk {
                 at: directory,
                 includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey])) ?? []
         return urls.compactMap { file in
-            guard file.pathExtension == "art" || file == revisionFile,
+            guard
+                file.pathExtension == "art"
+                    || file.lastPathComponent == revisionFile.lastPathComponent,
                 let values = try? file.resourceValues(forKeys: [
                     .fileSizeKey, .contentModificationDateKey,
                 ]),
