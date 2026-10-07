@@ -391,7 +391,18 @@
             guard let index = arguments.firstIndex(of: "-fixtureMembership"),
                 arguments.indices.contains(index + 1), !membershipReady
             else { return }
-            // A cold launch restores the exact account-owned manifest rather than re-downloading.
+            // Inventory verifies retained files asynchronously. Never race it by seeding a cold launch.
+            for _ in 0..<200 {
+                guard !Task.isCancelled else { return }
+                if !downloads.isLoading { break }
+                do { try await Task.sleep(for: .milliseconds(50)) } catch { return }
+            }
+            guard !downloads.isLoading else { return }
+            // Offline readiness proves verified restore only: no library lookup, rewrite, or retry.
+            if arguments.contains("-fixtureStartOffline") {
+                membershipReady = !downloads.downloadedSongs.isEmpty
+                return
+            }
             if !downloads.downloadedSongs.isEmpty {
                 membershipReady = true
                 return
