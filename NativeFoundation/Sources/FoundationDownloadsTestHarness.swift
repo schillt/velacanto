@@ -514,7 +514,7 @@
         }
         func artists(startIndex: Int) async throws -> FoundationPage {
             .init(
-                items: (usesCache
+                items: (usesCache || canonical
                     || ProcessInfo.processInfo.arguments.contains("-fixtureMembership"))
                     ? [
                         FoundationItem(
