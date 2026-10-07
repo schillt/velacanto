@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// One view-owned image read. Failure remains a local placeholder; no retries.
+/// View publication is owned locally; catalog bytes and decoding share the account cache.
 struct FoundationCatalogArtwork: View {
     enum Source {
         case catalog
@@ -23,7 +23,7 @@ struct FoundationCatalogArtwork: View {
     var loadedImage: Binding<Image?>? = nil
     var upperEdgeColors: Binding<[Color]?>? = nil
     @State private var image: Image?
-    @State private var completed = false
+    @State private var installedIdentity: String?
     #if DEBUG
         @Environment(\.foundationTraceOrigin) private var traceOrigin
     #endif
@@ -50,49 +50,47 @@ struct FoundationCatalogArtwork: View {
                 installImage(result?.image)
             }
         }
-        .task(
-            id:
-                "\(isActive)-\(downloads.retainedArtworkIdentity(for: item) ?? "")-\(connectivity.localOnly)"
-        ) {
+        .task(id: artworkTaskIdentity) {
             guard case .catalog = source, isActive, !Task.isCancelled else { return }
+            let identity = FoundationArtworkCache.key(item, pixels: isHero ? 640 : 160).identity
+            if installedIdentity != identity {
+                installImage(nil)
+                installedIdentity = identity
+            }
             if let data = await downloads.retainedArtwork(for: item) {
+                let result = await Task.detached(priority: .utility) {
+                    FoundationCurrentArtwork.decode(data, maximumPixels: isHero ? 640 : 160)
+                }.value
                 guard !Task.isCancelled else { return }
-                installArtwork(data)
-                completed = true
+                installImage(result?.image)
                 return
             }
-            guard !connectivity.localOnly else { return }
             #if DEBUG
                 await FoundationTrace.withPage(origin: traceOrigin, page: .artwork) {
-                    guard isActive, !completed, !Task.isCancelled else { return }
-                    do {
-                        let data = try await library.artwork(for: item, size: isHero ? 640 : 160)
-                        try Task.checkCancellation()
-                        installArtwork(data)
-                        completed = true
-                    } catch {
-                        if !Task.isCancelled { completed = true }
-                    }
+                    await loadCatalogArtwork()
                 }
             #else
-                guard isActive, !completed, !Task.isCancelled else { return }
-                do {
-                    let data = try await library.artwork(for: item, size: isHero ? 640 : 160)
-                    try Task.checkCancellation()
-                    installArtwork(data)
-                    completed = true
-                } catch {
-                    if !Task.isCancelled { completed = true }
-                }
+                await loadCatalogArtwork()
             #endif
         }
     }
 
-    private func installArtwork(_ data: Data?) {
-        let result = data.flatMap {
-            FoundationCurrentArtwork.decode($0, maximumPixels: isHero ? 640 : 160)
+    private func loadCatalogArtwork() async {
+        do {
+            let result = try await library.artworkResult(
+                for: item, size: isHero ? 640 : 160,
+                allowsNetwork: !connectivity.localOnly)
+            try Task.checkCancellation()
+            installImage(result?.image)
+        } catch {
+            // Optional failure keeps the deterministic placeholder until task identity changes.
         }
-        installImage(result?.image)
+    }
+
+    private var artworkTaskIdentity: String {
+        let key = FoundationArtworkCache.key(item, pixels: isHero ? 640 : 160)
+        return
+            "\(isActive)-\(key.identity)-\(key.pixels)-\(downloads.retainedArtworkIdentity(for: item) ?? "")-\(connectivity.localOnly)"
     }
 
     private func installImage(_ cgImage: CGImage?, displayImage: Image? = nil) {

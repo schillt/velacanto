@@ -83,6 +83,7 @@ final class FoundationAppModel: ObservableObject {
     let playbackPreferences = FoundationPlaybackPreferences()
     private var policySubscriptions: Set<AnyCancellable> = []
     private var currentRetainedArtworkIdentity: String?
+    private var currentArtworkLocalOnly = false
     @Published private(set) var isCleaningDownloads = false
     @Published var credentialError: String?
     @Published var signOutNotice: String?
@@ -93,6 +94,9 @@ final class FoundationAppModel: ObservableObject {
     private var mediaSession: MediaSession<FoundationNowPlaying>?
 
     isolated deinit {
+        if let cache = library?.artworkCache {
+            Task { _ = await cache.invalidate(removeDisk: false) }
+        }
         downloads?.invalidate()
         connectivity?.invalidate()
         nowPlaying?.invalidate()
@@ -140,6 +144,18 @@ final class FoundationAppModel: ObservableObject {
         if credentialReadCompleted, library == nil, !FoundationDownloads.clearStoredDownloads() {
             credentialError = FoundationDownloadAccountError.cleanupFailed.errorDescription
         }
+        if credentialReadCompleted, library == nil {
+            let epoch = accountEpoch
+            Task { [weak self] in
+                guard let self, self.accountEpoch == epoch, self.library == nil else { return }
+                let cleared = await FoundationArtworkCache.clearStoredArtwork()
+                guard self.accountEpoch == epoch, self.library == nil else { return }
+                if !cleared {
+                    self.credentialError =
+                        "Saved artwork cache could not be removed from this device."
+                }
+            }
+        }
         #if DEBUG
             FoundationJournal.shared.record("app phase=opened")
         #endif
@@ -172,7 +188,21 @@ final class FoundationAppModel: ObservableObject {
         connectivity?.invalidate()
         policySubscriptions.removeAll()
         currentRetainedArtworkIdentity = nil
-        let library = FoundationJellyfinLibrary(session: session)
+        let retiringCache = library?.artworkCache
+        let cache = FoundationArtworkCache(scope: sourceScope)
+        let epoch = accountEpoch
+        Task { [weak self] in
+            if let retiringCache {
+                _ = await retiringCache.invalidate(removeDisk: retiringCache.scope != cache.scope)
+            }
+            guard let self, self.accountEpoch == epoch else { return }
+            let cleared = await FoundationArtworkCache.clearStoredArtwork(retaining: cache.scope)
+            guard self.accountEpoch == epoch else { return }
+            if !cleared {
+                self.credentialError = "Older artwork cache could not be removed from this device."
+            }
+        }
+        let library = FoundationJellyfinLibrary(session: session, artworkCache: cache)
         self.actions = FoundationLibraryActions(sourceScope: sourceScope) { item, favorite in
             try await library.setFavorite(for: item, isFavorite: favorite)
         }
@@ -192,9 +222,16 @@ final class FoundationAppModel: ObservableObject {
                 try await downloads.playbackResource(
                     for: item, allowsRemoteFallback: !connectivity.localOnly)
             }, makeItem: { preferences.makePlayerItem(for: $0) })
-        connectivity.objectWillChange.sink { [weak downloads, weak connectivity] in
+        currentArtworkLocalOnly = connectivity.localOnly
+        connectivity.objectWillChange.sink { [weak self, weak downloads, weak connectivity] in
             Task { @MainActor in
-                guard let downloads, let connectivity else { return }
+                guard let self, let downloads, let connectivity,
+                    self.connectivity === connectivity
+                else { return }
+                if self.currentArtworkLocalOnly != connectivity.localOnly {
+                    self.currentArtworkLocalOnly = connectivity.localOnly
+                    self.currentArtwork?.refreshRetainedArtwork()
+                }
                 downloads.updateConnectivity(
                     isConnected: connectivity.isConnected,
                     usesWiFi: connectivity.usesWiFiOrWired)
@@ -223,8 +260,8 @@ final class FoundationAppModel: ObservableObject {
             }
             let artwork = FoundationCurrentArtwork(player: player) { item in
                 if let local = await downloads.retainedArtwork(for: item) { return local }
-                guard await !connectivity.localOnly else { return nil }
-                return try await library.artwork(for: item, size: 640)
+                return try await library.artworkResult(
+                    for: item, size: 640, allowsNetwork: !connectivity.localOnly)?.data
             }
             downloads.$artworkRevision.dropFirst().sink {
                 [weak self, weak artwork, weak player, weak downloads] _ in
@@ -276,6 +313,7 @@ final class FoundationAppModel: ObservableObject {
                 + "Jellyfin may have ended the session."
             return
         }
+        let retiringCache = library?.artworkCache
         let retiringDownloads = downloads
         retiringDownloads?.invalidate()
         connectivity?.invalidate()
@@ -297,6 +335,7 @@ final class FoundationAppModel: ObservableObject {
         library = nil
         credentialError = nil
         Task { [weak self] in
+            let artworkCleared = await retiringCache?.invalidate(removeDisk: true) ?? true
             let downloadsCleared: Bool
             if let retiringDownloads {
                 downloadsCleared = await retiringDownloads.clearAccount(waitForPlayback: true)
@@ -307,6 +346,10 @@ final class FoundationAppModel: ObservableObject {
             self.isCleaningDownloads = false
             if !downloadsCleared {
                 self.credentialError = FoundationDownloadAccountError.cleanupFailed.errorDescription
+            }
+            if !artworkCleared {
+                let notice = "Artwork cache could not be removed from this device."
+                self.credentialError = self.credentialError.map { $0 + " " + notice } ?? notice
             }
             let serverAccepted = await attempt.revocation.value
             guard self.accountEpoch == epoch, self.library == nil else { return }

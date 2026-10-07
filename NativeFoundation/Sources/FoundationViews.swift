@@ -1321,11 +1321,13 @@ private struct FoundationProfileImage: View {
                 let profile = try await library.profile()
                 try Task.checkCancellation()
                 initial = String(profile.name.prefix(1)).uppercased()
-                #if os(iOS)
-                    image = profile.image.flatMap { UIImage(data: $0) }.map { Image(uiImage: $0) }
-                #else
-                    image = profile.image.flatMap { NSImage(data: $0) }.map { Image(nsImage: $0) }
-                #endif
+                let decoded = await Task.detached(priority: .utility) {
+                    profile.image.flatMap {
+                        FoundationCurrentArtwork.decode($0, maximumPixels: 160)
+                    }
+                }.value
+                try Task.checkCancellation()
+                image = decoded.map { Image(decorative: $0.image, scale: 1) }
                 onLoaded(profile.name, image)
                 completed = true
             } catch {

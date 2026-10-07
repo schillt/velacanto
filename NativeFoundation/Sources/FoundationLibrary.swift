@@ -80,9 +80,22 @@ protocol FoundationLibrary: Sendable {
     func artwork(for item: FoundationItem, size: Int) async throws -> Data?
     func downloadArtwork(for item: FoundationItem, size: Int, allowsCellular: Bool) async throws
         -> Data?
+    func artworkResult(for item: FoundationItem, size: Int, allowsNetwork: Bool) async throws
+        -> FoundationCurrentArtwork.Result?
 }
 
 extension FoundationLibrary {
+    func artworkResult(for item: FoundationItem, size: Int, allowsNetwork: Bool) async throws
+        -> FoundationCurrentArtwork.Result?
+    {
+        guard allowsNetwork else { return nil }
+        let data = try await artwork(for: item.catalogArtworkItem, size: size)
+        try Task.checkCancellation()
+        return await Task.detached(priority: .utility) {
+            data.flatMap { FoundationCurrentArtwork.decode($0, maximumPixels: size) }
+        }.value
+    }
+
     func downloadSource(for item: FoundationItem) async throws -> FoundationDownloadSource {
         throw FoundationDownloadError.unsupported
     }
@@ -236,10 +249,15 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
     typealias Load = @Sendable (URLRequest) async throws -> (Data, URLResponse)
     let session: FoundationSession
     private let load: Load
+    let artworkCache: FoundationArtworkCache?
 
-    init(session: FoundationSession, load: @escaping Load = nativeLoad) {
+    init(
+        session: FoundationSession, load: @escaping Load = nativeLoad,
+        artworkCache: FoundationArtworkCache? = nil
+    ) {
         self.session = session
         self.load = load
+        self.artworkCache = artworkCache
     }
 
     var supportsPlaylistManagement: Bool { true }
@@ -610,10 +628,23 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
         let user = try await send(Paths.getCurrentUser)
         var image: Data?
         if let tag = user.primaryImageTag, !tag.isEmpty {
-            image = try? await responseData(
-                Paths.getUserImage(
-                    parameters: .init(userID: session.userID, tag: tag, format: .jpg)),
-                accept: "image/jpeg")
+            let loadImage: @Sendable (FoundationItem, Int) async throws -> Data? = { _, _ in
+                try await responseData(
+                    Paths.getUserImage(
+                        parameters: .init(userID: session.userID, tag: tag, format: .jpg)),
+                    accept: "image/jpeg")
+            }
+            if let artworkCache {
+                let avatar = FoundationItem(
+                    id: "account-avatar:", title: "", subtitle: "", kind: .artist,
+                    duration: nil, primaryImageTag: tag)
+                image = try? await artworkCache.result(
+                    for: avatar, pixels: 160, allowsNetwork: true, load: loadImage)?.data
+            } else {
+                image = try? await loadImage(
+                    FoundationItem(
+                        id: "", title: "", subtitle: "", kind: .artist, duration: nil), 160)
+            }
         }
         try Task.checkCancellation()
         return (user.name ?? "", image)
@@ -755,13 +786,36 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
     }
 
     func artwork(for item: FoundationItem, size: Int) async throws -> Data? {
-        try await readArtwork(for: item, size: size, allowsCellular: nil)
+        if artworkCache != nil {
+            return try await artworkResult(for: item, size: size, allowsNetwork: true)?.data
+        }
+        return try await readArtwork(for: item, size: size, allowsCellular: nil)
     }
 
     func downloadArtwork(for item: FoundationItem, size: Int, allowsCellular: Bool) async throws
         -> Data?
     {
         try await readArtwork(for: item, size: size, allowsCellular: allowsCellular)
+    }
+
+    func artworkResult(for item: FoundationItem, size: Int, allowsNetwork: Bool) async throws
+        -> FoundationCurrentArtwork.Result?
+    {
+        guard let artworkCache else {
+            guard allowsNetwork else { return nil }
+            let data = try await readArtwork(
+                for: item.catalogArtworkItem, size: size, allowsCellular: nil)
+            return await Task.detached(priority: .utility) {
+                data.flatMap {
+                    FoundationCurrentArtwork.decode($0, maximumPixels: min(640, max(1, size)))
+                }
+            }.value
+        }
+        return try await artworkCache.result(
+            for: item, pixels: size, allowsNetwork: allowsNetwork
+        ) { item, pixels in
+            try await readArtwork(for: item, size: pixels, allowsCellular: nil)
+        }
     }
 
     private func readArtwork(for item: FoundationItem, size: Int, allowsCellular: Bool?)

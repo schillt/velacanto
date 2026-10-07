@@ -96,7 +96,12 @@ final class FoundationCurrentArtwork: ObservableObject {
                 #endif
                 try Task.checkCancellation()
                 guard let self, self.isLive, self.generation == requestGeneration else { return }
-                self.result = data.flatMap { Self.decode($0, id: artworkID) }
+                let decoded = await Task.detached(priority: .utility) {
+                    data.flatMap { Self.decode($0, id: artworkID) }
+                }.value
+                try Task.checkCancellation()
+                guard self.isLive, self.generation == requestGeneration else { return }
+                self.result = decoded
                 self.loadTask = nil
             } catch {
                 guard let self, self.isLive, self.generation == requestGeneration else { return }

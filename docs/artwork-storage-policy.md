@@ -1,53 +1,62 @@
 # Artwork and offline storage policy — issue #14
 
-## Current implementation and measured boundaries
+## Shared catalog artwork implementation — local candidate
 
-Baseline: alpha `de7abe9df9ae294184cadbddb01ecc2161038ab1`. This policy
-belongs to the maintained NativeFoundation app, not the removed legacy cache.
+Owner clarification on 2026-10-07 authorizes actual app-wide reuse, including artist,
+playlist and genre consumers, on the local issue #13 build 116 source `2a41f533`.
+This does not claim publication, integration, physical acceptance or #14 completion.
 
-| Owner | Retention and request boundary |
-| --- | --- |
-| Visible catalog artwork | One optional image per live view; one view-owned read, cancelled with its task. Requests use 160 pixels for tiles and 640 for heroes. Completed failures remain placeholders until that view lifetime ends. No metadata lookup, prefetch, application disk cache or cross-view coalescer. |
-| Current artwork | One account-owned result shared by the player and system metadata. Identity includes account lifetime, album/item and tag. Same identity reuses the result; change cancels the old load and rejects late results. Missing/failing artwork does not retry that identity. |
-| Image decode | Shared existing ImageIO decoder rejects empty/malformed, multi-image, over-2 MiB payloads and source dimensions beyond 2048. Tiles downsample to 160 pixels; hero/current result to 640. Catalog views retain only the decoded image; current owner also retains the encoded payload. |
-| Native transport | Existing shared ephemeral URLSession, no application-owned disk cache. Request/resource timeouts are 30/60 seconds. Ephemeral does not mean zero in-memory native cache. The app does not presently set an explicit URLCache capacity or clear that shared native cache on account teardown. |
+The account-owned `FoundationArtworkCache` shares visible catalog and current-player
+reads through the existing provider. Track artwork projects supplied album references;
+Home album tiles and Library track rows share kind/ID/tag/rendition without metadata
+lookups. Artists share their own Primary identity. New's genre cards intentionally
+use a representative recent album ID/tag; Search/Library genre cards use genre Primary
+ID/tag. These images use one loading pipeline but are not falsely aliased. The account
+avatar uses a distinct internal namespace within the same cache; profile metadata
+still uses its existing provider read.
 
-Synthetic decoder tests use a 1024 × 512 JPEG: tile output is 160 × 80;
-hero output is 640 × 320. Tests inspect `bytesPerRow × height`, bounded by
-102,400 bytes per tile and 1,638,400 bytes per hero (160/640 square RGBA
-budgets). Current encoded retention is at most 2 MiB, in addition to the decoded
-image. These are retained-result boundaries, not process peak-memory measurements;
-encoded responses arrive before decode validation, and native network/decode
-buffers, SwiftUI retention and system-media copies remain outside this count.
-Total visible catalog retention scales with live views; no global memory limit
-or LRU eviction is claimed. No private library or device memory profile was read.
+- Scope is a digest of the existing server/account scope. Disk names are opaque
+  SHA256 keys; no titles, origins, credentials or request URLs are stored.
+- Renditions are 160 and 640 pixels. A larger cached rendition serves smaller requests;
+  a tile cannot satisfy a missing hero rendition. Tagged entries expire after 30 days;
+  untagged entries after 24 hours. A changed tag has a new identity. Nil/failing reads
+  are suppressed for 60 seconds in a bounded in-memory identity table; cancellation
+  never installs a failure. No automatic retry, prefetch or metadata scanning.
+- LRU memory retention counts encoded bytes plus decoded image row bytes, bounded
+  to 16 MiB. Disposable account artwork under Caches is bounded to 64 MiB after each
+  operation, with atomic writes and disk LRU eviction. This is a retained-cache
+  bound, not peak process memory or write staging usage. SwiftUI/current/system
+  image retention and native transport buffers are outside it.
+- At most 4 shared image fetch/decode jobs run; pending distinct keys are bounded to 128.
+  Consumers of the same identity/rendition share a job. One cancellation releases
+  that consumer; the last cancels queued/native work. A cancelled native job holds
+  its slot until it ends. Requests for distinct resolution upgrades can be separate.
+- Decoding and serial disk I/O run off MainActor. Existing ImageIO validation rejects
+  malformed/multi-image/over 2 MiB payloads and source dimensions beyond 2048. Account
+  invalidation cancels work, rejects late publication and disables late disk writes.
+- Cache roots are backup-excluded. Files use complete-until-first-authentication
+  protection on iOS; account directories are owner-only on Mac. Signed physical
+  protection/backup behavior remains an acceptance gate.
+- Startup/sign-in remove retired disposable account scopes, retaining live directory
+  leases. Successful account transition/sign-out retires the cache after credential
+  removal succeeds. Cleanup failure remains visible. No credentials are read by
+  the cache, and inaccessible saved credentials do not trigger new cache cleanup.
 
-Invalidation clears current ownership/result and rejects retained callbacks. Account
-replacement tears down the catalog tree. This establishes application result
-isolation; it does not establish immediate erasure of native buffers/caches or
-old backups. A future native-cache change needs focused account/response tests;
-do not revive historical 16/64 MiB caches as though they already exist.
+## Retained downloads and offline behavior
 
-## Offline and failure presentation
+Download-owned artwork remains local-first and has its own manifest/reference lifetime.
+It may preserve an older valid tag after failed refresh. Those bytes are not recorded
+under a new disposable-cache revision. Disposable eviction/cleanup never removes
+retained music/artwork. Download artwork transfers retain their existing Wi-Fi/cellular
+policy and separate explicit owner; no cache prefetch or second download owner.
 
-Missing, malformed, rejected and failed images use the same deterministic neutral
-shape with `music.mic` for artists or `music.note` otherwise. The view hides decorative
-artwork from accessibility. No error text includes provider response contents, and
-artwork never changes playback. A currently retained image can remain visible offline;
-an unseen/recreated catalog view has no promised persistent artwork. Native response
-reuse is optional and must not be labeled offline availability.
-
-Issue #13 may retain optional artwork for explicitly downloaded content through its
-single storage owner and existing library reads. Current/system artwork must continue
-using FoundationCurrentArtwork with a local-first loader; do not add a second current
-owner/downloader. Offline image absence remains a placeholder and does not block an
-audio download. Store at most one validated 640-pixel rendition for each retained
-artwork identity; share it for tracks with the same album/tag. Reuse a larger rendition
-for a smaller display, never enlarge a tile as a guaranteed hero. New tags replace
-only owned artwork after success; failed refreshes preserve usable local content.
-Artwork disk bytes count in On Device storage; release files when their last retained
-collection/track reference disappears. This download artwork policy is specified here,
-not implemented by #14. It does not authorize scanning or prefetching the library.
+Recreated catalog/current-player views can use memory/disk hits offline. A miss uses
+its existing deterministic neutral placeholder. Offline readers do not join pending
+remote work. Reconnect permits normal visible reads; nil/failure suppression bounds
+repeat navigation. Artwork success/failure does not resolve audio, mutate queue state,
+activate audio sessions or change native URLSession configuration. The current-player
+owner continues sharing its single result with system providers; it may decode cached
+encoded bytes separately from the catalog result off-main.
 
 ## Download storage integration contract — issue #13
 
@@ -92,10 +101,14 @@ snapshot and shared retention. #14 adds no offline audio, manifest or download c
 
 ## Acceptance limits
 
-Focused synthetic tests cover bounded decode, current-result reuse, stale selection/
-account rejection and optional failure behavior. Lint/preflight/build results belong
-to the exact candidate handoff, not this baseline observation. Physical offline
-placeholder, signed file protection/backup exclusion, storage pressure and account
-cleanup acceptance remain pending with #13's implemented storage and exact artifact.
-An application cache eviction test is inapplicable until such a cache exists; no
-historical cache behavior is claimed verified.
+Exact local checks and request counts are recorded in the candidate handoff. Synthetic
+cases cover album-to-track reuse, artist/playlist/genre identity, concurrent coalescing,
+resolution upgrade, memory/disk bounds, eviction, cancellation, changed revisions,
+untagged expiry, malformed records, cold offline restore, live-account cleanup and
+current-owner queue/intent preservation. Native UI exercises actual shared catalog
+components through Home/Library routes with aggregate synthetic fetch counts.
+
+These tests do not prove real-server performance, physical audibility/background routes,
+VoiceOver, signed protection or secure erasure. No live account/session was modified.
+Existing native audio failures must be compared with the unchanged baseline, and a
+failed full suite must remain reported separately from passing focused tests.

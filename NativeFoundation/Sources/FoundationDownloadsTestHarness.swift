@@ -12,7 +12,7 @@
                     != nil
         }
 
-        static var storageRoot: URL {
+        nonisolated static var storageRoot: URL {
             let runID = ProcessInfo.processInfo.environment["FOUNDATION_UI_RUN_ID"]!
             return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[
                 0
@@ -93,10 +93,25 @@
             }
         }
 
+        @State private var artworkCounts = ""
         private var fixtureControls: some View {
-            FoundationDownloadUIControls(
-                downloads: fixture.downloads, connectivity: fixture.connectivity,
-                playlist: fixture.playlist, productionShell: productionShell)
+            VStack {
+                if ProcessInfo.processInfo.arguments.contains("-fixtureArtworkCache") {
+                    Button("Read artwork counts") {
+                        Task {
+                            for _ in 0..<20 {
+                                guard !Task.isCancelled else { return }
+                                artworkCounts = await fixture.library.artworkCounts()
+                                try? await Task.sleep(for: .milliseconds(100))
+                            }
+                        }
+                    }
+                    Text(artworkCounts).accessibilityIdentifier("fixture-artwork-counts")
+                }
+                FoundationDownloadUIControls(
+                    downloads: fixture.downloads, connectivity: fixture.connectivity,
+                    playlist: fixture.playlist, productionShell: productionShell)
+            }
         }
     }
 
@@ -371,6 +386,49 @@
     }
 
     private actor FoundationDownloadUILibrary: FoundationLibrary {
+        private let usesCache = ProcessInfo.processInfo.arguments.contains("-fixtureArtworkCache")
+        private let cache = FoundationArtworkCache(
+            scope: "synthetic-artwork",
+            root: FoundationDownloadsTestHarness.storageRoot.appendingPathComponent("artwork-cache")
+        )
+        private var fetches: [String: Int] = [:]
+
+        func artworkCounts() -> String {
+            "Album \(fetches["album", default: 0]), Artist \(fetches["artist", default: 0]), Playlist \(fetches["playlist", default: 0]), Genre \(fetches["genre", default: 0])"
+        }
+        func artworkResult(for item: FoundationItem, size: Int, allowsNetwork: Bool) async throws
+            -> FoundationCurrentArtwork.Result?
+        {
+            if usesCache {
+                return try await cache.result(for: item, pixels: size, allowsNetwork: allowsNetwork)
+                { item, _ in
+                    try await self.artwork(for: item)
+                }
+            }
+            guard allowsNetwork else { return nil }
+            let data = try await artwork(for: item)
+            return await Task.detached {
+                data.flatMap { FoundationCurrentArtwork.decode($0, maximumPixels: size) }
+            }.value
+        }
+        func artists(startIndex: Int) async throws -> FoundationPage {
+            .init(
+                items: usesCache
+                    ? [
+                        FoundationItem(
+                            id: "artist", title: "Fixture Artist", subtitle: "", kind: .artist,
+                            duration: nil, primaryImageTag: "synthetic")
+                    ] : [], nextStartIndex: nil)
+        }
+        func genres(startIndex: Int) async throws -> FoundationPage {
+            .init(
+                items: usesCache
+                    ? [
+                        FoundationItem(
+                            id: "genre", title: "Fixture Genre", subtitle: "", kind: .genre,
+                            duration: nil, primaryImageTag: "synthetic")
+                    ] : [], nextStartIndex: nil)
+        }
         private let canonical = ProcessInfo.processInfo.arguments.contains(
             "-fixtureCanonicalCollections")
         private let missing = FoundationItem(
@@ -388,7 +446,8 @@
                 items: [
                     .init(
                         id: "playlist", title: "Fixture Playlist", subtitle: "Synthetic",
-                        kind: .playlist, duration: nil, isFavorite: false)
+                        kind: .playlist, duration: nil,
+                        primaryImageTag: usesCache ? "synthetic" : nil, isFavorite: false)
                 ], nextStartIndex: nil)
         }
         func playlistTracks(playlistID: String, startIndex: Int) async throws -> FoundationPage {
@@ -401,7 +460,9 @@
             album: .init(id: "album", title: "Fixture Album", primaryImageTag: "synthetic"))
         private let album = FoundationItem(
             id: "album", title: "Fixture Album", subtitle: "Synthetic Artist", kind: .album,
-            duration: 30, primaryImageTag: "synthetic", isFavorite: false)
+            duration: 30, primaryImageTag: "synthetic", isFavorite: false,
+            genres: ProcessInfo.processInfo.arguments.contains("-fixtureArtworkCache")
+                ? [.init(id: "genre", title: "Fixture Genre", primaryImageTag: "synthetic")] : [])
         func albums(startIndex: Int) async throws -> FoundationPage {
             .init(items: [album], nextStartIndex: nil)
         }
@@ -418,12 +479,13 @@
             .init(items: [], nextStartIndex: nil)
         }
         func homeGenres() async throws -> FoundationPage {
-            .init(items: [], nextStartIndex: nil)
+            try await genres(startIndex: 0)
         }
         func searchGenres() async throws -> FoundationPage {
-            .init(items: [], nextStartIndex: nil)
+            try await genres(startIndex: 0)
         }
         func artwork(for item: FoundationItem) async throws -> Data? {
+            fetches[String(describing: item.kind), default: 0] += 1
             let format = UIGraphicsImageRendererFormat()
             format.scale = 1
             let renderer = UIGraphicsImageRenderer(

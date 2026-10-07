@@ -5,13 +5,14 @@ final class FoundationDownloadsUITests: XCTestCase {
     private func launch(
         failOnce: Bool = false, account: Bool = false, delayedAuth: Bool = false,
         productionShell: Bool = false, largeText: Bool = false,
-        canonicalDownloadState: String? = nil
+        canonicalDownloadState: String? = nil, artworkCache: Bool = false
     )
         -> XCUIApplication
     {
         let app = XCUIApplication(bundleIdentifier: "com.chameleonenterprise.velacanto.uitesting")
         app.launchArguments = ["-foundationDownloadsUITesting", "-foundationTesting"]
         if productionShell { app.launchArguments.append("-fixtureProductionShell") }
+        if artworkCache { app.launchArguments.append("-fixtureArtworkCache") }
         if let canonicalDownloadState {
             app.launchArguments += [
                 "-fixtureCanonicalCollections", "-fixtureDownloadState", canonicalDownloadState,
@@ -36,6 +37,96 @@ final class FoundationDownloadsUITests: XCTestCase {
             XCTAssertTrue(app.staticTexts["Canonical fixture ready"].waitForExistence(timeout: 15))
         }
         return app
+    }
+
+    func testSharedArtworkHomeToLibraryTrackAndOfflineNavigation() {
+        let app = launch(productionShell: true, artworkCache: true)
+        func counts(_ expected: String) {
+            app.buttons["Read artwork counts"].tap()
+            let label = app.staticTexts["fixture-artwork-counts"]
+            let predicate = NSPredicate(format: "label CONTAINS %@", expected)
+            XCTAssertEqual(
+                XCTWaiter.wait(
+                    for: [XCTNSPredicateExpectation(predicate: predicate, object: label)],
+                    timeout: 5), .completed)
+        }
+        XCTAssertTrue(app.buttons["Home"].firstMatch.waitForExistence(timeout: 5))
+        app.buttons["Home"].firstMatch.tap()
+        XCTAssertTrue(
+            app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Fixture Album"))
+                .firstMatch.waitForExistence(timeout: 10))
+        counts("Album 1")
+        capture("Shared artwork Home album", in: app)
+        app.buttons["Library"].firstMatch.tap()
+        tapVisible(
+            app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Songs")).firstMatch,
+            in: app)
+        XCTAssertTrue(app.navigationBars["Songs"].waitForExistence(timeout: 5))
+        XCTAssertTrue(
+            app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Fixture Tone"))
+                .firstMatch.waitForExistence(timeout: 5))
+        counts("Album 1")
+        capture("Shared artwork Library track no second album fetch", in: app)
+        app.switches["Simulate unavailable network"].switches.firstMatch.tap()
+        app.buttons["Home"].firstMatch.tap()
+        app.buttons["Library"].firstMatch.tap()
+        counts("Album 1")
+        capture("Shared artwork retained across offline navigation", in: app)
+    }
+
+    func testSharedArtistPlaylistAndDistinctGenreArtworkSources() {
+        let app = launch(productionShell: true, artworkCache: true)
+        func counts(_ expected: String) {
+            app.buttons["Read artwork counts"].tap()
+            let label = app.staticTexts["fixture-artwork-counts"]
+            let predicate = NSPredicate(format: "label CONTAINS %@", expected)
+            XCTAssertEqual(
+                XCTWaiter.wait(
+                    for: [XCTNSPredicateExpectation(predicate: predicate, object: label)],
+                    timeout: 5), .completed)
+        }
+        func tab(_ title: String) {
+            let button = app.buttons[title].firstMatch
+            if !button.exists {
+                // Native scroll minimization leaves the current-tab bubble at the lower left.
+                // Expand that visible system control, then require the named destination.
+                app.coordinate(withNormalizedOffset: CGVector(dx: 0.14, dy: 0.95)).tap()
+            }
+            XCTAssertTrue(button.waitForExistence(timeout: 5) && button.isHittable)
+            button.tap()
+        }
+        tab("Home")
+        counts("Album 1")
+        let genre = app.buttons.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "Fixture Genre")
+        ).firstMatch
+        tab("New")
+        for _ in 0..<12 {
+            if genre.exists && genre.isHittable { break }
+            scrollContent(in: app)
+        }
+        XCTAssertTrue(genre.exists && genre.isHittable)
+        counts("Album 1")
+        counts("Genre 0")
+        capture("New genre representative reuses album without aliasing genre Primary", in: app)
+        tab("Library")
+        tapVisible(
+            app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Artists")).firstMatch,
+            in: app)
+        XCTAssertTrue(app.navigationBars["Artists"].waitForExistence(timeout: 5))
+        counts("Artist 1")
+        capture("Shared artist artwork", in: app)
+        app.navigationBars.buttons.firstMatch.tap()
+        tapVisible(
+            app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Playlists"))
+                .firstMatch, in: app)
+        XCTAssertTrue(app.navigationBars["Playlists"].waitForExistence(timeout: 5))
+        counts("Playlist 1")
+        capture("Shared playlist artwork", in: app)
+        app.navigationBars.buttons.firstMatch.tap()
+        tab("Search")
+        counts("Genre 1")
+        capture("Search genre Primary shares its identity independently of New", in: app)
     }
 
     private func openDownloads(_ app: XCUIApplication) {
