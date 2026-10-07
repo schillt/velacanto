@@ -159,15 +159,15 @@ struct FoundationGenreIndex: View {
                 #endif
             }
         }
-        .task(id: isActive && isVisible && !connectivity.localOnly ? genreRevision : nil) {
+        .task(id: "\(isActive && isVisible)-\(connectivity.localOnly)-\(genreRevision)") {
+            guard isActive, isVisible else { return }
             #if DEBUG
                 await FoundationTrace.withPage(origin: traceOrigin, page: .genreIndex) {
-                    await genres.loadPending(
-                        ifActive: isActive && isVisible && !connectivity.localOnly, using: loader)
+                    await genres.refreshVisible(
+                        allowsNetwork: !connectivity.localOnly, using: loader)
                 }
             #else
-                await genres.loadPending(
-                    ifActive: isActive && isVisible && !connectivity.localOnly, using: loader)
+                await genres.refreshVisible(allowsNetwork: !connectivity.localOnly, using: loader)
             #endif
         }
     }
@@ -208,10 +208,7 @@ struct FoundationGenreCard: View {
                             isActive: isActive && isVisible, size: geometry.size.width,
                             sampledColor: $tint
                         )
-                        .id(
-                            (artworkItem ?? genre).id
-                                + ((artworkItem ?? genre).primaryImageTag ?? "")
-                        )
+                        .id((artworkItem ?? genre).sharedArtworkIdentity)
                         .frame(width: geometry.size.width, height: geometry.size.height)
                         .clipped()
                         LinearGradient(

@@ -2,8 +2,8 @@ import Foundation
 import Get
 import JellyfinAPI
 
-struct FoundationItem: Identifiable, Equatable, Sendable {
-    enum Kind: Sendable { case album, artist, track, playlist, genre }
+struct FoundationItem: Identifiable, Equatable, Codable, Sendable {
+    enum Kind: String, Codable, Sendable { case album, artist, track, playlist, genre }
     let id: String
     var title: String
     let subtitle: String
@@ -17,13 +17,13 @@ struct FoundationItem: Identifiable, Equatable, Sendable {
     var playCount: Int = 0
 }
 
-struct FoundationItemReference: Equatable, Sendable {
+struct FoundationItemReference: Equatable, Codable, Sendable {
     let id: String
     let title: String
     var primaryImageTag: String? = nil
 }
 
-struct FoundationPage: Sendable {
+struct FoundationPage: Codable, Sendable {
     let items: [FoundationItem]
     let nextStartIndex: Int?
 }
@@ -36,6 +36,9 @@ struct FoundationSession: Codable, Sendable {
 }
 
 protocol FoundationLibrary: Sendable {
+    var catalogPageCache: FoundationCatalogPageCache? { get }
+    func cachedArtworkResult(for item: FoundationItem, size: Int) async throws
+        -> FoundationCurrentArtwork.Result?
     func downloadSource(for item: FoundationItem) async throws -> FoundationDownloadSource
     var supportsPlaylistManagement: Bool { get }
     var supportsRepeatedPlaylistTracks: Bool { get }
@@ -85,6 +88,10 @@ protocol FoundationLibrary: Sendable {
 }
 
 extension FoundationLibrary {
+    var catalogPageCache: FoundationCatalogPageCache? { nil }
+    func cachedArtworkResult(for item: FoundationItem, size: Int) async throws
+        -> FoundationCurrentArtwork.Result?
+    { nil }
     func artworkResult(for item: FoundationItem, size: Int, allowsNetwork: Bool) async throws
         -> FoundationCurrentArtwork.Result?
     {
@@ -250,14 +257,17 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
     let session: FoundationSession
     private let load: Load
     let artworkCache: FoundationArtworkCache?
+    let catalogPageCache: FoundationCatalogPageCache?
 
     init(
         session: FoundationSession, load: @escaping Load = nativeLoad,
-        artworkCache: FoundationArtworkCache? = nil
+        artworkCache: FoundationArtworkCache? = nil,
+        catalogPageCache: FoundationCatalogPageCache? = nil
     ) {
         self.session = session
         self.load = load
         self.artworkCache = artworkCache
+        self.catalogPageCache = catalogPageCache
     }
 
     var supportsPlaylistManagement: Bool { true }
@@ -779,6 +789,12 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
         return try Self.url(
             endpoint, base: session.serverURL,
             additionalQuery: [("ApiKey", session.accessToken)])
+    }
+
+    func cachedArtworkResult(for item: FoundationItem, size: Int) async throws
+        -> FoundationCurrentArtwork.Result?
+    {
+        try await artworkCache?.cachedResult(for: item, pixels: size)
     }
 
     func artwork(for item: FoundationItem) async throws -> Data? {

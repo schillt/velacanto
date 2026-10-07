@@ -10,8 +10,42 @@ final class FoundationBrowseModel: ObservableObject {
     private(set) var loaded = false
     private(set) var isRetainedSnapshot = false
     private var revision = UUID()
+    private var writePermit = FoundationPageWritePermit()
     private var pendingRequest = Request.initial
     private(set) var retryRequest = Request.initial
+
+    private var pageCache: FoundationCatalogPageCache?
+    private var cacheKey: String?
+    private var restoredCache = false
+    private var lastRefreshAttempt: Date?
+    private let now: () -> Date
+    private let refreshInterval: TimeInterval
+
+    init(refreshInterval: TimeInterval = 60, now: @escaping () -> Date = { Date() }) {
+        self.refreshInterval = refreshInterval
+        self.now = now
+    }
+
+    func configureCache(_ cache: FoundationCatalogPageCache?, key: String) {
+        guard pageCache !== cache || cacheKey != key else { return }
+        clearRetainedData()
+        pageCache = cache
+        cacheKey = key
+    }
+
+    /// Restore before any network work, including when the visible view is offline.
+    private func restoreCache() async {
+        guard !restoredCache, let pageCache, let cacheKey else { return }
+        let owner = revision
+        let record = await pageCache.read(cacheKey)
+        guard !Task.isCancelled, revision == owner else { return }
+        restoredCache = true
+        guard !loaded, let record else { return }
+        items = record.page.items
+        nextStartIndex = record.page.nextStartIndex
+        loaded = true
+        isRetainedSnapshot = true
+    }
 
     /// Build only from already-loaded songs; preserve repeated occurrences.
     func trackQueue(selecting sourceIndex: Int) -> (items: [FoundationItem], index: Int)? {
@@ -26,6 +60,7 @@ final class FoundationBrowseModel: ObservableObject {
 
     /// Install complete known membership without inventing a remote page or filtering occurrences.
     func installSnapshot(_ snapshot: [FoundationItem], complete: Bool = true) {
+        writePermit.revoke()
         revision = UUID()
         items = snapshot
         nextStartIndex = nil
@@ -37,6 +72,7 @@ final class FoundationBrowseModel: ObservableObject {
     }
 
     func clearRetainedData() {
+        writePermit.revoke()
         revision = UUID()
         items = []
         nextStartIndex = nil
@@ -45,15 +81,20 @@ final class FoundationBrowseModel: ObservableObject {
         isLoading = false
         errorMessage = nil
         pendingRequest = .initial
+        restoredCache = false
+        lastRefreshAttempt = nil
     }
 
     func request(_ request: Request) {
+        writePermit.revoke()
         revision = UUID()
         pendingRequest = request
+        isLoading = false
     }
 
     func loadPending(
-        ifActive isActive: Bool = true, using loader: (Int) async throws -> FoundationPage
+        ifActive isActive: Bool = true, allowsNetwork: Bool = true,
+        using loader: (Int) async throws -> FoundationPage
     ) async {
         guard isActive, !Task.isCancelled else {
             #if DEBUG
@@ -63,9 +104,30 @@ final class FoundationBrowseModel: ObservableObject {
             #endif
             return
         }
-        let request = pendingRequest
+        await restoreCache()
+        guard allowsNetwork, !Task.isCancelled, !isLoading else { return }
+        var request = pendingRequest
+        if case .initial = request, pageCache != nil, loaded {
+            guard !isLoading,
+                lastRefreshAttempt.map({ now().timeIntervalSince($0) >= refreshInterval }) ?? true
+            else { return }
+            request = .refresh
+        }
         pendingRequest = .initial
         await load(request, using: loader)
+    }
+
+    /// The view owns this loop; disappearing/offline transitions cancel its network work.
+    func refreshVisible(
+        allowsNetwork: Bool, using loader: (Int) async throws -> FoundationPage
+    ) async {
+        await loadPending(allowsNetwork: allowsNetwork, using: loader)
+        guard allowsNetwork, pageCache != nil, errorMessage == nil else { return }
+        while !Task.isCancelled {
+            do { try await Task.sleep(for: .seconds(max(1, refreshInterval))) } catch { return }
+            await loadPending(allowsNetwork: allowsNetwork, using: loader)
+            if errorMessage != nil { return }
+        }
     }
 
     func load(_ request: Request, using loader: (Int) async throws -> FoundationPage) async {
@@ -99,8 +161,12 @@ final class FoundationBrowseModel: ObservableObject {
         }
         if case .initial = request { retryRequest = .refresh } else { retryRequest = request }
         let owner = UUID()
+        writePermit.revoke()
+        let permit = FoundationPageWritePermit()
+        writePermit = permit
         revision = owner
         isLoading = true
+        lastRefreshAttempt = now()
         errorMessage = nil
         defer { if revision == owner { isLoading = false } }
         #if DEBUG
@@ -128,6 +194,15 @@ final class FoundationBrowseModel: ObservableObject {
             nextStartIndex = page.nextStartIndex
             loaded = true
             isRetainedSnapshot = false
+            if let pageCache, let cacheKey {
+                // Persist a bounded prefix; preserve the next offset so truncated pages stay usable.
+                let limit = 200
+                let retained = Array(items.prefix(limit))
+                let next = items.count > limit ? retained.count : nextStartIndex
+                await pageCache.write(
+                    FoundationPage(items: retained, nextStartIndex: next), key: cacheKey,
+                    permit: permit)
+            }
             #if DEBUG
                 FoundationJournal.shared.record(
                     "browse disposition=publication-committed \(FoundationTrace.fields)")

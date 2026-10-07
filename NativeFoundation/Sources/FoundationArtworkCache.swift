@@ -35,6 +35,12 @@ actor FoundationArtworkCache {
     private var activeTasks: [UUID: Task<Void, Never>] = [:]
     private var jobs: [Key: Job] = [:]
     private var queue: [Key] = []
+    private var revisions: [String: Revision] = [:]
+    private struct Revision {
+        let identity: String
+        let tag: String
+        let expiry: Date
+    }
     private var clock: UInt = 0
     private var live = true
     private var active = 0
@@ -72,14 +78,87 @@ actor FoundationArtworkCache {
             pixels: pixels <= 160 ? 160 : 640)
     }
 
+    /// Missing tags mean unknown revision, not a new revision. Explicit tags never alias.
+    private func resolvedArtwork(_ item: FoundationItem, pixels: Int) async
+        -> (key: Key, item: FoundationItem)
+    {
+        let key = Self.key(item, pixels: pixels)
+        let base = Self.digest("\(item.kind)\0\(item.id)")
+        revisions = revisions.filter { $0.value.expiry > now() }
+        if let tag = item.primaryImageTag, !tag.isEmpty {
+            if let revision = revisions[base], revision.identity == key.identity {
+                return (key, item)
+            }
+            if tag.utf8.count > 256 { return (key, item) }
+            let expiry = now().addingTimeInterval(30 * 86_400)
+            revisions[base] = Revision(identity: key.identity, tag: tag, expiry: expiry)
+            if revisions.count > max(1, limits.pendingKeys),
+                let oldest = revisions.min(by: { $0.value.expiry < $1.value.expiry })?.key
+            {
+                revisions.removeValue(forKey: oldest)
+            }
+            await disk.rememberRevision(
+                base: base, identity: key.identity, tag: tag, expiry: expiry)
+            return (key, item)
+        }
+        if let revision = revisions[base] {
+            var canonical = item
+            canonical.primaryImageTag = revision.tag
+            return (Key(identity: revision.identity, pixels: key.pixels), canonical)
+        }
+        if let revision = await disk.revision(base: base) {
+            var canonical = item
+            canonical.primaryImageTag = revision.tag
+            guard Self.key(canonical, pixels: pixels).identity == revision.identity else {
+                return (key, item)
+            }
+            return (Key(identity: revision.identity, pixels: key.pixels), canonical)
+        }
+        return (key, item)
+    }
+
+    /// Local preview may use a smaller rendition while the caller owns a bounded upgrade.
+    func cachedResult(for item: FoundationItem, pixels: Int) async throws
+        -> FoundationCurrentArtwork.Result?
+    {
+        try Task.checkCancellation()
+        guard live else { throw CancellationError() }
+        let key = await resolvedArtwork(item.catalogArtworkItem, pixels: pixels).key
+        try Task.checkCancellation()
+        guard live else { throw CancellationError() }
+        for candidate in [
+            key, Key(identity: key.identity, pixels: 640),
+            Key(identity: key.identity, pixels: 160),
+        ] {
+            if var entry = entries[candidate], entry.expiry > now() {
+                clock &+= 1
+                entry.access = clock
+                entries[candidate] = entry
+                return entry.result
+            }
+        }
+        guard let record = await disk.read(key, allowsSmaller: true) else { return nil }
+        let decoded = await Task.detached(priority: .utility) {
+            FoundationCurrentArtwork.decode(record.data, maximumPixels: record.key.pixels)
+        }.value
+        try Task.checkCancellation()
+        guard live else { throw CancellationError() }
+        // Keep the original rendition key; a preview must not masquerade as an upgrade.
+        if let decoded { remember(decoded, key: record.key, expiry: record.record.expiry) }
+        return decoded
+    }
+
     func result(
         for item: FoundationItem, pixels: Int, allowsNetwork: Bool,
         load: @escaping @Sendable (FoundationItem, Int) async throws -> Data?
     ) async throws -> FoundationCurrentArtwork.Result? {
         try Task.checkCancellation()
         guard live else { throw CancellationError() }
-        let item = item.catalogArtworkItem
-        let key = Self.key(item, pixels: pixels)
+        let resolved = await resolvedArtwork(item.catalogArtworkItem, pixels: pixels)
+        let item = resolved.item
+        let key = resolved.key
+        try Task.checkCancellation()
+        guard live else { throw CancellationError() }
         let now = now()
         for candidate in [key, Key(identity: key.identity, pixels: 640)] {
             if var entry = entries[candidate], entry.expiry > now {
@@ -92,14 +171,7 @@ actor FoundationArtworkCache {
         let id = UUID()
         // Offline readers never join a pending remote fetch. A disk read remains local.
         if !allowsNetwork {
-            guard let record = await disk.read(key), live else { return nil }
-            let result = await Task.detached(priority: .utility) {
-                FoundationCurrentArtwork.decode(record.data, maximumPixels: key.pixels)
-            }.value
-            try Task.checkCancellation()
-            guard live, let result else { return nil }
-            remember(result, key: key, expiry: record.expiry)
-            return result
+            return try await cachedResult(for: item, pixels: pixels)
         }
         failures = failures.filter { $0.value > now }
         if failures[key] != nil { return nil }
@@ -243,6 +315,7 @@ actor FoundationArtworkCache {
         live = false
         entries.removeAll()
         failures.removeAll()
+        revisions.removeAll()
         queue.removeAll()
         let tasks = Array(activeTasks.values)
         for task in tasks { task.cancel() }
@@ -319,10 +392,75 @@ private actor FoundationArtworkDisk {
         directory.appendingPathComponent("\(key.identity)-\(key.pixels).art")
     }
 
+    struct CachedRecord: Sendable {
+        let key: FoundationArtworkCache.Key
+        let record: Record
+        var data: Data { record.data }
+    }
+    struct RevisionRecord: Codable, Sendable {
+        let identity: String
+        let tag: String
+        let expiry: Date
+    }
+    private var revisionFile: URL { directory.appendingPathComponent("revisions.plist") }
+
+    private func revisions() -> [String: RevisionRecord] {
+        guard
+            let values = try? revisionFile.resourceValues(forKeys: [
+                .fileSizeKey, .isSymbolicLinkKey,
+            ]),
+            values.isSymbolicLink != true, let size = values.fileSize, size <= 65_536,
+            let bytes = try? Data(contentsOf: revisionFile),
+            let records = try? PropertyListDecoder().decode(
+                [String: RevisionRecord].self, from: bytes)
+        else { return [:] }
+        guard records.count <= 128 else { return [:] }
+        return records.filter { $0.value.expiry > now() }.filter {
+            $0.key.count == 64 && $0.value.identity.count == 64
+                && !$0.value.tag.isEmpty && $0.value.tag.utf8.count <= 256
+        }
+    }
+
+    func revision(base: String) async -> RevisionRecord? {
+        await registration.value
+        guard live else { return nil }
+        return revisions()[base]
+    }
+
+    func rememberRevision(base: String, identity: String, tag: String, expiry: Date) async {
+        await registration.value
+        guard live, limit > 0, (try? prepare()) != nil else { return }
+        var records = revisions()
+        records[base] = RevisionRecord(identity: identity, tag: tag, expiry: expiry)
+        while records.count > 128,
+            let oldest = records.min(by: { $0.value.expiry < $1.value.expiry })?.key
+        {
+            records.removeValue(forKey: oldest)
+        }
+        let encoder = PropertyListEncoder()
+        encoder.outputFormat = .binary
+        guard let data = try? encoder.encode(records), data.count <= min(limit, 65_536) else {
+            return
+        }
+        try? data.write(to: revisionFile, options: .atomic)
+        #if os(iOS)
+            try? FileManager.default.setAttributes(
+                [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+                ofItemAtPath: revisionFile.path)
+        #endif
+        trim()
+    }
+
     func read(_ key: FoundationArtworkCache.Key) async -> Record? {
+        await read(key, allowsSmaller: false)?.record
+    }
+
+    func read(_ key: FoundationArtworkCache.Key, allowsSmaller: Bool) async -> CachedRecord? {
         await registration.value
         guard live, (try? prepare()) != nil else { return nil }
-        for candidate in [key, .init(identity: key.identity, pixels: 640)] {
+        var candidates = [key, FoundationArtworkCache.Key(identity: key.identity, pixels: 640)]
+        if allowsSmaller { candidates.append(.init(identity: key.identity, pixels: 160)) }
+        for candidate in candidates {
             let file = url(candidate)
             guard
                 let values = try? file.resourceValues(forKeys: [
@@ -340,7 +478,7 @@ private actor FoundationArtworkDisk {
             try? FileManager.default.setAttributes(
                 [.modificationDate: Date()], ofItemAtPath: file.path)
             trim()
-            return record
+            return CachedRecord(key: candidate, record: record)
         }
         trim()
         return nil
@@ -372,7 +510,7 @@ private actor FoundationArtworkDisk {
                 at: directory,
                 includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey])) ?? []
         return urls.compactMap { file in
-            guard file.pathExtension == "art",
+            guard file.pathExtension == "art" || file == revisionFile,
                 let values = try? file.resourceValues(forKeys: [
                     .fileSizeKey, .contentModificationDateKey,
                 ]),

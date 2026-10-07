@@ -38,14 +38,14 @@ struct FoundationLibraryView: View {
     @StateObject private var songs = FoundationBrowseModel()
     @StateObject private var playlists = FoundationBrowseModel()
     @StateObject private var favorites = FoundationBrowseModel()
-    @StateObject private var genres = FoundationBrowseModel()
-    @StateObject private var recentTracks = FoundationBrowseModel()
-    @StateObject private var recentAlbums = FoundationBrowseModel()
+    @StateObject private var genres: FoundationBrowseModel
+    @StateObject private var recentTracks: FoundationBrowseModel
+    @StateObject private var recentAlbums: FoundationBrowseModel
     @StateObject private var mostPlayedAlbums = FoundationBrowseModel()
-    @StateObject private var homeHistory = FoundationBrowseModel()
-    @StateObject private var homeFavorites = FoundationBrowseModel()
-    @StateObject private var homeGenres = FoundationBrowseModel()
-    @StateObject private var searchGenres = FoundationBrowseModel()
+    @StateObject private var homeHistory: FoundationBrowseModel
+    @StateObject private var homeFavorites: FoundationBrowseModel
+    @StateObject private var homeGenres: FoundationBrowseModel
+    @StateObject private var searchGenres: FoundationBrowseModel
     @State private var searchQuery = ""
     @State private var searchActivation = 0
     @State private var selectedTab = FoundationDestination.home
@@ -63,6 +63,34 @@ struct FoundationLibraryView: View {
     @State private var showingFavorites = false
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var openedItem: FoundationItem?
+
+    init(library: any FoundationLibrary, player: FoundationPlayer, signOut: @escaping () -> Void) {
+        self.library = library
+        self.player = player
+        self.signOut = signOut
+        _homeHistory = StateObject(
+            wrappedValue: Self.cachedModel(library.catalogPageCache, key: "home-history"))
+        _homeFavorites = StateObject(
+            wrappedValue: Self.cachedModel(library.catalogPageCache, key: "home-favorites"))
+        _homeGenres = StateObject(
+            wrappedValue: Self.cachedModel(library.catalogPageCache, key: "home-genres"))
+        _recentAlbums = StateObject(
+            wrappedValue: Self.cachedModel(library.catalogPageCache, key: "recent-albums"))
+        _recentTracks = StateObject(
+            wrappedValue: Self.cachedModel(library.catalogPageCache, key: "recent-tracks"))
+        _genres = StateObject(
+            wrappedValue: Self.cachedModel(library.catalogPageCache, key: "library-genres"))
+        _searchGenres = StateObject(
+            wrappedValue: Self.cachedModel(library.catalogPageCache, key: "search-genres"))
+    }
+
+    private static func cachedModel(_ cache: FoundationCatalogPageCache?, key: String)
+        -> FoundationBrowseModel
+    {
+        let model = FoundationBrowseModel()
+        if let cache { model.configureCache(cache, key: key) }
+        return model
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -114,6 +142,10 @@ struct FoundationLibraryView: View {
         .environmentObject(playlistChanges)
         .environment(\.foundationAddToPlaylist, playlistPresentation)
         .environment(\.foundationPlayerTransition, playerTransition)
+        .environment(
+            \.foundationPlayerArtworkIdentity,
+            displayedQueue.first { $0.id == displayedEntryID }?.item.sharedArtworkIdentity
+        )
         .environment(\.foundationOpenLibrary, libraryPresentation)
         .environment(
             \.foundationOpenLibraryItem,
@@ -422,7 +454,7 @@ struct FoundationLibraryView: View {
                         item: item, library: library,
                         isActive: selectedTab == .library, size: geometry.size.width
                     )
-                    .id(item.id + (item.primaryImageTag ?? ""))
+                    .id(item.sharedArtworkIdentity)
                     .overlay {
                         LinearGradient(
                             colors: [.black.opacity(0.05), .black.opacity(0.8)],
@@ -486,12 +518,13 @@ struct FoundationLibraryView: View {
                             FoundationCatalogArtwork(
                                 source: .current(currentArtwork.result(for: item)),
                                 item: cover, library: library, isActive: true, size: 34
-                            ).id(cover.id + (cover.primaryImageTag ?? ""))
+                            ).id(cover.sharedArtworkIdentity)
                         } else {
                             Image(systemName: "music.note").frame(width: 34, height: 34)
                         }
                     }
-                    .foundationPlayerArtworkSource(namespace: playerTransition)
+                    .foundationPlayerArtworkSource(
+                        namespace: playerTransition, identity: item?.sharedArtworkIdentity)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(item?.title ?? "Nothing Playing").font(.callout.weight(.medium))
                             .lineLimit(1)
@@ -652,14 +685,15 @@ struct FoundationCatalogView: View {
                     item: item, library: library, player: player, isActive: isActive)
             }
         }
-        .task(id: isActive && !connectivity.localOnly ? revision : nil) {
-            guard isActive, !connectivity.localOnly else { return }
+        .task(id: "\(isActive && isVisible)-\(connectivity.localOnly)-\(revision)") {
+            guard isActive, isVisible else { return }
             #if DEBUG
                 await FoundationTrace.withPage(origin: traceOrigin, page: .catalog) {
-                    await model.loadPending(ifActive: isActive, using: loader)
+                    await model.refreshVisible(
+                        allowsNetwork: !connectivity.localOnly, using: loader)
                 }
             #else
-                await model.loadPending(ifActive: isActive, using: loader)
+                await model.refreshVisible(allowsNetwork: !connectivity.localOnly, using: loader)
             #endif
         }
     }
@@ -778,13 +812,13 @@ struct FoundationCollectionCard: View {
                     if item.kind == .artist {
                         FoundationCatalogArtwork(
                             item: item, library: library, isActive: isActive, size: 150
-                        ).id(item.id + (item.primaryImageTag ?? ""))
+                        ).id(item.sharedArtworkIdentity)
                     } else {
                         GeometryReader { geometry in
                             FoundationCatalogArtwork(
                                 item: item, library: library, isActive: isActive,
                                 size: geometry.size.width
-                            ).id(item.id + (item.primaryImageTag ?? ""))
+                            ).id(item.sharedArtworkIdentity)
                         }.aspectRatio(1, contentMode: .fit)
                     }
                 }.buttonStyle(.plain).accessibilityLabel("View " + item.title)
@@ -1560,7 +1594,7 @@ struct FoundationAlbumShelfCard: View {
                         FoundationCatalogArtwork(
                             item: item, library: library, isActive: isActive, size: 144
                         )
-                        .id(item.id + (item.primaryImageTag ?? ""))
+                        .id(item.sharedArtworkIdentity)
                         VStack(alignment: .leading, spacing: 4) {
                             HStack(alignment: .firstTextBaseline, spacing: 6) {
                                 Text(item.title).font(.headline).lineLimit(
@@ -1639,7 +1673,7 @@ struct FoundationDetailHero<Controls: View>: View {
                         item: item, library: library, isActive: isActive,
                         size: geometry.size.width, sampledColor: $tint, isHero: true
                     )
-                    .id(item.id + (item.primaryImageTag ?? ""))
+                    .id(item.sharedArtworkIdentity)
                     LinearGradient(
                         stops: [
                             .init(color: .black.opacity(0.1), location: 0),

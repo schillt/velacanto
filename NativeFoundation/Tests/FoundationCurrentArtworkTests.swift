@@ -79,6 +79,85 @@ final class FoundationCurrentArtworkTests: XCTestCase {
         XCTAssertTrue(player.wantsPlayback)
     }
 
+    func testExplicitRefreshRetainsArtworkIdentityAndBytesOnOptionalFailure() async throws {
+        let data = try imageData()
+        let probe = ArtworkProbe()
+        let player = player()
+        let item = track("album")
+        player.setQueue([item], selectedIndex: 0)
+        let owner = FoundationCurrentArtwork(player: player) { await probe.load($0) }
+        defer {
+            owner.invalidate()
+            player.stop()
+        }
+        await probe.waitForCount(1)
+        await probe.complete(0, with: data)
+        await owner.loadTask?.value
+        let first = try XCTUnwrap(owner.result(for: item))
+        owner.refreshRetainedArtwork()
+        await probe.waitForCount(2)
+        XCTAssertEqual(owner.result(for: item)?.id, first.id)
+        let provider = try XCTUnwrap(owner.provider(for: item))
+        _ = try await provider(CGSize(width: 640, height: 640))
+        await probe.complete(1, with: nil)
+        await owner.loadTask?.value
+        XCTAssertEqual(owner.result(for: item)?.data, data)
+        XCTAssertEqual(owner.result(for: item)?.id, first.id)
+        XCTAssertTrue(player.wantsPlayback)
+    }
+
+    func testCachedPreviewAppearsWhileUpgradeRunsAndSurvivesFailure() async throws {
+        let data = try imageData(width: 160, height: 80)
+        let probe = ArtworkProbe()
+        let player = player()
+        let item = track("album")
+        player.setQueue([item], selectedIndex: 0)
+        let owner = FoundationCurrentArtwork(
+            player: player, cachedLoad: { _ in data }, load: { await probe.load($0) })
+        defer {
+            owner.invalidate()
+            player.stop()
+        }
+        await probe.waitForCount(1)
+        let preview = try XCTUnwrap(owner.result(for: item))
+        XCTAssertEqual(preview.image.width, 160)
+        await probe.complete(0, with: nil)
+        await owner.loadTask?.value
+        XCTAssertEqual(owner.result(for: item)?.id, preview.id)
+        player.setQueue([track("album", tag: nil)], selectedIndex: 0)
+        await owner.updateTask?.value
+        XCTAssertEqual(owner.result?.id, preview.id)
+        let count = await probe.count
+        XCTAssertEqual(count, 1)
+    }
+
+    func testPreviewUpgradePublishesNewDisplayRevisionWithStableSystemIdentity() async throws {
+        let previewData = try imageData(width: 160, height: 80)
+        let heroData = try imageData(width: 640, height: 320)
+        let probe = ArtworkProbe()
+        let player = player()
+        let item = track("album")
+        player.setQueue([item], selectedIndex: 0)
+        let owner = FoundationCurrentArtwork(
+            player: player, cachedLoad: { _ in previewData }, load: { await probe.load($0) })
+        defer {
+            owner.invalidate()
+            player.stop()
+        }
+        await probe.waitForCount(1)
+        let preview = try XCTUnwrap(owner.result(for: item))
+        let systemID = try XCTUnwrap(owner.artwork(for: item)?.id)
+        await probe.complete(0, with: heroData)
+        await owner.loadTask?.value
+        let hero = try XCTUnwrap(owner.result(for: item))
+        XCTAssertEqual(hero.image.width, 640)
+        XCTAssertEqual(hero.id, preview.id)
+        XCTAssertNotEqual(hero.revision, preview.revision)
+        XCTAssertEqual(owner.artwork(for: item)?.id, systemID)
+        XCTAssertEqual(owner.data(for: preview.id), heroData)
+        XCTAssertTrue(player.wantsPlayback)
+    }
+
     func testDelayedSystemProvidersShareLoadAndConsumerCancellationDoesNotCancelOwner() async throws
     {
         let data = try imageData()

@@ -88,6 +88,8 @@ final class FoundationAppModel: ObservableObject {
     @Published var credentialError: String?
     @Published var signOutNotice: String?
     private var playbackSessionSubscription: AnyCancellable?
+    @Published private(set) var isPreparingCaches = true
+    @Published private(set) var cachesReady = false
     private var restored = false
     private var accountEpoch = 0
     private var nowPlaying: FoundationNowPlaying?
@@ -96,6 +98,9 @@ final class FoundationAppModel: ObservableObject {
     isolated deinit {
         if let cache = library?.artworkCache {
             Task { _ = await cache.invalidate(removeDisk: false) }
+        }
+        if let pages = library?.catalogPageCache {
+            Task { _ = await pages.invalidate(removeDisk: false) }
         }
         downloads?.invalidate()
         connectivity?.invalidate()
@@ -109,6 +114,29 @@ final class FoundationAppModel: ObservableObject {
         #if DEBUG
             guard !ProcessInfo.processInfo.arguments.contains("-foundationTesting") else { return }
         #endif
+        Task { [weak self] in
+            let prepared = await FoundationDisposableCachePolicy.shared.prepare(
+                version: FoundationDisposableCachePolicy.currentVersion)
+            guard let self else { return }
+            self.cachesReady = prepared
+            self.isPreparingCaches = false
+            guard prepared else {
+                self.credentialError =
+                    "Disposable caches could not be cleared. Retry to open your library."
+                return
+            }
+            self.restoreCredentials()
+        }
+    }
+
+    func retryCachePreparation() {
+        restored = false
+        isPreparingCaches = true
+        credentialError = nil
+        restore()
+    }
+
+    private func restoreCredentials() {
         var credentialReadCompleted = false
         do {
             let savedSession = try FoundationCredentials.load()
@@ -149,10 +177,11 @@ final class FoundationAppModel: ObservableObject {
             Task { [weak self] in
                 guard let self, self.accountEpoch == epoch, self.library == nil else { return }
                 let cleared = await FoundationArtworkCache.clearStoredArtwork()
+                let pagesCleared = await FoundationCatalogPageCache.clearStoredPages()
                 guard self.accountEpoch == epoch, self.library == nil else { return }
-                if !cleared {
+                if !cleared || !pagesCleared {
                     self.credentialError =
-                        "Saved artwork cache could not be removed from this device."
+                        "Saved disposable caches could not be removed from this device."
                 }
             }
         }
@@ -162,6 +191,7 @@ final class FoundationAppModel: ObservableObject {
     }
 
     fileprivate func accept(_ session: FoundationSession) throws {
+        guard cachesReady else { throw FoundationLibraryError.unavailable }
         try FoundationCredentials.save(session)
         open(session, sourceScope: Self.sourceScope(for: session))
     }
@@ -189,20 +219,29 @@ final class FoundationAppModel: ObservableObject {
         policySubscriptions.removeAll()
         currentRetainedArtworkIdentity = nil
         let retiringCache = library?.artworkCache
+        let retiringPages = library?.catalogPageCache
         let cache = FoundationArtworkCache(scope: sourceScope)
+        let pages = FoundationCatalogPageCache(scope: sourceScope)
         let epoch = accountEpoch
         Task { [weak self] in
             if let retiringCache {
                 _ = await retiringCache.invalidate(removeDisk: retiringCache.scope != cache.scope)
             }
+            if let retiringPages {
+                _ = await retiringPages.invalidate(removeDisk: retiringPages.scope != pages.scope)
+            }
             guard let self, self.accountEpoch == epoch else { return }
             let cleared = await FoundationArtworkCache.clearStoredArtwork(retaining: cache.scope)
+            let pagesCleared = await FoundationCatalogPageCache.clearStoredPages(
+                retaining: pages.scope)
             guard self.accountEpoch == epoch else { return }
-            if !cleared {
-                self.credentialError = "Older artwork cache could not be removed from this device."
+            if !cleared || !pagesCleared {
+                self.credentialError =
+                    "Older disposable caches could not be removed from this device."
             }
         }
-        let library = FoundationJellyfinLibrary(session: session, artworkCache: cache)
+        let library = FoundationJellyfinLibrary(
+            session: session, artworkCache: cache, catalogPageCache: pages)
         self.actions = FoundationLibraryActions(sourceScope: sourceScope) { item, favorite in
             try await library.setFavorite(for: item, isFavorite: favorite)
         }
@@ -258,11 +297,17 @@ final class FoundationAppModel: ObservableObject {
                     self.credentialError = "Playback session could not be saved on this device."
                 }
             }
-            let artwork = FoundationCurrentArtwork(player: player) { item in
-                if let local = await downloads.retainedArtwork(for: item) { return local }
-                return try await library.artworkResult(
-                    for: item, size: 640, allowsNetwork: !connectivity.localOnly)?.data
-            }
+            let artwork = FoundationCurrentArtwork(
+                player: player,
+                cachedLoad: { item in
+                    if let local = await downloads.retainedArtwork(for: item) { return local }
+                    return try await library.cachedArtworkResult(for: item, size: 640)?.data
+                },
+                load: { item in
+                    if let local = await downloads.retainedArtwork(for: item) { return local }
+                    return try await library.artworkResult(
+                        for: item, size: 640, allowsNetwork: !connectivity.localOnly)?.data
+                })
             downloads.$artworkRevision.dropFirst().sink {
                 [weak self, weak artwork, weak player, weak downloads] _ in
                 Task { @MainActor in
@@ -314,6 +359,7 @@ final class FoundationAppModel: ObservableObject {
             return
         }
         let retiringCache = library?.artworkCache
+        let retiringPages = library?.catalogPageCache
         let retiringDownloads = downloads
         retiringDownloads?.invalidate()
         connectivity?.invalidate()
@@ -336,6 +382,7 @@ final class FoundationAppModel: ObservableObject {
         credentialError = nil
         Task { [weak self] in
             let artworkCleared = await retiringCache?.invalidate(removeDisk: true) ?? true
+            let pagesCleared = await retiringPages?.invalidate(removeDisk: true) ?? true
             let downloadsCleared: Bool
             if let retiringDownloads {
                 downloadsCleared = await retiringDownloads.clearAccount(waitForPlayback: true)
@@ -347,8 +394,8 @@ final class FoundationAppModel: ObservableObject {
             if !downloadsCleared {
                 self.credentialError = FoundationDownloadAccountError.cleanupFailed.errorDescription
             }
-            if !artworkCleared {
-                let notice = "Artwork cache could not be removed from this device."
+            if !artworkCleared || !pagesCleared {
+                let notice = "Disposable caches could not be removed from this device."
                 self.credentialError = self.credentialError.map { $0 + " " + notice } ?? notice
             }
             let serverAccepted = await attempt.revocation.value
@@ -407,7 +454,15 @@ struct FoundationRootView: View {
 
     var body: some View {
         Group {
-            if let library = model.library, let player = model.player, let actions = model.actions,
+            if model.isPreparingCaches {
+                ProgressView("Preparing library…")
+            } else if !model.cachesReady {
+                VStack(spacing: 12) {
+                    Text("Disposable caches could not be cleared.")
+                    Button("Retry") { model.retryCachePreparation() }
+                }
+            } else if let library = model.library, let player = model.player,
+                let actions = model.actions,
                 let artwork = model.currentArtwork, let downloads = model.downloads,
                 let connectivity = model.connectivity
             {

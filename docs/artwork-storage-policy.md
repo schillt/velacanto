@@ -112,3 +112,45 @@ These tests do not prove real-server performance, physical audibility/background
 VoiceOver, signed protection or secure erasure. No live account/session was modified.
 Existing native audio failures must be compared with the unchanged baseline, and a
 failed full suite must remain reported separately from passing focused tests.
+
+## Local continuity refinements — 2026-10-07
+
+The owner additionally authorized local update invalidation, persisted Home/New/genre
+shelves, canonical artwork continuity and shared-item transition groundwork. This
+extends the unpublished `00b4b931` candidate; it does not update the GitHub contract,
+claim integration or authorize installation/publication.
+
+Before opening account cache owners, startup compares app version/build plus cache
+schema with a disposable generation marker. A mismatch (including first use of this
+policy) removes only `Caches/VelacantoArtwork` and `Caches/VelacantoCatalogPages`.
+Downloaded music, download-owned artwork, manifests, pins and playback sessions
+remain outside these roots. Cleanup failure prevents opening stale caches and offers
+an explicit retry; the marker is written only after successful removal.
+
+Catalog page snapshots retain private titles, provider references and minimal item
+metadata under opaque account/server scopes and page filenames. This metadata is
+private local cache content, not anonymized merely because paths are digests. The
+cache is bounded to 2 MiB, 32 pages, 200 items per page and 256 KiB per record, with
+seven-day retention, atomic replacement, backup exclusion and platform protection.
+Account teardown revokes writes and releases directory leases before removal. No
+credentials, request URLs or request headers are encoded. Visible Home/New/genre
+models restore local data before network work, preserve shelves through refresh,
+refresh at most once per minute automatically and stop that loop after an error.
+Explicit refresh and reconnect use the view's cancellable task lifetime. Offline
+reads make no catalog requests; existing download eligibility still controls offline
+playback and collection visibility. A cached page does not claim audio availability.
+
+A bounded artwork revision index allows omitted image tags to reuse a previously
+observed explicit revision without a metadata fetch. Explicit tags retain separate
+keys; known tags accompany resolution upgrades. A local smaller rendition appears
+while the visible consumer owns the larger request. Cancellation or optional failure
+preserves the usable image for the same identity. System artwork identity remains
+stable; each displayed result has a separate publication revision so upgrades update
+SwiftUI. The native player presentation uses canonical kind/item identity and respects
+Reduce Motion. This groundwork adds no custom animation or playback authority.
+
+Synthetic tests establish local cache/update/cancellation behavior and request counts.
+Native simulator flows and local builds establish only their recorded scope. Real-server
+contention, physical audibility/background routes, VoiceOver and signed storage/backup
+verification remain separate acceptance gates. Build 117 and its phone data remain
+unchanged by this local refinement task.

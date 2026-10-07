@@ -9,8 +9,8 @@ struct FoundationCatalogArtwork: View {
     @EnvironmentObject private var downloads: FoundationDownloads
     @EnvironmentObject private var connectivity: FoundationConnectivity
     var source: Source = .catalog
-    private var currentResultID: UUID? {
-        if case .current(let result) = source { return result?.id }
+    private var currentResultRevision: UUID? {
+        if case .current(let result) = source { return result?.revision }
         return nil
     }
     let item: FoundationItem
@@ -45,14 +45,14 @@ struct FoundationCatalogArtwork: View {
             RoundedRectangle(cornerRadius: isHero ? 0 : (item.kind == .artist ? size / 2 : 6))
         )
         .accessibilityHidden(true)
-        .task(id: currentResultID) {
+        .task(id: currentResultRevision) {
             if case .current(let result) = source {
                 installImage(result?.image)
             }
         }
         .task(id: artworkTaskIdentity) {
             guard case .catalog = source, isActive, !Task.isCancelled else { return }
-            let identity = FoundationArtworkCache.key(item, pixels: isHero ? 640 : 160).identity
+            let identity = item.sharedArtworkIdentity
             if installedIdentity != identity {
                 installImage(nil)
                 installedIdentity = identity
@@ -64,6 +64,12 @@ struct FoundationCatalogArtwork: View {
                 guard !Task.isCancelled else { return }
                 installImage(result?.image)
                 return
+            }
+            if let cached = try? await library.cachedArtworkResult(
+                for: item, size: isHero ? 640 : 160)
+            {
+                guard !Task.isCancelled else { return }
+                installImage(cached.image)
             }
             #if DEBUG
                 await FoundationTrace.withPage(origin: traceOrigin, page: .artwork) {
@@ -81,7 +87,7 @@ struct FoundationCatalogArtwork: View {
                 for: item, size: isHero ? 640 : 160,
                 allowsNetwork: !connectivity.localOnly)
             try Task.checkCancellation()
-            installImage(result?.image)
+            if let result { installImage(result.image) }
         } catch {
             // Optional failure keeps the deterministic placeholder until task identity changes.
         }
@@ -184,6 +190,12 @@ struct FoundationCatalogArtwork: View {
 
 /// Project a supplied album reference for track covers without a metadata lookup.
 extension FoundationItem {
+    /// Stable across rendition upgrades and missing revision metadata; no provider lookup.
+    var sharedArtworkIdentity: String {
+        let artwork = catalogArtworkItem
+        return FoundationArtworkCache.digest("\(artwork.kind)\0\(artwork.id)")
+    }
+
     var catalogArtworkItem: FoundationItem {
         guard kind == .track, let album else { return self }
         return FoundationItem(

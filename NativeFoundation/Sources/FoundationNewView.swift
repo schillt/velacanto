@@ -30,6 +30,13 @@ struct FoundationNewView<Profile: View>: View {
                 }
             }.padding()
         }
+        .refreshable {
+            guard isActive, !connectivity.localOnly else { return }
+            tracks.request(.refresh)
+            albums.request(.refresh)
+            trackRevision += 1
+            albumRevision += 1
+        }
         .foundationHeader("New", profile: profile)
         .onAppear {
             isVisible = true
@@ -95,18 +102,20 @@ struct FoundationNewView<Profile: View>: View {
                 trackRevision += 1
             }
         }
-        .task(id: isActive && isVisible && !connectivity.localOnly ? trackRevision : nil) {
+        .task(
+            id: isActive && isVisible ? trackRevision * 2 + (connectivity.localOnly ? 1 : 0) : nil
+        ) {
+            guard isActive, isVisible, !Task.isCancelled else { return }
             #if DEBUG
                 await FoundationTrace.withPage(origin: .new, page: .shelf) {
-                    await tracks.loadPending(
-                        ifActive: isActive && isVisible && !connectivity.localOnly
+                    await tracks.refreshVisible(
+                        allowsNetwork: !connectivity.localOnly
                     ) {
                         try await library.recentTracks(startIndex: $0)
                     }
                 }
             #else
-                await tracks.loadPending(ifActive: isActive && isVisible && !connectivity.localOnly)
-                {
+                await tracks.refreshVisible(allowsNetwork: !connectivity.localOnly) {
                     try await library.recentTracks(startIndex: $0)
                 }
             #endif
@@ -138,18 +147,20 @@ struct FoundationNewView<Profile: View>: View {
                 albumRevision += 1
             }
         }
-        .task(id: isActive && isVisible && !connectivity.localOnly ? albumRevision : nil) {
+        .task(
+            id: isActive && isVisible ? albumRevision * 2 + (connectivity.localOnly ? 1 : 0) : nil
+        ) {
+            guard isActive, isVisible, !Task.isCancelled else { return }
             #if DEBUG
                 await FoundationTrace.withPage(origin: .new, page: .shelf) {
-                    await albums.loadPending(
-                        ifActive: isActive && isVisible && !connectivity.localOnly
+                    await albums.refreshVisible(
+                        allowsNetwork: !connectivity.localOnly
                     ) {
                         try await library.recentAlbums(startIndex: $0)
                     }
                 }
             #else
-                await albums.loadPending(ifActive: isActive && isVisible && !connectivity.localOnly)
-                {
+                await albums.refreshVisible(allowsNetwork: !connectivity.localOnly) {
                     try await library.recentAlbums(startIndex: $0)
                 }
             #endif
@@ -236,7 +247,7 @@ struct FoundationNewView<Profile: View>: View {
     @ViewBuilder private func sectionState(
         _ model: FoundationBrowseModel, retry: @escaping () -> Void
     ) -> some View {
-        if model.isLoading {
+        if model.isLoading, model.items.isEmpty {
             FoundationLoadingPlaceholder(layout: model === albums ? .albumShelf : .rows)
         }
         if let error = model.errorMessage {
@@ -278,7 +289,9 @@ struct FoundationLibraryMostPlayedAlbums: View {
                         navigate: { openedItem = $0 })
                 }
             }
-            if model.isLoading { FoundationLoadingPlaceholder(layout: .albumGrid) }
+            if model.isLoading, model.items.isEmpty {
+                FoundationLoadingPlaceholder(layout: .albumGrid)
+            }
             if let error = model.errorMessage {
                 Text(error).foregroundStyle(.red)
                 Button("Retry") {
@@ -305,6 +318,7 @@ struct FoundationLibraryMostPlayedAlbums: View {
             }
         }
         .task(id: isActive && isVisible && !connectivity.localOnly ? revision : nil) {
+            guard isActive, isVisible, !Task.isCancelled else { return }
             #if DEBUG
                 await FoundationTrace.withPage(origin: .library, page: .shelf) {
                     await model.loadPending(

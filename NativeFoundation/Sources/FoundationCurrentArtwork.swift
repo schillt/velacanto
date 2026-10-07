@@ -8,12 +8,15 @@ import NowPlaying
 final class FoundationCurrentArtwork: ObservableObject {
     nonisolated struct Result: Sendable {
         let id: UUID
+        /// Display publication changes on a decode while the system artwork identity stays stable.
+        let revision = UUID()
         let data: Data
         let image: CGImage
     }
     private struct Key: Equatable {
         let account: UUID
         let item: String
+        let kind: FoundationItem.Kind
         let tag: String?
     }
     nonisolated static let maximumBytes = 2 * 1_024 * 1_024
@@ -23,6 +26,7 @@ final class FoundationCurrentArtwork: ObservableObject {
     private(set) var loadTask: Task<Void, Never>?
     private let player: FoundationPlayer
     private let load: @Sendable (FoundationItem) async throws -> Data?
+    private let cachedLoad: @Sendable (FoundationItem) async throws -> Data?
     private let account = UUID()
     private var key: Key?
     private var artworkID: UUID?
@@ -30,10 +34,14 @@ final class FoundationCurrentArtwork: ObservableObject {
     private var subscriptions: Set<AnyCancellable> = []
     private var isLive = true
 
-    init(player: FoundationPlayer, load: @escaping @Sendable (FoundationItem) async throws -> Data?)
-    {
+    init(
+        player: FoundationPlayer,
+        cachedLoad: @escaping @Sendable (FoundationItem) async throws -> Data? = { _ in nil },
+        load: @escaping @Sendable (FoundationItem) async throws -> Data?
+    ) {
         self.player = player
         self.load = load
+        self.cachedLoad = cachedLoad
         Publishers.Merge(
             player.$queue.map { _ in () },
             player.$selectedEntryID.removeDuplicates().map { _ in () }
@@ -60,8 +68,9 @@ final class FoundationCurrentArtwork: ObservableObject {
         let imageItem = item.catalogArtworkItem
         guard imageItem.kind != .track else { return nil }
         return Key(
-            account: account, item: imageItem.id,
-            tag: imageItem.primaryImageTag.flatMap { $0.isEmpty ? nil : $0 })
+            account: account, item: imageItem.id, kind: imageItem.kind,
+            tag: imageItem.primaryImageTag.flatMap { $0.isEmpty ? nil : $0 }
+                ?? (key?.item == imageItem.id && key?.kind == imageItem.kind ? key?.tag : nil))
     }
 
     func refreshRetainedArtwork() {
@@ -76,16 +85,30 @@ final class FoundationCurrentArtwork: ObservableObject {
         generation &+= 1
         loadTask?.cancel()
         loadTask = nil
+        let sameIdentity = nextKey == key
         key = nextKey
-        artworkID = nextKey == nil ? nil : UUID()
-        result = nil
+        if !sameIdentity {
+            artworkID = nextKey == nil ? nil : UUID()
+            result = nil
+        }
         guard let artworkID, let item else { return }
         let requestGeneration = generation
         let load = load
+        let cachedLoad = cachedLoad
         let imageItem = item.catalogArtworkItem
         loadTask = Task { [weak self] in
             do {
                 try Task.checkCancellation()
+                if let cached = try? await cachedLoad(imageItem) {
+                    let preview = await Task.detached(priority: .utility) {
+                        Self.decode(cached, id: artworkID)
+                    }.value
+                    try Task.checkCancellation()
+                    guard let self, self.isLive, self.generation == requestGeneration else {
+                        return
+                    }
+                    if let preview { self.result = preview }
+                }
                 let data: Data?
                 #if DEBUG
                     data = try await FoundationTrace.$context.withValue(
@@ -101,7 +124,7 @@ final class FoundationCurrentArtwork: ObservableObject {
                 }.value
                 try Task.checkCancellation()
                 guard self.isLive, self.generation == requestGeneration else { return }
-                self.result = decoded
+                if let decoded { self.result = decoded }
                 self.loadTask = nil
             } catch {
                 guard let self, self.isLive, self.generation == requestGeneration else { return }
@@ -173,7 +196,7 @@ final class FoundationCurrentArtwork: ObservableObject {
         guard isLive, key == currentSelectionKey, artworkID == id else {
             throw ArtworkRepresentation.ArtworkRepresentationError.noRepresentationAvailable
         }
-        return loadTask
+        return result == nil ? loadTask : nil
     }
 
     private var currentSelectionKey: Key? {

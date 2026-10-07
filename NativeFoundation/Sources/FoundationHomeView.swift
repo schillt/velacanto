@@ -15,6 +15,7 @@ struct FoundationHomeView<Profile: View>: View {
     var hasQueue = false
     @State private var isVisible = false
     @State private var genreRetryRevision = 0
+    @State private var refreshRevision = 0
     @State private var showingPlayer = false
     @State private var openedItem: FoundationItem?
     @EnvironmentObject private var actions: FoundationLibraryActions
@@ -30,17 +31,17 @@ struct FoundationHomeView<Profile: View>: View {
                     showingPlayer: $showingPlayer)
                 FoundationHomeShelf(
                     title: "Recently Played", model: recentTracks, library: library, player: player,
-                    isActive: isActive, showsTracks: true,
+                    isActive: isActive, refreshRevision: refreshRevision, showsTracks: true,
                     openedItem: $openedItem
                 ) { try await library.recentlyPlayed(startIndex: $0) }
                 FoundationHomeShelf(
                     title: "Favorites", model: favorites, library: library, player: player,
-                    isActive: isActive, isFavorites: true,
+                    isActive: isActive, refreshRevision: refreshRevision, isFavorites: true,
                     openedItem: $openedItem
                 ) { try await library.favoriteAlbums(startIndex: $0) }
                 FoundationHomeShelf(
                     title: "Recently Added", model: recentAlbums, library: library, player: player,
-                    isActive: isActive,
+                    isActive: isActive, refreshRevision: refreshRevision,
                     openedItem: $openedItem
                 ) { try await library.recentAlbums(startIndex: $0) }
                 genreShelves
@@ -58,6 +59,15 @@ struct FoundationHomeView<Profile: View>: View {
             #if DEBUG
                 FoundationTrace.event("ui origin=home disappeared")
             #endif
+        }
+        .refreshable {
+            guard isActive, !connectivity.localOnly else { return }
+            recentTracks.request(.refresh)
+            favorites.request(.refresh)
+            recentAlbums.request(.refresh)
+            genres.request(.refresh)
+            refreshRevision += 1
+            genreRetryRevision += 1
         }
         .foundationHeader("Home", profile: profile)
         #if DEBUG
@@ -98,10 +108,12 @@ struct FoundationHomeView<Profile: View>: View {
             ForEach(Array(genres.items.prefix(5).enumerated()), id: \.element.id) { _, genre in
                 FoundationHomeGenreShelf(
                     genre: genre, library: library, player: player,
-                    isActive: isActive,
+                    isActive: isActive, refreshRevision: refreshRevision,
                     openedItem: $openedItem)
             }
-            if genres.isLoading { FoundationLoadingPlaceholder(layout: .albumShelf) }
+            if genres.isLoading, genres.items.isEmpty {
+                FoundationLoadingPlaceholder(layout: .albumShelf)
+            }
             if let error = genres.errorMessage {
                 Text(error).foregroundStyle(.red)
                 Button("Retry genres") {
@@ -111,18 +123,21 @@ struct FoundationHomeView<Profile: View>: View {
                 }.disabled(connectivity.localOnly)
             }
         }
-        .task(id: isActive && isVisible && !connectivity.localOnly ? genreRetryRevision : nil) {
+        .task(
+            id: isActive && isVisible
+                ? genreRetryRevision * 2 + (connectivity.localOnly ? 1 : 0) : nil
+        ) {
+            guard isActive, isVisible, !Task.isCancelled else { return }
             #if DEBUG
                 await FoundationTrace.withPage(origin: .home, page: .genreIndex) {
-                    await genres.loadPending(
-                        ifActive: isActive && isVisible && !connectivity.localOnly
+                    await genres.refreshVisible(
+                        allowsNetwork: !connectivity.localOnly
                     ) { _ in
                         try await library.homeGenres()
                     }
                 }
             #else
-                await genres.loadPending(ifActive: isActive && isVisible && !connectivity.localOnly)
-                { _ in
+                await genres.refreshVisible(allowsNetwork: !connectivity.localOnly) { _ in
                     try await library.homeGenres()
                 }
             #endif
@@ -222,13 +237,29 @@ private struct FoundationHomeGenreShelf: View {
     let library: any FoundationLibrary
     let player: FoundationPlayer
     let isActive: Bool
+    let refreshRevision: Int
     @Binding var openedItem: FoundationItem?
-    @StateObject private var albums = FoundationBrowseModel()
+    @StateObject private var albums: FoundationBrowseModel
+
+    init(
+        genre: FoundationItem, library: any FoundationLibrary, player: FoundationPlayer,
+        isActive: Bool, refreshRevision: Int, openedItem: Binding<FoundationItem?>
+    ) {
+        self.genre = genre
+        self.library = library
+        self.player = player
+        self.isActive = isActive
+        self.refreshRevision = refreshRevision
+        _openedItem = openedItem
+        let model = FoundationBrowseModel()
+        model.configureCache(library.catalogPageCache, key: "home.genre." + genre.id)
+        _albums = StateObject(wrappedValue: model)
+    }
 
     var body: some View {
         FoundationHomeShelf(
             title: genre.title, model: albums, library: library, player: player,
-            isActive: isActive,
+            isActive: isActive, refreshRevision: refreshRevision,
             openedItem: $openedItem
         ) { try await library.albums(genreID: genre.id, startIndex: $0) }
     }
@@ -242,6 +273,7 @@ private struct FoundationHomeShelf: View {
     let library: any FoundationLibrary
     let player: FoundationPlayer
     let isActive: Bool
+    var refreshRevision = 0
     var showsTracks = false
     var isFavorites = false
     @Binding var openedItem: FoundationItem?
@@ -249,6 +281,7 @@ private struct FoundationHomeShelf: View {
     @EnvironmentObject private var actions: FoundationLibraryActions
     @State private var isVisible = false
     @State private var retryRevision = 0
+    @State private var consumedRefreshRevision = 0
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     var body: some View {
@@ -306,7 +339,7 @@ private struct FoundationHomeShelf: View {
                 .scrollTargetBehavior(.viewAligned)
                 .scrollIndicators(.hidden)
             }
-            if model.isLoading {
+            if model.isLoading, model.items.isEmpty {
                 FoundationLoadingPlaceholder(layout: showsTracks ? .rows : .albumShelf)
             }
             if let error = model.errorMessage {
@@ -338,19 +371,28 @@ private struct FoundationHomeShelf: View {
                 retryRevision += 1
             }
         }
-        .task(id: isActive && isVisible && !connectivity.localOnly ? retryRevision : nil) {
+        .task(
+            id: isActive && isVisible
+                ? "\(refreshRevision):\(retryRevision):\(connectivity.localOnly)" : nil
+        ) {
+            guard isActive, isVisible, !Task.isCancelled else { return }
+            if refreshRevision != consumedRefreshRevision {
+                model.request(.refresh)
+                consumedRefreshRevision = refreshRevision
+            }
             #if DEBUG
                 await FoundationTrace.withPage(origin: .home, page: .shelf) {
-                    guard isActive, isVisible, !connectivity.localOnly, !Task.isCancelled else {
+                    guard isActive, isVisible, !Task.isCancelled else {
                         return
                     }
-                    await model.loadPending(using: loader)
+                    await model.refreshVisible(
+                        allowsNetwork: !connectivity.localOnly, using: loader)
                 }
             #else
-                guard isActive, isVisible, !connectivity.localOnly, !Task.isCancelled else {
+                guard isActive, isVisible, !Task.isCancelled else {
                     return
                 }
-                await model.loadPending(using: loader)
+                await model.refreshVisible(allowsNetwork: !connectivity.localOnly, using: loader)
             #endif
         }
     }

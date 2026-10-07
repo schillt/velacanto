@@ -56,6 +56,79 @@ final class FoundationArtworkCacheTests: XCTestCase {
         XCTAssertEqual(home?.image.width, 160)
     }
 
+    func testOmittedTagsReuseKnownRevisionIncludingColdOfflineLaunch() async throws {
+        let root = root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let cache = FoundationArtworkCache(scope: "synthetic", root: root)
+        let probe = ArtworkCacheProbe(data: try image())
+        let original = try await cache.result(
+            for: item(), pixels: 160, allowsNetwork: true, load: probe.load)
+        let track = FoundationItem(
+            id: "song", title: "", subtitle: "", kind: .track, duration: nil,
+            album: .init(id: "album", title: "", primaryImageTag: nil))
+        let omitted = try await cache.result(
+            for: track, pixels: 160, allowsNetwork: true, load: probe.load)
+        XCTAssertEqual(original?.id, omitted?.id)
+        _ = await cache.invalidate(removeDisk: false)
+        let restored = FoundationArtworkCache(scope: "synthetic", root: root)
+        let local = try await restored.result(
+            for: track, pixels: 640, allowsNetwork: false, load: probe.load)
+        XCTAssertEqual(local?.image.width, 160)
+        let count = await probe.count
+        XCTAssertEqual(count, 1)
+        let newer = try await restored.result(
+            for: item(tag: "v2"), pixels: 160, allowsNetwork: true, load: probe.load)
+        XCTAssertNotEqual(newer?.id, local?.id)
+        let latest = try await restored.result(
+            for: track, pixels: 160, allowsNetwork: true, load: probe.load)
+        XCTAssertEqual(newer?.id, latest?.id)
+        let finalCount = await probe.count
+        XCTAssertEqual(finalCount, 2)
+        _ = await restored.invalidate(removeDisk: true)
+    }
+
+    func testMissingTagUpgradeUsesKnownRevisionOnProviderRequest() async throws {
+        let root = root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let cache = FoundationArtworkCache(scope: "synthetic", root: root)
+        let probe = ArtworkCacheProbe(data: try image())
+        _ = try await cache.result(
+            for: item(), pixels: 160, allowsNetwork: true, load: probe.load)
+        let upgraded = try await cache.result(
+            for: item(tag: nil), pixels: 640, allowsNetwork: true, load: probe.load)
+        XCTAssertEqual(upgraded?.image.width, 640)
+        let requestedTags = await probe.requestedTags
+        XCTAssertEqual(requestedTags, ["v1", "v1"])
+        let explicit = try await cache.result(
+            for: item(), pixels: 640, allowsNetwork: true, load: probe.load)
+        XCTAssertEqual(upgraded?.id, explicit?.id)
+        _ = await cache.invalidate(removeDisk: true)
+    }
+
+    func testLocalPreviewRemainsUsableDuringCancelledHeroUpgrade() async throws {
+        let root = root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let cache = FoundationArtworkCache(scope: "synthetic", root: root)
+        let probe = ArtworkCacheProbe(data: try image())
+        let album = item()
+        let tile = try await cache.result(
+            for: album, pixels: 160, allowsNetwork: true, load: probe.load)
+        let held = ArtworkCacheProbe(data: try image(), held: true)
+        let upgrade = Task {
+            try await cache.result(for: album, pixels: 640, allowsNetwork: true, load: held.load)
+        }
+        try await held.waitForCount(1)
+        let preview = try await cache.cachedResult(for: album, pixels: 640)
+        XCTAssertEqual(preview?.id, tile?.id)
+        XCTAssertEqual(preview?.image.width, 160)
+        upgrade.cancel()
+        await held.release()
+        _ = try? await upgrade.value
+        let retained = try await cache.cachedResult(for: album, pixels: 640)
+        XCTAssertNotNil(retained)
+        _ = await cache.invalidate(removeDisk: true)
+    }
+
     func testArtistPlaylistAndGenreIdentityAndChangedRevision() async throws {
         let root = root()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -374,7 +447,7 @@ final class FoundationArtworkCacheTests: XCTestCase {
         let directory = root.appendingPathComponent(cache.scope)
         let file = try XCTUnwrap(
             FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
-                .first)
+                .first { $0.pathExtension == "art" })
         try Data("corrupt".utf8).write(to: file)
         let restored = FoundationArtworkCache(scope: "synthetic", root: root)
         let result = try await restored.result(
@@ -428,7 +501,8 @@ final class FoundationArtworkCacheTests: XCTestCase {
         let data = try image()
         let cache = FoundationArtworkCache(
             scope: "synthetic", root: root,
-            limits: .init(memoryBytes: 0, diskBytes: (data.count + 256) * 2))
+            // Include bounded revision metadata while retaining room for exactly two images.
+            limits: .init(memoryBytes: 0, diskBytes: (data.count + 256) * 2 + 1_024))
         let probe = ArtworkCacheProbe(data: data)
         for id in ["one", "two"] {
             _ = try await cache.result(
@@ -479,6 +553,7 @@ private actor ArtworkCacheProbe {
     let data: Data
     var held: Bool
     var count = 0
+    var requestedTags: [String?] = []
     var active = 0
     var peak = 0
     var waiters: [CheckedContinuation<Void, Never>] = []
@@ -490,6 +565,7 @@ private actor ArtworkCacheProbe {
 
     func load(_ item: FoundationItem, _ pixels: Int) async throws -> Data? {
         count += 1
+        requestedTags.append(item.primaryImageTag)
         active += 1
         peak = max(peak, active)
         if held { await withCheckedContinuation { waiters.append($0) } }

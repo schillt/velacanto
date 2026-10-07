@@ -296,7 +296,7 @@ struct FoundationPlayerView: View {
                 sampledColor: $artworkTint, isHero: true,
                 loadedImage: $artworkFill,
                 upperEdgeColors: $artworkUpperEdgeColors
-            ).id(album.id + (album.primaryImageTag ?? ""))
+            ).id(album.sharedArtworkIdentity)
         } else {
             Image(systemName: "music.note").font(.system(size: 80)).foregroundStyle(.secondary)
                 .frame(width: size, height: height)
@@ -601,11 +601,20 @@ private struct FoundationPlayerTransitionKey: EnvironmentKey {
     static let defaultValue: Namespace.ID? = nil
 }
 
+private struct FoundationPlayerArtworkIdentityKey: EnvironmentKey {
+    static let defaultValue: String? = nil
+}
+
 private struct FoundationOpenLibraryItemKey: EnvironmentKey {
     static let defaultValue: (@MainActor @Sendable (FoundationItem) -> Void)? = nil
 }
 
 extension EnvironmentValues {
+    var foundationPlayerArtworkIdentity: String? {
+        get { self[FoundationPlayerArtworkIdentityKey.self] }
+        set { self[FoundationPlayerArtworkIdentityKey.self] = newValue }
+    }
+
     var foundationOpenLibraryItem: (@MainActor @Sendable (FoundationItem) -> Void)? {
         get { self[FoundationOpenLibraryItemKey.self] }
         set { self[FoundationOpenLibraryItemKey.self] = newValue }
@@ -624,9 +633,15 @@ extension View {
         modifier(FoundationPlayerPresentation(isPresented: isPresented, playerContent: content))
     }
 
-    @ViewBuilder func foundationPlayerArtworkSource(namespace: Namespace.ID) -> some View {
+    @ViewBuilder func foundationPlayerArtworkSource(namespace: Namespace.ID, identity: String?)
+        -> some View
+    {
         #if os(iOS)
-            self.matchedTransitionSource(id: "now-playing-artwork", in: namespace)
+            if let identity {
+                self.matchedTransitionSource(id: identity, in: namespace)
+            } else {
+                self
+            }
         #else
             self
         #endif
@@ -637,6 +652,8 @@ private struct FoundationPlayerPresentation<PlayerContent: View>: ViewModifier {
     @Binding var isPresented: Bool
     @ViewBuilder let playerContent: () -> PlayerContent
     @Environment(\.foundationPlayerTransition) private var namespace
+    @Environment(\.foundationPlayerArtworkIdentity) private var artworkIdentity
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.foundationOpenLibraryItem) private var openLibraryItem
     @State private var pendingDestination: FoundationItem?
 
@@ -658,9 +675,9 @@ private struct FoundationPlayerPresentation<PlayerContent: View>: ViewModifier {
     func body(content: Content) -> some View {
         #if os(iOS)
             content.fullScreenCover(isPresented: $isPresented, onDismiss: finishDismissal) {
-                if let namespace {
+                if let namespace, let artworkIdentity, !reduceMotion {
                     destinationContent
-                        .navigationTransition(.zoom(sourceID: "now-playing-artwork", in: namespace))
+                        .navigationTransition(.zoom(sourceID: artworkIdentity, in: namespace))
                 } else {
                     destinationContent
                 }
