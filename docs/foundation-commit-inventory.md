@@ -1,0 +1,110 @@
+# Historical Foundation commits through build 106
+
+This optional historical appendix records the development lineage, including superseded experiments. It is not a merge list or a claim that every change ships in 0.3. The final release tree and release notes define shipped behavior. Build 107 is excluded and documented separately in the engineering record.
+
+```text
+a45adc38be1ce8ef8cdd0617a59c70cb5b9e46e4 Establish isolated native foundation rebuild contract
+b96ae21fdba9826dff4ed21619e16d2c0cad2be7 Build standalone native app shell and visible browsing
+202742c586f65829388c2db244e6bc7adaa54400 Add minimal native Jellyfin library and Keychain session adapter
+970103b0f431f34e2b2f9ef75a81e1081eeece7a Build minimal single AVPlayer foundation and occurrence queue
+2d1011876a8029039f8447d6754307e283c469fe Record finite DEBUG native API operation outcomes
+52606cd3dcd9968c01a2168e502c90988e26fda0 Set native API connectivity waiting and timeout bounds
+6eb1dccbce1b3d837b7725e207f8c9d27e3ad75b Align native player controls with loading intent and stopped selection
+aeeaf7855e6219fb409b386b5fe3a2d8d7bdb7db Consume visible actions once and refine native build integration
+4be2ebbd02d38f01a7909e064b81e327bf1d4697 Isolate native player teardown to MainActor
+0d9eb765a8201de32ff6bdc9cc35fffc0f3e966c Make queue boundary controls and stop behavior explicit
+5a92a43a5e96411ea5d7237de03161f0ea03a204 Handle repeated generated query keys in library budget test
+790071b112b499e654d9b198cf0d0a021b350aad Test real native playback with generated silent WAV
+bbba5e36c1c4fd6f1fc9f52b1cf3033cc5f8517f Document minimal Foundation candidate and owner test procedure
+7b997e4566222a8098f56af397f01f3cbf4170f4 Exclude synthetic test launch flag from Release
+f323f9757eb329d9166906b76304feaf54a09ceb Record signed Foundation candidate and Release exclusion gates
+6b16535dde2c29681a14e9e3db7fea8ddfad50aa Add only album-list artwork to the native Foundation player
+f791177722065b30ecd33c9eebfa3f53af067f91 Add native Albums and Artists navigation using shared catalog pages
+c88fd9ee2fbc2f9c1b311174a7b3a62a10a15494 Restore original navigation shell and shared artist portraits
+cc41d4a01b304344fa1a7f119b20974a9a5de962 Restore Library collections with frozen playback and separate presentation files
+23b654f96a4a9c1b42c350f5b592815de4912950 Record Foundation playback freeze and parallel UI integration contract
+a2fa5b8c76d09ef9432e9aacf66415b2961352cd Add bounded Foundation genres and explicit favorite API
+ea1152509463754977bd735a7f5ec5e73a419582 Add source-scoped local pins and explicit item actions
+008e0c1ccc3cd48c904e2acc4ddc4f927903d415 Add native macOS Foundation sidebar shell
+d28543a92e30014ce8b647a814e4f382f38ff907 Integrate Library genres pins menus and native macOS presentation
+39078049ea33bec4aae428d93dcdf20e1a50e23d Add bounded recent album and track catalog pages
+1ea0c8f158cc10318d4027926851a0d537d88374 Enable native New tab with bounded recent tracks and albums
+318f01e540afc6dd763870c4eb6f08ff8d188ea4 Add bounded native catalog search API
+de8020544b6a0538353d027abf16adcf8dbb2684 Use tagged genre artwork for Search browsing
+9c46aae8ec82003a6eae236eaa77a551155765eb Enable Search with native input grouped results and genre cards
+9cc0d11755d3426595a0893d1038a355a476103f Add bounded Home server history and favorite album reads
+ef6711d9fcddf8d97981c99ac78217fdb1637dd9 Compose native Home shelves from existing catalog owners
+9e3744f68319a0899a4e10ed88558f092938d947 Enable Home and explicit queue additions without replacing active audio
+90b9e586db7b712f4516d04d956f3632c9357ea0 Restore full Now Playing with native controls and owned enrichment
+90a1e3cf94cd16cb8217e5f0db8ca44cf9178188 Reduce Now Playing to artwork controls and queue for isolation
+ed27fc8b6e595a7b24579b881485a4470ed9c2c4 Add Favorite and native AirPlay to the reduced player
+dd5ebb7b56d3c524ff35ce9f75f85c4c0626b574 Restore Now Playing album and artist destinations from supplied references
+1054151d3efa9a3853fe7f1b5b0527e6d3cba565 Attribute internal request diagnostics to owning pages
+9cd74253c5fc37877a48e4b70397f43f222a6733 Recover Foundation UI refinement from preserved edit history
+49214aa9c42e249f1582c8a72a53f5ab9b6342de Refine Foundation Home carousel and listening card
+dd3496be6f774a806c90e8dc94b27f41a348b79d Polish Home header and rank the five largest music genres
+545cc5fec1684eabd5dca5c7688782ee45b4b668 Rank Home genres by album count only
+ff6885c8aa39c98748961c51524eb6fb6abf9358 Extend Home backdrop through the status bar
+1a2052f02bb5234ab80da0f1d883a632e6e9a443 Strengthen and extend the Home header backdrop
+7b1bb09d5d5d4c9d6ebf8e8135420b809f571420 Refine Search and share native root-tab headers
+03d7299940c97607446c2115630ba59f317c4dcc Retain genres with unavailable counts after ranked entries
+5e1a650fca4f0dabdeebfef3d3a1705cee911b84 Keep Search input stable while result views change
+3b0592a473a8635ba592d3bee7f886d5d10002c2 Show compact Search previews with artwork and category navigation
+f6c2136048a82e7026c565e98f6d6fcaa26ef38b Dismiss Search keyboard on scroll and replace loading spinners
+44a625666bb10db20ce239c7bc3b01a0b82dceb8 Match fading placeholders to content and prioritize song results
+a3cef2087f67630bf3ecd048845af3aa9e4b23d5 Keep header material within title and search bounds
+c5c4719b1ee312237e521c08be53166d1211253f Use richer artwork colors and stronger genre overlays
+46a85924d55ed927785914c3893bbd160e125791 Spread genre tint gradually across artwork
+35287cc2ff78ea8fe2f5a66bd3b58d7f3e6f0604 Align New with shared shelf design and remove item carets
+42d1b88469a4dcb2510f5baa6fe2d27ccf2b9551 Restore original Library section and pinned tile layout
+07eb10d2872e0893f08dcd33bfc732774b904206 Add Library recent albums and share genre browsing cards
+0401edc411c64d7519df49c7e1f244eb1fed28c9 Remove remaining album artwork menu overlays
+603f5ce177e7095bb224bbe6d71815ec5245023e Use shared album-artist lookup for artist search
+0a620716e372813b406c0e0db2aee55e979e2830 Enrich Library song rows and unify catalog headers
+21d88137ae106d083d0dba7d5a21f7461764be5b Remove Songs bulk play button
+f0dab8cb48d200ab7b4dc4be77b01e8ec13d48e7 Recreate image-led artist and album headers with native controls
+e6a64ce6a6fffcc46214b403329be5bbbfc932fa Unify detail safe areas and track surfaces
+d88dfaf958eea1292cf0ed47b0eb512aebef74f1 Reveal tab header material only after scrolling
+63626e312647fbfa750dcb34dc36d1f6280d2280 Soften header diffusion and ignore scroll rebound
+a05a40b232d13c0423b2d41d4ea1f703d955ff9f Restore translucent body to the diffused tab header
+d1e22a90aadcfd6b5a2067c7601820047810bea0 Anchor header diffusion below title and controls
+6ffead29c0f7a113ec3d7fa3e8dd1c44afb0fe35 Position header material using measured safe area
+464a33f0257f52164a6707e07b8ebecd850840e8 Add artist overview preview and expandable native sheet
+353bb1eb1ff16a99022f971ef2d22b94aadedb2d Add Jellyfin artist appearances and suggestions
+1b0b0570223da6bcdaf63dc4c3d9cc7257a45716 Add personal Most Played shelf and expand artist imagery
+f46b3d133d7f732f1dafa33063a0dff2414eb554 Unify artist portraits and refine overview sheet materials
+c6084905a903706dce9b9408b1c74a5e86164491 Refine artist page captions and portrait labels
+58f90f4eb12b4e864921b51da7fecb1ad8a23f89 Allow About sheet to expand to native large height
+99166c93a979a5dde4cdac296b4796a79ae10a4d Use native Liquid Glass for About sheet background
+2f301ab5b51a1e2f9b457207f55f134a1d5bdd10 Use native glass styles for artist and album controls
+e0f1725bc87def11d1b4144b3a70555e484ece79 Reduce secondary detail control sizes
+7432fba668d3cdf16f344760b30612406d81fac9 Adopt native safe-area bars for modern iOS tab headers
+5a5f36ba1b587ee45aa276c20d3c1ae499c10eea Open Home on fresh app launch
+769794ecfce982e74fac1d5054491eccfa3f29b7 Share detail sections and complete album overview and recommendations
+2c8dc0074a26e38dde23191006d8bc31eb4bdd7a Show album recommendations in two carousel rows
+8c2f3cd5f86a05af49d931b94e8766da3d1086cc Add View Artist to album page menus
+d70716acfd5afb96e1b7a28ba164efa6da9e06fc Add album and artist destinations to song menus
+09ae361805a4dcf8a98506078203ecab38010c1d Use explicit destination actions in collection menus
+df64f4c52753008948cc7f4e9a06e73a42a79a6b Add compact Liquid Glass titles to detail pages
+b808729d4b3264c21979cffd28f888bfeecfcf06 Hide redundant track destinations on detail pages
+6fe31f7292a48e2981c9f646ed3f06bbb415e153 Use plain transitioning detail toolbar titles
+b93641d2eacc7baa5e47d020166632344f9d4453 Load artist artwork when references omit image tags
+53f52faa80bc43cb7cefc4ee23a3bf95f921fb7f Load album artwork when image tags are omitted
+26c1b7919bda9f977656818c0987b0cecf19991b Replace profile menu with native settings sheet
+71b73ceee6902b4816c4c86e5e2959b5d843e154 Add immersive Now Playing presentation and bar artwork
+4150ba894f677f8b188b0f2a90e25b1741919d95 Keep song selection in browsing and refine player controls
+be0a24d3c3e92588cd6ed1696289673988b48081 Fit Now Playing to the viewport without scrolling
+41b27270cfeb9189097b8eb67c06501de0cee631 Return player catalog links to persistent main tabs
+7a68adcbaceebae8bdb21738570dca70ff997fe6 Enable native scroll-down tab minimization
+53506b9c6f4698db2116edb46f4fcb99b589ba5a Use native Search tab role for centered compact player
+0cb5f1553b165c02ee87ae49acf0efe6476722f4 Add bounded new-genre carousel and most-played album shelf
+f424413276d70e8efc9349853e3a18ccb31b8ac6 Prepare build98 direct audio delivery comparison on66
+824e5a22ed2a3ee3f422c76549ac95eef1e96419 Prepare playback-only scrub and precise seek candidate99
+bed516810555e9ad19078271f732b8e96c565281 Remove custom scrub tracking and restore Previous restart semantics
+7d139ac746eb71bcb6765fa449a59094aafe52aa Restore Now Playing artwork and layout without media controls
+83f56ea4e557545fdcdbd31467d83aa8a739ef0d Add disabled Lyrics and AirPlay placeholders to Now Playing
+0b3702d116ed8b7bf384508d015458c9a6086c65 Simplify profile and show installed app version
+c2e8e9673443fcbea125022ba9efa7888813561d Remove queue banner and lighten overview glass
+af94cbc36770599ccef350be73fb9cba5da7c9ff Narrow browsing player observation and increase overview transparency
+3d66dbe8c9f0119f935c466585bd048f4e4d15b2 Use native overview sheets and add Continue Listening progress ring
+```

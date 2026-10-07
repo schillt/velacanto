@@ -1,6 +1,6 @@
 # 0005 — Sideload-only deployment for 0.x
 
-- Status: Accepted
+- Status: Superseded by [0010](0010-internal-testflight-for-0-x.md)
 - Date: 2026-07-29
 
 ## Context

@@ -1,157 +1,84 @@
 # Velacanto
 
-Velacanto is an early-stage native music player for Apple platforms. It plays
-device-local audio in place and is being built to stream from personal Jellyfin
-and Navidrome libraries through source adapters.
+Velacanto is a native Jellyfin music app for iPhone, iPad and Mac. **0.3.5 alpha prerelease**
+restores system controls, lyrics, AirPlay and volume while improving playback and
+Now Playing presentation. It follows the 0.3.0 Foundation replacement; earlier
+releases remain in Git history and tags. Publication and distribution status are
+recorded separately in the [release acceptance record](docs/0.3.5-acceptance.md).
 
-> **Status:** Alpha. Velacanto 0.2.0 is the current release: a focused UI
-> architecture and interface-quality update. See the [0.2 release notes](docs/0.2-release-notes.md)
-> and [roadmap](docs/roadmap.md).
+The app is named **Velacanto**, bundle `com.chameleonenterprise.velacanto`.
+Users upgrading from the original app may need to sign in again. No legacy
+credential or queue-state migration is included.
 
-## Completed 0.1.0 goal
+## Current experience
 
-The first milestone will let a user:
+Browse Home, New, Library and Search; play songs, albums and playlists; use
+favorites, local pins, Play Next/Last, the queue and native seeking. Artist/album
+pages include artwork, overviews and bounded server-supplied recommendations.
+Jellyfin is the only implemented provider. The shared item/player interfaces keep
+provider details inside the adapter without adding speculative provider systems.
 
-- Open and play a local audio file without importing or copying it.
-- Connect securely to a Jellyfin server.
-- Sign in to an existing Jellyfin account.
-- Browse the account's music library.
-- Select and stream a track.
-- Use basic playback and system media controls.
-
-Velacanto is initially planned for iOS and macOS. CarPlay support will follow
-after the core playback experience is proven.
-
-## Project documentation
-
-- [0.2 release notes](docs/0.2-release-notes.md) — completed scope,
-  validation, and known limitations.
-- [0.2 plan](docs/0.2-plan.md) — historical scope and acceptance criteria.
-- [0.1.0 plan](docs/0.1-plan.md) — scope and acceptance criteria.
-- [0.1 stability acceptance](docs/0.1-stability-acceptance.md) — final
-  device/server verification matrix.
-- [Roadmap](docs/roadmap.md) — ordered work and exit gates.
-- [Architecture](docs/architecture.md) — component and runtime diagrams.
-- [Decision records](docs/decisions/README.md) — durable technical choices.
-- [Foundational product design](docs/design/README.md) — approved iOS and macOS
-  interface direction and interactive prototype.
-- [Interactive architecture visualization](docs/visualizations/README.md) —
-  standalone runtime and delivery-plan explorer.
+Now Playing includes an inline queue, synchronized lyrics with line seeking and
+idle follow, shared system artwork, Control Center/lock-screen commands, native
+AirPlay selection and volume. Lyrics availability depends on the library.
+iOS volume uses Apple's native control; Mac volume adjusts app playback gain.
+Playback reporting is not implemented; server history/play-count shelves may not
+reflect listening in this app. Offline/local libraries, playlist editing,
+persistent shuffle/repeat and CarPlay are deferred. Collection Shuffle exists.
+See [release notes](docs/0.3.5-release-notes.md) and [known issues](docs/0.3.5-known-issues.md), including the accepted volume-jump defect.
 
 ## Development
 
-Run the pre-build check without Xcode:
+Open `NativeFoundation/VelacantoFoundation.xcodeproj`, scheme
+`VelacantoFoundation`. These internal names preserve tested source boundaries;
+the built product is `Velacanto.app`. No legacy app target remains.
 
 ```sh
 ./scripts/preflight.sh --skip-xcode
-```
-
-Run the complete check after Xcode is installed:
-
-```sh
-./scripts/preflight.sh
-```
-
-Build the macOS app, run the foundation tests, and compile the iOS Simulator app
-with the selected Xcode beta:
-
-```sh
 ./scripts/build.sh all
-```
-
-Use `lint`, `macos`, `test`, `ios-simulator`, or `ios-simulator-test` instead
-of `all` to run one step. To reproduce the pull-request quality gate (including
-an iOS Simulator build, a Release build, and static analysis), use:
-
-```sh
+# For tests, first select an existing authorized OS 27 simulator:
+# export VELACANTO_IOS_SIMULATOR_DESTINATION='platform=iOS Simulator,id=<authorized-UUID>'
 ./scripts/build.sh pr
 ```
 
-Local runs default to the installed Xcode beta and the iPhone Air simulator
-running iOS 27.0. The GitHub Actions gate uses the hosted macOS 26 image,
-Xcode 26.6, and the iPhone Air simulator running iOS 26.5. Set
-`DEVELOPER_DIR` and `VELACANTO_IOS_SIMULATOR_DESTINATION` together to reproduce
-the hosted gate locally when that Xcode/runtime pair is installed. The hosted
-gate runs the platform-neutral unit suite on macOS and compiles the iOS app; its
-iOS Simulator runtime test command remains available for local diagnostics.
-Physical-device acceptance covers audio-session interruptions, routes,
-background playback, and system-media controls. Seven audio-session and
-system-command tests currently fail only in the iOS Simulator runtime suite;
-their physical-device behavior passed the 0.1 acceptance review, so the
-simulator results remain a documented diagnostic limitation rather than part of
-the hosted gate. The current interface has working local-file playback and a
-generated diagnostic tone, plus an early Jellyfin integration. Playback state
-is owned at the app level, publishes Now Playing metadata and artwork, and
-accepts system play, pause, previous, next, toggle, and seek commands. The
-background path and Control Center pause/resume controls have been verified on
-a sideloaded physical iPhone.
+Modes: `lint`, `macos`, `test`, `ios-simulator`, `ios-simulator-test`, `release`.
+Builds use per-worktree derived data. Set `VELACANTO_IOS_SIMULATOR_DESTINATION`
+explicitly for an existing authorized test device and `VELACANTO_PACKAGES_PATH` for an existing package
+checkout cache. The committed SwiftPM resolution is required. Current development
+requires iOS/iPadOS 27 and macOS 27 for both app and tests, Debug and Release.
+Use regular Xcode 27 or newer at `/Applications/Xcode.app/Contents/Developer`;
+scripts honor an explicit `DEVELOPER_DIR` and never auto-select Xcode beta.
+Preflight checks the selected Xcode and all three platform SDK versions. CI retains
+the OS 27 Quality Gate and validates its existing simulator before testing; Xcode
+26 is no longer a supported compatibility gate. The project is maintained directly
+(no tracked generator). See the [platform decision update](docs/decisions/0013-rebuilt-03-release.md#035-development-platform-update).
 
-Build output defaults to `VelacantoDerivedData` under the system temporary
-directory. Keeping build products outside a Documents folder managed by File
-Provider prevents Finder metadata from being copied onto the macOS app and
-rejected by code signing. To select another external location, set
-`VELACANTO_DERIVED_DATA_PATH`:
+The published 0.3.0 (108) minimums and historical acceptance remain unchanged.
+The 0.3.5 packaging candidate uses build 109; distribution must verify that identity is available before upload.
+Unsigned local/CI checks do not establish signed, physical or distribution
+acceptance; signing/export and Apple processing remain tracked by issue #149.
 
-```sh
-VELACANTO_DERIVED_DATA_PATH=/private/tmp/velacanto-derived ./scripts/build.sh all
-```
+Existing 106 formatting findings are explicitly baselined in
+`scripts/foundation-lint-baseline.txt` to avoid mixing historical formatting cleanup with functional changes. New findings fail; strict compiler/test gates still apply.
+Remove this formatting debt separately after release.
 
-Check Swift formatting without changing files:
+## Release and architecture
 
-```sh
-DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer \
-  xcrun swift-format lint --configuration .swift-format --strict \
-  --recursive Velacanto VelacantoTests
-```
+- [0.3.5 acceptance and provenance](docs/0.3.5-acceptance.md)
+- [Historical 0.3 acceptance](docs/0.3-acceptance-and-provenance.md)
+- [Engineering history and investigations](docs/0.3-engineering-record.md)
+- [Dependencies and notices](docs/0.3-dependencies.md)
+- [Architecture](docs/architecture.md)
+- [0.3.5 scope and remaining gates](docs/0.3.5-acceptance.md)
+- [Historical 0.3 plan](docs/0.3-plan.md)
+- [Agent instructions](AGENTS.md)
 
-### Jellyfin early access
+The owner authorized PR #174 into alpha after passing checks, a 0.3.5 GitHub
+prerelease from alpha and internal TestFlight through the existing Xcode Cloud
+workflow, with the documented known defects. Main promotion and public App Store
+submission are not authorized.
+Publication still requires recorded candidate checks and signed distribution verification. Credentials,
+signing material and raw device traces never belong in the repository.
 
-Choose **Connect to Jellyfin**, enter the complete server address, connect, and
-sign in with an existing Jellyfin account. Remote servers require HTTPS.
-Explicit HTTP addresses are accepted only for loopback, private, link-local,
-`.local`, and unqualified local-network hosts.
-
-After sign-in, Velacanto pages through accessible music libraries, albums,
-artists, songs, playlists, and server-backed search results with cached Jellyfin
-artwork. Selecting a track negotiates a source and play session with Jellyfin,
-uses direct play when the server confirms compatibility, and otherwise uses the
-server's transcoding fallback. The resolved stream goes through the same
-app-level player used for local files. The access token is stored in
-Velacanto’s non-synchronizing Keychain entry, the password is never persisted,
-the device identifier remains stable across launches, and logout removes the
-saved token. Tokens saved by early pre-alpha preferences and private-file
-implementations are migrated into Keychain when the session is restored.
-
-The connection and session path is covered by unit tests and has been verified
-against a real Jellyfin server on a physical iPhone, including relaunch and
-logout. The paginated browser, shared artwork cache, two-item playback queue,
-paused relaunch restoration, and system-media integration compile on both
-platforms. The remaining device/server checks are listed in the
-[0.1 stability acceptance matrix](docs/0.1-stability-acceptance.md).
-
-### Local playback
-
-Choose **Open Audio File…** to play a file directly from its current URL.
-Velacanto does not copy, import, upload, index, or persist a bookmark to that
-file. Access is retained only while the selected item is active. **Play Test
-Tone** checks the same playback coordinator without using personal media.
-
-### 0.x deployment
-
-Velacanto 0.x builds are for local development and sideloading. The project
-will not publish through the App Store or TestFlight before 1.0.
-
-Physical iPhone and iPad installs still require Apple code signing. During 0.x,
-contributors can use Xcode-managed signing with a free Apple Account
-(`Personal Team`) where its provisioning limits are acceptable. Paid Apple
-Developer Program enrollment, public distribution, and an App Store release
-pipeline are deferred until the 1.0 milestone.
-
-## Project identity
-
-- Publisher: Chameleon Enterprise Ltd
-- Bundle identifier: `com.chameleonenterprise.velacanto`
-- Primary language: English
-
-Velacanto is an independent project and is not affiliated with or endorsed by
-Jellyfin.
+Publisher: Chameleon Enterprise Ltd. Velacanto is independent of Jellyfin and is
+not affiliated with or endorsed by Jellyfin.

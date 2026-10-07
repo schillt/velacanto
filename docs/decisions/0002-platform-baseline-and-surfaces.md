@@ -1,6 +1,6 @@
 # 0002 — Platform baseline and 0.1.0 surfaces
 
-- Status: Accepted
+- Status: Superseded by [0007](0007-platform-26-baseline.md)
 - Date: 2026-07-29
 
 ## Context

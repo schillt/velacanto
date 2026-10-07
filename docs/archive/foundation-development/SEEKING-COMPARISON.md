@@ -1,0 +1,7 @@
+# Build99 seeking comparison
+
+Base: accepted98 f424413276d70e8efc9349853e3a18ccb31b8ac6. Restore precise native seeks and native scrub lifecycle from103540d. Include required playback-only slider component; explicitly remove its historical system-volume component. Keep direct delivery, artwork, queue, catalog, transport unchanged. AirPlay remains absent and volume placeholder inactive.
+
+Gesture begins with occurrence identity; release seeks that occurrence, cancellation does not seek. Native zero-tolerance seek; DEBUG completion records finite direction/current/reached categories only. No retries, replacement players, extra network requests or recovery logic. Existing silent-audio test exercises forward/back paused seeking. Physical gate: forward/back, near start/end, repeated scrub, skip during scrub, pause/resume, Play Next and browsing. Network behavior of seeking requires owner verification.98 archive remains available.
+
+Build100:99 owner reports stable playback but ineffective seeking. Journal shows four paired forward seek calls, cancelled first/completed second; no backward seek reaches native player. Remove custom slider/event synthesis entirely and restore SwiftUI Slider. Preserve precise seeks and delivery. Previous restarts current occurrence after3seconds, otherwise selects prior occurrence. First queue entry can restart. No new volume, route, transport, retry or playback replacement logic.

@@ -13,12 +13,8 @@ elif [ "$#" -gt 0 ]; then
   exit 2
 fi
 
-if [ "$skip_xcode" = false ] &&
-  [ -z "${DEVELOPER_DIR:-}" ] &&
-  [ -d /Applications/Xcode-beta.app/Contents/Developer ]; then
-  DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer
-  export DEVELOPER_DIR
-fi
+DEVELOPER_DIR=${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}
+export DEVELOPER_DIR
 
 failures=0
 warnings=0
@@ -102,48 +98,47 @@ else
   warn "Repository has no initial commit"
 fi
 
-if [ -f README.md ] && [ -f docs/0.1-plan.md ]; then
-  pass "Product brief and 0.1.0 plan exist"
+if [ -f README.md ] && [ -f docs/0.3-plan.md ] &&
+  [ -f docs/archive/0.1/0.1-plan.md ]; then
+  pass "Product brief, current plan, and archived 0.1.0 plan exist"
 else
-  fail "Product brief or 0.1.0 plan is missing"
+  fail "Product brief, current plan, or archived 0.1.0 plan is missing"
 fi
 
-if rg -q 'com\.chameleonenterprise\.velacanto' README.md docs/0.1-plan.md; then
+if rg -q 'com\.chameleonenterprise\.velacanto' README.md docs/0.3-plan.md; then
   pass "Bundle identifier is documented"
 else
   fail "Bundle identifier is not documented consistently"
 fi
 
-if find . -maxdepth 2 -name '*.xcodeproj' -print -quit | grep -q .; then
-  pass "An Xcode project exists"
+if [ -f NativeFoundation/VelacantoFoundation.xcodeproj/project.pbxproj ]; then
+  pass "Active rebuilt Xcode project exists"
 else
-  warn "No Xcode project exists yet"
+  fail "Active rebuilt Xcode project is missing"
 fi
 
-if [ -f Velacanto/Resources/PrivacyInfo.xcprivacy ] &&
-  plutil -lint Velacanto/Resources/PrivacyInfo.xcprivacy >/dev/null; then
+if [ -f NativeFoundation/Resources/PrivacyInfo.xcprivacy ] &&
+  plutil -lint NativeFoundation/Resources/PrivacyInfo.xcprivacy >/dev/null; then
   pass "Privacy manifest exists and is a valid property list"
 else
   fail "Privacy manifest is missing or invalid"
 fi
 
-if [ -f Velacanto/Resources/Info.plist ] &&
-  plutil -extract NSAppTransportSecurity.NSAllowsLocalNetworking raw \
-    Velacanto/Resources/Info.plist 2>/dev/null | grep -q '^true$'; then
-  pass "Local-network ATS exception is configured"
+if plutil -lint NativeFoundation/Resources/Info.plist >/dev/null; then
+  pass "Application Info.plist is valid"
 else
-  fail "Local-network ATS exception is missing"
+  fail "Application Info.plist is invalid"
 fi
 
 if plutil -extract NSAppTransportSecurity.NSAllowsArbitraryLoads raw \
-  Velacanto/Resources/Info.plist >/dev/null 2>&1; then
+  NativeFoundation/Resources/Info.plist >/dev/null 2>&1; then
   fail "Global arbitrary network loads are enabled"
 else
   pass "Global arbitrary network loads remain disabled"
 fi
 
 if plutil -extract UIBackgroundModes.0 raw \
-  Velacanto/Resources/Info.plist 2>/dev/null | grep -q '^audio$'; then
+  NativeFoundation/Resources/Info.plist 2>/dev/null | grep -q '^audio$'; then
   pass "iOS background audio mode is configured"
 else
   fail "iOS background audio mode is missing"
@@ -166,22 +161,25 @@ fi
 if [ "$skip_xcode" = true ]; then
   warn "Xcode checks were skipped by request"
 else
-  if command_exists xcodebuild; then
-    developer_dir=$(xcode-select -p 2>/dev/null || true)
-    if [ -n "$developer_dir" ]; then
-      pass "Active developer directory is $developer_dir"
+  xcodebuild_path="$DEVELOPER_DIR/usr/bin/xcodebuild"
+  pass "Selected developer directory is $DEVELOPER_DIR"
+  if [ -x "$xcodebuild_path" ] && xcode_version=$("$xcodebuild_path" -version 2>/dev/null); then
+    xcode_major=$(printf '%s\n' "$xcode_version" | awk '/^Xcode / { split($2, version, "."); print version[1] }')
+    if [ "${xcode_major:-0}" -ge 27 ] 2>/dev/null; then
+      pass "xcodebuild is ready ($(printf '%s' "$xcode_version" | tr '\n' ' '))"
     else
-      fail "No active Xcode developer directory is selected"
+      fail "Xcode 27 or newer is required"
     fi
-
-    if xcodebuild -version >/dev/null 2>&1; then
-      xcode_version=$(xcodebuild -version | tr '\n' ' ')
-      pass "xcodebuild is ready ($xcode_version)"
-    else
-      fail "xcodebuild is installed but not ready"
-    fi
+    for sdk in iphoneos iphonesimulator macosx; do
+      if sdk_version=$(xcrun --sdk "$sdk" --show-sdk-version 2>/dev/null) &&
+        [ "${sdk_version%%.*}" -ge 27 ] 2>/dev/null; then
+        pass "$sdk SDK $sdk_version is available"
+      else
+        fail "$sdk SDK 27 or newer is required"
+      fi
+    done
   else
-    fail "xcodebuild is missing"
+    fail "Xcode is unavailable or not ready at $DEVELOPER_DIR"
   fi
 fi
 
