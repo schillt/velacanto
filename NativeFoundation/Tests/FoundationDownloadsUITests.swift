@@ -202,7 +202,9 @@ final class FoundationDownloadsUITests: XCTestCase {
 
     private func reveal(_ element: XCUIElement, in app: XCUIApplication) {
         for step in 0..<32 {
-            if element.exists && element.isHittable && tapCenterIsVisible(element, in: app) {
+            if element.exists && element.frame.width > 0 && element.frame.height > 0
+                && tapCenterIsVisible(element, in: app) && element.isHittable
+            {
                 break
             }
             let scroll = [
@@ -215,14 +217,18 @@ final class FoundationDownloadsUITests: XCTestCase {
                 ? element.frame.midY >= viewport!.midY : step < 24
             scrollContent(in: app, upward: upward)
         }
-        if !element.exists || !element.isHittable || !tapCenterIsVisible(element, in: app) {
+        if !element.exists || element.frame.width <= 0 || element.frame.height <= 0
+            || !tapCenterIsVisible(element, in: app) || !element.isHittable
+        {
             capture("Unreachable navigation target", in: app)
             let hierarchy = XCTAttachment(string: app.debugDescription)
             hierarchy.name = "Synthetic unreachable navigation hierarchy"
             hierarchy.lifetime = .keepAlways
             add(hierarchy)
         }
-        XCTAssertTrue(element.exists && element.isHittable && tapCenterIsVisible(element, in: app))
+        XCTAssertTrue(
+            element.exists && element.frame.width > 0 && element.frame.height > 0
+                && tapCenterIsVisible(element, in: app) && element.isHittable)
     }
 
     // XCTest can report a clipped offscreen link as hittable and tap the adjacent row.
@@ -249,11 +255,15 @@ final class FoundationDownloadsUITests: XCTestCase {
             if frame.intersects(original), frame.maxY < original.maxY { top = max(top, frame.maxY) }
         }
         let profile = app.buttons["Profile and settings"].firstMatch
-        if profile.exists && profile.isHittable && profile.frame.minY < original.midY {
+        if profile.exists && profile.frame.height > 0 && profile.frame.intersects(original)
+            && profile.frame.minY < original.midY && profile.isHittable
+        {
             top = max(top, profile.frame.maxY + 12)
         }
         let search = app.textFields["Search music"]
-        if search.exists && search.isHittable && search.frame.minY < original.midY {
+        if search.exists && search.frame.height > 0 && search.frame.intersects(original)
+            && search.frame.minY < original.midY && search.isHittable
+        {
             top = max(top, search.frame.maxY + 8)
         }
         let tabBar = app.tabBars.firstMatch
@@ -261,7 +271,9 @@ final class FoundationDownloadsUITests: XCTestCase {
             bottom = min(bottom, tabBar.frame.minY)
         }
         let miniPlayer = app.buttons["Show Now Playing"]
-        if miniPlayer.exists && miniPlayer.isHittable && miniPlayer.frame.minY > original.midY {
+        if miniPlayer.exists && miniPlayer.frame.height > 0 && miniPlayer.frame.intersects(original)
+            && miniPlayer.frame.minY > original.midY && miniPlayer.isHittable
+        {
             bottom = min(bottom, miniPlayer.frame.minY)
         }
         let keyboard = app.keyboards.firstMatch
