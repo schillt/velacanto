@@ -390,8 +390,10 @@ final class FoundationDownloadsUITests: XCTestCase {
         tapVisible(address, in: app)
         address.typeText("https://example.invalid")
         let username = app.textFields["Username"]
-        let next = app.keyboards.buttons["Next"]
-        XCTAssertTrue(next.exists && next.isHittable)
+        let next = app.keyboards.firstMatch.buttons.matching(
+            NSPredicate(format: "label ==[c] %@", "next")
+        ).firstMatch
+        XCTAssertTrue(next.waitForExistence(timeout: 5) && next.isHittable)
         next.tap()
         username.typeText("synthetic-ui")
         let password = app.secureTextFields["Password"]
@@ -886,16 +888,20 @@ final class FoundationDownloadsUITests: XCTestCase {
         tapVisible(address, in: app)
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
         address.typeText("https://example.invalid")
-        let next = app.keyboards.buttons["Next"]
-        XCTAssertTrue(next.exists && next.isHittable)
+        let next = app.keyboards.firstMatch.buttons.matching(
+            NSPredicate(format: "label ==[c] %@", "next")
+        ).firstMatch
+        XCTAssertTrue(next.waitForExistence(timeout: 5) && next.isHittable)
         next.tap()
         app.textFields["Username"].typeText("synthetic-ui")
         XCTAssertTrue(next.exists && next.isHittable)
         next.tap()
         app.secureTextFields["Password"].typeText("synthetic-not-a-password")
         capture("Large text sign in secure keyboard focus", in: app)
-        let go = app.keyboards.buttons["Go"]
-        XCTAssertTrue(go.exists && go.isHittable)
+        let go = app.keyboards.firstMatch.buttons.matching(
+            NSPredicate(format: "label ==[c] %@", "go")
+        ).firstMatch
+        XCTAssertTrue(go.waitForExistence(timeout: 5) && go.isHittable)
         go.tap()
         XCTAssertTrue(
             app.descendants(matching: .any)["sign-in-progress"].waitForExistence(timeout: 5))
@@ -994,7 +1000,19 @@ final class FoundationDownloadsUITests: XCTestCase {
         capture("Full page accessible Profile and Settings", in: app)
         tapVisible(app.buttons["FoundationSettingsAccount"], in: app)
         XCTAssertTrue(app.navigationBars["Server & Account"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts["Jellyfin"].exists)
+        let accountForm = app.descendants(matching: .any).matching(
+            NSPredicate(
+                format: "label CONTAINS %@ AND (label CONTAINS %@ OR value CONTAINS %@)",
+                "Provider", "Jellyfin", "Jellyfin")
+        ).firstMatch
+        let providerLeaf = app.staticTexts["Jellyfin"]
+        if !accountForm.exists && !providerLeaf.exists {
+            let hierarchy = XCTAttachment(string: app.debugDescription)
+            hierarchy.name = "Synthetic current account provider accessibility hierarchy"
+            hierarchy.lifetime = .keepAlways
+            add(hierarchy)
+        }
+        XCTAssertTrue(accountForm.exists || providerLeaf.exists)
         XCTAssertFalse(app.secureTextFields.firstMatch.exists)
         XCTAssertFalse(app.textFields.firstMatch.exists)
         reveal(app.staticTexts["All music available to this Jellyfin account"], in: app)
@@ -1111,7 +1129,13 @@ final class FoundationDownloadsUITests: XCTestCase {
                 field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 14))
                 field.typeText("slow")
                 field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 4))
-                app.buttons["Cancel"].tap()
+                let clearedValue = field.value as? String ?? ""
+                XCTAssertTrue(clearedValue.isEmpty || clearedValue == "Search albums")
+                tapNativeChrome(app.navigationBars["Albums"].buttons["Close"], in: app)
+                let keyboardDismissed = expectation(
+                    for: NSPredicate(format: "exists == false"),
+                    evaluatedWith: app.keyboards.firstMatch)
+                wait(for: [keyboardDismissed], timeout: 5)
                 reveal(last, in: app)
                 XCTAssertTrue(
                     last.exists, "Clearing pending scoped query restores complete baseline")
@@ -1241,6 +1265,7 @@ final class FoundationDownloadsUITests: XCTestCase {
         XCTAssertEqual(artwork.frame.minY, expandedFrame.minY, accuracy: 2)
         XCTAssertEqual(artwork.frame.width, expandedFrame.width, accuracy: 2)
         XCTAssertEqual(artwork.frame.height, expandedFrame.height, accuracy: 2)
+        XCTAssertEqual(app.staticTexts["fixture-player-playback-identity"].label, originalIdentity)
         XCTAssertGreaterThanOrEqual(artworkTransitionCount("cancelled", in: app), 1)
         XCTAssertGreaterThanOrEqual(artworkTransitionCount("morph", in: app), 2)
         capture("Artwork native interactive cancellation restores expanded snapshot", in: app)
@@ -1277,10 +1302,27 @@ final class FoundationDownloadsUITests: XCTestCase {
         XCTAssertTrue(baselineAdd.waitForExistence(timeout: 5))
         XCTAssertTrue(baselineAdd.isEnabled)
         let baselineAddEnabled = baselineAdd.isEnabled
-        app.staticTexts["Fixture Album"].firstMatch.tap()
-        let menuClosed = expectation(
-            for: NSPredicate(format: "exists == false"), evaluatedWith: baselineAdd)
-        wait(for: [menuClosed], timeout: 5)
+        let detail = app.descendants(matching: .any)["collection-detail-album-album"]
+        let toolbar = app.buttons["More actions"]
+        let menuRemoval = app.buttons["Remove Downloads"]
+        let point = CGPoint(
+            x: detail.frame.minX + detail.frame.width * 0.06,
+            y: toolbar.frame.maxY + 32)
+        XCTAssertTrue(app.frame.contains(point) && detail.frame.contains(point))
+        XCTAssertFalse(toolbar.frame.insetBy(dx: -12, dy: -12).contains(point))
+        XCTAssertFalse(baselineAdd.frame.insetBy(dx: -12, dy: -12).contains(point))
+        if menuRemoval.exists {
+            XCTAssertFalse(menuRemoval.frame.insetBy(dx: -12, dy: -12).contains(point))
+        }
+        app.coordinate(withNormalizedOffset: .zero).withOffset(
+            CGVector(dx: point.x - app.frame.minX, dy: point.y - app.frame.minY)
+        ).tap()
+        for overlay in [baselineAdd, menuRemoval, app.buttons["Remove"]] {
+            let closed = expectation(
+                for: NSPredicate(format: "exists == false"), evaluatedWith: overlay)
+            wait(for: [closed], timeout: 5)
+        }
+        XCTAssertFalse(app.staticTexts["Remove downloads?"].exists)
         let baseline = canonicalPresentation(
             app, state: "full", offline: false,
             captureName: "Canonical album before related sheet action presenters")
@@ -1404,7 +1446,8 @@ final class FoundationDownloadsUITests: XCTestCase {
             }
             XCTAssertTrue(app.buttons["More playback options"].waitForExistence(timeout: 5))
             XCTAssertTrue(app.buttons["Pause"].exists)
-            XCTAssertEqual(identity.label, originalIdentity)
+            XCTAssertEqual(
+                app.staticTexts["fixture-player-playback-identity"].label, originalIdentity)
         }
         dismissNowPlaying(app)
         XCTAssertTrue(app.descendants(matching: .any)["collection-detail-album-album"].exists)

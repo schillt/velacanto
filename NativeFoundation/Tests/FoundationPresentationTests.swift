@@ -27,7 +27,7 @@ final class FoundationPresentationTests: XCTestCase {
             .fade(.offscreenSource))
         XCTAssertEqual(
             artworkTransition(
-                compact: CGRect(x: 18, y: 730, width: .infinity, height: 34), expanded: expanded),
+                compact: CGRect(x: 18, y: 730, width: CGFloat.infinity, height: 34), expanded: expanded),
             .fade(.unavailableGeometry))
     }
 

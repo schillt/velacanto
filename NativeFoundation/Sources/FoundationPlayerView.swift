@@ -248,8 +248,17 @@ struct FoundationPlayerView: View {
         }
         #if DEBUG && os(iOS) && targetEnvironment(simulator)
             .overlay(alignment: .bottomTrailing) {
-                if FoundationDownloadsTestHarness.enabled, let artworkPresentation {
-                    FoundationPlayerArtworkTransitionEvidence(model: artworkPresentation)
+                if FoundationDownloadsTestHarness.enabled {
+                    ZStack {
+                        if let artworkPresentation {
+                            FoundationPlayerArtworkTransitionEvidence(model: artworkPresentation)
+                        }
+                        FoundationDownloadUIPlaybackIdentity(
+                            player: player, identifier: "fixture-player-playback-identity"
+                        )
+                        .font(.system(size: 1)).frame(width: 1, height: 1).clipped().opacity(0.05)
+                        .allowsHitTesting(false)
+                    }
                 }
             }
         #endif
