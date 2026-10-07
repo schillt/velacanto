@@ -402,13 +402,16 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
     func search(
         query: String, kind: FoundationItem.Kind, startIndex: Int, limit: Int
     ) async throws -> FoundationPage {
-        guard startIndex >= 0, (1...50).contains(limit),
-            kind == .track || kind == .album || kind == .artist
-        else { throw FoundationLibraryError.invalidResponse }
+        guard startIndex >= 0, (1...50).contains(limit) else {
+            throw FoundationLibraryError.invalidResponse
+        }
         let term = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !term.isEmpty else { return FoundationPage(items: [], nextStartIndex: nil) }
         if kind == .artist {
             return try await albumArtists(startIndex: startIndex, limit: limit, query: term)
+        }
+        if kind == .genre {
+            return try await genrePage(startIndex: startIndex, limit: limit, query: term)
         }
         return try await page(
             kinds: [kind], parent: nil, startIndex: startIndex,
@@ -680,11 +683,18 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
     }
 
     func genres(startIndex: Int = 0) async throws -> FoundationPage {
+        try await genrePage(startIndex: startIndex, limit: 50)
+    }
+
+    private func genrePage(startIndex: Int, limit: Int, query: String? = nil) async throws
+        -> FoundationPage
+    {
         guard startIndex >= 0 else { throw FoundationLibraryError.invalidResponse }
         var parameters = Paths.GetGenresParameters()
         parameters.userID = session.userID
         parameters.startIndex = startIndex
-        parameters.limit = 50
+        parameters.limit = limit
+        parameters.searchTerm = query
         parameters.includeItemTypes = [.musicAlbum, .audio]
         parameters.sortBy = [.sortName]
         parameters.sortOrder = [.ascending]
@@ -697,7 +707,7 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
         let endpoint = Request<BaseItemDtoQueryResult>(
             path: "/MusicGenres", method: "GET", query: parameters.asQuery, id: "GetMusicGenres")
         return try mappedPage(
-            try await send(endpoint), kinds: [.genre], startIndex: startIndex, limit: 50)
+            try await send(endpoint), kinds: [.genre], startIndex: startIndex, limit: limit)
     }
 
     func albums(genreID: String, startIndex: Int = 0) async throws -> FoundationPage {

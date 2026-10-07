@@ -15,10 +15,14 @@ enum FoundationDestination: Int, CaseIterable {
     var symbol: String {
         switch self {
         case .home: "house.fill"
-        case .new: "music.note.list"
-        case .library: "rectangle.stack"
+        case .new: "square.grid.2x2"
+        case .library: "music.pages"
         case .search: "magnifyingglass"
         }
+    }
+    var icon: Image {
+        self == .home
+            ? Image("HomeRounded").renderingMode(.template) : Image(systemName: symbol)
     }
 }
 
@@ -51,9 +55,11 @@ struct FoundationLibraryView: View {
     @State private var selectedTab = FoundationDestination.home
     @State private var initialConnectionResolved = false
     @State private var selectedTabByUser = false
-    @State private var playerDestination: FoundationItem?
-    @State private var playerDestinationTab: FoundationDestination?
-    @Namespace private var playerTransition
+    #if os(iOS)
+        @StateObject private var playerArtworkPresentation =
+            FoundationPlayerArtworkPresentationModel()
+        @AccessibilityFocusState private var miniPlayerFocused: Bool
+    #endif
     @State private var showingPlayer = false
     @State private var showingSettings = false
     @State private var playlistSource: FoundationItem?
@@ -64,6 +70,7 @@ struct FoundationLibraryView: View {
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.scenePhase) private var scenePhase
     @State private var openedItem: FoundationItem?
+    @State private var offlineSurface: Color?
 
     init(library: any FoundationLibrary, player: FoundationPlayer, signOut: @escaping () -> Void) {
         self.library = library
@@ -95,9 +102,10 @@ struct FoundationLibraryView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if connectivity.localOnly { FoundationOfflineStatus() }
+            if connectivity.localOnly { FoundationOfflineStatus(surfaceColor: offlineSurface) }
             shell
         }
+        .onPreferenceChange(FoundationOfflineSurfacePreferenceKey.self) { offlineSurface = $0 }
         .onReceive(player.$queue.removeDuplicates()) { displayedQueue = $0 }
         .onReceive(player.$selectedEntryID.removeDuplicates()) { displayedEntryID = $0 }
         .onReceive(player.$state.removeDuplicates()) { displayedState = $0 }
@@ -123,12 +131,12 @@ struct FoundationLibraryView: View {
             favorites.request(.refresh)
             homeFavorites.request(.refresh)
         }
-        .foundationPlayerCover(isPresented: $showingPlayer) {
+        .foundationPlayerCover(isPresented: $showingPlayer, player: player) {
             FoundationPlayerView(player: player, library: library)
         }
-        .sheet(isPresented: $showingSettings) {
+        .foundationSettingsPresentation(isPresented: $showingSettings) {
             FoundationSettingsView(
-                name: profileName, image: profileImage, signOut: signOut)
+                name: profileName, image: profileImage, signOut: signOut, library: library)
         }
         .sheet(
             isPresented: Binding(
@@ -142,19 +150,14 @@ struct FoundationLibraryView: View {
         .foundationDownloadRemovalPresentation()
         .environmentObject(playlistChanges)
         .environment(\.foundationAddToPlaylist, playlistPresentation)
-        .environment(\.foundationPlayerTransition, playerTransition)
-        .environment(
-            \.foundationPlayerArtworkIdentity,
-            displayedQueue.first { $0.id == displayedEntryID }?.item.sharedArtworkIdentity
-        )
+        #if os(iOS)
+            .environment(\.foundationPlayerArtworkPresentation, playerArtworkPresentation)
+            .onChange(of: playerArtworkPresentation.isPlayerPresented) { wasPresented, presented in
+                if wasPresented, !presented { miniPlayerFocused = true }
+            }
+        #endif
         .environment(\.foundationOpenLibrary, libraryPresentation)
-        .environment(
-            \.foundationOpenLibraryItem,
-            { item in
-                showingSettings = false
-                playerDestinationTab = selectedTab
-                playerDestination = item
-            })
+
     }
 
     private func catalogIsActive(_ tab: FoundationDestination) -> Bool {
@@ -209,12 +212,16 @@ struct FoundationLibraryView: View {
         private var tabs: some View {
             TabView(selection: tabSelection) {
                 ForEach(FoundationDestination.allCases, id: \.self) { destination in
-                    Tab(
-                        destination.title, systemImage: destination.symbol, value: destination,
-                        role: destination == .search ? .search : nil
-                    ) {
+                    Tab(value: destination, role: destination == .search ? .search : nil) {
                         NavigationStack {
                             browsingContent(destination)
+                        }
+                    } label: {
+                        Label {
+                            Text(destination.title)
+                        } icon: {
+                            destination.icon
+                                .symbolVariant(selectedTab == destination ? .fill : .none)
                         }
                     }
                 }
@@ -224,17 +231,6 @@ struct FoundationLibraryView: View {
 
     private func browsingContent(_ tab: FoundationDestination) -> some View {
         destinationContent(tab)
-            .navigationDestination(
-                isPresented: Binding(
-                    get: { playerDestinationTab == tab && playerDestination != nil },
-                    set: { if !$0 && playerDestinationTab == tab { playerDestination = nil } })
-            ) {
-                if let item = playerDestination, playerDestinationTab == tab {
-                    FoundationItemDestination(
-                        item: item, library: library, player: player, isActive: catalogIsActive(tab)
-                    )
-                }
-            }
             #if os(iOS)
                 .toolbar(.visible, for: .tabBar)
             #endif
@@ -331,41 +327,26 @@ struct FoundationLibraryView: View {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Your Music").font(.title2.bold()).padding(.bottom, 4)
                     NavigationLink {
-                        FoundationCatalogView(
-                            title: "Albums", model: albums, library: library, player: player,
-                            isActive: catalogIsActive(.library),
-                            localItems: { downloads.downloadedAlbums }
-                        ) { try await library.albums(startIndex: $0) }
-                        #if os(iOS)
-                            .toolbar(.visible, for: .navigationBar)
-                        #endif
+                        FoundationLibraryIndexView(
+                            kind: .album, model: albums, library: library, player: player,
+                            isActive: catalogIsActive(.library))
                     } label: {
                         categoryRow(
                             "Albums", subtitle: "Browse your collection by album",
                             symbol: "opticaldisc.fill")
                     }.accessibilityIdentifier("library-category-albums")
                     NavigationLink {
-                        FoundationCatalogView(
-                            title: "Artists", model: artists, library: library, player: player,
-                            isActive: catalogIsActive(.library),
-                            localItems: { downloads.downloadedArtists }
-                        ) { try await library.artists(startIndex: $0) }
-                        #if os(iOS)
-                            .toolbar(.visible, for: .navigationBar)
-                        #endif
+                        FoundationLibraryIndexView(
+                            kind: .artist, model: artists, library: library, player: player,
+                            isActive: catalogIsActive(.library))
                     } label: {
                         categoryRow(
                             "Artists", subtitle: "Find music by artist", symbol: "music.mic")
                     }.accessibilityIdentifier("library-category-artists")
                     NavigationLink {
-                        FoundationTrackList(
-                            title: "Songs", tracks: songs, player: player, library: library,
-                            isActive: catalogIsActive(.library),
-                            localItems: { downloads.downloadedSongs }
-                        ) { try await library.songs(startIndex: $0) }
-                        #if os(iOS)
-                            .toolbar(.visible, for: .navigationBar)
-                        #endif
+                        FoundationLibraryIndexView(
+                            kind: .track, model: songs, library: library, player: player,
+                            isActive: catalogIsActive(.library))
                     } label: {
                         categoryRow(
                             "Songs", subtitle: "See every song in your library",
@@ -374,7 +355,7 @@ struct FoundationLibraryView: View {
                     NavigationLink {
                         FoundationPlaylistIndex(
                             library: library, player: player, isActive: catalogIsActive(.library),
-                            model: playlists
+                            model: playlists, usesLibraryIndex: true
                         )
                         #if os(iOS)
                             .toolbar(.visible, for: .navigationBar)
@@ -385,15 +366,9 @@ struct FoundationLibraryView: View {
                             symbol: "music.note.list")
                     }.accessibilityIdentifier("library-category-playlists")
                     NavigationLink {
-                        FoundationGenreIndex(
-                            genres: genres, library: library, player: player,
-                            isActive: catalogIsActive(.library)
-                        ) {
-                            try await library.genres(startIndex: $0)
-                        }.foundationCatalogHeader("Genres")
-                            #if os(iOS)
-                                .toolbar(.visible, for: .navigationBar)
-                            #endif
+                        FoundationLibraryIndexView(
+                            kind: .genre, model: genres, library: library, player: player,
+                            isActive: catalogIsActive(.library))
                     } label: {
                         categoryRow(
                             "Genres", subtitle: "Browse albums by genre", symbol: "guitars")
@@ -423,27 +398,13 @@ struct FoundationLibraryView: View {
                 .toolbar(.visible, for: .navigationBar)
             #endif
         }
-        .navigationDestination(
-            isPresented: Binding(
-                get: { openedItem != nil }, set: { if !$0 { openedItem = nil } }
-            )
-        ) {
-            if let item = openedItem {
-                FoundationItemDestination(
-                    item: item, library: library, player: player,
-                    isActive: catalogIsActive(.library)
-                )
-                #if os(iOS)
-                    .toolbar(.visible, for: .navigationBar)
-                #endif
-            }
-        }
+        .foundationCollectionDestination(
+            item: $openedItem, library: library, player: player, isActive: catalogIsActive(.library)
+        )
     }
 
     private func pinnedTile(_ item: FoundationItem) -> some View {
-        Button {
-            openedItem = item
-        } label: {
+        FoundationCollectionSourceButton(item: item, action: { openedItem = item }) {
             VStack(alignment: .leading) {
                 Spacer(minLength: 24)
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
@@ -462,6 +423,7 @@ struct FoundationLibraryView: View {
                         isActive: catalogIsActive(.library), size: geometry.size.width
                     )
                     .id(item.sharedArtworkIdentity)
+                    .foundationCollectionArtworkSource(item: item)
                     .overlay {
                         LinearGradient(
                             colors: [.black.opacity(0.05), .black.opacity(0.8)],
@@ -530,8 +492,11 @@ struct FoundationLibraryView: View {
                             Image(systemName: "music.note").frame(width: 34, height: 34)
                         }
                     }
-                    .foundationPlayerArtworkSource(
-                        namespace: playerTransition, identity: item?.sharedArtworkIdentity)
+                    #if os(iOS)
+                        .foundationPlayerArtworkRegistration(
+                            role: .compact, identity: item?.sharedArtworkIdentity,
+                            cornerRadius: 6)
+                    #endif
                     VStack(alignment: .leading, spacing: 2) {
                         Text(item?.title ?? "Nothing Playing").font(.callout.weight(.medium))
                             .lineLimit(1)
@@ -544,6 +509,9 @@ struct FoundationLibraryView: View {
                 }.contentShape(Rectangle())
             }
             .buttonStyle(.plain).accessibilityLabel("Show Now Playing")
+            #if os(iOS)
+                .accessibilityFocused($miniPlayerFocused)
+            #endif
             .accessibilityValue(
                 [item?.title, item?.subtitle, displayedState.label].compactMap { $0 }.filter {
                     !$0.isEmpty
@@ -664,6 +632,10 @@ struct FoundationCatalogView: View {
             }
         #endif
         .foundationDetailPresentation(title: title, immersive: headerItem != nil, tint: detailTint)
+        .preference(
+            key: FoundationOfflineSurfacePreferenceKey.self,
+            value: isActive && isVisible && headerItem != nil ? detailTint : nil
+        )
         .modifier(FoundationDetailTitle(item: headerItem))
         .toolbar {
             if let headerItem {
@@ -683,16 +655,9 @@ struct FoundationCatalogView: View {
             // Main-actor change callbacks finish before the asynchronous task begins.
             if isFavorites, isActive, isVisible { revision += 1 }
         }
-        .navigationDestination(
-            isPresented: Binding(
-                get: { openedItem != nil }, set: { if !$0 { openedItem = nil } }
-            )
-        ) {
-            if let item = openedItem {
-                FoundationItemDestination(
-                    item: item, library: library, player: player, isActive: isActive)
-            }
-        }
+        .foundationCollectionDestination(
+            item: $openedItem, library: library, player: player, isActive: isActive
+        )
         .onChange(of: connectivity.localOnly ? localItems?() : nil) { _, items in
             if let items { model.installSnapshot(items) }
         }
@@ -829,19 +794,19 @@ struct FoundationCollectionCard: View {
     var body: some View {
         if !connectivity.localOnly || !downloads.browseTracks(for: item).isEmpty {
             VStack(alignment: item.kind == .artist ? .center : .leading, spacing: 6) {
-                Button {
-                    open()
-                } label: {
+                FoundationCollectionSourceButton(item: item, action: open) {
                     if item.kind == .artist {
                         FoundationCatalogArtwork(
                             item: item, library: library, isActive: isActive, size: 150
                         ).id(item.sharedArtworkIdentity)
+                            .foundationCollectionArtworkSource(item: item)
                     } else {
                         GeometryReader { geometry in
                             FoundationCatalogArtwork(
                                 item: item, library: library, isActive: isActive,
                                 size: geometry.size.width
                             ).id(item.sharedArtworkIdentity)
+                                .foundationCollectionArtworkSource(item: item)
                         }.aspectRatio(1, contentMode: .fit)
                     }
                 }.buttonStyle(.plain).accessibilityLabel("View " + item.title)
@@ -900,23 +865,27 @@ struct FoundationLibraryItemRow: View {
     var body: some View {
         VStack(alignment: .leading) {
             HStack(spacing: 12) {
-                Button {
-                    if let play {
-                        guard
-                            !connectivity.localOnly || item.kind != .track
-                                || downloads.isReady(item)
-                        else { return }
-                        play()
-                    } else {
-                        open()
+                FoundationCollectionSourceButton(
+                    item: item,
+                    action: {
+                        if let play {
+                            guard
+                                !connectivity.localOnly || item.kind != .track
+                                    || downloads.isReady(item)
+                            else { return }
+                            play()
+                        } else {
+                            open()
+                        }
                     }
-                } label: {
+                ) {
                     HStack(spacing: 12) {
                         if !connectivity.localOnly || !downloads.browseTracks(for: item).isEmpty {
                             FoundationCatalogArtwork(
                                 item: artworkItem, library: library, isActive: isActive
                             )
                             .id(artworkItem.id + (artworkItem.primaryImageTag ?? ""))
+                            .foundationCollectionArtworkSource(item: item)
                         }
                         VStack(alignment: .leading) {
                             HStack(alignment: .firstTextBaseline, spacing: 6) {
@@ -1238,6 +1207,10 @@ struct FoundationTrackList: View {
         }
         .listStyle(.plain)
         .foundationDetailPresentation(title: title, immersive: collection != nil, tint: detailTint)
+        .preference(
+            key: FoundationOfflineSurfacePreferenceKey.self,
+            value: isActive && isVisible && collection != nil ? detailTint : nil
+        )
         .modifier(FoundationDetailTitle(item: collection))
         .accessibilityIdentifier(
             collection.map { "collection-detail-\($0.kind)-\($0.id)" } ?? "track-list"
@@ -1293,15 +1266,8 @@ struct FoundationTrackList: View {
                 await loadTracks()
             #endif
         }
-        .navigationDestination(
-            isPresented: Binding(
-                get: { openedCollection != nil }, set: { if !$0 { openedCollection = nil } })
-        ) {
-            if let item = openedCollection {
-                FoundationItemDestination(
-                    item: item, library: library, player: player, isActive: isActive)
-            }
-        }
+        .foundationCollectionDestination(
+            item: $openedCollection, library: library, player: player, isActive: isActive)
     }
 
     private func loadTracks() async {
@@ -1550,7 +1516,9 @@ private struct FoundationScreenHeader<Profile: View, Search: View>: ViewModifier
 struct FoundationLoadingPlaceholder: View {
     enum Layout { case rows, genreCards, albumShelf, albumGrid }
     var layout: Layout = .rows
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    var rowCount = 4
+    var rowSpacing = 16.0
+    @Environment(\.foundationReduceMotion) private var reduceMotion
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var bright = false
 
@@ -1571,13 +1539,13 @@ struct FoundationLoadingPlaceholder: View {
     @ViewBuilder private var shapes: some View {
         switch layout {
         case .rows:
-            VStack(spacing: 16) {
-                ForEach(0..<4) { index in
+            VStack(spacing: rowSpacing) {
+                ForEach(0..<rowCount, id: \.self) { index in
                     HStack(spacing: 12) {
                         RoundedRectangle(cornerRadius: 8).frame(width: 48, height: 48)
                         textLines
                         Spacer(minLength: 0)
-                    }.opacity(1 - Double(index) * 0.23)
+                    }.opacity(max(0.3, 1 - Double(index) / Double(max(1, rowCount)) * 0.7))
                 }
             }
         case .genreCards:
@@ -1644,12 +1612,13 @@ struct FoundationAlbumShelfCard: View {
     var body: some View {
         if !connectivity.localOnly || !downloads.browseTracks(for: item).isEmpty {
             VStack(alignment: .leading, spacing: 8) {
-                Button(action: open) {
+                FoundationCollectionSourceButton(item: item, action: open) {
                     VStack(alignment: .leading, spacing: 8) {
                         FoundationCatalogArtwork(
                             item: item, library: library, isActive: isActive, size: 144
                         )
                         .id(item.sharedArtworkIdentity)
+                        .foundationCollectionArtworkSource(item: item)
                         VStack(alignment: .leading, spacing: 4) {
                             HStack(alignment: .firstTextBaseline, spacing: 6) {
                                 Text(item.title).font(.headline).lineLimit(
@@ -1818,25 +1787,8 @@ extension View {
         }
     }
 
-    @ViewBuilder func foundationDetailPresentation(
-        title: String, immersive: Bool, tint: Color
-    ) -> some View {
-        if immersive {
-            self.navigationTitle("")
-                .scrollContentBackground(.hidden)
-                .background { tint.ignoresSafeArea() }
-                .environment(\.colorScheme, .dark)
-                #if os(iOS)
-                    .ignoresSafeArea(.container, edges: .top)
-                    .contentMargins(.top, 0, for: .scrollContent)
-                    .navigationBarTitleDisplayMode(.inline)
-                    .toolbarBackground(.hidden, for: .navigationBar)
-                    .toolbarColorScheme(.dark, for: .navigationBar)
-                    .toolbar(.visible, for: .navigationBar)
-                #endif
-        } else {
-            self.foundationCatalogHeader(title)
-        }
+    func foundationDetailPresentation(title: String, immersive: Bool, tint: Color) -> some View {
+        modifier(FoundationDetailPresentation(title: title, immersive: immersive, tint: tint))
     }
 }
 
@@ -1850,7 +1802,7 @@ private struct FoundationDetailTitlePosition: PreferenceKey {
 
 struct FoundationDetailTitle: ViewModifier {
     let item: FoundationItem?
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.foundationReduceMotion) private var reduceMotion
     @State private var titleBottom = CGFloat.greatestFiniteMagnitude
     @State private var toolbarBottom = CGFloat.zero
 
@@ -1908,5 +1860,190 @@ struct FoundationDetailTitle: ViewModifier {
         }
         .multilineTextAlignment(.center)
         .padding(.horizontal, 16).padding(.vertical, 6)
+    }
+}
+
+/// Transition state belongs to the page that owns its existing destination binding.
+private struct FoundationCollectionTransitionContext: Sendable {
+    let namespace: Namespace.ID
+    let select: @MainActor @Sendable (FoundationItem, String) -> Void
+}
+
+private struct FoundationCollectionTransitionKey: EnvironmentKey {
+    static let defaultValue: FoundationCollectionTransitionContext? = nil
+}
+
+private struct FoundationCollectionOccurrenceKey: EnvironmentKey {
+    static let defaultValue: String? = nil
+}
+
+extension EnvironmentValues {
+    fileprivate var foundationCollectionTransition: FoundationCollectionTransitionContext? {
+        get { self[FoundationCollectionTransitionKey.self] }
+        set { self[FoundationCollectionTransitionKey.self] = newValue }
+    }
+    fileprivate var foundationCollectionOccurrence: String? {
+        get { self[FoundationCollectionOccurrenceKey.self] }
+        set { self[FoundationCollectionOccurrenceKey.self] = newValue }
+    }
+}
+
+private struct FoundationCollectionSourceButton<Label: View>: View {
+    let item: FoundationItem
+    let action: () -> Void
+    @ViewBuilder let label: () -> Label
+    @State private var occurrence = UUID().uuidString
+    @Environment(\.foundationCollectionTransition) private var transition
+
+    private var sourceID: String { item.sharedArtworkIdentity + "-" + occurrence }
+
+    var body: some View {
+        Button {
+            if item.kind == .album || item.kind == .playlist {
+                transition?.select(item, sourceID)
+            }
+            action()
+        } label: {
+            label().environment(\.foundationCollectionOccurrence, sourceID)
+        }
+    }
+}
+
+private struct FoundationCollectionArtworkSource: ViewModifier {
+    let item: FoundationItem
+    @Environment(\.foundationCollectionTransition) private var transition
+    @Environment(\.foundationCollectionOccurrence) private var occurrence
+
+    @ViewBuilder func body(content: Content) -> some View {
+        #if os(iOS)
+            if item.kind == .album || item.kind == .playlist,
+                item.primaryImageTag != nil, let transition, let occurrence
+            {
+                content.matchedTransitionSource(id: occurrence, in: transition.namespace)
+            } else {
+                content
+            }
+        #else
+            content
+        #endif
+    }
+}
+
+private struct FoundationCollectionDestination: ViewModifier {
+    @Binding var item: FoundationItem?
+    let library: any FoundationLibrary
+    let player: FoundationPlayer
+    let isActive: Bool
+    @Namespace private var namespace
+    @State private var sourceIdentity: String?
+    @State private var sourceOccurrence: String?
+    @Environment(\.foundationReduceMotion) private var reduceMotion
+
+    private var context: FoundationCollectionTransitionContext {
+        .init(namespace: namespace) { selected, occurrence in
+            sourceIdentity = selected.sharedArtworkIdentity
+            sourceOccurrence = selected.primaryImageTag == nil ? nil : occurrence
+        }
+    }
+
+    func body(content: Content) -> some View {
+        content.environment(\.foundationCollectionTransition, context)
+            .navigationDestination(
+                isPresented: Binding(
+                    get: { item != nil }, set: { if !$0 { item = nil } })
+            ) {
+                if let item {
+                    destination(item)
+                }
+            }
+            .onChange(of: item?.sharedArtworkIdentity) { _, identity in
+                if identity == nil {
+                    sourceIdentity = nil
+                    sourceOccurrence = nil
+                }
+            }
+    }
+
+    @ViewBuilder private func destination(_ item: FoundationItem) -> some View {
+        let page = FoundationItemDestination(
+            item: item, library: library, player: player, isActive: isActive)
+        #if os(iOS)
+            if !reduceMotion, sourceIdentity == item.sharedArtworkIdentity,
+                let sourceOccurrence, item.kind == .album || item.kind == .playlist
+            {
+                page.navigationTransition(.zoom(sourceID: sourceOccurrence, in: namespace))
+            } else {
+                page
+            }
+        #else
+            page
+        #endif
+    }
+}
+
+extension View {
+    fileprivate func foundationCollectionArtworkSource(item: FoundationItem) -> some View {
+        modifier(FoundationCollectionArtworkSource(item: item))
+    }
+
+    func foundationCollectionDestination(
+        item: Binding<FoundationItem?>, library: any FoundationLibrary,
+        player: FoundationPlayer, isActive: Bool
+    ) -> some View {
+        modifier(
+            FoundationCollectionDestination(
+                item: item, library: library, player: player, isActive: isActive))
+    }
+}
+
+private struct FoundationDetailPresentation: ViewModifier {
+    let title: String
+    let immersive: Bool
+    let tint: Color
+    @Environment(\.foundationRelatedItemSheet) private var relatedItemSheet
+
+    @ViewBuilder func body(content: Content) -> some View {
+        if immersive {
+            if relatedItemSheet {
+                content.navigationTitle("")
+                    .scrollContentBackground(.hidden)
+                    .environment(\.colorScheme, .dark)
+                    #if os(iOS)
+                        .navigationBarTitleDisplayMode(.inline)
+                        .toolbarBackground(.hidden, for: .navigationBar)
+                        .toolbarColorScheme(.dark, for: .navigationBar)
+                        .toolbar(.visible, for: .navigationBar)
+                    #endif
+            } else {
+                content.navigationTitle("")
+                    .scrollContentBackground(.hidden)
+                    .background { tint.ignoresSafeArea() }
+                    .environment(\.colorScheme, .dark)
+                    #if os(iOS)
+                        .ignoresSafeArea(.container, edges: .top)
+                        .contentMargins(.top, 0, for: .scrollContent)
+                        .navigationBarTitleDisplayMode(.inline)
+                        .toolbarBackground(.hidden, for: .navigationBar)
+                        .toolbarColorScheme(.dark, for: .navigationBar)
+                        .toolbar(.visible, for: .navigationBar)
+                    #endif
+            }
+        } else {
+            content.foundationCatalogHeader(title)
+        }
+    }
+}
+
+extension View {
+    @ViewBuilder fileprivate func foundationSettingsPresentation<Settings: View>(
+        isPresented: Binding<Bool>, @ViewBuilder settings: @escaping () -> Settings
+    ) -> some View {
+        #if os(iOS)
+            self.fullScreenCover(isPresented: isPresented, content: settings)
+        #else
+            self.sheet(isPresented: isPresented) {
+                settings().frame(minWidth: 460, minHeight: 640)
+            }
+        #endif
     }
 }

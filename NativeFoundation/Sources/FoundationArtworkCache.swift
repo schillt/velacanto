@@ -346,6 +346,14 @@ actor FoundationArtworkCache {
         return await FoundationArtworkDirectoryOwner.shared.clear(root: directory, retaining: scope)
     }
 
+    /// Separate physical cache files from transient decoded-image memory.
+    func storageUsage() async -> (memory: Int64, disk: Int64?) {
+        guard live else { return (0, nil) }
+        let bytes = await disk.storageBytes()
+        guard live else { return (0, nil) }
+        return (Int64(entries.values.reduce(0, { $0 + $1.cost })), bytes)
+    }
+
     func usage() async -> (memory: Int, disk: Int, active: Int, pending: Int) {
         (entries.values.reduce(0, { $0 + $1.cost }), await disk.bytes(), active, jobs.count)
     }
@@ -531,6 +539,34 @@ private actor FoundationArtworkDisk {
     }
 
     func bytes() -> Int { files().reduce(0) { $0 + $1.1 } }
+
+    func storageBytes() async -> Int64? {
+        await registration.value
+        guard live else { return nil }
+        let manager = FileManager.default
+        guard manager.fileExists(atPath: directory.path) else { return 0 }
+        do {
+            guard try directory.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink != true
+            else { return nil }
+            let urls = try manager.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
+            var bytes: Int64 = 0
+            for url in urls
+            where url.pathExtension == "art"
+                || url.lastPathComponent == revisionFile.lastPathComponent
+            {
+                let values = try url.resourceValues(forKeys: [
+                    .isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey,
+                ])
+                guard values.isRegularFile == true, values.isSymbolicLink != true,
+                    let size = values.fileSize
+                else { return nil }
+                bytes += Int64(size)
+            }
+            return bytes
+        } catch { return nil }
+    }
 
     func invalidate(removeFiles: Bool) async -> Bool {
         live = false

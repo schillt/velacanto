@@ -89,19 +89,11 @@ struct FoundationHomeView<Profile: View>: View {
                         ? "ui origin=home player=presented" : "ui origin=home player=dismissed")
             }
         #endif
-        .foundationPlayerCover(isPresented: $showingPlayer) {
+        .foundationPlayerCover(isPresented: $showingPlayer, player: player) {
             FoundationPlayerView(player: player, library: library)
         }
-        .navigationDestination(
-            isPresented: Binding(
-                get: { openedItem != nil }, set: { if !$0 { openedItem = nil } }
-            )
-        ) {
-            if let item = openedItem {
-                FoundationItemDestination(
-                    item: item, library: library, player: player, isActive: isActive)
-            }
-        }
+        .foundationCollectionDestination(
+            item: $openedItem, library: library, player: player, isActive: isActive)
     }
 
     private var genreShelves: some View {

@@ -128,6 +128,16 @@ extension EnvironmentValues {
     }
 }
 
+/// The visible canonical detail shares its existing sampled surface with shell chrome.
+/// No artwork is resolved by the notice or the shell.
+struct FoundationOfflineSurfacePreferenceKey: PreferenceKey {
+    static var defaultValue: Color? { nil }
+
+    static func reduce(value: inout Color?, nextValue: () -> Color?) {
+        if let next = nextValue() { value = next }
+    }
+}
+
 /// Connection recovery stays visible alongside usable saved content.
 struct FoundationOfflineNotice: View {
     @EnvironmentObject private var connectivity: FoundationConnectivity
@@ -143,17 +153,24 @@ struct FoundationOfflineNotice: View {
                         ? "Offline. Downloaded music is in Library."
                         : "The server could not be reached. Saved music remains available.")
             )
-            .font(.subheadline).foregroundStyle(.secondary)
-            HStack {
-                if let openLibrary { Button("Open Library", action: openLibrary) }
-                Button("Retry") { Task { await connectivity.retryOnline() } }
-                    .disabled(connectivity.isRetrying)
-                    .accessibilityIdentifier("offline-retry")
-                if connectivity.isRetrying { ProgressView().controlSize(.small) }
+            .font(.subheadline).foregroundStyle(.primary)
+            .fixedSize(horizontal: false, vertical: true)
+            ViewThatFits(in: .horizontal) {
+                HStack { recoveryActions }
+                VStack(alignment: .leading) { recoveryActions }
             }.font(.subheadline).buttonStyle(.borderless)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("offline-notice")
+    }
+
+    @ViewBuilder
+    private var recoveryActions: some View {
+        if let openLibrary { Button("Open Library", action: openLibrary) }
+        Button("Retry") { Task { await connectivity.retryOnline() } }
+            .disabled(connectivity.isRetrying)
+            .accessibilityIdentifier("offline-retry")
+        if connectivity.isRetrying { ProgressView().controlSize(.small) }
     }
 }

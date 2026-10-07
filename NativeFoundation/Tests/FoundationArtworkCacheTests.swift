@@ -15,6 +15,42 @@ final class FoundationArtworkCacheTests: XCTestCase {
             id: id, title: "", subtitle: "", kind: kind, duration: nil, primaryImageTag: tag)
     }
 
+    func testStorageMetricsSeparateOwnedArtworkDiskFromMemoryAndOtherAccounts() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let cache = FoundationArtworkCache(scope: "metrics/account-a", root: root)
+        let other = FoundationArtworkCache(scope: "metrics/account-b", root: root)
+        let scoped = root.appendingPathComponent(cache.scope)
+        try FileManager.default.createDirectory(at: scoped, withIntermediateDirectories: true)
+        try Data(repeating: 0, count: 17).write(to: scoped.appendingPathComponent("fixture.art"))
+        try Data(repeating: 0, count: 5).write(to: scoped.appendingPathComponent("revisions.plist"))
+        try Data(repeating: 0, count: 999).write(to: scoped.appendingPathComponent("unrelated.tmp"))
+        let measured = await cache.storageUsage()
+        let isolated = await other.storageUsage()
+        XCTAssertEqual(measured.disk, 22)
+        XCTAssertEqual(measured.memory, 0)
+        XCTAssertEqual(isolated.disk, 0)
+        _ = await cache.invalidate(removeDisk: true)
+        let retired = await cache.storageUsage()
+        XCTAssertNil(retired.disk)
+        XCTAssertEqual(retired.memory, 0)
+    }
+
+    func testStorageMetricsRejectSymbolicArtworkFiles() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let cache = FoundationArtworkCache(scope: "metrics", root: root)
+        let scoped = root.appendingPathComponent(cache.scope)
+        try FileManager.default.createDirectory(at: scoped, withIntermediateDirectories: true)
+        let target = root.appendingPathComponent("private.bin")
+        try Data(repeating: 0, count: 10).write(to: target)
+        try FileManager.default.createSymbolicLink(
+            at: scoped.appendingPathComponent("linked.art"), withDestinationURL: target)
+        let measured = await cache.storageUsage()
+        XCTAssertNil(measured.disk)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: target.path))
+    }
+
     private func image() throws -> Data {
         let context = try XCTUnwrap(
             CGContext(

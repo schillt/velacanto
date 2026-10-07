@@ -59,20 +59,8 @@ struct FoundationNewView<Profile: View>: View {
                 FoundationTrace.event("ui origin=new disappeared")
             #endif
         }
-        .navigationDestination(
-            isPresented: Binding(
-                get: { openedItem != nil }, set: { if !$0 { openedItem = nil } }
-            )
-        ) {
-            if let item = openedItem {
-                FoundationItemDestination(
-                    item: item, library: library, player: player, isActive: isActive
-                )
-                #if os(iOS)
-                    .toolbar(.visible, for: .navigationBar)
-                #endif
-            }
-        }
+        .foundationCollectionDestination(
+            item: $openedItem, library: library, player: player, isActive: isActive)
     }
 
     private var trackSection: some View {
@@ -319,18 +307,9 @@ struct FoundationLibraryMostPlayedAlbums: View {
             model.request(.refresh)
             revision += 1
         }
-        .navigationDestination(
-            isPresented: Binding(get: { openedItem != nil }, set: { if !$0 { openedItem = nil } })
-        ) {
-            if let item = openedItem {
-                FoundationItemDestination(
-                    item: item, library: library, player: player, isActive: isActive
-                )
-                #if os(iOS)
-                    .toolbar(.visible, for: .navigationBar)
-                #endif
-            }
-        }
+        .foundationCollectionDestination(
+            item: $openedItem, library: library, player: player, isActive: isActive
+        )
         .task(id: isActive && isVisible && !connectivity.localOnly ? revision : nil) {
             guard isActive, isVisible, !Task.isCancelled else { return }
             #if DEBUG

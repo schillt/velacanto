@@ -140,6 +140,32 @@ actor FoundationCatalogPageCache {
         await FoundationPageDirectoryOwner.shared.clear(root: root ?? defaultRoot, retaining: scope)
     }
 
+    /// Physical bytes for this account's disposable page files; never creates or trims storage.
+    func storageBytes() async -> Int64? {
+        await registration.value
+        guard live else { return nil }
+        let manager = FileManager.default
+        guard manager.fileExists(atPath: directory.path) else { return 0 }
+        do {
+            guard try directory.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink != true
+            else { return nil }
+            let urls = try manager.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
+            var bytes: Int64 = 0
+            for url in urls where url.pathExtension == "page" {
+                let values = try url.resourceValues(forKeys: [
+                    .isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey,
+                ])
+                guard values.isRegularFile == true, values.isSymbolicLink != true,
+                    let size = values.fileSize
+                else { return nil }
+                bytes += Int64(size)
+            }
+            return bytes
+        } catch { return nil }
+    }
+
     private func trim() {
         let urls =
             (try? FileManager.default.contentsOfDirectory(

@@ -5,6 +5,7 @@
     struct FoundationMacLibraryShell<Content: View, MiniPlayer: View>: View {
         @Binding var selection: FoundationDestination
         let showsMiniPlayer: Bool
+        @ScaledMetric(relativeTo: .body) private var homeIconSize = 18.0
         private let content: (FoundationDestination) -> Content
         private let miniPlayer: () -> MiniPlayer
 
@@ -24,8 +25,18 @@
             NavigationSplitView {
                 List(selection: $selection) {
                     ForEach(FoundationDestination.allCases, id: \.self) { destination in
-                        Label(destination.title, systemImage: destination.symbol)
-                            .tag(destination)
+                        Label {
+                            Text(destination.title)
+                        } icon: {
+                            if destination == .home {
+                                destination.icon.resizable().scaledToFit()
+                                    .frame(width: homeIconSize, height: homeIconSize)
+                            } else {
+                                destination.icon.symbolVariant(
+                                    selection == destination ? .fill : .none)
+                            }
+                        }
+                        .tag(destination)
                     }
                 }
                 .listStyle(.sidebar)

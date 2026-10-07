@@ -38,6 +38,13 @@
         var body: some View {
             VStack(spacing: 0) {
                 fixtureControls
+                if ProcessInfo.processInfo.environment["FOUNDATION_UI_REDUCE_MOTION"] == "1",
+                    ProcessInfo.processInfo.environment["FOUNDATION_UI_REDUCE_TRANSPARENCY"] == "1"
+                {
+                    Text("Synthetic accessibility: reduced motion, reduced transparency")
+                        .font(.caption).dynamicTypeSize(.medium)
+                        .accessibilityIdentifier("fixture-accessibility-effects")
+                }
                 if fixture.canonicalReady {
                     Text("Canonical fixture ready").font(.caption).dynamicTypeSize(.medium)
                 }
@@ -59,7 +66,9 @@
             .environmentObject(playlistChanges)
             .environment(
                 \.dynamicTypeSize,
-                usesAccessibilitySizedText ? .accessibility3 : systemDynamicTypeSize)
+                usesAccessibilitySizedText ? .accessibility3 : systemDynamicTypeSize
+            )
+            .modifier(FoundationUITestAppearance())
         }
 
         @ViewBuilder private var content: some View {
@@ -102,8 +111,20 @@
         }
 
         @State private var artworkCounts = ""
+        @State private var catalogCounts = ""
         private var fixtureControls: some View {
             VStack {
+                if ProcessInfo.processInfo.arguments.contains("-fixturePagedCatalog") {
+                    if ProcessInfo.processInfo.arguments.contains("-fixtureHoldInitialCatalog") {
+                        Button("Release initial catalog page") {
+                            Task { await fixture.library.releaseInitialCatalogPage() }
+                        }
+                    }
+                    Button("Read catalog counts") {
+                        Task { catalogCounts = await fixture.library.catalogCounts() }
+                    }
+                    Text(catalogCounts).accessibilityIdentifier("fixture-catalog-counts")
+                }
                 if ProcessInfo.processInfo.arguments.contains("-fixtureArtworkCache") {
                     Button("Read artwork counts") {
                         Task {
@@ -249,6 +270,14 @@
                             }
                         }
                         FoundationSignInView { url, username, password in
+                            if ProcessInfo.processInfo.arguments.contains(
+                                "-fixtureUnreachableServer")
+                            {
+                                throw URLError(.cannotConnectToHost)
+                            }
+                            if ProcessInfo.processInfo.arguments.contains("-fixtureInvalidServer") {
+                                throw URLError(.badURL)
+                            }
                             guard url.host == "example.invalid", username == "synthetic-ui",
                                 password == "synthetic-not-a-password"
                             else { throw FoundationLibraryError.authentication }
@@ -272,6 +301,7 @@
                 }
             }
             .onDisappear { delayedResponse.complete() }
+            .modifier(FoundationUITestAppearance())
         }
     }
 
@@ -332,15 +362,16 @@
     }
 
     /// Synthetic continuity evidence: route navigation must retain the exact queue occurrence.
-    private struct FoundationDownloadUIPlaybackIdentity: View {
+    struct FoundationDownloadUIPlaybackIdentity: View {
         @ObservedObject var player: FoundationPlayer
+        var identifier = "fixture-playback-identity"
         var body: some View {
             Text(
                 verbatim:
                     "Fixture identity: \(player.selectedEntryID?.uuidString ?? "none"); item \(player.queue.first { $0.id == player.selectedEntryID }?.item.id ?? "none"); intent \(player.wantsPlayback); state \(String(describing: player.state))"
             )
             .font(.caption).lineLimit(1).dynamicTypeSize(.medium)
-            .accessibilityIdentifier("fixture-playback-identity")
+            .accessibilityIdentifier(identifier)
         }
     }
 
@@ -483,6 +514,10 @@
     }
 
     private actor FoundationDownloadUILibrary: FoundationLibrary {
+        // Opt-in picker presentation acceptance only; tests never invoke server mutations.
+        nonisolated var supportsPlaylistManagement: Bool {
+            ProcessInfo.processInfo.arguments.contains("-fixturePlaylistPresentation")
+        }
         private let usesCache = ProcessInfo.processInfo.arguments.contains("-fixtureArtworkCache")
         private let cache = FoundationArtworkCache(
             scope: "synthetic-artwork",
@@ -493,6 +528,66 @@
             root: FoundationDownloadsTestHarness.storageRoot
                 .appendingPathComponent("page-cache"))
         private var fetches: [String: Int] = [:]
+        private let pagedCatalog = ProcessInfo.processInfo.arguments.contains(
+            "-fixturePagedCatalog")
+        private var catalogRequests: [String: Int] = [:]
+        private var failedCatalogPages: Set<String> = []
+        private var pendingCatalogKinds: Set<FoundationItem.Kind> = []
+        private var releasedCatalogKinds: Set<FoundationItem.Kind> = []
+
+        func releaseInitialCatalogPage() {
+            releasedCatalogKinds.formUnion(pendingCatalogKinds)
+        }
+
+        func catalogCounts() -> String {
+            catalogRequests.sorted { $0.key < $1.key }
+                .map { "\($0.key) \($0.value)" }.joined(separator: ", ")
+        }
+
+        private func catalogPage(kind: FoundationItem.Kind, startIndex: Int, query: String? = nil)
+            async throws -> FoundationPage
+        {
+            let key = "\(kind)-\(query ?? "browse")-\(startIndex)"
+            catalogRequests[key, default: 0] += 1
+            if query == nil, startIndex == 0,
+                ProcessInfo.processInfo.arguments.contains("-fixtureHoldInitialCatalog")
+            {
+                pendingCatalogKinds.insert(kind)
+                defer { pendingCatalogKinds.remove(kind) }
+                while !releasedCatalogKinds.contains(kind) {
+                    try Task.checkCancellation()
+                    try await Task.sleep(for: .milliseconds(50))
+                }
+            }
+            let delay = query == "slow" ? 1200 : (query == nil && startIndex == 0 ? 1800 : 650)
+            try await Task.sleep(for: .milliseconds(delay))
+            try Task.checkCancellation()
+            if startIndex > 0,
+                ProcessInfo.processInfo.arguments.contains("-fixtureCatalogPageFailOnce"),
+                failedCatalogPages.insert(key).inserted
+            {
+                throw FoundationLibraryError.invalidResponse
+            }
+            let all = (0..<12).map { index in
+                FoundationItem(
+                    id: "paged-\(kind)-\(index)", title: "Paged \(kind) \(index)",
+                    subtitle: "Synthetic catalog", kind: kind, duration: kind == .track ? 30 : nil,
+                    primaryImageTag: "synthetic", isFavorite: false)
+            }
+            let matches =
+                query.map { term in
+                    all.filter { $0.title.localizedStandardContains(term) }
+                } ?? all
+            guard startIndex < matches.count else {
+                return .init(items: [], nextStartIndex: nil)
+            }
+            // Repeat the last occurrence at the page boundary to exercise stable deduplication.
+            let first = startIndex == 0 ? 0 : startIndex - 1
+            let end = min(startIndex + 6, matches.count)
+            return .init(
+                items: Array(matches[first..<end]),
+                nextStartIndex: end < matches.count ? end : nil)
+        }
 
         func artworkCounts() -> String {
             "Album \(fetches["album", default: 0]), Artist \(fetches["artist", default: 0]), Playlist \(fetches["playlist", default: 0]), Genre \(fetches["genre", default: 0])"
@@ -513,7 +608,8 @@
             }.value
         }
         func artists(startIndex: Int) async throws -> FoundationPage {
-            .init(
+            if pagedCatalog { return try await catalogPage(kind: .artist, startIndex: startIndex) }
+            return .init(
                 items: (usesCache || canonical
                     || ProcessInfo.processInfo.arguments.contains("-fixtureMembership"))
                     ? [
@@ -523,7 +619,8 @@
                     ] : [], nextStartIndex: nil)
         }
         func genres(startIndex: Int) async throws -> FoundationPage {
-            .init(
+            if pagedCatalog { return try await catalogPage(kind: .genre, startIndex: startIndex) }
+            return .init(
                 items: usesCache
                     ? [
                         FoundationItem(
@@ -549,11 +646,15 @@
             canonical ? [track, missing, track] : [track, track]
         }
         func songs(startIndex: Int) async throws -> FoundationPage {
-            .init(items: canonical ? [track, missing] : [track], nextStartIndex: nil)
+            if pagedCatalog { return try await catalogPage(kind: .track, startIndex: startIndex) }
+            return .init(items: canonical ? [track, missing] : [track], nextStartIndex: nil)
         }
         func search(query: String, kind: FoundationItem.Kind, startIndex: Int, limit: Int)
             async throws -> FoundationPage
         {
+            if pagedCatalog {
+                return try await catalogPage(kind: kind, startIndex: startIndex, query: query)
+            }
             let items: [FoundationItem]
             switch kind {
             case .track: items = canonical ? [track, missing] : [track]
@@ -577,7 +678,10 @@
                 nextStartIndex: nil)
         }
         func playlists(startIndex: Int) async throws -> FoundationPage {
-            .init(
+            if pagedCatalog {
+                return try await catalogPage(kind: .playlist, startIndex: startIndex)
+            }
+            return .init(
                 items: [
                     .init(
                         id: "playlist", title: "Fixture Playlist", subtitle: "Synthetic",
@@ -605,7 +709,8 @@
             genres: ProcessInfo.processInfo.arguments.contains("-fixtureArtworkCache")
                 ? [.init(id: "genre", title: "Fixture Genre", primaryImageTag: "synthetic")] : [])
         func albums(startIndex: Int) async throws -> FoundationPage {
-            .init(items: [album], nextStartIndex: nil)
+            if pagedCatalog { return try await catalogPage(kind: .album, startIndex: startIndex) }
+            return .init(items: [album], nextStartIndex: nil)
         }
         func albums(artistID: String, startIndex: Int) async throws -> FoundationPage {
             .init(items: [album], nextStartIndex: nil)
@@ -626,12 +731,15 @@
             .init(items: [], nextStartIndex: nil)
         }
         func homeGenres() async throws -> FoundationPage {
-            try await genres(startIndex: 0)
+            // The paged fixture targets explicit Library indexes, not unrelated Home shelves.
+            if pagedCatalog { return .init(items: [], nextStartIndex: nil) }
+            return try await genres(startIndex: 0)
         }
         func searchGenres() async throws -> FoundationPage {
             try await genres(startIndex: 0)
         }
         func artwork(for item: FoundationItem) async throws -> Data? {
+            if ProcessInfo.processInfo.arguments.contains("-fixtureMissingArtwork") { return nil }
             fetches[String(describing: item.kind), default: 0] += 1
             let format = UIGraphicsImageRendererFormat()
             format.scale = 1
@@ -713,6 +821,32 @@
             try Task.checkCancellation()
             try data.write(to: destination)
             progress(2, 2)
+        }
+    }
+    private struct FoundationUITestAppearance: ViewModifier {
+        @Environment(\.foundationReduceMotion) private var reduceMotion
+        @Environment(\.foundationReduceTransparency) private var reduceTransparency
+        @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
+        func body(content: Content) -> some View {
+            let values = ProcessInfo.processInfo.environment
+            content
+                .environment(
+                    \.foundationReduceMotion,
+                    reduceMotion || values["FOUNDATION_UI_REDUCE_MOTION"] == "1"
+                )
+                .environment(
+                    \.foundationReduceTransparency,
+                    reduceTransparency || values["FOUNDATION_UI_REDUCE_TRANSPARENCY"] == "1"
+                )
+                .environment(
+                    \.dynamicTypeSize,
+                    values["FOUNDATION_UI_LARGE_TEXT"] == "1" ? .accessibility3 : dynamicTypeSize
+                )
+                .preferredColorScheme(
+                    values["FOUNDATION_UI_COLOR_SCHEME"] == "light"
+                        ? .light
+                        : values["FOUNDATION_UI_COLOR_SCHEME"] == "dark" ? .dark : nil)
         }
     }
 #endif

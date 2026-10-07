@@ -109,20 +109,41 @@ private struct FoundationDownloadFilteredCatalog: View {
 /// A status strip occupies layout space above browsing, never covers native navigation.
 struct FoundationOfflineStatus: View {
     @EnvironmentObject private var connectivity: FoundationConnectivity
+    @Environment(\.colorScheme) private var colorScheme
+    var surfaceColor: Color? = nil
 
     var body: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 8) {
+                statusLabel
+                recoveryAction
+            }
+            VStack(spacing: 6) {
+                statusLabel
+                recoveryAction
+            }
+        }
+        .font(.caption).foregroundStyle(.primary)
+        .buttonStyle(.borderless)
+        .frame(maxWidth: .infinity).padding(.horizontal, 16).padding(.vertical, 6)
+        .background(surfaceColor ?? .clear)
+        // Detail artwork sampling already bounds luminance for white text.
+        .environment(\.colorScheme, surfaceColor == nil ? colorScheme : .dark)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("browsing-offline-status")
+    }
+
+    private var statusLabel: some View {
+        Label("Browsing offline", systemImage: "wifi.slash")
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private var recoveryAction: some View {
         HStack(spacing: 6) {
-            Image(systemName: "wifi.slash").accessibilityHidden(true)
-            Text("Browsing offline")
             Button("Retry") { Task { await connectivity.retryOnline() } }
                 .disabled(connectivity.isRetrying)
                 .accessibilityIdentifier("offline-status-retry")
             if connectivity.isRetrying { ProgressView().controlSize(.mini) }
         }
-        .font(.caption).foregroundStyle(.secondary)
-        .frame(maxWidth: .infinity).padding(.vertical, 4)
-        .background(.bar)
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("browsing-offline-status")
     }
 }

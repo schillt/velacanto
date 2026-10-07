@@ -20,6 +20,8 @@ final class FoundationBrowseModel: ObservableObject {
     private var pageCache: FoundationCatalogPageCache?
     private var cacheKey: String?
     private var restoredCache = false
+    private var deduplicatesCatalogItems = false
+    private var cachedRawPrefix: [FoundationItem] = []
     private var lastRefreshAttempt: Date?
     private let now: () -> Date
     private let refreshInterval: TimeInterval
@@ -36,6 +38,29 @@ final class FoundationBrowseModel: ObservableObject {
         cacheKey = key
     }
 
+    /// Catalog indexes have unique items; collection track lists keep occurrence identity.
+    func configureCatalogPagination() {
+        guard !deduplicatesCatalogItems else { return }
+        deduplicatesCatalogItems = true
+        items = uniqueCatalogItems(items)
+    }
+
+    private func uniqueCatalogItems(_ candidates: [FoundationItem]) -> [FoundationItem] {
+        var seen: Set<String> = []
+        return candidates.filter { seen.insert($0.kind.rawValue + ":" + $0.id).inserted }
+    }
+
+    /// One visible demand fetches one bounded server page. Errors require explicit retry.
+    func loadNextPage(
+        ifActive isActive: Bool = true, allowsNetwork: Bool = true,
+        using loader: (Int) async throws -> FoundationPage
+    ) async {
+        guard isActive, allowsNetwork, !hasLiveLoad, errorMessage == nil,
+            nextStartIndex != nil, !Task.isCancelled
+        else { return }
+        await load(.more, using: loader)
+    }
+
     /// Restore before any network work, including when the visible view is offline.
     private func restoreCache() async {
         guard !restoredCache, let pageCache, let cacheKey else { return }
@@ -44,7 +69,8 @@ final class FoundationBrowseModel: ObservableObject {
         guard !Task.isCancelled, revision == owner else { return }
         restoredCache = true
         guard !loaded, let record else { return }
-        items = record.page.items
+        cachedRawPrefix = Array(record.page.items.prefix(200))
+        items = deduplicatesCatalogItems ? uniqueCatalogItems(record.page.items) : record.page.items
         nextStartIndex = record.page.nextStartIndex
         loaded = true
         isRetainedSnapshot = true
@@ -65,7 +91,8 @@ final class FoundationBrowseModel: ObservableObject {
     func installSnapshot(_ snapshot: [FoundationItem], complete: Bool = true) {
         writePermit.revoke()
         revision = UUID()
-        items = snapshot
+        cachedRawPrefix = []
+        items = deduplicatesCatalogItems ? uniqueCatalogItems(snapshot) : snapshot
         nextStartIndex = nil
         loaded = complete
         isRetainedSnapshot = true
@@ -78,6 +105,7 @@ final class FoundationBrowseModel: ObservableObject {
     func clearRetainedData() {
         writePermit.revoke()
         revision = UUID()
+        cachedRawPrefix = []
         items = []
         nextStartIndex = nil
         loaded = false
@@ -153,6 +181,7 @@ final class FoundationBrowseModel: ObservableObject {
         }
         let offset: Int
         if case .more = request {
+            guard !hasLiveLoad else { return }
             guard let nextStartIndex else {
                 #if DEBUG
                     FoundationJournal.shared.record(
@@ -196,10 +225,24 @@ final class FoundationBrowseModel: ObservableObject {
                 #endif
                 return
             }
+            let (rawEnd, overflow) = offset.addingReportingOverflow(page.items.count)
+            guard !overflow else { throw FoundationLibraryError.invalidResponse }
+            if deduplicatesCatalogItems, let next = page.nextStartIndex {
+                guard next > offset, !page.items.isEmpty else {
+                    throw FoundationLibraryError.invalidResponse
+                }
+            }
             if case .more = request {
-                items.append(contentsOf: page.items)
+                if cachedRawPrefix.count < 200 {
+                    cachedRawPrefix.append(
+                        contentsOf: page.items.prefix(200 - cachedRawPrefix.count))
+                }
+                items =
+                    deduplicatesCatalogItems
+                    ? uniqueCatalogItems(items + page.items) : items + page.items
             } else {
-                items = page.items
+                cachedRawPrefix = Array(page.items.prefix(200))
+                items = deduplicatesCatalogItems ? uniqueCatalogItems(page.items) : page.items
             }
             nextStartIndex = page.nextStartIndex
             loaded = true
@@ -207,8 +250,14 @@ final class FoundationBrowseModel: ObservableObject {
             if let pageCache, let cacheKey {
                 // Persist a bounded prefix; preserve the next offset so truncated pages stay usable.
                 let limit = 200
-                let retained = Array(items.prefix(limit))
-                let next = items.count > limit ? retained.count : nextStartIndex
+                let retained =
+                    deduplicatesCatalogItems
+                    ? cachedRawPrefix : Array(items.prefix(limit))
+                // Cache raw entries so duplicate suppression never changes server offsets.
+                let next =
+                    deduplicatesCatalogItems
+                    ? (rawEnd > limit ? limit : nextStartIndex)
+                    : (items.count > limit ? retained.count : nextStartIndex)
                 await pageCache.write(
                     FoundationPage(items: retained, nextStartIndex: next), key: cacheKey,
                     permit: permit)

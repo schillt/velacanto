@@ -527,70 +527,156 @@ struct FoundationSignInView: View {
     @State private var signingIn = false
     @State private var errorMessage: String?
 
+    private enum Field: Hashable { case address, username, password }
+    @FocusState private var focusedField: Field?
+
+    private var canSignIn: Bool { !signingIn && !address.isEmpty && !username.isEmpty }
+
+    private func beginSignIn() {
+        guard canSignIn else { return }
+        focusedField = nil
+        signingIn = true
+        attempt += 1
+    }
+
     var body: some View {
         NavigationStack {
-            Form {
-                Section {
-                    Text("A simple player for your music library.")
-                    TextField("Jellyfin HTTPS address", text: $address)
-                        .autocorrectionDisabled()
-                        #if os(iOS)
-                            .textInputAutocapitalization(.never)
-                            .keyboardType(.URL)
-                        #endif
-                    TextField("Username", text: $username)
-                        .autocorrectionDisabled()
-                        #if os(iOS)
-                            .textInputAutocapitalization(.never)
-                        #endif
-                    SecureField("Password", text: $password)
-                    if let errorMessage { Text(errorMessage).foregroundStyle(.red) }
-                    Button(signingIn ? "Signing in…" : "Sign in") {
-                        signingIn = true
-                        attempt += 1
+            signInForm
+                .navigationTitle("Velacanto")
+                #if os(iOS)
+                    .navigationBarTitleDisplayMode(.inline)
+                    .scrollContentBackground(.hidden)
+                    .scrollDismissesKeyboard(.interactively)
+                    .background {
+                        LinearGradient(
+                            colors: [
+                                Color.accentColor.opacity(0.12),
+                                Color(uiColor: .systemGroupedBackground),
+                            ],
+                            startPoint: .topLeading, endPoint: .center
+                        )
+                        .ignoresSafeArea()
                     }
-                    .disabled(signingIn || address.isEmpty || username.isEmpty)
-                    if signingIn {
-                        Button("Cancel") {
-                            signingIn = false
-                            attempt += 1
+                #endif
+                .task(id: attempt) {
+                    guard signingIn else { return }
+                    let owner = attempt
+                    errorMessage = nil
+                    do {
+                        guard
+                            let url = URL(
+                                string: address.trimmingCharacters(in: .whitespacesAndNewlines))
+                        else { throw URLError(.badURL) }
+                        let accept = try await authenticate(url, username, password)
+                        try Task.checkCancellation()
+                        guard signingIn, attempt == owner else { return }
+                        try accept()
+                        password = ""
+                        signingIn = false
+                    } catch {
+                        guard !Task.isCancelled, signingIn, attempt == owner else { return }
+                        signingIn = false
+                        if let downloadError = error as? FoundationDownloadAccountError {
+                            errorMessage = downloadError.errorDescription
+                        } else if let pinError = error as? FoundationPinStorageError {
+                            errorMessage = pinError.errorDescription
+                        } else if let storageError = error
+                            as? FoundationPlaybackSessionStore.StorageError
+                        {
+                            errorMessage = storageError.errorDescription
+                        } else {
+                            errorMessage = FoundationLibraryError.category(error).errorDescription
                         }
                     }
-                } footer: {
-                    Text(
-                        "Use your server’s trusted HTTPS address. Credentials are stored in Keychain."
-                    )
                 }
+        }
+    }
+
+    private var signInForm: some View {
+        Form {
+            #if os(iOS)
+                Section {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Image(systemName: "music.note")
+                            .font(.largeTitle)
+                            .foregroundStyle(.tint)
+                            .accessibilityHidden(true)
+                        Text("Your music, in Velacanto.")
+                            .font(.largeTitle.bold())
+                            .accessibilityAddTraits(.isHeader)
+                        Text("Connect to your Jellyfin server to browse your library and listen.")
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.vertical, 16)
+                    .listRowBackground(Color.clear)
+                    .accessibilityIdentifier("sign-in-introduction")
+                }
+            #endif
+            Section {
+                TextField("Jellyfin HTTPS address", text: $address)
+                    .autocorrectionDisabled()
+                    .focused($focusedField, equals: .address)
+                    .accessibilityHint("The trusted HTTPS address of your Jellyfin server.")
+                    #if os(iOS)
+                        .textInputAutocapitalization(.never)
+                        .keyboardType(.URL)
+                        .textContentType(.URL)
+                        .submitLabel(.next)
+                    #endif
+                    .onSubmit { focusedField = .username }
+            } header: {
+                Text("Your server")
+            } footer: {
+                Text("Use your server’s trusted HTTPS address.")
             }
-            .navigationTitle("Velacanto Foundation")
-            .task(id: attempt) {
-                guard signingIn else { return }
-                let owner = attempt
-                errorMessage = nil
-                do {
-                    guard
-                        let url = URL(
-                            string: address.trimmingCharacters(in: .whitespacesAndNewlines))
-                    else { throw URLError(.badURL) }
-                    let accept = try await authenticate(url, username, password)
-                    try Task.checkCancellation()
-                    guard signingIn, attempt == owner else { return }
-                    try accept()
-                    password = ""
-                    signingIn = false
-                } catch {
-                    guard !Task.isCancelled, signingIn, attempt == owner else { return }
-                    signingIn = false
-                    if let downloadError = error as? FoundationDownloadAccountError {
-                        errorMessage = downloadError.errorDescription
-                    } else if let pinError = error as? FoundationPinStorageError {
-                        errorMessage = pinError.errorDescription
-                    } else if let storageError = error
-                        as? FoundationPlaybackSessionStore.StorageError
-                    {
-                        errorMessage = storageError.errorDescription
-                    } else {
-                        errorMessage = FoundationLibraryError.category(error).errorDescription
+            Section {
+                TextField("Username", text: $username)
+                    .autocorrectionDisabled()
+                    .focused($focusedField, equals: .username)
+                    #if os(iOS)
+                        .textInputAutocapitalization(.never)
+                        .textContentType(.username)
+                        .submitLabel(.next)
+                    #endif
+                    .onSubmit { focusedField = .password }
+                SecureField("Password", text: $password)
+                    .focused($focusedField, equals: .password)
+                    #if os(iOS)
+                        .textContentType(.password)
+                        .submitLabel(.go)
+                    #endif
+                    .onSubmit { beginSignIn() }
+            } header: {
+                Text("Your Jellyfin account")
+            } footer: {
+                Text(
+                    "Sign in with your existing Jellyfin account. Credentials are stored in Keychain."
+                )
+            }
+            Section {
+                if let errorMessage {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Label("Couldn’t sign in", systemImage: "exclamationmark.circle")
+                            .font(.headline)
+                        Text(errorMessage)
+                    }
+                    .foregroundStyle(.primary)
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier("sign-in-error")
+                }
+                Button(action: beginSignIn) {
+                    Text(signingIn ? "Signing in…" : "Sign in")
+                        .font(.headline)
+                        .frame(maxWidth: .infinity, minHeight: 32)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!canSignIn)
+                if signingIn {
+                    ProgressView("Connecting to your Jellyfin server…")
+                        .accessibilityIdentifier("sign-in-progress")
+                    Button("Cancel") {
+                        signingIn = false
+                        attempt += 1
                     }
                 }
             }

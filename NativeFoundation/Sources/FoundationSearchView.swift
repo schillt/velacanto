@@ -5,6 +5,7 @@ struct FoundationSearchView<Profile: View>: View {
     @EnvironmentObject private var connectivity: FoundationConnectivity
     let profile: Profile
     @FocusState private var searchFocused: Bool
+    @State private var cancelledActivation: Int?
     let library: any FoundationLibrary
     @ObservedObject var player: FoundationPlayer
     @ObservedObject var genres: FoundationBrowseModel
@@ -27,7 +28,7 @@ struct FoundationSearchView<Profile: View>: View {
         }
         .foundationSearchHeader(profile: profile, search: searchField, keepsVisible: searchFocused)
         .onChange(of: activation, initial: true) { _, value in
-            if isActive, value > 0 { searchFocused = true }
+            if isActive, value > 0, cancelledActivation != value { searchFocused = true }
         }
         .onChange(of: isActive) { _, active in
             if !active { searchFocused = false }
@@ -70,14 +71,34 @@ struct FoundationSearchView<Profile: View>: View {
         .frame(minHeight: 44)
     }
 
+    private func cancelSearchFocus() {
+        cancelledActivation = activation
+        searchFocused = false
+    }
+
     private var searchField: some View {
-        Group {
-            if #available(iOS 26.0, macOS 26.0, *) {
-                searchInput.glassEffect(.regular, in: Capsule())
-            } else {
-                searchInput.background(.regularMaterial, in: Capsule())
+        HStack(spacing: 8) {
+            Group {
+                if #available(iOS 26.0, macOS 26.0, *) {
+                    searchInput.glassEffect(.regular, in: Capsule())
+                } else {
+                    searchInput.background(.regularMaterial, in: Capsule())
+                }
             }
-        }.padding(.horizontal, 16).padding(.bottom, 8)
+            if searchFocused {
+                Button("Dismiss search keyboard", systemImage: "xmark") {
+                    cancelSearchFocus()
+                }
+                .labelStyle(.iconOnly)
+                .buttonStyle(.glass)
+                .buttonBorderShape(.circle)
+                .frame(minWidth: 44, minHeight: 44)
+                .keyboardShortcut(.cancelAction)
+                .accessibilityIdentifier("search-dismiss-keyboard")
+                .accessibilityHint("Keeps your search. Tap the search field to type again.")
+            }
+        }
+        .padding(.horizontal, 16).padding(.bottom, 8)
     }
 
     private var genreGrid: some View {
@@ -294,18 +315,9 @@ private struct FoundationSearchOverview: View {
         }
         .onAppear { isVisible = true }
         .onDisappear { isVisible = false }
-        .navigationDestination(
-            isPresented: Binding(get: { openedItem != nil }, set: { if !$0 { openedItem = nil } })
-        ) {
-            if let item = openedItem {
-                FoundationItemDestination(
-                    item: item, library: library, player: player, isActive: isActive
-                )
-                #if os(iOS)
-                    .toolbar(.visible, for: .navigationBar)
-                #endif
-            }
-        }
+        .foundationCollectionDestination(
+            item: $openedItem, library: library, player: player, isActive: isActive
+        )
         .onChange(of: connectivity.successfulRetryRevision) { _, _ in
             for section in sections { section.model.request(.refresh) }
         }

@@ -332,19 +332,30 @@ struct FoundationPlaylistIndex: View {
     let player: FoundationPlayer
     let isActive: Bool
     @ObservedObject var model: FoundationBrowseModel
+    var usesLibraryIndex = false
     @State private var creating = false
     @State private var refreshRevision = 0
     @State private var refreshPending = false
 
     var body: some View {
-        FoundationCatalogView(
-            title: "Playlists", model: model, library: library, player: player,
-            isActive: isActive, localItems: { downloads.downloadedPlaylists },
-            loader: { try await library.playlists(startIndex: $0) }
-        )
-        .onAppear { refreshPending = model.loaded }
+        Group {
+            if usesLibraryIndex {
+                FoundationLibraryIndexView(
+                    kind: .playlist, model: model, library: library, player: player,
+                    isActive: isActive, refreshToken: refreshRevision)
+            } else {
+                FoundationCatalogView(
+                    title: "Playlists", model: model, library: library, player: player,
+                    isActive: isActive, localItems: { downloads.downloadedPlaylists },
+                    loader: { try await library.playlists(startIndex: $0) }
+                )
+            }
+        }
+        .onAppear { refreshPending = !usesLibraryIndex && model.loaded }
         .task(id: "\(isActive && !connectivity.localOnly)-\(refreshRevision)") {
-            guard isActive, !connectivity.localOnly, refreshPending else { return }
+            guard !usesLibraryIndex, isActive, !connectivity.localOnly, refreshPending else {
+                return
+            }
             refreshPending = false
             await model.load(.refresh, using: library.playlists)
         }

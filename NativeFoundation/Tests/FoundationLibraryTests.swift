@@ -790,6 +790,55 @@ final class FoundationLibraryTests: XCTestCase {
         XCTAssertEqual(after, 1)
     }
 
+    func testScopedPlaylistAndGenreSearchUsesFullServerPages() async throws {
+        let recorder = Recorder()
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            await recorder.append(request)
+            let components = try XCTUnwrap(
+                URLComponents(url: request.url!, resolvingAgainstBaseURL: false))
+            let query = try XCTUnwrap(components.queryItems)
+            let start = try XCTUnwrap(query.first { $0.name == "startIndex" }?.value)
+            let type = request.url!.path.hasSuffix("MusicGenres") ? "MusicGenre" : "Playlist"
+            return (
+                Data(
+                    """
+                    {"Items":[{"Id":"00000000000000000000000000000001","Name":"Beyond first page","Type":"\(type)","ImageTags":{"Primary":"synthetic"}}],"StartIndex":\(start),"TotalRecordCount":101}
+                    """.utf8), Self.response(request)
+            )
+        }
+        for kind in [FoundationItem.Kind.playlist, .genre] {
+            let page = try await library.search(
+                query: "  Beyond  ", kind: kind, startIndex: 50, limit: 25)
+            XCTAssertEqual(page.items.first?.kind, kind)
+            XCTAssertEqual(page.items.first?.primaryImageTag, "synthetic")
+            XCTAssertEqual(page.nextStartIndex, 51)
+        }
+        let requests = await recorder.requests
+        XCTAssertEqual(requests.count, 2)
+        for (index, request) in requests.enumerated() {
+            XCTAssertEqual(
+                request.url?.path,
+                index == 0 ? "/proxy/jellyfin/Items" : "/proxy/jellyfin/MusicGenres")
+            let query = try XCTUnwrap(
+                URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems)
+            for (name, value) in [
+                ("searchTerm", "Beyond"), ("startIndex", "50"), ("limit", "25"),
+                ("sortBy", "SortName"), ("enableTotalRecordCount", "true"),
+            ] {
+                XCTAssertTrue(query.contains(URLQueryItem(name: name, value: value)))
+            }
+            if index == 0 {
+                XCTAssertTrue(
+                    query.contains(URLQueryItem(name: "includeItemTypes", value: "Playlist")))
+            }
+        }
+        let empty = try await library.search(query: "  ", kind: .genre, startIndex: 0, limit: 25)
+        XCTAssertTrue(empty.items.isEmpty)
+        XCTAssertNil(empty.nextStartIndex)
+        let finalCount = await recorder.requests.count
+        XCTAssertEqual(finalCount, 2)
+    }
+
     private static func response(_ request: URLRequest, status: Int = 200) -> HTTPURLResponse {
         HTTPURLResponse(
             url: request.url!, statusCode: status, httpVersion: "HTTP/1.1", headerFields: nil)!
@@ -799,4 +848,143 @@ final class FoundationLibraryTests: XCTestCase {
 private actor Recorder {
     var requests: [URLRequest] = []
     func append(_ request: URLRequest) { requests.append(request) }
+}
+
+@MainActor
+final class FoundationBrowsePaginationTests: XCTestCase {
+    private func item(_ id: String, kind: FoundationItem.Kind = .album) -> FoundationItem {
+        FoundationItem(id: id, title: id, subtitle: "", kind: kind, duration: nil)
+    }
+
+    func testCatalogDedupKeepsRawCursorAndOrderingWhileDetailsKeepOccurrences() async {
+        let model = FoundationBrowseModel()
+        model.configureCatalogPagination()
+        await model.loadPending { _ in
+            .init(items: [self.item("a"), self.item("a")], nextStartIndex: 2)
+        }
+        var offsets: [Int] = []
+        await model.loadNextPage { offset in
+            offsets.append(offset)
+            return .init(
+                items: [self.item("a"), self.item("b"), self.item("a", kind: .artist)],
+                nextStartIndex: nil)
+        }
+        await model.loadNextPage { _ in
+            XCTFail("End must stop requests")
+            return .init(items: [], nextStartIndex: nil)
+        }
+        XCTAssertEqual(offsets, [2])
+        XCTAssertEqual(
+            model.items.map { $0.kind.rawValue + ":" + $0.id }, ["album:a", "album:b", "artist:a"])
+        let details = FoundationBrowseModel()
+        await details.loadPending { _ in
+            .init(items: [self.item("same", kind: .track)], nextStartIndex: 1)
+        }
+        await details.loadNextPage { _ in
+            .init(items: [self.item("same", kind: .track)], nextStartIndex: nil)
+        }
+        XCTAssertEqual(details.items.count, 2)
+    }
+
+    func testDemandGatesAndMalformedCursorRequireExplicitRetry() async {
+        let model = FoundationBrowseModel()
+        model.configureCatalogPagination()
+        await model.loadPending { _ in .init(items: [self.item("a")], nextStartIndex: 1) }
+        var calls = 0
+        let loader: (Int) async throws -> FoundationPage = { offset in
+            calls += 1
+            return .init(items: [self.item("b")], nextStartIndex: offset)
+        }
+        await model.loadNextPage(ifActive: false, using: loader)
+        await model.loadNextPage(allowsNetwork: false, using: loader)
+        XCTAssertEqual(calls, 0)
+        await model.loadNextPage(using: loader)
+        XCTAssertEqual(model.errorCategory, .invalidResponse)
+        XCTAssertEqual(model.items.map(\.id), ["a"])
+        XCTAssertEqual(model.nextStartIndex, 1)
+        await model.loadNextPage(using: loader)
+        XCTAssertEqual(calls, 1)
+        model.request(model.retryRequest)
+        await model.loadPending { offset in
+            XCTAssertEqual(offset, 1)
+            return .init(items: [self.item("b")], nextStartIndex: nil)
+        }
+        XCTAssertEqual(model.items.map(\.id), ["a", "b"])
+        XCTAssertNil(model.errorMessage)
+    }
+
+    func testCatalogCacheRetainsRawPrefixAndResumesCorrectOffsetAfterRelaunch() async {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cache = FoundationCatalogPageCache(scope: "synthetic-account/server", root: directory)
+        let model = FoundationBrowseModel()
+        model.configureCatalogPagination()
+        model.configureCache(cache, key: "library.albums")
+        await model.loadPending { _ in
+            .init(items: (0..<100).map { self.item(String($0 / 2)) }, nextStartIndex: 100)
+        }
+        await model.loadNextPage { _ in
+            .init(items: (100..<200).map { self.item(String($0 / 2)) }, nextStartIndex: 200)
+        }
+        await model.loadNextPage { _ in
+            .init(items: [self.item("last")], nextStartIndex: nil)
+        }
+        let restored = FoundationBrowseModel()
+        restored.configureCatalogPagination()
+        restored.configureCache(cache, key: "library.albums")
+        await restored.loadPending(allowsNetwork: false) { _ in
+            XCTFail("Offline cache restore must not read server")
+            return .init(items: [], nextStartIndex: nil)
+        }
+        XCTAssertEqual(restored.items.count, 100)
+        XCTAssertEqual(restored.nextStartIndex, 200)
+        await restored.loadNextPage { offset in
+            XCTAssertEqual(offset, 200)
+            return .init(items: [self.item("last")], nextStartIndex: nil)
+        }
+        XCTAssertEqual(restored.items.last?.id, "last")
+        XCTAssertNil(restored.nextStartIndex)
+    }
+
+    func testEmptyNonterminalCatalogPageRetainsRowsWithoutAutomaticRetry() async {
+        let model = FoundationBrowseModel()
+        model.configureCatalogPagination()
+        await model.loadPending { _ in .init(items: [self.item("a")], nextStartIndex: 1) }
+        await model.loadNextPage { _ in .init(items: [], nextStartIndex: 2) }
+        XCTAssertEqual(model.errorCategory, .invalidResponse)
+        XCTAssertEqual(model.items.map(\.id), ["a"])
+        await model.loadNextPage { _ in
+            XCTFail("Invalid page must require explicit retry")
+            return .init(items: [], nextStartIndex: nil)
+        }
+    }
+
+    func testConcurrentDemandAndCancelledResponseCannotDuplicateOrPublish() async {
+        let model = FoundationBrowseModel()
+        model.configureCatalogPagination()
+        await model.loadPending { _ in .init(items: [self.item("a")], nextStartIndex: 1) }
+        var continuation: CheckedContinuation<FoundationPage, Never>?
+        var calls = 0
+        let task = Task {
+            await model.loadNextPage { _ in
+                calls += 1
+                return await withCheckedContinuation { continuation = $0 }
+            }
+        }
+        while continuation == nil { await Task.yield() }
+        await model.loadNextPage { _ in
+            calls += 1
+            return .init(items: [], nextStartIndex: nil)
+        }
+        XCTAssertEqual(calls, 1)
+        task.cancel()
+        continuation?.resume(returning: .init(items: [item("stale")], nextStartIndex: nil))
+        await task.value
+        XCTAssertEqual(model.items.map(\.id), ["a"])
+        XCTAssertEqual(model.nextStartIndex, 1)
+        XCTAssertFalse(model.isLoading)
+        await model.loadNextPage { _ in .init(items: [self.item("b")], nextStartIndex: nil) }
+        XCTAssertEqual(model.items.map(\.id), ["a", "b"])
+    }
 }

@@ -12,6 +12,48 @@ final class FoundationCatalogPageCacheTests: XCTestCase {
         FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     }
 
+    func testStorageMetricsCountOnlyCurrentAccountPageFilesAndBecomeUnavailableAfterRetirement()
+        async throws
+    {
+        let directory = root()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cache = FoundationCatalogPageCache(scope: "metrics/account-a", root: directory)
+        let other = FoundationCatalogPageCache(scope: "metrics/account-b", root: directory)
+        let before = await cache.storageBytes()
+        XCTAssertEqual(before, 0)
+        await cache.write(FoundationPage(items: [album], nextStartIndex: nil), key: "home")
+        let scoped = directory.appendingPathComponent(cache.scope)
+        let urls = try FileManager.default.contentsOfDirectory(
+            at: scoped, includingPropertiesForKeys: [.fileSizeKey])
+        let expected = try urls.reduce(Int64(0)) {
+            $0 + Int64(try $1.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0)
+        }
+        try Data(repeating: 0, count: 999).write(to: scoped.appendingPathComponent("unrelated.tmp"))
+        let measured = await cache.storageBytes()
+        let isolated = await other.storageBytes()
+        XCTAssertGreaterThan(expected, 0)
+        XCTAssertEqual(measured, expected)
+        XCTAssertEqual(isolated, 0)
+        _ = await cache.invalidate()
+        let retired = await cache.storageBytes()
+        XCTAssertNil(retired)
+    }
+
+    func testStorageMetricsRejectSymbolicPageFilesWithoutReadingTarget() async throws {
+        let directory = root()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cache = FoundationCatalogPageCache(scope: "metrics", root: directory)
+        let scoped = directory.appendingPathComponent(cache.scope)
+        try FileManager.default.createDirectory(at: scoped, withIntermediateDirectories: true)
+        let target = directory.appendingPathComponent("private.bin")
+        try Data(repeating: 0, count: 10).write(to: target)
+        try FileManager.default.createSymbolicLink(
+            at: scoped.appendingPathComponent("linked.page"), withDestinationURL: target)
+        let measured = await cache.storageBytes()
+        XCTAssertNil(measured)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: target.path))
+    }
+
     func testRelaunchRestoresOfflineWithoutAnyLoaderRead() async {
         let directory = root()
         defer { try? FileManager.default.removeItem(at: directory) }

@@ -4,6 +4,55 @@ import XCTest
 
 @MainActor
 final class FoundationPresentationTests: XCTestCase {
+    func testArtworkMorphUsesCanonicalIdentityAndExactArtworkRectangles() {
+        let compact = CGRect(x: 18, y: 730, width: 34, height: 34)
+        let expanded = CGRect(x: 0, y: 60, width: 390, height: 430)
+        XCTAssertEqual(
+            artworkTransition(compact: compact, expanded: expanded),
+            .morph(compact: compact, expanded: expanded))
+        XCTAssertEqual(
+            artworkTransition(compact: compact, expanded: expanded, compactIdentity: "other"),
+            .fade(.differentIdentity))
+    }
+
+    func testArtworkMorphNeverGuessesMissingOrOffscreenSourceGeometry() {
+        let expanded = CGRect(x: 0, y: 60, width: 390, height: 430)
+        XCTAssertEqual(
+            artworkTransition(compact: nil, expanded: expanded), .fade(.unavailableGeometry))
+        XCTAssertEqual(
+            artworkTransition(compact: .zero, expanded: expanded), .fade(.unavailableGeometry))
+        XCTAssertEqual(
+            artworkTransition(
+                compact: CGRect(x: 18, y: 830, width: 34, height: 34), expanded: expanded),
+            .fade(.offscreenSource))
+        XCTAssertEqual(
+            artworkTransition(
+                compact: CGRect(x: 18, y: 730, width: .infinity, height: 34), expanded: expanded),
+            .fade(.unavailableGeometry))
+    }
+
+    func testArtworkMorphRequiresAnImageAndHonorsReduceMotion() {
+        let compact = CGRect(x: 18, y: 730, width: 34, height: 34)
+        let expanded = CGRect(x: 0, y: 60, width: 390, height: 430)
+        XCTAssertEqual(
+            artworkTransition(compact: compact, expanded: expanded, artworkIdentity: nil),
+            .fade(.missingArtwork))
+        XCTAssertEqual(
+            artworkTransition(compact: compact, expanded: expanded, reduceMotion: true),
+            .fade(.reduceMotion))
+    }
+
+    private func artworkTransition(
+        compact: CGRect?, expanded: CGRect?, artworkIdentity: String? = "album",
+        compactIdentity: String? = "album", reduceMotion: Bool = false
+    ) -> FoundationPlayerArtworkTransitionDecision {
+        FoundationPlayerArtworkTransitionDecision.resolve(
+            artworkIdentity: artworkIdentity, compactIdentity: compactIdentity,
+            expandedIdentity: "album", compactRect: compact, expandedRect: expanded,
+            containerBounds: CGRect(x: 0, y: 0, width: 390, height: 844),
+            reduceMotion: reduceMotion)
+    }
+
     func testRelatedCatalogRoutesRetainCanonicalMetadataAndArtworkIdentity() throws {
         let artist = FoundationItemReference(
             id: "artist", title: "Album Artist", primaryImageTag: "artist-revision")

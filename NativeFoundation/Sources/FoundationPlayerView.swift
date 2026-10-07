@@ -8,7 +8,11 @@ struct FoundationPlayerView: View {
     @EnvironmentObject private var connectivity: FoundationConnectivity
     @EnvironmentObject private var downloads: FoundationDownloads
     @Environment(\.dismiss) private var dismiss
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    #if os(iOS)
+        @Environment(\.foundationClosePlayer) private var closePlayer
+        @Environment(\.foundationPlayerArtworkPresentation) private var artworkPresentation
+    #endif
+    @Environment(\.foundationReduceMotion) private var reduceMotion
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var artworkFill: Image?
     @State private var artworkUpperEdgeColors: [Color]?
@@ -21,7 +25,7 @@ struct FoundationPlayerView: View {
     @State private var showingQueue = false
     @State private var lyricsPresentation: FoundationLyricsPresentation?
     @State private var showsDelayedLoading = false
-    @Environment(\.foundationOpenLibraryItem) private var openLibraryItem
+    @State private var relatedItem: FoundationItem?
 
     private enum ContentMode { case artwork, lyrics, queue }
 
@@ -51,6 +55,13 @@ struct FoundationPlayerView: View {
                                         0, artworkGeometry.size.height - artworkGeometry.size.width)
                                     * 0.75
                             )
+                            #if DEBUG && os(iOS) && targetEnvironment(simulator)
+                                .modifier(FoundationPlayerArtworkFixtureTarget())
+                            #endif
+                            #if os(iOS)
+                                .foundationPlayerArtworkRegistration(
+                                    role: .expanded, identity: current?.sharedArtworkIdentity)
+                            #endif
                             .mask {
                                 LinearGradient(
                                     stops: [
@@ -117,7 +128,7 @@ struct FoundationPlayerView: View {
                                 FoundationQueueView(player: player, isPresented: $showingQueue) {
                                     item in
                                     guard showingQueue else { return }
-                                    openLibraryItem?(item)
+                                    relatedItem = item
                                 }
                                 .frame(
                                     width: artworkGeometry.size.width,
@@ -231,9 +242,28 @@ struct FoundationPlayerView: View {
                     .allowsHitTesting(false).accessibilityHidden(true)
             #endif
         }
+        .sheet(item: $relatedItem) { item in
+            FoundationPlayerRelatedSheet(item: item, library: library, player: player)
+                .environment(\.foundationShowsDownloadBadges, true)
+        }
+        #if DEBUG && os(iOS) && targetEnvironment(simulator)
+            .overlay(alignment: .bottomTrailing) {
+                if FoundationDownloadsTestHarness.enabled, let artworkPresentation {
+                    FoundationPlayerArtworkTransitionEvidence(model: artworkPresentation)
+                }
+            }
+        #endif
         .environment(\.foundationShowsDownloadBadges, false)
         .interactiveDismissDisabled(scrubbing)
-        .accessibilityAction(.escape) { dismiss() }
+        .accessibilityAction(.escape) { dismissPlayer() }
+        #if os(iOS)
+            .onAppear { updateArtworkDismissalAvailability() }
+            .onChange(of: scrubbing) { _, _ in updateArtworkDismissalAvailability() }
+            .onChange(of: showingQueue) { _, _ in updateArtworkDismissalAvailability() }
+            .onChange(of: lyricsPresentation != nil) { _, _ in updateArtworkDismissalAvailability()
+            }
+            .onChange(of: relatedItem != nil) { _, _ in updateArtworkDismissalAvailability() }
+        #endif
         .task {
             showingGrabber = true
             do { try await Task.sleep(for: .seconds(2)) } catch { return }
@@ -276,6 +306,24 @@ struct FoundationPlayerView: View {
             lyricsPresentation = nil
         }
     }
+
+    private func dismissPlayer() {
+        #if os(iOS)
+            if let closePlayer {
+                closePlayer()
+                return
+            }
+        #endif
+        dismiss()
+    }
+
+    #if os(iOS)
+        private func updateArtworkDismissalAvailability() {
+            artworkPresentation?.allowsInteractiveDismissal =
+                !scrubbing && !showingQueue
+                && lyricsPresentation == nil && relatedItem == nil
+        }
+    #endif
 
     @ViewBuilder private func artworkView(size: CGFloat, height: CGFloat) -> some View {
         if let album {
@@ -322,16 +370,16 @@ struct FoundationPlayerView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 Menu {
                     Button("View Album", systemImage: "square.stack") {
-                        if let album { openLibraryItem?(album) }
+                        if let album { relatedItem = album }
                     }.disabled(
-                        album == nil || openLibraryItem == nil
+                        album == nil
                             || (connectivity.localOnly
                                 && album.map { downloads.browseTracks(for: $0).isEmpty } == true)
                     )
                     Button("View Artist", systemImage: "music.mic") {
-                        if let artist { openLibraryItem?(artist) }
+                        if let artist { relatedItem = artist }
                     }.disabled(
-                        artist == nil || openLibraryItem == nil
+                        artist == nil
                             || (connectivity.localOnly
                                 && artist.map {
                                     downloads.downloadedAlbums(artistID: $0.id).isEmpty
@@ -594,95 +642,199 @@ extension FoundationPlayer.State {
     }
 }
 
-private struct FoundationPlayerTransitionKey: EnvironmentKey {
-    static let defaultValue: Namespace.ID? = nil
-}
-
-private struct FoundationPlayerArtworkIdentityKey: EnvironmentKey {
-    static let defaultValue: String? = nil
-}
-
-private struct FoundationOpenLibraryItemKey: EnvironmentKey {
-    static let defaultValue: (@MainActor @Sendable (FoundationItem) -> Void)? = nil
-}
-
-extension EnvironmentValues {
-    var foundationPlayerArtworkIdentity: String? {
-        get { self[FoundationPlayerArtworkIdentityKey.self] }
-        set { self[FoundationPlayerArtworkIdentityKey.self] = newValue }
-    }
-
-    var foundationOpenLibraryItem: (@MainActor @Sendable (FoundationItem) -> Void)? {
-        get { self[FoundationOpenLibraryItemKey.self] }
-        set { self[FoundationOpenLibraryItemKey.self] = newValue }
-    }
-
-    var foundationPlayerTransition: Namespace.ID? {
-        get { self[FoundationPlayerTransitionKey.self] }
-        set { self[FoundationPlayerTransitionKey.self] = newValue }
-    }
-}
-
 extension View {
     func foundationPlayerCover<PlayerContent: View>(
-        isPresented: Binding<Bool>, @ViewBuilder content: @escaping () -> PlayerContent
+        isPresented: Binding<Bool>, player: FoundationPlayer,
+        @ViewBuilder content: @escaping () -> PlayerContent
     ) -> some View {
-        modifier(FoundationPlayerPresentation(isPresented: isPresented, playerContent: content))
-    }
-
-    @ViewBuilder func foundationPlayerArtworkSource(namespace: Namespace.ID, identity: String?)
-        -> some View
-    {
-        #if os(iOS)
-            if let identity {
-                self.matchedTransitionSource(id: identity, in: namespace)
-            } else {
-                self
-            }
-        #else
-            self
-        #endif
+        modifier(
+            FoundationPlayerPresentation(
+                isPresented: isPresented, player: player, playerContent: content))
     }
 }
 
 private struct FoundationPlayerPresentation<PlayerContent: View>: ViewModifier {
     @Binding var isPresented: Bool
+    let player: FoundationPlayer
     @ViewBuilder let playerContent: () -> PlayerContent
-    @Environment(\.foundationPlayerTransition) private var namespace
-    @Environment(\.foundationPlayerArtworkIdentity) private var artworkIdentity
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Environment(\.foundationOpenLibraryItem) private var openLibraryItem
-    @State private var pendingDestination: FoundationItem?
-
-    private func finishDismissal() {
-        guard let item = pendingDestination else { return }
-        pendingDestination = nil
-        openLibraryItem?(item)
-    }
-
-    private var destinationContent: some View {
-        playerContent().environment(
-            \.foundationOpenLibraryItem,
-            { item in
-                pendingDestination = item
-                isPresented = false
-            })
-    }
+    #if os(iOS)
+        @StateObject private var standalone = FoundationPlayerArtworkPresentationModel()
+        @Environment(\.foundationPlayerArtworkPresentation) private var shared
+        @Environment(\.self) private var inheritedEnvironment
+        @EnvironmentObject private var currentArtwork: FoundationCurrentArtwork
+        @EnvironmentObject private var actions: FoundationLibraryActions
+        @EnvironmentObject private var connectivity: FoundationConnectivity
+        @EnvironmentObject private var downloads: FoundationDownloads
+        @EnvironmentObject private var playbackPreferences: FoundationPlaybackPreferences
+        @EnvironmentObject private var playlistChanges: FoundationPlaylistChanges
+        @Environment(\.foundationReduceMotion) private var reduceMotion
+        @Environment(\.foundationReduceTransparency) private var reduceTransparency
+        @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+        @Environment(\.colorScheme) private var colorScheme
+        @Environment(\.scenePhase) private var scenePhase
+    #endif
 
     func body(content: Content) -> some View {
         #if os(iOS)
-            content.fullScreenCover(isPresented: $isPresented, onDismiss: finishDismissal) {
-                if let namespace, let artworkIdentity, !reduceMotion {
-                    destinationContent
-                        .navigationTransition(.zoom(sourceID: artworkIdentity, in: namespace))
-                } else {
-                    destinationContent
-                }
+            content.background {
+                FoundationPlayerArtworkFullscreen(
+                    isPresented: $isPresented, model: shared ?? standalone,
+                    content: AnyView(
+                        playerContent()
+                            .environmentObject(currentArtwork)
+                            .environmentObject(actions)
+                            .environmentObject(connectivity)
+                            .environmentObject(downloads)
+                            .environmentObject(playbackPreferences)
+                            .environmentObject(playlistChanges)
+                            .environment(\.foundationReduceMotion, reduceMotion)
+                            .environment(\.foundationReduceTransparency, reduceTransparency)
+                            .environment(\.dynamicTypeSize, dynamicTypeSize)
+                            .environment(\.colorScheme, colorScheme)
+                            .environment(\.scenePhase, scenePhase)),
+                    inheritedEnvironment: inheritedEnvironment,
+                    artwork: { [weak player, weak artwork = currentArtwork] in
+                        guard let player, let artwork,
+                            let item = player.queue.first(where: {
+                                $0.id == player.selectedEntryID
+                            })?.item,
+                            let result = artwork.result(for: item)
+                        else { return nil }
+                        return .init(identity: item.sharedArtworkIdentity, result: result)
+                    }, reduceMotion: reduceMotion
+                ).frame(width: 0, height: 0)
             }
         #else
-            content.sheet(isPresented: $isPresented, onDismiss: finishDismissal) {
-                destinationContent
-            }
+            content.sheet(isPresented: $isPresented) { playerContent() }
         #endif
     }
 }
+
+private struct FoundationRelatedItemSheetKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+extension EnvironmentValues {
+    var foundationRelatedItemSheet: Bool {
+        get { self[FoundationRelatedItemSheetKey.self] }
+        set { self[FoundationRelatedItemSheetKey.self] = newValue }
+    }
+}
+
+/// Only the presentation changes: catalog content and collection ownership are shared.
+private struct FoundationPlayerRelatedSheet: View {
+    let item: FoundationItem
+    let library: any FoundationLibrary
+    let player: FoundationPlayer
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.foundationReduceTransparency) private var reduceTransparency
+    @EnvironmentObject private var connectivity: FoundationConnectivity
+    @State private var detent = PresentationDetent.medium
+    @State private var playlistSource: FoundationItem?
+
+    private var catalogContent: some View {
+        NavigationStack {
+            FoundationItemDestination(
+                item: item, library: library, player: player, isActive: scenePhase == .active
+            )
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Close", systemImage: "xmark") { dismiss() }
+                        .labelStyle(.iconOnly)
+                        .accessibilityIdentifier("now-playing-related-close")
+                }
+            }
+        }
+        .environment(\.foundationRelatedItemSheet, true)
+        .foundationDownloadRemovalPresentation()
+        .sheet(item: $playlistSource) { source in
+            FoundationPlaylistPicker(source: source, library: library)
+        }
+        .environment(\.foundationAddToPlaylist, playlistPresentation)
+        #if DEBUG && os(iOS) && targetEnvironment(simulator)
+            .safeAreaInset(edge: .bottom) {
+                if FoundationDownloadsTestHarness.enabled {
+                    FoundationDownloadUIPlaybackIdentity(
+                        player: player, identifier: "fixture-related-playback-identity")
+                }
+            }
+        #endif
+    }
+
+    private var playlistPresentation: (@MainActor @Sendable (FoundationItem) -> Void)? {
+        guard !connectivity.localOnly, library.supportsPlaylistManagement else { return nil }
+        return { playlistSource = $0 }
+    }
+
+    @ViewBuilder var body: some View {
+        if reduceTransparency {
+            presentedContent.presentationBackground(.background)
+        } else {
+            presentedContent.presentationBackground(.ultraThinMaterial)
+        }
+    }
+
+    private var presentedContent: some View {
+        catalogContent
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel(item.kind == .artist ? "Artist details" : "Album details")
+            .accessibilityIdentifier("now-playing-related-sheet")
+            .accessibilityValue(detent == .large ? "large" : "medium")
+            .accessibilityAction(.escape) { dismiss() }
+            .accessibilityAction(named: "Expand details") { detent = .large }
+            .accessibilityAction(named: "Collapse details") { detent = .medium }
+            .presentationDetents([.medium, .large], selection: $detent)
+            .presentationDragIndicator(detent == .large ? .hidden : .visible)
+            .presentationContentInteraction(.resizes)
+            .preferredColorScheme(.dark)
+            #if os(macOS)
+                .frame(minWidth: 420, idealWidth: 520, minHeight: 460, idealHeight: 660)
+            #endif
+    }
+}
+
+private struct FoundationReduceMotionKey: EnvironmentKey {
+    static let defaultValue = false
+}
+private struct FoundationReduceTransparencyKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+extension EnvironmentValues {
+    /// Native accessibility remains authoritative; synthetic acceptance can also reduce effects.
+    var foundationReduceMotion: Bool {
+        get { accessibilityReduceMotion || self[FoundationReduceMotionKey.self] }
+        set { self[FoundationReduceMotionKey.self] = newValue }
+    }
+    var foundationReduceTransparency: Bool {
+        get { accessibilityReduceTransparency || self[FoundationReduceTransparencyKey.self] }
+        set { self[FoundationReduceTransparencyKey.self] = newValue }
+    }
+}
+
+#if DEBUG && os(iOS) && targetEnvironment(simulator)
+    private struct FoundationPlayerArtworkFixtureTarget: ViewModifier {
+        @ViewBuilder func body(content: Content) -> some View {
+            if FoundationDownloadsTestHarness.enabled {
+                content.accessibilityElement(children: .ignore)
+                    .accessibilityLabel("Expanded album artwork")
+                    .accessibilityIdentifier("fixture-player-expanded-artwork")
+                    .accessibilityHidden(false)
+            } else {
+                content
+            }
+        }
+    }
+
+    private struct FoundationPlayerArtworkTransitionEvidence: View {
+        @ObservedObject var model: FoundationPlayerArtworkPresentationModel
+        var body: some View {
+            Text(verbatim: model.transitionSummary)
+                .font(.system(size: 1)).frame(width: 1, height: 1).opacity(0.05)
+                .accessibilityLabel(model.transitionSummary)
+                .accessibilityIdentifier("fixture-player-artwork-transition")
+                .allowsHitTesting(false)
+        }
+    }
+#endif
