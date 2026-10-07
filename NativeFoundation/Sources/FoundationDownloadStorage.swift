@@ -3,7 +3,7 @@ import Darwin
 import Foundation
 
 /// Private, recoverable download metadata. Requests and credentials never enter this representation.
-nonisolated struct FoundationStoredDownloadItem: Codable, Sendable {
+nonisolated struct FoundationStoredDownloadItem: Codable, Equatable, Sendable {
     let id: String
     let title: String
     let subtitle: String
@@ -13,6 +13,7 @@ nonisolated struct FoundationStoredDownloadItem: Codable, Sendable {
     let albumID: String?
     let albumTitle: String?
     let albumTag: String?
+    var artist: FoundationItemReference? = nil
 
     init(_ item: FoundationItem) {
         id = item.id
@@ -30,18 +31,20 @@ nonisolated struct FoundationStoredDownloadItem: Codable, Sendable {
         artworkTag = item.primaryImageTag
         albumID = item.album?.id
         albumTitle = item.album?.title
+        artist = item.artist
         albumTag = item.album?.primaryImageTag
     }
 
     var item: FoundationItem {
         var result = FoundationItem(
             id: id, title: title, subtitle: subtitle,
-            kind: kind == "album" ? .album : kind == "playlist" ? .playlist : .track,
+            kind: FoundationItem.Kind(rawValue: kind) ?? .track,
             duration: duration, primaryImageTag: artworkTag)
         if let albumID, let albumTitle {
             result.album = FoundationItemReference(
                 id: albumID, title: albumTitle, primaryImageTag: albumTag)
         }
+        result.artist = artist
         return result
     }
 }
@@ -65,6 +68,13 @@ nonisolated struct FoundationDownloadManifest: Codable, Sendable {
         let item: FoundationStoredDownloadItem
         let file: File
     }
+    struct Collection: Codable, Equatable, Sendable {
+        let item: FoundationStoredDownloadItem
+        let tracks: [FoundationStoredDownloadItem]
+        let complete: Bool
+    }
+    // Discovery metadata has no ownership claim on audio or retained artwork.
+    var collections: [Collection]? = nil
     var artwork: [String: Artwork]? = nil
     var version = 2
     // Optional for version-one manifests; absence means no deliberate local removals.
@@ -213,7 +223,14 @@ nonisolated enum FoundationDownloadStorage {
             (manifest.excludedTrackIDs?.count ?? 0) <= 100_000,
             (manifest.artwork?.count ?? 0) <= 100_000,
             Set(manifest.owners.map(\.id)).count == manifest.owners.count,
-            manifest.owners.allSatisfy({ $0.tracks.count <= 10_000 })
+            manifest.owners.allSatisfy({ $0.tracks.count <= 10_000 }),
+            (manifest.collections?.count ?? 0) <= 128,
+            (manifest.collections ?? []).reduce(0, { $0 + $1.tracks.count }) <= 10_000,
+            (try JSONEncoder().encode(manifest.collections ?? [])).count <= 2 * 1_024 * 1_024,
+            (manifest.collections ?? []).allSatisfy({
+                ["album", "playlist"].contains($0.item.kind)
+                    && $0.tracks.allSatisfy { $0.kind == "track" }
+            })
         else { throw CocoaError(.fileReadCorruptFile) }
         manifest.version = 2
         return manifest

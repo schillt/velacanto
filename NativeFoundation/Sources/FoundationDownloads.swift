@@ -18,6 +18,8 @@ struct FoundationDownloadOwner: Identifiable {
     var item: FoundationItem
     var tracks: [FoundationItem]
     var state: FoundationDownloadState
+    var activeTrackID: String? = nil
+    var activeTrackProgress: Double? = nil
     var progress: Double = 0
     var availability: FoundationDownloadAvailability = .unavailable
     var status: String {
@@ -56,6 +58,7 @@ final class FoundationDownloads: ObservableObject {
     @Published private(set) var storageBytes: Int64 = 0
     @Published private(set) var errorMessage: String?
     @Published private(set) var artworkRevision: UInt = 0
+    @Published private(set) var catalogRevision: UInt = 0
     private let library: any FoundationLibrary
     private let directory: URL
     private let transfer: Transfer
@@ -75,6 +78,7 @@ final class FoundationDownloads: ObservableObject {
     private var resetting = false
     private var syncTask: Task<Void, Never>?
     private var syncPending = false
+    private var transferRevision: UInt = 0
     private var activeOwner: String?
     private var monitor: NWPathMonitor?
     private var connected = false
@@ -271,7 +275,10 @@ final class FoundationDownloads: ObservableObject {
         guard isLive, storageUsable, let index = owners.firstIndex(where: { $0.id == ownerID })
         else { return }
         paused.insert(ownerID)
+        if activeOwner == ownerID { transferRevision &+= 1 }
         owners[index].state = .cancelled
+        owners[index].activeTrackID = nil
+        owners[index].activeTrackProgress = nil
         if activeOwner == ownerID { worker?.cancel() }
         do { try save() } catch { reportStorageFailure() }
     }
@@ -311,6 +318,25 @@ final class FoundationDownloads: ObservableObject {
         schedule()
     }
 
+    func transferOwner(for item: FoundationItem) -> FoundationDownloadOwner? {
+        guard isLive, storageUsable else { return nil }
+        if item.kind == .track,
+            let active = owners.first(where: {
+                $0.activeTrackID == item.id && $0.state == .downloading
+            })
+        {
+            return active
+        }
+        if let exact = owners.first(where: { $0.id == ownerID(item) && $0.state != .ready }) {
+            return exact
+        }
+        guard item.kind == .track, !isReady(item) else { return nil }
+        let matches = owners.filter {
+            $0.state != .ready && $0.tracks.contains(where: { $0.id == item.id })
+        }
+        return matches.first(where: { $0.activeTrackID == item.id }) ?? matches.first
+    }
+
     private func isExcluded(_ id: String) -> Bool {
         manifest.excludedTrackIDs?.contains(id) == true
     }
@@ -328,7 +354,17 @@ final class FoundationDownloads: ObservableObject {
     var downloadedPlaylists: [FoundationItem] {
         guard isLive, storageUsable else { return [] }
         // Saved snapshots remain browsable after their final local track is removed.
-        return owners.filter { $0.item.kind == .playlist && expanded.contains($0.id) }.map(\.item)
+        var result = owners.filter { $0.item.kind == .playlist && expanded.contains($0.id) }.map(
+            \.item)
+        var seen = Set(result.map(\.id))
+        for saved in manifest.collections ?? [] where saved.item.kind == "playlist" {
+            if saved.tracks.contains(where: { isReady($0.item) }),
+                seen.insert(saved.item.id).inserted
+            {
+                result.append(saved.item.item)
+            }
+        }
+        return result
     }
 
     var downloadedAlbums: [FoundationItem] {
@@ -337,15 +373,122 @@ final class FoundationDownloads: ObservableObject {
             $0.item.kind == .album && expanded.contains($0.id)
         }.map(\.item)
         var seen = Set(items.map(\.id))
+        for saved in manifest.collections ?? [] where saved.item.kind == "album" {
+            if saved.tracks.contains(where: { isReady($0.item) }),
+                seen.insert(saved.item.id).inserted
+            {
+                items.append(saved.item.item)
+            }
+        }
         for song in downloadedSongs {
             if let album = song.album, seen.insert(album.id).inserted {
-                items.append(
-                    FoundationItem(
-                        id: album.id, title: album.title, subtitle: song.subtitle,
-                        kind: .album, duration: nil, primaryImageTag: album.primaryImageTag))
+                var item = FoundationItem(
+                    id: album.id, title: album.title, subtitle: song.subtitle,
+                    kind: .album, duration: nil, primaryImageTag: album.primaryImageTag)
+                item.artist = song.artist
+                items.append(item)
             }
         }
         return items
+    }
+
+    var downloadedArtists: [FoundationItem] {
+        guard isLive, storageUsable else { return [] }
+        var seen: Set<String> = []
+        return (downloadedSongs + downloadedAlbums).compactMap { item in
+            guard let artist = item.artist, seen.insert(artist.id).inserted else { return nil }
+            return FoundationItem(
+                id: artist.id, title: artist.title, subtitle: "", kind: .artist,
+                duration: nil, primaryImageTag: artist.primaryImageTag)
+        }
+    }
+
+    func downloadedAlbums(artistID: String) -> [FoundationItem] {
+        let albumIDs = Set(
+            downloadedSongs.filter { $0.artist?.id == artistID }.compactMap { $0.album?.id })
+        return downloadedAlbums.filter { $0.artist?.id == artistID || albumIDs.contains($0.id) }
+    }
+
+    /// Retain only catalog membership already fetched by a visible collection; never fetch to discover.
+    /// Bounded independently of download ownership so remembered playlists cannot retain shared files.
+    func rememberCollection(_ item: FoundationItem, tracks: [FoundationItem], complete: Bool) {
+        guard isLive, storageUsable, [.album, .playlist].contains(item.kind),
+            tracks.count <= 10_000, tracks.allSatisfy({ $0.kind == .track })
+        else { return }
+        let previous = manifest.collections
+        // Pagination may be interrupted; it cannot erase a prior successful full membership list.
+        if !complete,
+            previous?.contains(where: {
+                $0.item.id == item.id && $0.item.kind == item.kind.rawValue && $0.complete
+            }) == true
+        {
+            return
+        }
+        var records = (previous ?? []).filter {
+            $0.item.id != item.id || $0.item.kind != item.kind.rawValue
+        }
+        let record = FoundationDownloadManifest.Collection(
+            item: FoundationStoredDownloadItem(item),
+            tracks: tracks.map(FoundationStoredDownloadItem.init),
+            complete: complete)
+        guard let data = try? JSONEncoder().encode(record), data.count <= 2 * 1_024 * 1_024 else {
+            return
+        }
+        if let existing = previous?.first(where: {
+            $0.item.id == item.id && $0.item.kind == item.kind.rawValue
+        }),
+            existing == record
+        {
+            return
+        }
+        records.append(record)
+        while records.count > 128 || records.reduce(0, { $0 + $1.tracks.count }) > 10_000
+            || ((try? JSONEncoder().encode(records).count) ?? Int.max) > 2 * 1_024 * 1_024
+        { records.removeFirst() }
+        manifest.collections = records
+        do {
+            try save()
+            catalogRevision &+= 1
+        } catch {
+            manifest.collections = previous
+            reportStorageFailure()
+        }
+    }
+
+    /// Local search uses verified playable audio and its remembered related containers only.
+    func localSearchItems(query: String, kind: FoundationItem.Kind? = nil) -> [FoundationItem] {
+        let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard isLive, storageUsable, !query.isEmpty else {
+            return []
+        }
+        var seen: Set<String> = []
+        let containers = downloadedAlbums + downloadedArtists + downloadedPlaylists
+        let candidates =
+            downloadedSongs
+            + containers.filter { availability(for: $0) != .unavailable || $0.kind == .artist }
+        return candidates.filter { item in
+            guard kind == nil || kind == item.kind, seen.insert(collectionKey(item)).inserted else {
+                return false
+            }
+            return [item.title, item.subtitle, item.album?.title ?? "", item.artist?.title ?? ""]
+                .contains {
+                    $0.localizedStandardContains(query)
+                }
+        }.sorted {
+            let order = $0.title.localizedStandardCompare($1.title)
+            return order == .orderedSame
+                ? collectionKey($0) < collectionKey($1) : order == .orderedAscending
+        }
+    }
+
+    func localSearch(
+        query: String, kind: FoundationItem.Kind? = nil, startIndex: Int = 0, limit: Int = 50
+    ) -> FoundationPage {
+        let results = localSearchItems(query: query, kind: kind)
+        let start = min(max(0, startIndex), results.count)
+        let end = start + min(max(1, min(limit, 10_000)), results.count - start)
+        return FoundationPage(
+            items: Array(results[start..<end]), nextStartIndex: end < results.count ? end : nil)
     }
 
     private func collectionKey(_ item: FoundationItem) -> String {
@@ -360,9 +503,7 @@ final class FoundationDownloads: ObservableObject {
         let model = FoundationBrowseModel()
         collectionModels[key] = model
         let tracks = snapshotTracks(for: item)
-        let hasSnapshot = owners.contains {
-            $0.item.kind == item.kind && $0.id == ownerID(item) && expanded.contains($0.id)
-        }
+        let hasSnapshot = hasCompleteCollectionSnapshot(for: item)
         if hasSnapshot || !tracks.isEmpty { model.installSnapshot(tracks, complete: hasSnapshot) }
         return model
     }
@@ -383,9 +524,16 @@ final class FoundationDownloads: ObservableObject {
             // An established canonical page supersedes the older complete download snapshot.
             return model.loaded && model.nextStartIndex == nil
         }
+        if let saved = rememberedCollection(item) { return saved.complete }
         return owners.contains {
             $0.item.kind == item.kind && $0.id == ownerID(item) && expanded.contains($0.id)
         }
+    }
+
+    private func rememberedCollection(_ item: FoundationItem) -> FoundationDownloadManifest
+        .Collection?
+    {
+        manifest.collections?.first { $0.item.id == item.id && $0.item.kind == item.kind.rawValue }
     }
 
     private func installCollectionSnapshot(
@@ -446,7 +594,14 @@ final class FoundationDownloads: ObservableObject {
 
     private func snapshotTracks(for item: FoundationItem) -> [FoundationItem] {
         if item.kind == .track { return [item] }
+        if item.kind == .artist {
+            var seen: Set<String> = []
+            return owners.flatMap(\.tracks).filter {
+                $0.artist?.id == item.id && seen.insert($0.id).inserted
+            }
+        }
         guard item.kind == .album || item.kind == .playlist else { return [] }
+        if let saved = rememberedCollection(item) { return saved.tracks.map(\.item) }
         if let owner = owners.first(where: { $0.id == ownerID(item) }),
             item.kind != .album || expanded.contains(owner.id) || !owner.tracks.isEmpty
         {
@@ -693,6 +848,7 @@ final class FoundationDownloads: ObservableObject {
                         reacquiring = previousReacquiring
                         throw error
                     }
+                    rememberCollection(owner.item, tracks: tracks, complete: true)
                     readyFileIDs.formUnion(reusable.keys.filter { !isExcluded($0) })
                     installCollectionSnapshot(owner.item, tracks: tracks)
                     scheduleArtwork()
@@ -703,6 +859,12 @@ final class FoundationDownloads: ObservableObject {
                 for track in current.tracks where visited.insert(track.id).inserted {
                     try check(epoch: epoch, ownerID: owner.id)
                     if isExcluded(track.id) || isReady(track) { continue }
+                    transferRevision &+= 1
+                    let revision = transferRevision
+                    if let index = owners.firstIndex(where: { $0.id == owner.id }) {
+                        owners[index].activeTrackID = track.id
+                        owners[index].activeTrackProgress = nil
+                    }
                     let source = try await library.downloadSource(for: track)
                     try check(epoch: epoch, ownerID: owner.id)
                     let ext = source.fileExtension.lowercased()
@@ -716,9 +878,15 @@ final class FoundationDownloads: ObservableObject {
                             [weak self] bytes, total in
                             Task { @MainActor [weak self] in
                                 guard let self, self.generation == epoch,
-                                    self.activeOwner == owner.id,
+                                    self.transferRevision == revision, self.activeOwner == owner.id,
                                     let index = self.owners.firstIndex(where: { $0.id == owner.id })
                                 else { return }
+                                guard self.owners[index].activeTrackID == track.id,
+                                    self.owners[index].state == .downloading
+                                else { return }
+                                self.owners[index].activeTrackProgress = total.flatMap {
+                                    $0 > 0 ? min(1, max(0, Double(bytes) / Double($0))) : nil
+                                }
                                 let complete = self.readyTracks(ownerID: owner.id).count
                                 let fraction =
                                     total.map { $0 > 0 ? min(1, Double(bytes) / Double($0)) : 0 }
@@ -804,6 +972,10 @@ final class FoundationDownloads: ObservableObject {
     private func setState(_ id: String, _ state: FoundationDownloadState) {
         guard let index = owners.firstIndex(where: { $0.id == id }) else { return }
         owners[index].state = state
+        if state != .downloading {
+            owners[index].activeTrackID = nil
+            owners[index].activeTrackProgress = nil
+        }
         if state == .ready {
             owners[index].progress = 1
             owners[index].availability = availability(for: owners[index].item)
@@ -1158,6 +1330,7 @@ final class FoundationDownloads: ObservableObject {
                         owners[index] = previous
                         throw error
                     }
+                    rememberCollection(item, tracks: entries.map(\.item), complete: true)
                     installCollectionSnapshot(item, tracks: entries.map(\.item), refreshed: true)
                     if activeOwner == owner.id { worker?.cancel() }
                     collectUnusedFiles()

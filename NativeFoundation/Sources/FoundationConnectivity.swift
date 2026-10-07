@@ -10,6 +10,8 @@ final class FoundationConnectivity: ObservableObject {
     @Published private(set) var localOnly = false
     @Published private(set) var statusMessage: String?
     @Published private(set) var isRetrying = false
+    @Published private(set) var successfulRetryRevision = 0
+    var hasConnectionIssue: Bool { localOnly || (status == .available && statusMessage != nil) }
     @Published private(set) var usesWiFiOrWired = false
     @Published private(set) var usesCellular = false
     var isConnected: Bool { status == .available }
@@ -107,6 +109,9 @@ final class FoundationConnectivity: ObservableObject {
             guard isLive, epoch == generation else { return }
             settleTask?.cancel()
             publish(.available)
+            successfulRetryRevision += 1
+        } catch is CancellationError {
+            return
         } catch {
             guard isLive, epoch == generation else { return }
             statusMessage = "Server unavailable. Downloaded music is in Library."

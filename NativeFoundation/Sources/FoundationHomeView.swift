@@ -23,7 +23,10 @@ struct FoundationHomeView<Profile: View>: View {
     var body: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 28) {
-                if connectivity.localOnly, !hasLocalContent {
+                if connectivity.hasConnectionIssue
+                    || [recentTracks, favorites, recentAlbums, genres].contains(
+                        where: \.hasConnectionIssue)
+                {
                     FoundationOfflineNotice()
                 }
                 FoundationContinueListening(
@@ -69,6 +72,15 @@ struct FoundationHomeView<Profile: View>: View {
             refreshRevision += 1
             genreRetryRevision += 1
         }
+        .onChange(of: connectivity.successfulRetryRevision) { _, _ in
+            guard isActive else { return }
+            recentTracks.request(.refresh)
+            favorites.request(.refresh)
+            recentAlbums.request(.refresh)
+            genres.request(.refresh)
+            refreshRevision += 1
+            genreRetryRevision += 1
+        }
         .foundationHeader("Home", profile: profile)
         #if DEBUG
             .onChange(of: showingPlayer) { _, presented in
@@ -90,17 +102,6 @@ struct FoundationHomeView<Profile: View>: View {
                     item: item, library: library, player: player, isActive: isActive)
             }
         }
-    }
-
-    private var hasLocalContent: Bool {
-        let selected = player.queue.first { $0.id == player.selectedEntryID }?.item
-        if let selected, downloads.isReady(selected) { return true }
-        if recentTracks.items.prefix(6).contains(where: downloads.isReady) { return true }
-        return
-            (Array(favorites.items.prefix(5)) + Array(recentAlbums.items.prefix(5))
-            + Array(genres.items.prefix(5))).contains {
-                !downloads.browseTracks(for: $0).isEmpty
-            }
     }
 
     private var genreShelves: some View {
@@ -349,7 +350,7 @@ private struct FoundationHomeShelf: View {
                     model.request(model.retryRequest)
                     retryRevision += 1
                 }.disabled(connectivity.localOnly)
-            } else if model.loaded, model.items.isEmpty {
+            } else if !connectivity.localOnly, model.loaded, model.items.isEmpty {
                 Text("No items yet.").foregroundStyle(.secondary)
             }
         }

@@ -39,9 +39,13 @@
             VStack(spacing: 0) {
                 fixtureControls
                 if fixture.canonicalReady { Text("Canonical fixture ready").font(.caption) }
+                if fixture.membershipReady { Text("Membership fixture ready").font(.caption) }
                 content
             }
-            .task { await fixture.prepareCanonicalCollections() }
+            .task {
+                await fixture.prepareCanonicalCollections()
+                await fixture.prepareMembershipCollections()
+            }
             .foundationDownloadRemovalPresentation()
             .environmentObject(fixture.downloads)
             .environmentObject(fixture.preferences)
@@ -295,6 +299,7 @@
     @MainActor
     private final class FoundationDownloadUIFixture: ObservableObject {
         @Published private(set) var canonicalReady = false
+        @Published private(set) var membershipReady = false
         let downloads: FoundationDownloads
         let player: FoundationPlayer
         let library: FoundationDownloadUILibrary
@@ -333,9 +338,13 @@
             // Start on synthetic cellular; the production toggle governs transfer permission.
             let productionShell = ProcessInfo.processInfo.arguments.contains(
                 "-fixtureProductionShell")
-            downloads.updateConnectivity(isConnected: true, usesWiFi: productionShell)
+            downloads.updateConnectivity(
+                isConnected: !ProcessInfo.processInfo.arguments.contains("-fixtureStartOffline"),
+                usesWiFi: productionShell)
             connectivity.update(
-                status: .available, wifiOrWired: productionShell, cellular: !productionShell)
+                status: ProcessInfo.processInfo.arguments.contains("-fixtureStartOffline")
+                    ? .unavailable : .available,
+                wifiOrWired: productionShell, cellular: !productionShell)
         }
 
         func prepareCanonicalCollections() async {
@@ -377,6 +386,35 @@
             canonicalReady = true
         }
 
+        func prepareMembershipCollections() async {
+            let arguments = ProcessInfo.processInfo.arguments
+            guard let index = arguments.firstIndex(of: "-fixtureMembership"),
+                arguments.indices.contains(index + 1), !membershipReady
+            else { return }
+            // A cold launch restores the exact account-owned manifest rather than re-downloading.
+            if !downloads.downloadedSongs.isEmpty {
+                membershipReady = true
+                return
+            }
+            let album = FoundationItem(
+                id: "album", title: "Fixture Album", subtitle: "Fixture Artist", kind: .album,
+                duration: 60, primaryImageTag: "synthetic",
+                artist: .init(id: "artist", title: "Fixture Artist", primaryImageTag: "synthetic"))
+            let tracks = try? await library.tracks(albumID: "album", startIndex: 0)
+            guard let tracks else { return }
+            downloads.rememberCollection(album, tracks: tracks.items, complete: true)
+            downloads.rememberCollection(playlist, tracks: tracks.items, complete: true)
+            downloads.download(arguments[index + 1] == "track" ? tracks.items[0] : album)
+            for _ in 0..<200 {
+                guard !Task.isCancelled else { return }
+                if downloads.owners.first?.state == .ready { break }
+                try? await Task.sleep(for: .milliseconds(50))
+            }
+            guard downloads.owners.first?.state == .ready else { return }
+            if arguments[index + 1] == "album" { downloads.removeTrack(tracks.items[1]) }
+            membershipReady = true
+        }
+
         isolated deinit {
             artwork.invalidate()
             actions.invalidate()
@@ -391,6 +429,10 @@
             scope: "synthetic-artwork",
             root: FoundationDownloadsTestHarness.storageRoot.appendingPathComponent("artwork-cache")
         )
+        nonisolated let catalogPageCache: FoundationCatalogPageCache? = FoundationCatalogPageCache(
+            scope: "synthetic-ui",
+            root: FoundationDownloadsTestHarness.storageRoot
+                .appendingPathComponent("page-cache"))
         private var fetches: [String: Int] = [:]
 
         func artworkCounts() -> String {
@@ -413,7 +455,8 @@
         }
         func artists(startIndex: Int) async throws -> FoundationPage {
             .init(
-                items: usesCache
+                items: (usesCache
+                    || ProcessInfo.processInfo.arguments.contains("-fixtureMembership"))
                     ? [
                         FoundationItem(
                             id: "artist", title: "Fixture Artist", subtitle: "", kind: .artist,
@@ -429,17 +472,46 @@
                             duration: nil, primaryImageTag: "synthetic")
                     ] : [], nextStartIndex: nil)
         }
-        private let canonical = ProcessInfo.processInfo.arguments.contains(
-            "-fixtureCanonicalCollections")
+        private let canonical =
+            ProcessInfo.processInfo.arguments.contains(
+                "-fixtureCanonicalCollections")
+            || ProcessInfo.processInfo.arguments.contains("-fixtureMembership")
+            || ProcessInfo.processInfo.arguments.contains("-fixtureSlowTransfer")
         private let missing = FoundationItem(
             id: "missing-tone", title: "Fixture Missing Tone", subtitle: "Generated silent PCM",
             kind: .track, duration: 30, isFavorite: false,
-            album: .init(id: "album", title: "Fixture Album", primaryImageTag: "synthetic"))
+            album: .init(id: "album", title: "Fixture Album", primaryImageTag: "synthetic"),
+            artist: .init(id: "artist", title: "Fixture Artist", primaryImageTag: "synthetic"))
         private var orderedTracks: [FoundationItem] {
             canonical ? [track, missing, track] : [track, track]
         }
         func songs(startIndex: Int) async throws -> FoundationPage {
             .init(items: canonical ? [track, missing] : [track], nextStartIndex: nil)
+        }
+        func search(query: String, kind: FoundationItem.Kind, startIndex: Int, limit: Int)
+            async throws -> FoundationPage
+        {
+            let items: [FoundationItem]
+            switch kind {
+            case .track: items = canonical ? [track, missing] : [track]
+            case .album: items = [album]
+            case .artist:
+                items = [
+                    .init(
+                        id: "artist", title: "Fixture Artist", subtitle: "", kind: .artist,
+                        duration: nil)
+                ]
+            case .playlist:
+                items = [
+                    .init(
+                        id: "playlist", title: "Fixture Playlist", subtitle: "Synthetic",
+                        kind: .playlist, duration: nil)
+                ]
+            case .genre: items = []
+            }
+            return .init(
+                items: items.filter { $0.title.localizedStandardContains(query) },
+                nextStartIndex: nil)
         }
         func playlists(startIndex: Int) async throws -> FoundationPage {
             .init(
@@ -457,14 +529,22 @@
         private let track = FoundationItem(
             id: "tone", title: "Fixture Tone", subtitle: "Generated silent PCM", kind: .track,
             duration: 30, isFavorite: false,
-            album: .init(id: "album", title: "Fixture Album", primaryImageTag: "synthetic"))
+            album: .init(id: "album", title: "Fixture Album", primaryImageTag: "synthetic"),
+            artist: .init(id: "artist", title: "Fixture Artist", primaryImageTag: "synthetic"))
         private let album = FoundationItem(
             id: "album", title: "Fixture Album", subtitle: "Synthetic Artist", kind: .album,
             duration: 30, primaryImageTag: "synthetic", isFavorite: false,
+            artist: .init(id: "artist", title: "Fixture Artist", primaryImageTag: "synthetic"),
             genres: ProcessInfo.processInfo.arguments.contains("-fixtureArtworkCache")
                 ? [.init(id: "genre", title: "Fixture Genre", primaryImageTag: "synthetic")] : [])
         func albums(startIndex: Int) async throws -> FoundationPage {
             .init(items: [album], nextStartIndex: nil)
+        }
+        func albums(artistID: String, startIndex: Int) async throws -> FoundationPage {
+            .init(items: [album], nextStartIndex: nil)
+        }
+        func tracks(artistID: String, startIndex: Int) async throws -> FoundationPage {
+            .init(items: canonical ? [track, missing] : [track], nextStartIndex: nil)
         }
         func recentAlbums(startIndex: Int) async throws -> FoundationPage {
             .init(items: [album], nextStartIndex: nil)
@@ -531,7 +611,12 @@
         ) async throws {
             progress(1, 2)
             // Keep the injected failure pending long enough for native UI automation to observe progress.
-            try await Task.sleep(for: .seconds(failOnce ? 5 : 1))
+            try await Task.sleep(
+                for: .seconds(
+                    failOnce
+                        ? 5
+                        : (ProcessInfo.processInfo.arguments.contains("-fixtureSlowTransfer")
+                            ? 8 : 1)))
             if failOnce {
                 failOnce = false
                 throw CocoaError(.fileWriteOutOfSpace)

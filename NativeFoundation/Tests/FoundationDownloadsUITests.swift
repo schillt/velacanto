@@ -5,7 +5,8 @@ final class FoundationDownloadsUITests: XCTestCase {
     private func launch(
         failOnce: Bool = false, account: Bool = false, delayedAuth: Bool = false,
         productionShell: Bool = false, largeText: Bool = false,
-        canonicalDownloadState: String? = nil, artworkCache: Bool = false
+        canonicalDownloadState: String? = nil, artworkCache: Bool = false,
+        membership: String? = nil, slowTransfer: Bool = false
     )
         -> XCUIApplication
     {
@@ -19,6 +20,8 @@ final class FoundationDownloadsUITests: XCTestCase {
             ]
         }
         if failOnce { app.launchArguments.append("-fixtureFailOnce") }
+        if slowTransfer { app.launchArguments.append("-fixtureSlowTransfer") }
+        if let membership { app.launchArguments += ["-fixtureMembership", membership] }
         if account { app.launchArguments.append("-fixtureAccount") }
         if delayedAuth { app.launchArguments.append("-fixtureDelayedAuth") }
         app.launchEnvironment["FOUNDATION_UI_RUN_ID"] = UUID().uuidString
@@ -35,6 +38,9 @@ final class FoundationDownloadsUITests: XCTestCase {
         XCTAssertTrue(app.buttons[entry].waitForExistence(timeout: 10))
         if canonicalDownloadState != nil {
             XCTAssertTrue(app.staticTexts["Canonical fixture ready"].waitForExistence(timeout: 15))
+        }
+        if membership != nil {
+            XCTAssertTrue(app.staticTexts["Membership fixture ready"].waitForExistence(timeout: 20))
         }
         return app
     }
@@ -558,12 +564,12 @@ final class FoundationDownloadsUITests: XCTestCase {
         XCUIDevice.shared.orientation = .portrait
         XCTAssertTrue(app.navigationBars["Downloads"].waitForExistence(timeout: 5))
         app.buttons["Search"].firstMatch.tap()
-        XCTAssertTrue(app.buttons["Retry Online"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["offline-retry"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["Search"].firstMatch.exists)
         XCTAssertTrue(app.staticTexts["Offline. Downloaded music is in Library."].exists)
         XCTAssertTrue(app.buttons["Open Library"].exists)
         let search = app.textFields["Search music"]
-        if search.exists { XCTAssertFalse(search.isEnabled) }
+        if search.exists { XCTAssertTrue(search.isEnabled) }
         capture("Offline preserves Search and explains unavailable content", in: app)
         app.buttons["Profile and settings"].tap()
         XCTAssertTrue(app.navigationBars["Profile & Settings"].waitForExistence(timeout: 5))
@@ -577,8 +583,8 @@ final class FoundationDownloadsUITests: XCTestCase {
         app.navigationBars.buttons.firstMatch.tap()
         XCTAssertTrue(app.navigationBars["Profile & Settings"].waitForExistence(timeout: 5))
         app.buttons["Done"].tap()
-        XCTAssertTrue(app.buttons["Retry Online"].waitForExistence(timeout: 5))
-        app.buttons["Retry Online"].tap()
+        XCTAssertTrue(app.buttons["offline-retry"].waitForExistence(timeout: 5))
+        app.buttons["offline-retry"].tap()
         XCTAssertTrue(search.waitForExistence(timeout: 5))
         XCTAssertTrue(search.isEnabled)
         XCTAssertTrue(app.staticTexts["Search"].firstMatch.exists)
@@ -622,7 +628,7 @@ final class FoundationDownloadsUITests: XCTestCase {
         app.navigationBars.buttons.firstMatch.tap()
         app.buttons["Home"].firstMatch.tap()
         XCTAssertTrue(app.staticTexts["Home"].firstMatch.waitForExistence(timeout: 5))
-        XCTAssertFalse(app.buttons["Retry Online"].exists)
+        XCTAssertTrue(app.buttons["offline-retry"].exists)
         let resume = app.buttons["Open Now Playing"]
         XCTAssertTrue(resume.waitForExistence(timeout: 5))
         XCTAssertFalse(resume.label.contains("Available offline"))
@@ -780,6 +786,121 @@ final class FoundationDownloadsUITests: XCTestCase {
         }
     }
 
+    func testPartialTrackDiscoversAlbumArtistPlaylistAndOfflineSearchAfterColdLaunch() {
+        assertPartialMembership(mode: "track")
+    }
+
+    func testPartialAlbumDiscoversUnownedPlaylistAndOfflineSearchAfterColdLaunch() {
+        assertPartialMembership(mode: "album")
+    }
+
+    private func assertPartialMembership(mode: String) {
+        continueAfterFailure = false
+        let app = launch(productionShell: true, membership: mode)
+        app.switches["Simulate unavailable network"].switches.firstMatch.tap()
+        app.terminate()
+        app.launchArguments.append("-fixtureStartOffline")
+        app.launch()
+        XCTAssertTrue(app.staticTexts["Membership fixture ready"].waitForExistence(timeout: 10))
+        XCTAssertTrue(
+            app.descendants(matching: .any)["browsing-offline-status"].waitForExistence(timeout: 5))
+        app.buttons["Library"].firstMatch.tap()
+        for (category, title) in [
+            ("albums", "Fixture Album"), ("artists", "Fixture Artist"),
+            ("playlists", "Fixture Playlist"),
+        ] {
+            tapVisible(app.buttons["library-category-" + category], in: app)
+            let match = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", title))
+                .firstMatch
+            XCTAssertTrue(match.waitForExistence(timeout: 5))
+            match.tap()
+            if category == "artists" {
+                let album = app.buttons.matching(
+                    NSPredicate(format: "label BEGINSWITH %@", "Fixture Album")
+                ).firstMatch
+                tapVisible(album, in: app)
+            }
+            let playable = app.buttons["collection-track-0"]
+            let missing = app.buttons["collection-track-1"]
+            XCTAssertTrue(playable.waitForExistence(timeout: 5))
+            XCTAssertTrue(playable.isEnabled)
+            XCTAssertTrue(missing.exists)
+            XCTAssertFalse(missing.isEnabled)
+            XCTAssertTrue((missing.value as? String ?? "").contains("unavailable offline"))
+            XCTAssertTrue(app.buttons["Play"].isEnabled)
+            capture("Cold offline partial " + mode + " discovers " + category, in: app)
+            app.navigationBars.buttons.firstMatch.tap()
+            if category == "artists" { app.navigationBars.buttons.firstMatch.tap() }
+            app.navigationBars.buttons.firstMatch.tap()
+        }
+        app.buttons["Home"].firstMatch.tap()
+        XCTAssertTrue(
+            app.descendants(matching: .any)["offline-notice"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["offline-retry"].exists)
+        app.buttons["Search"].firstMatch.tap()
+        let search = app.textFields["Search music"]
+        XCTAssertTrue(search.waitForExistence(timeout: 5) && search.isEnabled)
+        search.tap()
+        search.typeText("Fixture")
+        // The keyboard obscures lower native result sections; dismiss through normal scrolling.
+        scrollContent(in: app)
+        XCTAssertTrue(
+            app.staticTexts["Searching downloaded music and saved collections."].waitForExistence(
+                timeout: 5))
+        for title in ["Fixture Tone", "Fixture Album", "Fixture Artist", "Fixture Playlist"] {
+            let result = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", title))
+                .firstMatch
+            for _ in 0..<8 {
+                if result.exists { break }
+                scrollContent(in: app)
+            }
+            XCTAssertTrue(result.exists, "Missing local search result: " + title)
+        }
+        XCTAssertFalse(
+            app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Fixture Missing Tone"))
+                .firstMatch.exists)
+        capture("Offline local search includes playable track and related collections", in: app)
+        app.buttons["offline-status-retry"].tap()
+        XCTAssertTrue(app.switches["Simulate unavailable network"].waitForExistence(timeout: 5))
+        let online = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "value == %@", "0"),
+            object: app.switches["Simulate unavailable network"])
+        XCTAssertEqual(XCTWaiter.wait(for: [online], timeout: 5), .completed)
+        XCTAssertTrue(search.isEnabled)
+        let onlineMissing = app.buttons.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "Fixture Missing Tone")
+        ).firstMatch
+        for _ in 0..<8 {
+            if onlineMissing.exists { break }
+            scrollContent(in: app, upward: false)
+        }
+        XCTAssertTrue(onlineMissing.waitForExistence(timeout: 5))
+        XCTAssertTrue(onlineMissing.isEnabled)
+        capture("Explicit Retry restores online search without losing navigation", in: app)
+    }
+
+    func testMeasuredTrackAndIndeterminateCollectionFeedback() {
+        continueAfterFailure = false
+        let app = launch(productionShell: true, canonicalDownloadState: nil, slowTransfer: true)
+        app.buttons["Queue fixture playlist"].tap()
+        app.buttons["Library"].firstMatch.tap()
+        tapVisible(app.buttons["library-category-songs"], in: app)
+        let progress = app.descendants(matching: .any)["download-state-active-measured"].firstMatch
+        XCTAssertTrue(progress.waitForExistence(timeout: 8))
+        XCTAssertEqual(progress.value as? String, "50 percent")
+        XCTAssertTrue(app.descendants(matching: .any)["download-state-queued"].firstMatch.exists)
+        capture("Measured track uses accessible determinate circular progress", in: app)
+        app.navigationBars.buttons.firstMatch.tap()
+        tapVisible(app.buttons["library-category-playlists"], in: app)
+        let aggregate = app.descendants(matching: .any)["download-state-active-indeterminate"]
+            .firstMatch
+        XCTAssertTrue(aggregate.waitForExistence(timeout: 5))
+        XCTAssertFalse((aggregate.value as? String ?? "").contains("percent"))
+        capture("Collection feedback does not invent aggregate percentages", in: app)
+        XCTAssertTrue(app.staticTexts["Fixture download ready"].waitForExistence(timeout: 20))
+        assertOfflineIconIsAccessible(in: app)
+    }
+
     func testWaitingCancellationFailureRetryAndRemoval() {
         continueAfterFailure = false
         let app = launch(failOnce: true)
@@ -790,10 +911,12 @@ final class FoundationDownloadsUITests: XCTestCase {
         XCTAssertTrue(app.buttons["Playlists"].exists)
         XCTAssertTrue(app.staticTexts["Waiting for Wi-Fi"].waitForExistence(timeout: 5))
         openFixturePlaylist(app)
+        XCTAssertTrue(app.descendants(matching: .any)["download-state-waiting"].firstMatch.exists)
         chooseCollectionAction("Cancel Download", in: app)
         XCTAssertTrue(
             app.staticTexts["Cancelled — downloaded tracks are retained"]
                 .waitForExistence(timeout: 5))
+        XCTAssertTrue(app.descendants(matching: .any)["download-state-cancelled"].firstMatch.exists)
         enableCellular(app)
         chooseCollectionAction("Retry Download", in: app)
         XCTAssertTrue(

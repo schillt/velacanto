@@ -6,6 +6,8 @@ final class FoundationBrowseModel: ObservableObject {
     @Published private(set) var items: [FoundationItem] = []
     @Published private(set) var nextStartIndex: Int?
     @Published private(set) var isLoading = false
+    @Published private(set) var errorCategory: FoundationLibraryError?
+    var hasConnectionIssue: Bool { errorCategory == .network }
     @Published private(set) var errorMessage: String?
     private(set) var loaded = false
     private(set) var isRetainedSnapshot = false
@@ -69,6 +71,7 @@ final class FoundationBrowseModel: ObservableObject {
         isRetainedSnapshot = true
         isLoading = false
         errorMessage = nil
+        errorCategory = nil
         pendingRequest = .initial
     }
 
@@ -81,6 +84,7 @@ final class FoundationBrowseModel: ObservableObject {
         isRetainedSnapshot = false
         isLoading = false
         errorMessage = nil
+        errorCategory = nil
         pendingRequest = .initial
         restoredCache = false
         lastRefreshAttempt = nil
@@ -169,6 +173,7 @@ final class FoundationBrowseModel: ObservableObject {
         isLoading = true
         lastRefreshAttempt = now()
         errorMessage = nil
+        errorCategory = nil
         defer { if revision == owner { isLoading = false } }
         #if DEBUG
             FoundationJournal.shared.record(
@@ -224,7 +229,8 @@ final class FoundationBrowseModel: ObservableObject {
                 #endif
                 return
             }
-            errorMessage = FoundationLibraryError.category(error).errorDescription
+            errorCategory = FoundationLibraryError.category(error)
+            errorMessage = errorCategory?.errorDescription
             #if DEBUG
                 FoundationJournal.shared.record(
                     "browse disposition=failure \(FoundationTrace.fields)")

@@ -64,6 +64,190 @@ final class FoundationDownloadsTests: XCTestCase {
         }
     }
 
+    func testTrackDownloadDiscoversRelatedCollectionsAcrossColdOfflineRelaunch() async throws {
+        var first = item("first")
+        first.album = .init(id: "album", title: "Synthetic album")
+        first.artist = .init(id: "artist", title: "Synthetic artist")
+        var unavailable = item("unavailable")
+        unavailable.album = first.album
+        unavailable.artist = first.artist
+        let album = item("album", kind: .album)
+        let playlist = item("playlist", kind: .playlist)
+        let directory = try root()
+        let library = DownloadsLibrary(tracks: [first, unavailable])
+        let manager = FoundationDownloads(
+            scope: "fixture", library: library, root: directory, transfer: transfer,
+            monitorConnectivity: false)
+        manager.rememberCollection(album, tracks: [first, unavailable], complete: true)
+        manager.rememberCollection(playlist, tracks: [unavailable, first, first], complete: true)
+        manager.updateConnectivity(isAllowed: true)
+        manager.download(first)
+        try await waitUntil { manager.isReady(first) }
+        XCTAssertEqual(manager.downloadedAlbums.map(\.id), ["album"])
+        XCTAssertEqual(manager.downloadedArtists.map(\.id), ["artist"])
+        XCTAssertEqual(manager.downloadedPlaylists.map(\.id), ["playlist"])
+        XCTAssertEqual(manager.availability(for: album), .partial(ready: 1, total: 2))
+        manager.invalidate()
+        let restored = FoundationDownloads(
+            scope: "fixture", library: library, root: directory, transfer: transfer,
+            monitorConnectivity: false)
+        try await waitUntil { !restored.isLoading }
+        XCTAssertEqual(
+            restored.knownCollectionTracks(for: playlist).map(\.id),
+            ["unavailable", "first", "first"])
+        XCTAssertEqual(restored.browseTracks(for: playlist).map(\.id), ["first", "first"])
+        XCTAssertEqual(restored.downloadedAlbums(artistID: "artist").map(\.id), ["album"])
+        XCTAssertEqual(restored.downloadedArtists.map(\.id), ["artist"])
+        let artist = item("artist", kind: .artist)
+        XCTAssertEqual(restored.browseTracks(for: artist).map(\.id), ["first"])
+        XCTAssertFalse(restored.hasCompleteCollectionSnapshot(for: artist))
+        XCTAssertEqual(restored.availability(for: artist), .partial(ready: 1, total: 1))
+        XCTAssertFalse(restored.isReady(unavailable))
+        let other = FoundationDownloads(
+            scope: "other-account-server", library: library, root: directory, transfer: transfer,
+            monitorConnectivity: false)
+        XCTAssertTrue(other.downloadedAlbums.isEmpty)
+        XCTAssertTrue(other.knownCollectionTracks(for: playlist).isEmpty)
+        _ = await other.clearAccount()
+        _ = await restored.clearAccount()
+    }
+
+    func testRememberedPlaylistDoesNotOwnAudioAfterAlbumRemoval() async throws {
+        let track = item("track")
+        let album = item("album", kind: .album)
+        let playlist = item("playlist", kind: .playlist)
+        let manager = FoundationDownloads(
+            scope: "fixture", library: DownloadsLibrary(tracks: [track]), root: try root(),
+            transfer: transfer, monitorConnectivity: false)
+        manager.rememberCollection(playlist, tracks: [track], complete: true)
+        manager.updateConnectivity(isAllowed: true)
+        manager.download(album)
+        try await waitUntil { manager.isReady(track) }
+        XCTAssertEqual(manager.downloadedPlaylists.map(\.id), ["playlist"])
+        XCTAssertEqual(manager.owners.count, 1)
+        manager.removeDownloads(for: album)
+        XCTAssertFalse(manager.isReady(track))
+        XCTAssertTrue(manager.downloadedPlaylists.isEmpty)
+        XCTAssertEqual(manager.knownCollectionTracks(for: playlist).map(\.id), ["track"])
+        XCTAssertEqual(manager.audioBytes, 0)
+        _ = await manager.clearAccount()
+    }
+
+    func testLocalSearchMatchesRelatedContainersAndOnlyPlayableSongs() async throws {
+        var track = item("ready")
+        track.album = .init(id: "album", title: "Synthetic album")
+        track.artist = .init(id: "artist", title: "Synthetic artist")
+        let unavailable = item("unavailable")
+        let manager = FoundationDownloads(
+            scope: "fixture", library: DownloadsLibrary(tracks: [track]), root: try root(),
+            transfer: transfer, monitorConnectivity: false)
+        manager.rememberCollection(
+            item("playlist", kind: .playlist), tracks: [track, unavailable], complete: true)
+        manager.updateConnectivity(isAllowed: true)
+        manager.download(track)
+        try await waitUntil { manager.isReady(track) }
+        let first = manager.localSearch(query: " synthetic ", limit: 2)
+        XCTAssertEqual(first.items.count, 2)
+        XCTAssertEqual(first.nextStartIndex, 2)
+        let second = manager.localSearch(query: "SYNTHETIC", startIndex: 2, limit: 2)
+        XCTAssertEqual(second.items.count, 2)
+        XCTAssertNil(second.nextStartIndex)
+        XCTAssertEqual(
+            Set((first.items + second.items).map(\.id)), ["ready", "album", "artist", "playlist"])
+        XCTAssertEqual(
+            manager.localSearch(query: "fixture", kind: .track).items.map(\.id), ["ready"])
+        XCTAssertTrue(manager.localSearch(query: " ").items.isEmpty)
+        XCTAssertTrue(manager.localSearch(query: "synthetic", startIndex: Int.max).items.isEmpty)
+        _ = await manager.clearAccount()
+        XCTAssertTrue(manager.localSearch(query: "synthetic").items.isEmpty)
+    }
+
+    func testIncompleteRefreshPreservesLastCompleteMembershipAndPublishesOnlyChanges() throws {
+        let directory = try root()
+        let manager = FoundationDownloads(
+            scope: "fixture", library: DownloadsLibrary(tracks: []), root: directory,
+            transfer: transfer, monitorConnectivity: false)
+        let playlist = item("playlist", kind: .playlist)
+        let first = item("first")
+        let second = item("second")
+        manager.rememberCollection(playlist, tracks: [first, second], complete: true)
+        let revision = manager.catalogRevision
+        manager.rememberCollection(playlist, tracks: [first], complete: false)
+        XCTAssertEqual(manager.catalogRevision, revision)
+        XCTAssertEqual(manager.knownCollectionTracks(for: playlist).map(\.id), ["first", "second"])
+        XCTAssertTrue(manager.hasCompleteCollectionSnapshot(for: playlist))
+        manager.rememberCollection(playlist, tracks: [second], complete: true)
+        XCTAssertEqual(manager.catalogRevision, revision + 1)
+        XCTAssertEqual(manager.knownCollectionTracks(for: playlist).map(\.id), ["second"])
+        manager.rememberCollection(playlist, tracks: [second], complete: true)
+        XCTAssertEqual(manager.catalogRevision, revision + 1)
+        let saved = try FoundationDownloadStorage.load(
+            directory: FoundationDownloadStorage.directory(scope: "fixture", root: directory))
+        XCTAssertEqual(saved.collections?.first?.tracks.map(\.id), ["second"])
+        XCTAssertTrue(manager.owners.isEmpty)
+        manager.invalidate()
+    }
+
+    func testRememberedCollectionMetadataHasBoundedRecordRetention() throws {
+        let directory = try root()
+        let manager = FoundationDownloads(
+            scope: "fixture", library: DownloadsLibrary(tracks: []), root: directory,
+            transfer: transfer, monitorConnectivity: false)
+        for index in 0..<140 {
+            manager.rememberCollection(
+                item("playlist-\(index)", kind: .playlist), tracks: [], complete: true)
+        }
+        let saved = try FoundationDownloadStorage.load(
+            directory: FoundationDownloadStorage.directory(scope: "fixture", root: directory))
+        XCTAssertEqual(saved.collections?.count, 128)
+        XCTAssertEqual(saved.collections?.first?.item.id, "playlist-12")
+        manager.invalidate()
+    }
+
+    func testSharedTransferProgressUsesMeasuredCurrentTrackAndRejectsCancelledCallback()
+        async throws
+    {
+        let first = item("first")
+        let second = item("second")
+        let gate = DownloadGate()
+        let reporter = DownloadProgressReporter()
+        let manager = FoundationDownloads(
+            scope: "fixture", library: DownloadsLibrary(tracks: [first, second]), root: try root(),
+            transfer: { _, destination, _, progress in
+                await reporter.install(progress)
+                await gate.wait()
+                try Task.checkCancellation()
+                try Data("synthetic audio".utf8).write(to: destination)
+            }, monitorConnectivity: false)
+        let playlist = item("playlist", kind: .playlist)
+        manager.updateConnectivity(isAllowed: true)
+        manager.download(playlist)
+        XCTAssertEqual(manager.transferOwner(for: playlist)?.state, .queued)
+        try await waitUntilAsync { await gate.started }
+        XCTAssertEqual(manager.transferOwner(for: first)?.activeTrackID, "first")
+        XCTAssertNil(manager.transferOwner(for: first)?.activeTrackProgress)
+        XCTAssertEqual(manager.transferOwner(for: second)?.activeTrackID, "first")
+        await reporter.report(5, nil)
+        for _ in 0..<10 { await Task.yield() }
+        XCTAssertNil(manager.transferOwner(for: first)?.activeTrackProgress)
+        await reporter.report(5, 20)
+        try await waitUntil { manager.transferOwner(for: first)?.activeTrackProgress == 0.25 }
+        // Cancelling a different queued owner must not revoke the active owner's progress callbacks.
+        manager.download(second)
+        XCTAssertEqual(manager.transferOwner(for: second)?.state, .queued)
+        manager.cancel(ownerID: "track:second")
+        await reporter.report(10, 20)
+        try await waitUntil { manager.transferOwner(for: first)?.activeTrackProgress == 0.5 }
+        manager.cancel(ownerID: "playlist:playlist")
+        await reporter.report(20, 20)
+        for _ in 0..<10 { await Task.yield() }
+        XCTAssertNil(manager.transferOwner(for: first)?.activeTrackID)
+        XCTAssertNil(manager.transferOwner(for: first)?.activeTrackProgress)
+        XCTAssertEqual(manager.transferOwner(for: first)?.state, .cancelled)
+        await gate.resume()
+        _ = await manager.clearAccount()
+    }
+
     func testSharedRetentionDuplicatesAndPlaybackLeaseDelayDeletion() async throws {
         let track = item("track")
         let library = DownloadsLibrary(tracks: [track, track])
@@ -1270,7 +1454,13 @@ final class FoundationDownloadsTests: XCTestCase {
         let queued = FoundationDownloads(
             scope: "fixture", library: library, root: directory, transfer: transfer,
             monitorConnectivity: false)
-        XCTAssertTrue(queued.knownCollectionTracks(for: playlist).isEmpty)
+        // Discovery metadata survives owner removal, without retaining audio or acquisition intent.
+        XCTAssertEqual(
+            queued.knownCollectionTracks(for: playlist).map(\.id),
+            ["first", "excluded", "excluded"])
+        XCTAssertTrue(queued.owners.isEmpty)
+        XCTAssertTrue(queued.downloadedSongs.isEmpty)
+        XCTAssertTrue(queued.browseTracks(for: playlist).isEmpty)
         queued.downloadAgain(playlist)
         let account = FoundationDownloadStorage.directory(scope: "fixture", root: directory)
         let intent = try FoundationDownloadStorage.load(directory: account)
@@ -1579,4 +1769,12 @@ private actor DownloadGate {
         continuation?.resume()
         continuation = nil
     }
+}
+
+private actor DownloadProgressReporter {
+    private var callback: (@Sendable (Int64, Int64?) -> Void)?
+    func install(_ callback: @escaping @Sendable (Int64, Int64?) -> Void) {
+        self.callback = callback
+    }
+    func report(_ bytes: Int64, _ total: Int64?) { callback?(bytes, total) }
 }

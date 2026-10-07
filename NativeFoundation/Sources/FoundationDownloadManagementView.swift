@@ -88,7 +88,7 @@ struct FoundationDownloadManagementView: View {
         Section("Songs") {
             ForEach(downloads.downloadedSongs, id: \.id) { item in
                 selectionRow(
-                    title: item.title, footprint: downloads.itemBytes(item),
+                    item: item, title: item.title, footprint: downloads.itemBytes(item),
                     selected: selectedTracks.contains(item.id)
                 ) {
                     toggle(item.id, in: &selectedTracks)
@@ -104,7 +104,8 @@ struct FoundationDownloadManagementView: View {
         Section("Albums & Playlists") {
             ForEach(downloads.owners.filter { $0.item.kind != .track }) { owner in
                 selectionRow(
-                    title: owner.item.title, footprint: downloads.itemBytes(owner.item),
+                    item: owner.item, title: owner.item.title,
+                    footprint: downloads.itemBytes(owner.item),
                     selected: selectedOwners.contains(owner.id)
                 ) {
                     toggle(owner.id, in: &selectedOwners)
@@ -134,7 +135,8 @@ struct FoundationDownloadManagementView: View {
     }
 
     private func selectionRow(
-        title: String, footprint: Int64, selected: Bool, action: @escaping () -> Void
+        item: FoundationItem, title: String, footprint: Int64, selected: Bool,
+        action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
             HStack(spacing: 12) {
@@ -144,15 +146,30 @@ struct FoundationDownloadManagementView: View {
                 }
                 Text(title).foregroundStyle(.primary)
                 Spacer(minLength: 8)
+                FoundationDownloadIndicator(item: item)
                 Text(bytes(footprint)).foregroundStyle(.secondary)
             }.padding(.vertical, 4).contentShape(Rectangle())
         }
         .buttonStyle(.plain).disabled(!editing || removingAll)
         .accessibilityLabel(title + ", " + bytes(footprint))
-        .accessibilityValue(editing ? (selected ? "Selected" : "Not selected") : "")
+        .accessibilityValue(
+            editing
+                ? (selected ? "Selected" : "Not selected")
+                : statusDescription(item)
+        )
         .accessibilityAddTraits(selected ? .isSelected : [])
         .accessibilityHint(
             editing ? "Toggle selection for removal" : "Choose Edit to select downloads")
+    }
+
+    private func statusDescription(_ item: FoundationItem) -> String {
+        if let owner = downloads.transferOwner(for: item) { return owner.status }
+        switch downloads.availability(for: item) {
+        case .ready: return "Available offline"
+        case .partial(let ready, let total):
+            return "Partially available offline, \(ready) of \(total) known track occurrences"
+        case .unavailable: return "Not available offline"
+        }
     }
 
     private func toggle(_ id: String, in selection: inout Set<String>) {

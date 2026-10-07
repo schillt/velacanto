@@ -64,3 +64,36 @@ teardown. Password-save prompts are dismissed without saving the synthetic value
 The fixture never saves a session to Keychain or
 contacts a server. These cases do not establish live password authentication,
 server token revocation or real-account separation.
+
+
+## Partial collection discovery and local search
+
+Verified ready tracks make their known albums and artists discoverable offline.
+Previously fetched playlist membership also makes a playlist discoverable when any
+of its tracks is locally playable, regardless of which item initiated the download.
+No catalog scan runs to find unknown playlist membership. Known collection pages
+preserve ordering and repeated occurrences; unavailable tracks remain visible with
+an explicit Not downloaded label and cannot start offline playback. An incomplete
+page does not establish full server membership. A partial refresh preserves the last
+complete saved membership until a complete replacement is available.
+
+Discovery metadata is account/server scoped with the existing private download
+manifest, limited to128 collections,10,000 total remembered track occurrences and
+2MiB of encoded collection metadata. It does not retain audio or artwork, create
+download owners or defeat shared-file removal/exclusions. Account cleanup removes
+it. Existing manifests without optional artist/collection metadata remain readable;
+unknown relationships require normal visible online browsing to become known.
+
+Offline Search uses verified downloaded songs and known album/artist/playlist
+projections containing downloads, matching titles and available related names.
+Unavailable songs are shown in known collection previews rather than offered as
+playable top-level song results. The existing query remains when returning online;
+normal online search resumes. This is a search of saved local knowledge, not the
+complete server catalog.
+
+Download controls distinguish queued, preparing, waiting, active, partial and ready
+states. A current track with measurable bytes shows circular determinate progress;
+unknown-length transfers and active collections show indeterminate activity. No
+aggregate collection percentage is inferred from equally weighted tracks.
+Connection notices keep usable content visible. Explicit Retry rechecks the server
+and refreshes active content even when the advisory path already reports available.

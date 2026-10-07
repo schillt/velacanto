@@ -159,10 +159,15 @@ struct FoundationDownloadActionButton: View {
 
     private var hasDownload: Bool { downloads.hasDownloadedData(for: item) }
     private var title: String { hasDownload ? "Remove Downloads" : "Download" }
-    private var symbol: String {
-        guard hasDownload else { return "arrow.down.circle" }
-        return downloads.availability(for: item) == .ready
-            ? "arrow.down.circle.fill" : "arrow.down.circle.dotted"
+    private var transferDescription: String {
+        guard let owner = downloads.transferOwner(for: item) else { return "" }
+        if owner.state == .downloading, item.kind == .track {
+            guard owner.activeTrackID == item.id else { return "Download queued" }
+            if let progress = owner.activeTrackProgress {
+                return "Downloading, \(Int(min(1, max(0, progress)) * 100)) percent"
+            }
+        }
+        return owner.status
     }
 
     var body: some View {
@@ -174,9 +179,12 @@ struct FoundationDownloadActionButton: View {
             }
         } label: {
             if showsTitle {
-                Label(title, systemImage: symbol)
+                HStack {
+                    FoundationDownloadIndicator(item: item, showsUnavailable: true)
+                    Text(title)
+                }
             } else {
-                Image(systemName: symbol)
+                FoundationDownloadIndicator(item: item, showsUnavailable: true)
             }
         }
         .disabled(
@@ -184,6 +192,7 @@ struct FoundationDownloadActionButton: View {
                 || (hasDownload && showsTitle && requestRemoval == nil)
         )
         .accessibilityLabel(title)
+        .accessibilityValue(transferDescription)
         .confirmationDialog(
             "Remove downloads?", isPresented: $confirmingRemoval,
             titleVisibility: .visible

@@ -334,7 +334,8 @@ struct FoundationLibraryView: View {
                     NavigationLink {
                         FoundationCatalogView(
                             title: "Albums", model: albums, library: library, player: player,
-                            isActive: catalogIsActive(.library)
+                            isActive: catalogIsActive(.library),
+                            localItems: { downloads.downloadedAlbums }
                         ) { try await library.albums(startIndex: $0) }
                         #if os(iOS)
                             .toolbar(.visible, for: .navigationBar)
@@ -347,7 +348,8 @@ struct FoundationLibraryView: View {
                     NavigationLink {
                         FoundationCatalogView(
                             title: "Artists", model: artists, library: library, player: player,
-                            isActive: catalogIsActive(.library)
+                            isActive: catalogIsActive(.library),
+                            localItems: { downloads.downloadedArtists }
                         ) { try await library.artists(startIndex: $0) }
                         #if os(iOS)
                             .toolbar(.visible, for: .navigationBar)
@@ -359,7 +361,8 @@ struct FoundationLibraryView: View {
                     NavigationLink {
                         FoundationTrackList(
                             title: "Songs", tracks: songs, player: player, library: library,
-                            isActive: catalogIsActive(.library)
+                            isActive: catalogIsActive(.library),
+                            localItems: { downloads.downloadedSongs }
                         ) { try await library.songs(startIndex: $0) }
                         #if os(iOS)
                             .toolbar(.visible, for: .navigationBar)
@@ -587,6 +590,7 @@ struct FoundationCatalogView: View {
     var isFavorites = false
     var showsTrackArtwork = false
     var headerItem: FoundationItem?
+    var localItems: (() -> [FoundationItem])? = nil
     @State private var detailTint = Color(white: 0.12)
     @State private var isVisible = false
     let loader: (Int) async throws -> FoundationPage
@@ -690,8 +694,23 @@ struct FoundationCatalogView: View {
                     item: item, library: library, player: player, isActive: isActive)
             }
         }
+        .onChange(of: connectivity.localOnly ? localItems?() : nil) { _, items in
+            if let items { model.installSnapshot(items) }
+        }
+        .onChange(of: connectivity.successfulRetryRevision) { _, _ in
+            guard isActive, isVisible else { return }
+            model.request(.refresh)
+            revision += 1
+        }
         .task(id: "\(isActive && isVisible)-\(connectivity.localOnly)-\(revision)") {
             guard isActive, isVisible else { return }
+            if connectivity.localOnly, let localItems {
+                model.installSnapshot(localItems())
+                return
+            }
+            if !connectivity.localOnly, localItems != nil, model.isRetainedSnapshot {
+                model.request(.refresh)
+            }
             #if DEBUG
                 await FoundationTrace.withPage(origin: traceOrigin, page: .catalog) {
                     await model.refreshVisible(
@@ -726,16 +745,16 @@ struct FoundationCatalogView: View {
     }
 
     @ViewBuilder private var pageState: some View {
-        if connectivity.localOnly, !hasVisibleItems { FoundationOfflineNotice() }
+        if connectivity.hasConnectionIssue || model.hasConnectionIssue { FoundationOfflineNotice() }
         if let error = actions.pinErrorMessage {
             Text(error).font(.caption).foregroundStyle(.red)
         }
-        if model.loaded, model.items.isEmpty { Text("No items found.") }
-        if let error = model.errorMessage {
+        if !connectivity.localOnly, model.loaded, model.items.isEmpty { Text("No items found.") }
+        if let error = model.errorMessage, !model.hasConnectionIssue {
             Text(error).foregroundStyle(.red)
             Button("Retry") { reload(model.retryRequest) }.disabled(connectivity.localOnly)
         }
-        if model.isLoading {
+        if !connectivity.localOnly, model.isLoading {
             FoundationLoadingPlaceholder(layout: showsCollectionGrid ? .albumGrid : .rows)
         }
         if model.nextStartIndex != nil {
@@ -996,13 +1015,16 @@ private struct FoundationArtistView: View {
     let library: any FoundationLibrary
     let player: FoundationPlayer
     let isActive: Bool
+    @EnvironmentObject private var downloads: FoundationDownloads
     @StateObject private var albums = FoundationBrowseModel()
 
     var body: some View {
         FoundationCatalogView(
             title: artist.title, model: albums, library: library, player: player,
-            isActive: isActive, headerItem: artist
-        ) { try await library.albums(artistID: artist.id, startIndex: $0) }
+            isActive: isActive, headerItem: artist,
+            localItems: { downloads.downloadedAlbums(artistID: artist.id) },
+            loader: { try await library.albums(artistID: artist.id, startIndex: $0) }
+        )
     }
 }
 
@@ -1088,6 +1110,7 @@ struct FoundationTrackList: View {
     var collection: FoundationItem?
     var playlistRevision = 0
     var managePlaylist: (() -> Void)? = nil
+    var localItems: (() -> [FoundationItem])? = nil
     @State private var loadedPlaylistRevision = 0
     @State private var detailTint = Color(white: 0.12)
     let loader: (Int) async throws -> FoundationPage
@@ -1102,6 +1125,9 @@ struct FoundationTrackList: View {
                     .listRowInsets(EdgeInsets())
                     .listRowBackground(Color.clear)
                     .listRowSeparator(.hidden)
+            }
+            if connectivity.hasConnectionIssue || tracks.hasConnectionIssue {
+                FoundationOfflineNotice().listRowBackground(Color.clear)
             }
             if connectivity.localOnly, let collection,
                 !downloads.hasCompleteCollectionSnapshot(for: collection), !tracks.items.isEmpty
@@ -1142,6 +1168,10 @@ struct FoundationTrackList: View {
                                         Text(subtitle).font(.caption).foregroundStyle(.secondary)
                                             .lineLimit(2)
                                     }
+                                    if connectivity.localOnly, !downloads.isReady(item) {
+                                        Label("Not downloaded", systemImage: "icloud.slash")
+                                            .font(.caption).foregroundStyle(.secondary)
+                                    }
                                 }
                                 .frame(maxWidth: .infinity, alignment: .leading)
                             }
@@ -1176,13 +1206,14 @@ struct FoundationTrackList: View {
                 .contextMenu { trackMenu(item, index: index) }
             }
             Group {
-                if connectivity.localOnly, tracks.items.isEmpty { FoundationOfflineNotice() }
-                if tracks.loaded, tracks.items.isEmpty { Text("No tracks found.") }
-                if let error = tracks.errorMessage {
+                if !connectivity.localOnly, tracks.loaded, tracks.items.isEmpty {
+                    Text("No tracks found.")
+                }
+                if let error = tracks.errorMessage, !tracks.hasConnectionIssue {
                     Text(error).foregroundStyle(.red)
                     Button("Retry") { reload(tracks.retryRequest) }.disabled(connectivity.localOnly)
                 }
-                if tracks.isLoading { FoundationLoadingPlaceholder() }
+                if !connectivity.localOnly, tracks.isLoading { FoundationLoadingPlaceholder() }
                 if tracks.nextStartIndex != nil {
                     Button("Load more tracks") { reload(.more) }.disabled(
                         tracks.isLoading || connectivity.localOnly)
@@ -1239,11 +1270,24 @@ struct FoundationTrackList: View {
         }
         .onAppear { isVisible = true }
         .onDisappear { isVisible = false }
+        .onChange(of: connectivity.localOnly ? localItems?() : nil) { _, items in
+            if let items { tracks.installSnapshot(items) }
+        }
+        .onChange(of: connectivity.successfulRetryRevision) { _, _ in
+            guard isActive, isVisible else { return }
+            tracks.request(.refresh)
+            revision += 1
+        }
         .task(id: [
             isActive ? 1 : 0, isVisible ? 1 : 0, connectivity.localOnly ? 1 : 0, revision,
             playlistRevision,
         ]) {
-            guard isActive, isVisible, !connectivity.localOnly else { return }
+            guard isActive, isVisible else { return }
+            if connectivity.localOnly {
+                if let localItems { tracks.installSnapshot(localItems()) }
+                return
+            }
+            if localItems != nil, tracks.isRetainedSnapshot { tracks.request(.refresh) }
             #if DEBUG
                 await FoundationTrace.withPage(origin: traceOrigin, page: .tracks) {
                     await loadTracks()
@@ -1265,6 +1309,15 @@ struct FoundationTrackList: View {
 
     private func loadTracks() async {
         guard !connectivity.localOnly else { return }
+        defer {
+            if !Task.isCancelled, tracks.errorMessage == nil, !tracks.isLoading,
+                let collection, !tracks.items.isEmpty || tracks.loaded
+            {
+                downloads.rememberCollection(
+                    collection, tracks: tracks.items,
+                    complete: tracks.loaded && tracks.nextStartIndex == nil)
+            }
+        }
         if (collection != nil && tracks.isRetainedSnapshot)
             || loadedPlaylistRevision != playlistRevision
         {

@@ -10,7 +10,7 @@ struct FoundationDownloadsView: View {
     var body: some View {
         List {
             if downloads.isLoading { ProgressView("Verifying downloaded files…") }
-            ForEach([FoundationItem.Kind.track, .album, .playlist], id: \.self) { kind in
+            ForEach([FoundationItem.Kind.track, .album, .artist, .playlist], id: \.self) { kind in
                 NavigationLink {
                     FoundationDownloadFilteredCatalog(
                         kind: kind, library: library, player: player, isActive: isActive)
@@ -32,6 +32,7 @@ struct FoundationDownloadsView: View {
         switch kind {
         case .track: "Songs"
         case .album: "Albums"
+        case .artist: "Artists"
         default: "Playlists"
         }
     }
@@ -39,6 +40,7 @@ struct FoundationDownloadsView: View {
         switch kind {
         case .track: "music.note"
         case .album: "opticaldisc"
+        case .artist: "music.mic"
         default: "music.note.list"
         }
     }
@@ -63,7 +65,14 @@ private struct FoundationDownloadFilteredCatalog: View {
                     owner.item.kind == .album
                         && !downloads.downloadedAlbums.contains(where: { $0.id == owner.item.id })
                 }.map(\.item)
-        case .playlist: downloads.owners.filter { $0.item.kind == .playlist }.map(\.item)
+        case .artist: downloads.downloadedArtists
+        case .playlist:
+            downloads.downloadedPlaylists
+                + downloads.owners.filter { owner in
+                    owner.item.kind == .playlist
+                        && !downloads.downloadedPlaylists.contains(where: { $0.id == owner.item.id }
+                        )
+                }.map(\.item)
         default: []
         }
     }
@@ -71,6 +80,7 @@ private struct FoundationDownloadFilteredCatalog: View {
         switch kind {
         case .track: "Songs"
         case .album: "Albums"
+        case .artist: "Artists"
         default: "Playlists"
         }
     }
@@ -98,15 +108,21 @@ private struct FoundationDownloadFilteredCatalog: View {
 
 /// A status strip occupies layout space above browsing, never covers native navigation.
 struct FoundationOfflineStatus: View {
+    @EnvironmentObject private var connectivity: FoundationConnectivity
+
     var body: some View {
         HStack(spacing: 6) {
             Image(systemName: "wifi.slash").accessibilityHidden(true)
             Text("Browsing offline")
+            Button("Retry") { Task { await connectivity.retryOnline() } }
+                .disabled(connectivity.isRetrying)
+                .accessibilityIdentifier("offline-status-retry")
+            if connectivity.isRetrying { ProgressView().controlSize(.mini) }
         }
         .font(.caption).foregroundStyle(.secondary)
         .frame(maxWidth: .infinity).padding(.vertical, 4)
         .background(.bar)
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("browsing-offline-status")
     }
 }

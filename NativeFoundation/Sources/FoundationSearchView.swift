@@ -22,18 +22,15 @@ struct FoundationSearchView<Profile: View>: View {
                 FoundationSearchOverview(
                     query: term, library: library, player: player, isActive: isActive
                 )
-                .id(term)
+                .id(term + (connectivity.localOnly ? "-local" : "-online"))
             }
         }
         .foundationSearchHeader(profile: profile, search: searchField, keepsVisible: searchFocused)
         .onChange(of: activation, initial: true) { _, value in
-            if isActive, value > 0, !connectivity.localOnly { searchFocused = true }
+            if isActive, value > 0 { searchFocused = true }
         }
         .onChange(of: isActive) { _, active in
-            if !active || connectivity.localOnly { searchFocused = false }
-        }
-        .onChange(of: connectivity.localOnly) { _, localOnly in
-            if localOnly { searchFocused = false }
+            if !active { searchFocused = false }
         }
         #if os(iOS)
             .onScrollPhaseChange { _, phase in
@@ -46,23 +43,26 @@ struct FoundationSearchView<Profile: View>: View {
     private var searchInput: some View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-            TextField("Albums, artists, and songs", text: $query)
-                .textFieldStyle(.plain)
-                .focused($searchFocused)
-                .disabled(connectivity.localOnly)
-                .autocorrectionDisabled()
-                .submitLabel(.search)
-                #if os(iOS)
-                    .textInputAutocapitalization(.never)
-                #endif
-                .accessibilityLabel("Search music")
+            TextField(
+                connectivity.localOnly
+                    ? "Downloaded music and saved collections" : "Albums, artists, and songs",
+                text: $query
+            )
+            .textFieldStyle(.plain)
+            .focused($searchFocused)
+            .autocorrectionDisabled()
+            .submitLabel(.search)
+            #if os(iOS)
+                .textInputAutocapitalization(.never)
+            #endif
+            .accessibilityLabel("Search music")
             if !query.isEmpty {
                 Button {
                     query = ""
                 } label: {
                     Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
                         .frame(width: 44, height: 44)
-                }.buttonStyle(.plain).disabled(connectivity.localOnly).accessibilityLabel(
+                }.buttonStyle(.plain).accessibilityLabel(
                     "Clear search")
             }
         }
@@ -113,7 +113,9 @@ struct FoundationGenreIndex: View {
     var body: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 16) {
-                if connectivity.localOnly, visibleGenres.isEmpty { FoundationOfflineNotice() }
+                if connectivity.hasConnectionIssue || genres.hasConnectionIssue {
+                    FoundationOfflineNotice()
+                }
                 LazyVGrid(
                     columns: [
                         GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12),
@@ -135,9 +137,17 @@ struct FoundationGenreIndex: View {
                     Button("Load more") { reloadGenres(.more) }.disabled(
                         genres.isLoading || connectivity.localOnly)
                 }
-                if genres.isLoading { FoundationLoadingPlaceholder(layout: .genreCards) }
-                if genres.loaded, genres.items.isEmpty { Text("No genres found.") }
-                if let error = genres.errorMessage {
+                if genres.isLoading, !connectivity.localOnly {
+                    FoundationLoadingPlaceholder(layout: .genreCards)
+                }
+                if genres.loaded, genres.items.isEmpty, !connectivity.hasConnectionIssue,
+                    !genres.hasConnectionIssue
+                {
+                    Text("No genres found.")
+                }
+                if let error = genres.errorMessage, !genres.hasConnectionIssue,
+                    !connectivity.localOnly
+                {
                     Text(error).foregroundStyle(.red)
                     Button("Retry") { reloadGenres(genres.retryRequest) }.disabled(
                         connectivity.localOnly)
@@ -158,6 +168,11 @@ struct FoundationGenreIndex: View {
                     .toolbar(.visible, for: .navigationBar)
                 #endif
             }
+        }
+        .onChange(of: connectivity.successfulRetryRevision) { _, _ in
+            guard isActive, isVisible else { return }
+            genres.request(.refresh)
+            genreRevision += 1
         }
         .task(id: "\(isActive && isVisible)-\(connectivity.localOnly)-\(genreRevision)") {
             guard isActive, isVisible else { return }
@@ -230,7 +245,7 @@ struct FoundationGenreCard: View {
     }
 }
 
-/// Three small, sequential, independently recoverable result sections.
+/// Small sequential result sections share local and remote catalog identities.
 private struct FoundationSearchOverview: View {
     @EnvironmentObject private var downloads: FoundationDownloads
     @EnvironmentObject private var connectivity: FoundationConnectivity
@@ -241,6 +256,7 @@ private struct FoundationSearchOverview: View {
     @StateObject private var artists = FoundationBrowseModel()
     @StateObject private var albums = FoundationBrowseModel()
     @StateObject private var songs = FoundationBrowseModel()
+    @StateObject private var playlists = FoundationBrowseModel()
     @State private var isVisible = false
     @State private var revision = 0
     @State private var openedItem: FoundationItem?
@@ -248,13 +264,20 @@ private struct FoundationSearchOverview: View {
     private var sections: [(title: String, kind: FoundationItem.Kind, model: FoundationBrowseModel)]
     {
         [("Songs", .track, songs), ("Albums", .album, albums), ("Artists", .artist, artists)]
+            + (connectivity.localOnly ? [("Playlists", .playlist, playlists)] : [])
     }
 
     var body: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 24) {
-                if connectivity.localOnly, sections.allSatisfy({ $0.model.items.isEmpty }) {
+                if connectivity.hasConnectionIssue
+                    || sections.contains(where: { $0.model.hasConnectionIssue })
+                {
                     FoundationOfflineNotice()
+                }
+                if connectivity.localOnly {
+                    Text("Searching downloaded music and saved collections.")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
                 ForEach(sections, id: \.title) { section in
                     if !section.model.items.isEmpty || section.model.errorMessage != nil {
@@ -283,9 +306,17 @@ private struct FoundationSearchOverview: View {
                 #endif
             }
         }
-        .task(id: isActive && isVisible && !connectivity.localOnly ? revision : nil) {
-            guard isActive, isVisible, !connectivity.localOnly else { return }
-            do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
+        .onChange(of: connectivity.successfulRetryRevision) { _, _ in
+            for section in sections { section.model.request(.refresh) }
+        }
+        .onReceive(downloads.objectWillChange) {
+            if connectivity.localOnly { revision += 1 }
+        }
+        .task(id: "\(isActive && isVisible)-\(revision)-\(connectivity.successfulRetryRevision)") {
+            guard isActive, isVisible else { return }
+            if !connectivity.localOnly {
+                do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
+            }
             #if DEBUG
                 await FoundationTrace.withPage(origin: .search, page: .catalog) {
                     await loadSections()
@@ -298,10 +329,15 @@ private struct FoundationSearchOverview: View {
 
     private func loadSections() async {
         for section in sections {
-            guard !Task.isCancelled, !connectivity.localOnly else { return }
-            await section.model.loadPending {
-                try await library.search(
-                    query: query, kind: section.kind, startIndex: $0, limit: 5)
+            guard !Task.isCancelled else { return }
+            if connectivity.localOnly { section.model.request(.refresh) }
+            await section.model.loadPending { offset in
+                if connectivity.localOnly {
+                    return downloads.localSearch(
+                        query: query, kind: section.kind, startIndex: offset, limit: 5)
+                }
+                return try await library.search(
+                    query: query, kind: section.kind, startIndex: offset, limit: 5)
             }
         }
     }
@@ -348,7 +384,7 @@ private struct FoundationSearchOverview: View {
                         } : nil, player: player, showsTrackArtwork: true,
                     navigate: { openedItem = $0 })
             }
-            if let error = model.errorMessage {
+            if let error = model.errorMessage, !model.hasConnectionIssue {
                 Text(error).foregroundStyle(.red)
                 Button("Retry") {
                     guard !connectivity.localOnly else { return }
@@ -361,6 +397,8 @@ private struct FoundationSearchOverview: View {
 }
 
 private struct FoundationSearchCategory: View {
+    @EnvironmentObject private var downloads: FoundationDownloads
+    @EnvironmentObject private var connectivity: FoundationConnectivity
     let title: String
     let query: String
     let kind: FoundationItem.Kind
@@ -373,11 +411,31 @@ private struct FoundationSearchCategory: View {
         FoundationCatalogView(
             title: title, model: results, library: library, player: player,
             isActive: isActive, showsTrackArtwork: true
-        ) {
-            try await library.search(query: query, kind: kind, startIndex: $0, limit: 50)
+        ) { offset in
+            if connectivity.localOnly {
+                return downloads.localSearch(
+                    query: query, kind: kind, startIndex: offset, limit: 50)
+            }
+            return try await library.search(query: query, kind: kind, startIndex: offset, limit: 50)
+        }
+        .onChange(of: connectivity.localOnly) { _, _ in results.clearRetainedData() }
+        .task(id: connectivity.localOnly) {
+            if connectivity.localOnly { installLocalResults() }
+        }
+        .onReceive(downloads.objectWillChange) {
+            if connectivity.localOnly {
+                Task { @MainActor in
+                    guard connectivity.localOnly else { return }
+                    installLocalResults()
+                }
+            }
         }
         #if os(iOS)
             .toolbar(.visible, for: .navigationBar)
         #endif
+    }
+
+    private func installLocalResults() {
+        results.installSnapshot(downloads.localSearchItems(query: query, kind: kind))
     }
 }

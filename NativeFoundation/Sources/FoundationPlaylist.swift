@@ -326,6 +326,7 @@ final class FoundationPlaylistOperation: ObservableObject {
 }
 
 struct FoundationPlaylistIndex: View {
+    @EnvironmentObject private var downloads: FoundationDownloads
     @EnvironmentObject private var connectivity: FoundationConnectivity
     let library: any FoundationLibrary
     let player: FoundationPlayer
@@ -338,7 +339,8 @@ struct FoundationPlaylistIndex: View {
     var body: some View {
         FoundationCatalogView(
             title: "Playlists", model: model, library: library, player: player,
-            isActive: isActive, loader: { try await library.playlists(startIndex: $0) }
+            isActive: isActive, localItems: { downloads.downloadedPlaylists },
+            loader: { try await library.playlists(startIndex: $0) }
         )
         .onAppear { refreshPending = model.loaded }
         .task(id: "\(isActive && !connectivity.localOnly)-\(refreshRevision)") {

@@ -73,4 +73,36 @@ final class FoundationOfflinePolicyTests: XCTestCase {
         XCTAssertTrue(connectivity.usesCellular)
         connectivity.invalidate()
     }
+    func testExplicitRetryRefreshesContentEvenWhilePathRemainsAvailable() async {
+        let connectivity = FoundationConnectivity(monitorConnectivity: false, retry: {})
+        connectivity.update(status: .available, wifiOrWired: true, cellular: false)
+        XCTAssertFalse(connectivity.hasConnectionIssue)
+        await connectivity.retryOnline()
+        XCTAssertEqual(connectivity.successfulRetryRevision, 1)
+        await connectivity.retryOnline()
+        XCTAssertEqual(connectivity.successfulRetryRevision, 2)
+        XCTAssertFalse(connectivity.hasConnectionIssue)
+        connectivity.invalidate()
+    }
+
+    func testFailedAndCancelledRetryDoNotSignalContentRefresh() async {
+        let failed = FoundationConnectivity(monitorConnectivity: false) {
+            throw URLError(.notConnectedToInternet)
+        }
+        failed.update(status: .available, wifiOrWired: true, cellular: false)
+        await failed.retryOnline()
+        XCTAssertTrue(failed.hasConnectionIssue)
+        XCTAssertEqual(failed.successfulRetryRevision, 0)
+        XCTAssertFalse(failed.localOnly)
+        let cancelled = FoundationConnectivity(monitorConnectivity: false) {
+            throw CancellationError()
+        }
+        cancelled.update(status: .available, wifiOrWired: true, cellular: false)
+        await cancelled.retryOnline()
+        XCTAssertFalse(cancelled.hasConnectionIssue)
+        XCTAssertEqual(cancelled.successfulRetryRevision, 0)
+        failed.invalidate()
+        cancelled.invalidate()
+    }
+
 }

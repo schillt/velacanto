@@ -19,7 +19,9 @@ struct FoundationNewView<Profile: View>: View {
     var body: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 28) {
-                if connectivity.localOnly, !hasLocalContent {
+                if connectivity.hasConnectionIssue || tracks.hasConnectionIssue
+                    || albums.hasConnectionIssue
+                {
                     FoundationOfflineNotice()
                 }
                 trackSection
@@ -32,6 +34,13 @@ struct FoundationNewView<Profile: View>: View {
         }
         .refreshable {
             guard isActive, !connectivity.localOnly else { return }
+            tracks.request(.refresh)
+            albums.request(.refresh)
+            trackRevision += 1
+            albumRevision += 1
+        }
+        .onChange(of: connectivity.successfulRetryRevision) { _, _ in
+            guard isActive else { return }
             tracks.request(.refresh)
             albums.request(.refresh)
             trackRevision += 1
@@ -167,12 +176,6 @@ struct FoundationNewView<Profile: View>: View {
         }
     }
 
-    private var hasLocalContent: Bool {
-        tracks.items.prefix(6).contains(where: downloads.isReady)
-            || albums.items.prefix(5).contains { !downloads.browseTracks(for: $0).isEmpty }
-            || recentGenres.contains { !downloads.browseTracks(for: $0.genre).isEmpty }
-    }
-
     /// Most recent occurrence wins; only the existing first 24 albums contribute.
     private var recentGenres: [(genre: FoundationItem, artwork: FoundationItem)] {
         var seen = Set<String>()
@@ -256,7 +259,7 @@ struct FoundationNewView<Profile: View>: View {
                 guard !connectivity.localOnly else { return }
                 retry()
             }.disabled(connectivity.localOnly)
-        } else if model.loaded, model.items.isEmpty {
+        } else if !connectivity.localOnly, model.loaded, model.items.isEmpty {
             Text("No recently added items.").foregroundStyle(.secondary)
         }
     }
@@ -299,7 +302,7 @@ struct FoundationLibraryMostPlayedAlbums: View {
                     model.request(model.retryRequest)
                     revision += 1
                 }.disabled(connectivity.localOnly)
-            } else if model.loaded, model.items.isEmpty {
+            } else if !connectivity.localOnly, model.loaded, model.items.isEmpty {
                 Text("No album listening history yet.").foregroundStyle(.secondary)
             }
         }
