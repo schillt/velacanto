@@ -17,7 +17,8 @@ struct FoundationGenreView: View {
         self.player = player
         self.isActive = isActive
         let model = FoundationBrowseModel()
-        model.configureCache(library.catalogPageCache, key: "genre.albums." + genre.id)
+        model.configureCache(
+            library.catalogPageCache, key: library.catalogCacheKey("genre.albums." + genre.id))
         _albums = StateObject(wrappedValue: model)
     }
 

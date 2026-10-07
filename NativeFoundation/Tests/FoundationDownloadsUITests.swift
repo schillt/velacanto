@@ -10,7 +10,8 @@ final class FoundationDownloadsUITests: XCTestCase {
         unknownRelatedItems: Bool = false, missingArtwork: Bool = false,
         reducedAccessibilityEffects: Bool = false, signInFailure: String? = nil,
         colorScheme: String? = nil, pagedCatalog: Bool = false,
-        catalogPageFailOnce: Bool = false, playlistPresentation: Bool = false
+        catalogPageFailOnce: Bool = false, playlistPresentation: Bool = false,
+        librarySelection: Bool = false
     )
         -> XCUIApplication
     {
@@ -23,6 +24,7 @@ final class FoundationDownloadsUITests: XCTestCase {
         }
         if catalogPageFailOnce { app.launchArguments.append("-fixtureCatalogPageFailOnce") }
         if playlistPresentation { app.launchArguments.append("-fixturePlaylistPresentation") }
+        if librarySelection { app.launchArguments.append("-fixtureLibrarySelection") }
         if let canonicalDownloadState {
             app.launchArguments += [
                 "-fixtureCanonicalCollections", "-fixtureDownloadState", canonicalDownloadState,
@@ -986,6 +988,112 @@ final class FoundationDownloadsUITests: XCTestCase {
                 app.buttons["Sign in"].tap()
             }
         }
+    }
+
+    private func openSyntheticLibrarySelector(_ app: XCUIApplication) {
+        tapNativeChrome(app.buttons["Profile and settings"], in: app)
+        XCTAssertTrue(app.navigationBars["Profile & Settings"].waitForExistence(timeout: 5))
+        tapVisible(app.buttons["FoundationSettingsAccount"], in: app)
+        XCTAssertTrue(app.navigationBars["Server & Account"].waitForExistence(timeout: 5))
+        tapVisible(app.buttons["FoundationSettingsMusicLibraries"], in: app)
+        XCTAssertTrue(app.navigationBars["Music Libraries"].waitForExistence(timeout: 5))
+    }
+
+    private func closeSyntheticLibrarySettings(_ app: XCUIApplication) {
+        XCTAssertTrue(app.navigationBars["Server & Account"].waitForExistence(timeout: 5))
+        app.navigationBars["Server & Account"].buttons.firstMatch.tap()
+        tapNativeChrome(app.navigationBars["Profile & Settings"].buttons["Done"], in: app)
+    }
+
+    private func selectSyntheticLibrary(_ name: String, in app: XCUIApplication) {
+        let choice = app.buttons.matching(identifier: "FoundationMusicLibraryChoice").matching(
+            NSPredicate(format: "label CONTAINS %@", name)
+        ).firstMatch
+        tapVisible(choice, in: app)
+        let save = app.buttons["FoundationMusicLibrarySave"]
+        XCTAssertTrue(save.isEnabled)
+        tapNativeChrome(save, in: app)
+        closeSyntheticLibrarySettings(app)
+    }
+
+    func testSyntheticLibrarySelectionCancelSaveIsolationRelaunchAndUnavailableFolder() {
+        continueAfterFailure = false
+        let app = launch(
+            productionShell: true, canonicalDownloadState: "full", longPlayback: true,
+            librarySelection: true)
+        selectTab("Library", in: app)
+        openCanonicalCollection("album", fromDownloads: false, in: app)
+        tapVisible(app.buttons["collection-track-0"], in: app)
+        let identity = app.staticTexts["fixture-playback-identity"]
+        let playing = expectation(
+            for: NSPredicate(format: "label CONTAINS %@", "state playing"), evaluatedWith: identity)
+        wait(for: [playing], timeout: 10)
+        let original = identity.label
+        app.navigationBars.buttons.firstMatch.tap()
+        app.navigationBars.buttons.firstMatch.tap()
+        openSyntheticLibrarySelector(app)
+        let cedar = app.buttons.matching(identifier: "FoundationMusicLibraryChoice").matching(
+            NSPredicate(format: "label CONTAINS %@", "Fixture Cedar Library")
+        ).firstMatch
+        tapVisible(cedar, in: app)
+        XCTAssertTrue(app.buttons["FoundationMusicLibrarySave"].isEnabled)
+        tapNativeChrome(app.navigationBars["Music Libraries"].buttons["Cancel"], in: app)
+        closeSyntheticLibrarySettings(app)
+        XCTAssertEqual(identity.label, original)
+        openSyntheticLibrarySelector(app)
+        XCTAssertFalse(
+            app.buttons["FoundationMusicLibrarySave"].isEnabled,
+            "Cancel must leave the original All selection unchanged")
+        selectSyntheticLibrary("Fixture Cedar Library", in: app)
+        XCTAssertEqual(identity.label, original)
+        selectTab("Home", in: app)
+        let cedarAlbum = app.buttons.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "Fixture Cedar Album")
+        ).firstMatch
+        XCTAssertTrue(cedarAlbum.waitForExistence(timeout: 10))
+        capture("Selected synthetic Cedar catalog and uninterrupted mini player", in: app)
+        openSyntheticLibrarySelector(app)
+        selectSyntheticLibrary("Fixture Silver Library", in: app)
+        let silverAlbum = app.buttons.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "Fixture Silver Album")
+        ).firstMatch
+        XCTAssertTrue(silverAlbum.waitForExistence(timeout: 10))
+        XCTAssertFalse(cedarAlbum.exists, "New selection must not expose the old cached shelf")
+        XCTAssertEqual(identity.label, original)
+        capture("Selected synthetic Silver catalog isolates cached Cedar shelf", in: app)
+        openSyntheticLibrarySelector(app)
+        selectSyntheticLibrary("Fixture Cedar Library", in: app)
+        XCTAssertTrue(cedarAlbum.waitForExistence(timeout: 10))
+        app.terminate()
+        app.launchArguments.append("-fixtureStartOffline")
+        app.launch()
+        XCTAssertTrue(app.staticTexts["Canonical fixture ready"].waitForExistence(timeout: 15))
+        selectTab("Home", in: app)
+        XCTAssertTrue(cedarAlbum.waitForExistence(timeout: 10))
+        openSyntheticLibrarySelector(app)
+        XCTAssertTrue(
+            app.staticTexts["Connect to choose a music library."].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["FoundationMusicLibrarySave"].isEnabled)
+        XCTAssertFalse(app.buttons["FoundationMusicLibraryChoice"].exists)
+        capture("Retained library choice offline with account wide download explanation", in: app)
+        tapNativeChrome(app.navigationBars["Music Libraries"].buttons["Cancel"], in: app)
+        closeSyntheticLibrarySettings(app)
+        app.terminate()
+        app.launchArguments.removeAll { $0 == "-fixtureStartOffline" }
+        app.launchArguments.append("-fixtureSelectedLibraryUnavailable")
+        app.launch()
+        XCTAssertTrue(app.staticTexts["Canonical fixture ready"].waitForExistence(timeout: 15))
+        openSyntheticLibrarySelector(app)
+        XCTAssertTrue(
+            app.staticTexts.matching(
+                NSPredicate(
+                    format: "label BEGINSWITH %@", "Your selected library is no longer available")
+            )
+            .firstMatch.waitForExistence(timeout: 10))
+        XCTAssertFalse(app.buttons["FoundationMusicLibrarySave"].isEnabled)
+        capture(
+            "Unavailable saved library requires explicit replacement without broad fallback",
+            in: app)
     }
 
     func testProfileSettingsFullPageAccountStorageAndDiagnosticsPresentation() {

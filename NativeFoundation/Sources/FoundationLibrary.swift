@@ -56,6 +56,8 @@ struct FoundationSession: Codable, Sendable {
 
 protocol FoundationLibrary: Sendable {
     var catalogPageCache: FoundationCatalogPageCache? { get }
+    var catalogScopeID: String { get }
+    func catalogCacheKey(_ key: String) -> String
     func cachedArtworkResult(for item: FoundationItem, size: Int) async throws
         -> FoundationCurrentArtwork.Result?
     func downloadSource(for item: FoundationItem) async throws -> FoundationDownloadSource
@@ -108,6 +110,8 @@ protocol FoundationLibrary: Sendable {
 
 extension FoundationLibrary {
     var catalogPageCache: FoundationCatalogPageCache? { nil }
+    var catalogScopeID: String { "all" }
+    func catalogCacheKey(_ key: String) -> String { key }
     func cachedArtworkResult(for item: FoundationItem, size: Int) async throws
         -> FoundationCurrentArtwork.Result?
     { nil }
@@ -277,6 +281,46 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
     private let load: Load
     let artworkCache: FoundationArtworkCache?
     let catalogPageCache: FoundationCatalogPageCache?
+    private(set) var musicLibraryID: String?
+    private(set) var catalogAvailable = true
+
+    var catalogScopeID: String {
+        (musicLibraryID.map { FoundationMusicLibraryStore.digest($0) } ?? "all")
+            + (catalogAvailable ? "" : ".unavailable")
+    }
+
+    func catalogCacheKey(_ key: String) -> String {
+        if let musicLibraryID {
+            return "library." + FoundationMusicLibraryStore.digest(musicLibraryID) + "." + key
+        }
+        return catalogAvailable ? key : "unavailable." + key
+    }
+
+    func scoped(to id: String?, available: Bool = true) -> Self {
+        var scoped = self
+        scoped.musicLibraryID = id
+        scoped.catalogAvailable = available
+        return scoped
+    }
+
+    func musicLibraries() async throws -> [FoundationMusicLibraryChoice] {
+        let result = try await send(
+            Paths.getUserViews(
+                parameters: .init(
+                    userID: session.userID, isIncludeExternalContent: false, isIncludeHidden: false)
+            ))
+        guard let entries = result.items, entries.count <= 128 else {
+            throw FoundationLibraryError.invalidResponse
+        }
+        var seen: Set<String> = []
+        return try entries.filter { $0.collectionType == .music }.map { entry in
+            guard let id = entry.id, Self.validID(id), seen.insert(id).inserted,
+                let name = entry.name?.trimmingCharacters(in: .whitespacesAndNewlines),
+                !name.isEmpty, name.utf8.count <= 512
+            else { throw FoundationLibraryError.invalidResponse }
+            return FoundationMusicLibraryChoice(id: id, name: name)
+        }
+    }
 
     init(
         session: FoundationSession, load: @escaping Load = nativeLoad,
@@ -287,6 +331,7 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
         self.load = load
         self.artworkCache = artworkCache
         self.catalogPageCache = catalogPageCache
+        self.musicLibraryID = nil
     }
 
     var supportsPlaylistManagement: Bool { true }
@@ -490,6 +535,10 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
 
     func similarItems(for item: FoundationItem) async throws -> FoundationPage {
         guard Self.validID(item.id) else { throw FoundationLibraryError.invalidResponse }
+        // Similar endpoints cannot honestly constrain results to a music folder.
+        guard musicLibraryID == nil, catalogAvailable else {
+            return FoundationPage(items: [], nextStartIndex: nil)
+        }
         let endpoint: Request<BaseItemDtoQueryResult>
         switch item.kind {
         case .artist:
@@ -533,8 +582,10 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
         guard startIndex >= 0, (1...50).contains(limit) else {
             throw FoundationLibraryError.invalidResponse
         }
+        guard catalogAvailable else { throw FoundationLibraryError.unavailable }
         var parameters = Paths.GetAlbumArtistsParameters()
         parameters.userID = session.userID
+        parameters.parentID = musicLibraryID
         parameters.startIndex = startIndex
         parameters.limit = limit
         parameters.searchTerm = query
@@ -613,8 +664,10 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
     /// Rank one complete, bounded summary response without scanning genre contents.
     private func rankedGenres(albumOnly: Bool) async throws -> FoundationPage {
         let limit = 1000
+        guard catalogAvailable else { throw FoundationLibraryError.unavailable }
         var parameters = Paths.GetGenresParameters()
         parameters.userID = session.userID
+        parameters.parentID = musicLibraryID
         parameters.startIndex = 0
         parameters.limit = limit
         parameters.includeItemTypes =
@@ -690,8 +743,10 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
         -> FoundationPage
     {
         guard startIndex >= 0 else { throw FoundationLibraryError.invalidResponse }
+        guard catalogAvailable else { throw FoundationLibraryError.unavailable }
         var parameters = Paths.GetGenresParameters()
         parameters.userID = session.userID
+        parameters.parentID = musicLibraryID
         parameters.startIndex = startIndex
         parameters.limit = limit
         parameters.searchTerm = query
@@ -890,12 +945,16 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
         fields: [ItemFields]? = nil
     ) async throws -> FoundationPage {
         guard startIndex >= 0 else { throw FoundationLibraryError.invalidResponse }
+        let accountWide = kinds == [.playlist]
+        guard catalogAvailable || parent != nil || accountWide else {
+            throw FoundationLibraryError.unavailable
+        }
         var parameters = Paths.GetItemsParameters()
         parameters.userID = session.userID
         parameters.startIndex = startIndex
         parameters.limit = limit
         parameters.isRecursive = parent == nil
-        parameters.parentID = parent
+        parameters.parentID = parent ?? (accountWide ? nil : musicLibraryID)
         parameters.albumArtistIDs = artistID.map { [$0] }
         parameters.contributingArtistIDs = contributingArtistID.map { [$0] }
         parameters.genreIDs = genreID.map { [$0] }

@@ -13,6 +13,7 @@ struct FoundationHomeView<Profile: View>: View {
     @ObservedObject var genres: FoundationBrowseModel
     let isActive: Bool
     var hasQueue = false
+    var accountLibrary: (any FoundationLibrary)? = nil
     @State private var isVisible = false
     @State private var genreRetryRevision = 0
     @State private var refreshRevision = 0
@@ -90,7 +91,7 @@ struct FoundationHomeView<Profile: View>: View {
             }
         #endif
         .foundationPlayerCover(isPresented: $showingPlayer, player: player) {
-            FoundationPlayerView(player: player, library: library)
+            FoundationPlayerView(player: player, library: accountLibrary ?? library)
         }
         .foundationCollectionDestination(
             item: $openedItem, library: library, player: player, isActive: isActive)
@@ -245,7 +246,8 @@ private struct FoundationHomeGenreShelf: View {
         self.refreshRevision = refreshRevision
         _openedItem = openedItem
         let model = FoundationBrowseModel()
-        model.configureCache(library.catalogPageCache, key: "home.genre." + genre.id)
+        model.configureCache(
+            library.catalogPageCache, key: library.catalogCacheKey("home.genre." + genre.id))
         _albums = StateObject(wrappedValue: model)
     }
 

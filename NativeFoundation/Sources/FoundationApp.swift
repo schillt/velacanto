@@ -75,6 +75,8 @@ struct VelacantoFoundationApp: App {
 @MainActor
 final class FoundationAppModel: ObservableObject {
     @Published private(set) var library: FoundationJellyfinLibrary?
+    @Published private(set) var browseLibrary: FoundationJellyfinLibrary?
+    @Published private(set) var librarySelection: FoundationMusicLibrarySelection?
     @Published private(set) var player: FoundationPlayer?
     @Published private(set) var actions: FoundationLibraryActions?
     @Published private(set) var currentArtwork: FoundationCurrentArtwork?
@@ -96,6 +98,7 @@ final class FoundationAppModel: ObservableObject {
     private var mediaSession: MediaSession<FoundationNowPlaying>?
 
     isolated deinit {
+        librarySelection?.invalidate()
         if let cache = library?.artworkCache {
             Task { _ = await cache.invalidate(removeDisk: false) }
         }
@@ -154,6 +157,9 @@ final class FoundationAppModel: ObservableObject {
                     credentialError =
                         "Older downloaded music could not be removed from this device."
                 }
+                if !FoundationMusicLibraryStore.clear(retaining: scope) {
+                    credentialError = "Older music-library selections could not be removed."
+                }
                 open(session, sourceScope: scope)
             } else if !FoundationPinStorage.removeStoredPins() {
                 credentialError = "Saved pins could not be removed from this device."
@@ -173,6 +179,9 @@ final class FoundationAppModel: ObservableObject {
             credentialError = FoundationDownloadAccountError.cleanupFailed.errorDescription
         }
         if credentialReadCompleted, library == nil {
+            if !FoundationMusicLibraryStore.clear() {
+                credentialError = "Saved music-library selections could not be removed."
+            }
             let epoch = accountEpoch
             Task { [weak self] in
                 guard let self, self.accountEpoch == epoch, self.library == nil else { return }
@@ -240,8 +249,31 @@ final class FoundationAppModel: ObservableObject {
                     "Older disposable caches could not be removed from this device."
             }
         }
+        librarySelection?.invalidate()
         let library = FoundationJellyfinLibrary(
             session: session, artworkCache: cache, catalogPageCache: pages)
+        let selectionStore = FoundationMusicLibraryStore(scope: sourceScope)
+        let savedSelection: FoundationMusicLibraryChoice?
+        let selectionReadFailed: Bool
+        do {
+            savedSelection = try selectionStore.load()
+            selectionReadFailed = false
+        } catch {
+            selectionReadFailed = true
+            savedSelection = nil
+            credentialError = "Saved music-library selection could not be read."
+        }
+        browseLibrary = library.scoped(
+            to: savedSelection?.id, available: savedSelection == nil && !selectionReadFailed)
+        librarySelection = FoundationMusicLibrarySelection(
+            selected: savedSelection, selectionReadFailed: selectionReadFailed,
+            load: { try await library.musicLibraries() },
+            save: { try selectionStore.save($0) },
+            allowsNetwork: { [weak self] in self?.connectivity?.localOnly == false },
+            apply: { [weak self] id, available in
+                guard let self, self.accountEpoch == epoch else { return }
+                self.browseLibrary = library.scoped(to: id, available: available)
+            })
         self.actions = FoundationLibraryActions(sourceScope: sourceScope) { item, favorite in
             try await library.setFavorite(for: item, isFavorite: favorite)
         }
@@ -370,6 +402,10 @@ final class FoundationAppModel: ObservableObject {
         isCleaningDownloads = true
         playbackSessionSubscription = nil
         let playbackSessionsCleared = FoundationPlaybackSessionStore.clear()
+        let librarySelectionsCleared = FoundationMusicLibraryStore.clear()
+        librarySelection?.invalidate()
+        librarySelection = nil
+        browseLibrary = nil
         actions?.invalidate()
         actions = nil
         nowPlaying?.invalidate()
@@ -393,6 +429,9 @@ final class FoundationAppModel: ObservableObject {
             self.isCleaningDownloads = false
             if !downloadsCleared {
                 self.credentialError = FoundationDownloadAccountError.cleanupFailed.errorDescription
+            }
+            if !librarySelectionsCleared {
+                self.credentialError = "Saved music-library selections could not be removed."
             }
             if !artworkCleared || !pagesCleared {
                 let notice = "Disposable caches could not be removed from this device."
@@ -466,13 +505,20 @@ struct FoundationRootView: View {
                 let artwork = model.currentArtwork, let downloads = model.downloads,
                 let connectivity = model.connectivity
             {
-                FoundationLibraryView(library: library, player: player, signOut: model.signOut)
-                    .environmentObject(actions)
-                    .environmentObject(artwork)
-                    .environmentObject(downloads)
-                    .environmentObject(connectivity)
-                    .environmentObject(model.playbackPreferences)
-                    .id(ObjectIdentifier(actions))
+                FoundationLibraryView(
+                    library: model.browseLibrary ?? library, accountLibrary: library,
+                    player: player, signOut: model.signOut, librarySelection: model.librarySelection
+                )
+                .environmentObject(actions)
+                .environmentObject(artwork)
+                .environmentObject(downloads)
+                .environmentObject(connectivity)
+                .environmentObject(model.playbackPreferences)
+                .id(ObjectIdentifier(actions))
+                .task(id: "\(connectivity.localOnly)-\(connectivity.successfulRetryRevision)") {
+                    guard !connectivity.localOnly else { return }
+                    await model.librarySelection?.validateSavedChoice()
+                }
             } else if model.isCleaningDownloads {
                 ProgressView("Removing downloaded music…")
             } else {

@@ -6,6 +6,7 @@ struct FoundationSettingsView: View {
     let image: Image?
     let signOut: () -> Void
     var library: (any FoundationLibrary)? = nil
+    var librarySelection: FoundationMusicLibrarySelection? = nil
     @EnvironmentObject private var downloads: FoundationDownloads
     @State private var measuredCaches = false
     @State private var artworkDisk: Int64?
@@ -193,11 +194,13 @@ struct FoundationSettingsView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("Music Libraries") {
-                Text("All music available to this Jellyfin account")
-                Text(
-                    "Velacanto browses the music your server grants this account access to. Library access is configured in Jellyfin; choosing an individual library in Velacanto is not available yet."
-                )
-                .font(.caption).foregroundStyle(.secondary)
+                if let librarySelection {
+                    FoundationMusicLibrarySettingsRow(selection: librarySelection)
+                } else {
+                    Text("All music available to this Jellyfin account")
+                    Text("Library selection is unavailable for this connection.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
             }
         }
         .formStyle(.grouped)
@@ -207,6 +210,201 @@ struct FoundationSettingsView: View {
         #endif
     }
 
+}
+
+/// The account owns committed scope; this destination owns only an uncommitted draft.
+private struct FoundationMusicLibrarySettingsRow: View {
+    @ObservedObject var selection: FoundationMusicLibrarySelection
+
+    var body: some View {
+        NavigationLink {
+            FoundationMusicLibrarySelectionView(selection: selection)
+        } label: {
+            LabeledContent(
+                "Browse music",
+                value: selection.selectionReadFailed
+                    ? "Saved selection unavailable"
+                    : (selection.selectedID == nil
+                        ? "All music libraries" : (selection.selectedName ?? "Selected library")))
+        }
+        .accessibilityIdentifier("FoundationSettingsMusicLibraries")
+    }
+}
+
+private struct FoundationMusicLibrarySelectionView: View {
+    @ObservedObject var selection: FoundationMusicLibrarySelection
+    @EnvironmentObject private var connectivity: FoundationConnectivity
+    @Environment(\.dismiss) private var dismiss
+    @State private var choices: [FoundationMusicLibraryChoice] = []
+    @State private var draftID: String?
+    @State private var hasDraft = false
+    @State private var hasExplicitDraft = false
+    @State private var loading = false
+    @State private var loaded = false
+    @State private var errorMessage: String?
+    @State private var retry = 0
+    @State private var isApplying = false
+    @State private var applyTask: Task<Void, Never>?
+
+    private struct LoadIdentity: Hashable {
+        let localOnly: Bool
+        let retry: Int
+    }
+
+    private var canSave: Bool {
+        loaded && !loading && !isApplying && !connectivity.localOnly
+            && (draftID != selection.selectedID
+                || (selection.selectionReadFailed && hasExplicitDraft))
+            && (draftID == nil || choices.contains { $0.id == draftID })
+    }
+
+    var body: some View {
+        List {
+            Section {
+                LabeledContent(
+                    "Current selection",
+                    value: selection.selectionReadFailed
+                        ? "Saved selection unavailable"
+                        : (selection.selectedID == nil
+                            ? "All music libraries"
+                            : (selection.selectedName ?? "Selected library")))
+            }
+            Section {
+                if selection.selectionReadFailed {
+                    Label(
+                        "Your saved library selection could not be read. Choose a library or all music libraries, then Save to restore browsing.",
+                        systemImage: "exclamationmark.triangle"
+                    )
+                    .font(.callout)
+                }
+                if connectivity.localOnly {
+                    Label("Connect to choose a music library.", systemImage: "wifi.slash")
+                    Text("Your current selection is kept for cached browsing.")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else if loading {
+                    ProgressView("Loading your music libraries…")
+                } else if let errorMessage {
+                    Text(errorMessage).foregroundStyle(.secondary)
+                    Button("Retry") { retry += 1 }
+                        .accessibilityIdentifier("FoundationMusicLibraryRetry")
+                } else if loaded {
+                    choiceRow(name: "All music libraries", id: nil)
+                    ForEach(choices) { choice in
+                        choiceRow(name: choice.name, id: choice.id)
+                    }
+                    if choices.isEmpty {
+                        Text("No individual music libraries are available to this account.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    if let selected = selection.selectedID,
+                        !choices.contains(where: { $0.id == selected })
+                    {
+                        Label(
+                            "Your selected library is no longer available. Choose another library or all music libraries.",
+                            systemImage: "exclamationmark.triangle"
+                        )
+                        .font(.callout)
+                    }
+                }
+            } header: {
+                Text("Browse Music")
+            } footer: {
+                Text(
+                    "Choose a library, then Save. Downloaded music and playlists remain available across all libraries in this account. Changing this selection does not interrupt playback."
+                )
+            }
+            if isApplying { ProgressView("Saving library selection…") }
+        }
+        .navigationTitle("Music Libraries")
+        #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+        #endif
+        .navigationBarBackButtonHidden(isApplying)
+        .toolbar {
+            ToolbarItem(placement: .cancellationAction) {
+                Button("Cancel") { dismiss() }.disabled(isApplying)
+            }
+            ToolbarItem(placement: .confirmationAction) {
+                Button("Save", action: save).disabled(!canSave)
+                    .accessibilityIdentifier("FoundationMusicLibrarySave")
+            }
+        }
+        .task(id: LoadIdentity(localOnly: connectivity.localOnly, retry: retry)) {
+            if !hasDraft {
+                draftID = selection.selectedID
+                hasDraft = true
+            }
+            guard !connectivity.localOnly else {
+                loading = false
+                return
+            }
+            loading = true
+            errorMessage = nil
+            do {
+                let result = try await selection.loadChoices()
+                try Task.checkCancellation()
+                choices = result
+                loaded = true
+            } catch {
+                guard !Task.isCancelled else { return }
+                errorMessage = FoundationLibraryError.category(error).errorDescription
+            }
+            guard !Task.isCancelled else { return }
+            loading = false
+        }
+        .onDisappear {
+            applyTask?.cancel()
+            applyTask = nil
+        }
+    }
+
+    private func choiceRow(name: String, id: String?) -> some View {
+        Button {
+            draftID = id
+            hasExplicitDraft = true
+            errorMessage = nil
+        } label: {
+            HStack {
+                Text(name).foregroundStyle(.primary)
+                Spacer()
+                if draftID == id && (!selection.selectionReadFailed || hasExplicitDraft) {
+                    Image(systemName: "checkmark").foregroundStyle(.tint)
+                        .accessibilityHidden(true)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .disabled(isApplying)
+        .accessibilityValue(
+            draftID == id && (!selection.selectionReadFailed || hasExplicitDraft)
+                ? "Selected" : "Not selected"
+        )
+        .accessibilityHint("Selection is applied when you choose Save")
+        .accessibilityAddTraits(
+            draftID == id && (!selection.selectionReadFailed || hasExplicitDraft) ? .isSelected : []
+        )
+        .accessibilityIdentifier(
+            id == nil ? "FoundationMusicLibraryAll" : "FoundationMusicLibraryChoice")
+    }
+
+    private func save() {
+        guard canSave else { return }
+        let choice = draftID.flatMap { id in choices.first { $0.id == id } }
+        isApplying = true
+        errorMessage = nil
+        applyTask = Task {
+            do {
+                try await selection.select(choice)
+                try Task.checkCancellation()
+                isApplying = false
+                dismiss()
+            } catch {
+                guard !Task.isCancelled else { return }
+                isApplying = false
+                errorMessage = FoundationLibraryError.category(error).errorDescription
+            }
+        }
+    }
 }
 
 private struct FoundationLicensesView: View {

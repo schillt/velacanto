@@ -56,6 +56,9 @@
             .task {
                 await fixture.prepareCanonicalCollections()
                 await fixture.prepareMembershipCollections()
+                if !fixture.connectivity.localOnly {
+                    await fixture.librarySelection?.validateSavedChoice()
+                }
             }
             .foundationDownloadRemovalPresentation()
             .environmentObject(fixture.downloads)
@@ -73,7 +76,9 @@
 
         @ViewBuilder private var content: some View {
             if productionShell {
-                FoundationLibraryView(library: fixture.library, player: fixture.player, signOut: {})
+                FoundationLibraryView(
+                    library: fixture.catalogLibrary, accountLibrary: fixture.library,
+                    player: fixture.player, signOut: {}, librarySelection: fixture.librarySelection)
             } else {
                 fixtureNavigation
             }
@@ -382,6 +387,8 @@
         let downloads: FoundationDownloads
         let player: FoundationPlayer
         let library: FoundationDownloadUILibrary
+        @Published private(set) var catalogLibrary: FoundationDownloadUILibrary
+        private(set) var librarySelection: FoundationMusicLibrarySelection?
         let actions = FoundationLibraryActions(
             sourceScope: "synthetic-ui", read: { _ in nil }, write: { _, _ in },
             mutateFavorite: { _, _ in })
@@ -400,6 +407,7 @@
             let root = FoundationDownloadsTestHarness.storageRoot
             let library = FoundationDownloadUILibrary()
             self.library = library
+            self.catalogLibrary = library
             let transfer = FoundationDownloadUITransfer(
                 failOnce: ProcessInfo.processInfo.arguments.contains("-fixtureFailOnce"))
             let downloads = FoundationDownloads(
@@ -424,6 +432,30 @@
                 status: ProcessInfo.processInfo.arguments.contains("-fixtureStartOffline")
                     ? .unavailable : .available,
                 wifiOrWired: productionShell, cellular: !productionShell)
+            if ProcessInfo.processInfo.arguments.contains("-fixtureLibrarySelection") {
+                let store = FoundationMusicLibraryStore(
+                    scope: FoundationMusicLibraryStore.digest("synthetic-selection-account"),
+                    root: root.appendingPathComponent("library-selections"))
+                let selected = try? store.load()
+                catalogLibrary = FoundationDownloadUILibrary(selectionID: selected?.id)
+                librarySelection = FoundationMusicLibrarySelection(
+                    selected: selected,
+                    load: {
+                        if ProcessInfo.processInfo.arguments.contains(
+                            "-fixtureSelectedLibraryUnavailable")
+                        {
+                            return [.init(id: "silver", name: "Fixture Silver Library")]
+                        }
+                        return [
+                            .init(id: "cedar", name: "Fixture Cedar Library"),
+                            .init(id: "silver", name: "Fixture Silver Library"),
+                        ]
+                    }, save: { try store.save($0) },
+                    apply: { [weak self] id, available in
+                        self?.catalogLibrary = FoundationDownloadUILibrary(
+                            selectionID: id, selectionAvailable: available)
+                    })
+            }
         }
 
         func prepareCanonicalCollections() async {
@@ -514,6 +546,40 @@
     }
 
     private actor FoundationDownloadUILibrary: FoundationLibrary {
+        private let selectionID: String?
+        private let selectionAvailable: Bool
+        nonisolated let catalogScopeID: String
+        private nonisolated let selectionCacheScope: String?
+
+        init(selectionID: String? = nil, selectionAvailable: Bool = true) {
+            self.selectionID = selectionID
+            self.selectionAvailable = selectionAvailable
+            self.selectionCacheScope = selectionID.map { FoundationMusicLibraryStore.digest($0) }
+            self.catalogScopeID =
+                (selectionID.map { FoundationMusicLibraryStore.digest($0) } ?? "all")
+                + (selectionAvailable ? "" : ".unavailable")
+        }
+
+        nonisolated func catalogCacheKey(_ key: String) -> String {
+            selectionCacheScope.map { "library." + $0 + "." + key } ?? key
+        }
+
+        private func selectedAlbums() throws -> FoundationPage? {
+            guard ProcessInfo.processInfo.arguments.contains("-fixtureLibrarySelection") else {
+                return nil
+            }
+            guard selectionAvailable else { throw FoundationLibraryError.unavailable }
+            guard let selectionID else { return nil }
+            return .init(
+                items: [
+                    .init(
+                        id: selectionID + "-album",
+                        title: "Fixture " + selectionID.capitalized + " Album",
+                        subtitle: "Synthetic catalog", kind: .album, duration: 30,
+                        primaryImageTag: "synthetic")
+                ],
+                nextStartIndex: nil)
+        }
         // Opt-in picker presentation acceptance only; tests never invoke server mutations.
         nonisolated var supportsPlaylistManagement: Bool {
             ProcessInfo.processInfo.arguments.contains("-fixturePlaylistPresentation")
@@ -709,6 +775,7 @@
             genres: ProcessInfo.processInfo.arguments.contains("-fixtureArtworkCache")
                 ? [.init(id: "genre", title: "Fixture Genre", primaryImageTag: "synthetic")] : [])
         func albums(startIndex: Int) async throws -> FoundationPage {
+            if let selected = try selectedAlbums() { return selected }
             if pagedCatalog { return try await catalogPage(kind: .album, startIndex: startIndex) }
             return .init(items: [album], nextStartIndex: nil)
         }
@@ -719,7 +786,8 @@
             .init(items: canonical ? [track, missing] : [track], nextStartIndex: nil)
         }
         func recentAlbums(startIndex: Int) async throws -> FoundationPage {
-            .init(items: [album], nextStartIndex: nil)
+            if let selected = try selectedAlbums() { return selected }
+            return .init(items: [album], nextStartIndex: nil)
         }
         func recentTracks(startIndex: Int) async throws -> FoundationPage {
             .init(items: [track], nextStartIndex: nil)

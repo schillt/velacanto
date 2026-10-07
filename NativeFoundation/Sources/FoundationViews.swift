@@ -28,6 +28,8 @@ enum FoundationDestination: Int, CaseIterable {
 
 struct FoundationLibraryView: View {
     let library: any FoundationLibrary
+    let accountLibrary: any FoundationLibrary
+    let librarySelection: FoundationMusicLibrarySelection?
     let player: FoundationPlayer
     let signOut: () -> Void
     @State private var displayedQueue: [FoundationQueueEntry] = []
@@ -53,6 +55,7 @@ struct FoundationLibraryView: View {
     @State private var searchQuery = ""
     @State private var searchActivation = 0
     @State private var selectedTab = FoundationDestination.home
+    @State private var displayedCatalogScope: String
     @State private var initialConnectionResolved = false
     @State private var selectedTabByUser = false
     #if os(iOS)
@@ -72,24 +75,38 @@ struct FoundationLibraryView: View {
     @State private var openedItem: FoundationItem?
     @State private var offlineSurface: Color?
 
-    init(library: any FoundationLibrary, player: FoundationPlayer, signOut: @escaping () -> Void) {
+    init(
+        library: any FoundationLibrary, accountLibrary: (any FoundationLibrary)? = nil,
+        player: FoundationPlayer, signOut: @escaping () -> Void,
+        librarySelection: FoundationMusicLibrarySelection? = nil
+    ) {
         self.library = library
+        self.accountLibrary = accountLibrary ?? library
+        self.librarySelection = librarySelection
+        _displayedCatalogScope = State(initialValue: library.catalogScopeID)
         self.player = player
         self.signOut = signOut
         _homeHistory = StateObject(
-            wrappedValue: Self.cachedModel(library.catalogPageCache, key: "home-history"))
+            wrappedValue: Self.cachedModel(
+                library.catalogPageCache, key: library.catalogCacheKey("home-history")))
         _homeFavorites = StateObject(
-            wrappedValue: Self.cachedModel(library.catalogPageCache, key: "home-favorites"))
+            wrappedValue: Self.cachedModel(
+                library.catalogPageCache, key: library.catalogCacheKey("home-favorites")))
         _homeGenres = StateObject(
-            wrappedValue: Self.cachedModel(library.catalogPageCache, key: "home-genres"))
+            wrappedValue: Self.cachedModel(
+                library.catalogPageCache, key: library.catalogCacheKey("home-genres")))
         _recentAlbums = StateObject(
-            wrappedValue: Self.cachedModel(library.catalogPageCache, key: "recent-albums"))
+            wrappedValue: Self.cachedModel(
+                library.catalogPageCache, key: library.catalogCacheKey("recent-albums")))
         _recentTracks = StateObject(
-            wrappedValue: Self.cachedModel(library.catalogPageCache, key: "recent-tracks"))
+            wrappedValue: Self.cachedModel(
+                library.catalogPageCache, key: library.catalogCacheKey("recent-tracks")))
         _genres = StateObject(
-            wrappedValue: Self.cachedModel(library.catalogPageCache, key: "library-genres"))
+            wrappedValue: Self.cachedModel(
+                library.catalogPageCache, key: library.catalogCacheKey("library-genres")))
         _searchGenres = StateObject(
-            wrappedValue: Self.cachedModel(library.catalogPageCache, key: "search-genres"))
+            wrappedValue: Self.cachedModel(
+                library.catalogPageCache, key: library.catalogCacheKey("search-genres")))
     }
 
     private static func cachedModel(_ cache: FoundationCatalogPageCache?, key: String)
@@ -103,6 +120,12 @@ struct FoundationLibraryView: View {
     var body: some View {
         VStack(spacing: 0) {
             if connectivity.localOnly { FoundationOfflineStatus(surfaceColor: offlineSurface) }
+            if library.catalogScopeID.hasSuffix(".unavailable"), !connectivity.localOnly {
+                Text(
+                    "Music library unavailable. Choose a library in Settings or retry the connection."
+                )
+                .font(.footnote).foregroundStyle(.secondary).padding(.horizontal)
+            }
             shell
         }
         .onPreferenceChange(FoundationOfflineSurfacePreferenceKey.self) { offlineSurface = $0 }
@@ -116,6 +139,7 @@ struct FoundationLibraryView: View {
                 )
             }
         #endif
+        .onChange(of: library.catalogScopeID) { _, _ in resetCatalogScope() }
         .onChange(of: connectivity.localOnly) { _, localOnly in
             if localOnly {
                 playlistSource = nil
@@ -132,11 +156,12 @@ struct FoundationLibraryView: View {
             homeFavorites.request(.refresh)
         }
         .foundationPlayerCover(isPresented: $showingPlayer, player: player) {
-            FoundationPlayerView(player: player, library: library)
+            FoundationPlayerView(player: player, library: accountLibrary)
         }
         .foundationSettingsPresentation(isPresented: $showingSettings) {
             FoundationSettingsView(
-                name: profileName, image: profileImage, signOut: signOut, library: library)
+                name: profileName, image: profileImage, signOut: signOut, library: accountLibrary,
+                librarySelection: librarySelection)
         }
         .sheet(
             isPresented: Binding(
@@ -158,6 +183,25 @@ struct FoundationLibraryView: View {
         #endif
         .environment(\.foundationOpenLibrary, libraryPresentation)
 
+    }
+
+    private func resetCatalogScope() {
+        openedItem = nil
+        showingFavorites = false
+        searchQuery = ""
+        for model in [albums, artists, songs, playlists, favorites, mostPlayedAlbums] {
+            model.clearRetainedData()
+        }
+        for (model, key) in [
+            (homeHistory, "home-history"), (homeFavorites, "home-favorites"),
+            (homeGenres, "home-genres"), (recentAlbums, "recent-albums"),
+            (recentTracks, "recent-tracks"), (genres, "library-genres"),
+            (searchGenres, "search-genres"),
+        ] {
+            model.clearRetainedData()
+            model.configureCache(library.catalogPageCache, key: library.catalogCacheKey(key))
+        }
+        displayedCatalogScope = library.catalogScopeID
     }
 
     private func catalogIsActive(_ tab: FoundationDestination) -> Bool {
@@ -195,6 +239,7 @@ struct FoundationLibraryView: View {
             } miniPlayer: {
                 miniPlayer()
             }
+            .id(library.catalogScopeID)
         #endif
     }
 
@@ -215,7 +260,7 @@ struct FoundationLibraryView: View {
                     Tab(value: destination, role: destination == .search ? .search : nil) {
                         NavigationStack {
                             browsingContent(destination)
-                        }
+                        }.id(library.catalogScopeID + String(destination.rawValue))
                     } label: {
                         Label {
                             Text(destination.title)
@@ -229,11 +274,16 @@ struct FoundationLibraryView: View {
         }
     #endif
 
-    private func browsingContent(_ tab: FoundationDestination) -> some View {
-        destinationContent(tab)
-            #if os(iOS)
-                .toolbar(.visible, for: .tabBar)
-            #endif
+    @ViewBuilder private func browsingContent(_ tab: FoundationDestination) -> some View {
+        if displayedCatalogScope != library.catalogScopeID {
+            ProgressView("Opening music library…")
+        } else {
+            destinationContent(tab)
+                .id(library.catalogScopeID)
+                #if os(iOS)
+                    .toolbar(.visible, for: .tabBar)
+                #endif
+        }
     }
 
     @ViewBuilder private func destinationContent(_ destination: FoundationDestination) -> some View
@@ -266,7 +316,8 @@ struct FoundationLibraryView: View {
                 profile: profileButton(isActive: catalogIsActive(.home)), library: library,
                 player: player, recentTracks: homeHistory,
                 favorites: homeFavorites, recentAlbums: recentAlbums, genres: homeGenres,
-                isActive: catalogIsActive(.home), hasQueue: !displayedQueue.isEmpty
+                isActive: catalogIsActive(.home), hasQueue: !displayedQueue.isEmpty,
+                accountLibrary: accountLibrary
             )
             #if DEBUG
                 .environment(\.foundationTraceOrigin, .home)
@@ -326,6 +377,14 @@ struct FoundationLibraryView: View {
                 }
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Your Music").font(.title2.bold()).padding(.bottom, 4)
+                    if library.catalogScopeID != "all" {
+                        Text(
+                            connectivity.localOnly
+                                ? "Offline downloads include all music libraries."
+                                : (librarySelection?.selectedName ?? "Selected music library")
+                        )
+                        .font(.footnote).foregroundStyle(.secondary)
+                    }
                     NavigationLink {
                         FoundationLibraryIndexView(
                             kind: .album, model: albums, library: library, player: player,
@@ -362,7 +421,7 @@ struct FoundationLibraryView: View {
                         #endif
                     } label: {
                         categoryRow(
-                            "Playlists", subtitle: "Collections you’ve created and saved",
+                            "Playlists", subtitle: "Collections from all music libraries",
                             symbol: "music.note.list")
                     }.accessibilityIdentifier("library-category-playlists")
                     NavigationLink {
@@ -378,7 +437,7 @@ struct FoundationLibraryView: View {
                             library: library, player: player, isActive: catalogIsActive(.library))
                     } label: {
                         categoryRow(
-                            "Downloads", subtitle: "Listen to music saved on this device",
+                            "Downloads", subtitle: "Saved music from all music libraries",
                             symbol: "arrow.down.circle")
                     }.accessibilityIdentifier("library-category-downloads")
                 }
