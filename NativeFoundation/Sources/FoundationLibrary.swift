@@ -17,6 +17,25 @@ struct FoundationItem: Identifiable, Equatable, Codable, Sendable {
     var playCount: Int = 0
 }
 
+extension FoundationItem {
+    /// Related routes use the same catalog identity and metadata in every entry point.
+    var relatedAlbum: FoundationItem? {
+        guard let album, !album.id.isEmpty else { return nil }
+        return FoundationItem(
+            id: album.id, title: album.title.isEmpty ? "Album" : album.title,
+            subtitle: artist.flatMap { $0.title.isEmpty ? nil : $0.title } ?? subtitle,
+            kind: .album, duration: nil,
+            primaryImageTag: album.primaryImageTag, artist: artist)
+    }
+
+    var relatedArtist: FoundationItem? {
+        guard let artist, !artist.id.isEmpty else { return nil }
+        return FoundationItem(
+            id: artist.id, title: artist.title.isEmpty ? "Artist" : artist.title,
+            subtitle: "", kind: .artist, duration: nil, primaryImageTag: artist.primaryImageTag)
+    }
+}
+
 struct FoundationItemReference: Equatable, Codable, Sendable {
     let id: String
     let title: String

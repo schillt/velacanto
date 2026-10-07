@@ -119,6 +119,9 @@
                 FoundationDownloadUIControls(
                     downloads: fixture.downloads, connectivity: fixture.connectivity,
                     playlist: fixture.playlist, productionShell: productionShell)
+                if ProcessInfo.processInfo.arguments.contains("-fixtureLongPlayback") {
+                    FoundationDownloadUIPlaybackIdentity(player: fixture.player)
+                }
             }
         }
     }
@@ -328,6 +331,18 @@
         }
     }
 
+    /// Synthetic continuity evidence: route navigation must retain the exact queue occurrence.
+    private struct FoundationDownloadUIPlaybackIdentity: View {
+        @ObservedObject var player: FoundationPlayer
+        var body: some View {
+            Text(
+                "Fixture identity: \(player.selectedEntryID?.uuidString ?? "none"); item \(player.queue.first { $0.id == player.selectedEntryID }?.item.id ?? "none"); intent \(player.wantsPlayback); state \(String(describing: player.state))"
+            )
+            .font(.caption).lineLimit(1).dynamicTypeSize(.medium)
+            .accessibilityIdentifier("fixture-playback-identity")
+        }
+    }
+
     @MainActor
     private final class FoundationDownloadUIFixture: ObservableObject {
         @Published private(set) var canonicalReady = false
@@ -523,8 +538,12 @@
         private let missing = FoundationItem(
             id: "missing-tone", title: "Fixture Missing Tone", subtitle: "Generated silent PCM",
             kind: .track, duration: 30, isFavorite: false,
-            album: .init(id: "album", title: "Fixture Album", primaryImageTag: "synthetic"),
-            artist: .init(id: "artist", title: "Fixture Artist", primaryImageTag: "synthetic"))
+            album: ProcessInfo.processInfo.arguments.contains("-fixtureUnknownRelatedItems")
+                ? nil
+                : .init(id: "album", title: "Fixture Album", primaryImageTag: "synthetic"),
+            artist: ProcessInfo.processInfo.arguments.contains("-fixtureUnknownRelatedItems")
+                ? nil
+                : .init(id: "artist", title: "Fixture Artist", primaryImageTag: "synthetic"))
         private var orderedTracks: [FoundationItem] {
             canonical ? [track, missing, track] : [track, track]
         }
@@ -572,8 +591,12 @@
         private let track = FoundationItem(
             id: "tone", title: "Fixture Tone", subtitle: "Generated silent PCM", kind: .track,
             duration: 30, isFavorite: false,
-            album: .init(id: "album", title: "Fixture Album", primaryImageTag: "synthetic"),
-            artist: .init(id: "artist", title: "Fixture Artist", primaryImageTag: "synthetic"))
+            album: ProcessInfo.processInfo.arguments.contains("-fixtureUnknownRelatedItems")
+                ? nil
+                : .init(id: "album", title: "Fixture Album", primaryImageTag: "synthetic"),
+            artist: ProcessInfo.processInfo.arguments.contains("-fixtureUnknownRelatedItems")
+                ? nil
+                : .init(id: "artist", title: "Fixture Artist", primaryImageTag: "synthetic"))
         private let album = FoundationItem(
             id: "album", title: "Fixture Album", subtitle: "Synthetic Artist", kind: .album,
             duration: 30, primaryImageTag: "synthetic", isFavorite: false,
@@ -665,7 +688,9 @@
                 throw CocoaError(.fileWriteOutOfSpace)
             }
             // Valid 30-second mono PCM silence; no external audio or account data.
-            let bytes: UInt32 = 22_050 * 30 * 2
+            let seconds: UInt32 =
+                ProcessInfo.processInfo.arguments.contains("-fixtureLongPlayback") ? 600 : 30
+            let bytes: UInt32 = 22_050 * seconds * 2
             var data = Data()
             func append<T: FixedWidthInteger>(_ value: T) {
                 var little = value.littleEndian

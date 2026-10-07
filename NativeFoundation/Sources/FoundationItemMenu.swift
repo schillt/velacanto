@@ -118,21 +118,15 @@ struct FoundationRelatedDestinations: View {
     @EnvironmentObject private var downloads: FoundationDownloads
 
     var body: some View {
-        if currentPageKind != .album, let album = item.album {
-            let albumItem = FoundationItem(
-                id: album.id, title: album.title, subtitle: item.artist?.title ?? "",
-                kind: .album, duration: nil, primaryImageTag: album.primaryImageTag,
-                artist: item.artist)
-            Button("View Album", systemImage: "square.stack") { navigate(albumItem) }
-                .disabled(connectivity.localOnly && downloads.browseTracks(for: albumItem).isEmpty)
+        if currentPageKind != .album, let album = item.relatedAlbum {
+            Button("View Album", systemImage: "square.stack") { navigate(album) }
+                .disabled(connectivity.localOnly && downloads.browseTracks(for: album).isEmpty)
         }
-        if !connectivity.localOnly, currentPageKind != .artist, let artist = item.artist {
-            Button("View Artist", systemImage: "music.mic") {
-                navigate(
-                    FoundationItem(
-                        id: artist.id, title: artist.title, subtitle: "", kind: .artist,
-                        duration: nil, primaryImageTag: artist.primaryImageTag))
-            }
+        if currentPageKind != .artist, let artist = item.relatedArtist {
+            Button("View Artist", systemImage: "music.mic") { navigate(artist) }
+                .disabled(
+                    connectivity.localOnly
+                        && downloads.downloadedAlbums(artistID: artist.id).isEmpty)
         }
     }
 }

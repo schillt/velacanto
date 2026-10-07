@@ -4,6 +4,52 @@ import XCTest
 
 @MainActor
 final class FoundationPresentationTests: XCTestCase {
+    func testRelatedCatalogRoutesRetainCanonicalMetadataAndArtworkIdentity() throws {
+        let artist = FoundationItemReference(
+            id: "artist", title: "Album Artist", primaryImageTag: "artist-revision")
+        let album = FoundationItemReference(
+            id: "album", title: "Album", primaryImageTag: "album-revision")
+        let track = FoundationItem(
+            id: "track", title: "Song", subtitle: "Track credit", kind: .track, duration: 60,
+            album: album, artist: artist)
+        let albumRoute = try XCTUnwrap(track.relatedAlbum)
+        let artistRoute = try XCTUnwrap(track.relatedArtist)
+        XCTAssertEqual(albumRoute.artist, artist)
+        XCTAssertEqual(albumRoute.subtitle, "Album Artist")
+        XCTAssertEqual(albumRoute.primaryImageTag, "album-revision")
+        XCTAssertEqual(artistRoute.primaryImageTag, "artist-revision")
+        XCTAssertEqual(albumRoute.relatedArtist, artistRoute)
+        XCTAssertEqual(albumRoute.sharedArtworkIdentity, track.sharedArtworkIdentity)
+        XCTAssertNotEqual(artistRoute.sharedArtworkIdentity, albumRoute.sharedArtworkIdentity)
+    }
+
+    func testMissingRelatedMetadataCannotRouteToAnInventedCatalogItem() {
+        var track = FoundationItem(
+            id: "track", title: "Song", subtitle: "Track credit", kind: .track, duration: nil)
+        XCTAssertNil(track.relatedAlbum)
+        XCTAssertNil(track.relatedArtist)
+        track.album = FoundationItemReference(id: "", title: "Album")
+        track.artist = FoundationItemReference(id: "", title: "Artist")
+        XCTAssertNil(track.relatedAlbum)
+        XCTAssertNil(track.relatedArtist)
+    }
+
+    func testKnownRelatedIdentityWithUnknownTitleKeepsUsableFallback() throws {
+        let track = FoundationItem(
+            id: "track", title: "Song", subtitle: "Track credit", kind: .track, duration: nil,
+            album: FoundationItemReference(id: "album", title: ""),
+            artist: FoundationItemReference(id: "artist", title: ""))
+        let album = try XCTUnwrap(track.relatedAlbum)
+        let artist = try XCTUnwrap(track.relatedArtist)
+        XCTAssertEqual(album.id, "album")
+        XCTAssertEqual(album.title, "Album")
+        XCTAssertEqual(album.subtitle, "Track credit")
+        XCTAssertEqual(artist.id, "artist")
+        XCTAssertEqual(artist.title, "Artist")
+        XCTAssertNil(album.primaryImageTag)
+        XCTAssertNil(artist.primaryImageTag)
+    }
+
     func testAccountAlertDismissalDefersModelChangeAndKeepsNewNotice() async {
         let model = FoundationAppModel()
         model.signOutNotice = "First sign-out result"

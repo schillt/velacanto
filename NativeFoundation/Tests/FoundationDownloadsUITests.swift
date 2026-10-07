@@ -6,7 +6,8 @@ final class FoundationDownloadsUITests: XCTestCase {
         failOnce: Bool = false, account: Bool = false, delayedAuth: Bool = false,
         productionShell: Bool = false, largeText: Bool = false,
         canonicalDownloadState: String? = nil, artworkCache: Bool = false,
-        membership: String? = nil, slowTransfer: Bool = false
+        membership: String? = nil, slowTransfer: Bool = false, longPlayback: Bool = false,
+        unknownRelatedItems: Bool = false
     )
         -> XCUIApplication
     {
@@ -21,6 +22,8 @@ final class FoundationDownloadsUITests: XCTestCase {
         }
         if failOnce { app.launchArguments.append("-fixtureFailOnce") }
         if slowTransfer { app.launchArguments.append("-fixtureSlowTransfer") }
+        if longPlayback { app.launchArguments.append("-fixtureLongPlayback") }
+        if unknownRelatedItems { app.launchArguments.append("-fixtureUnknownRelatedItems") }
         if let membership { app.launchArguments += ["-fixtureMembership", membership] }
         if account { app.launchArguments.append("-fixtureAccount") }
         if delayedAuth { app.launchArguments.append("-fixtureDelayedAuth") }
@@ -868,6 +871,152 @@ final class FoundationDownloadsUITests: XCTestCase {
                 fillSyntheticSignIn(app)
                 app.buttons["Sign in"].tap()
             }
+        }
+    }
+
+    private func openNowPlaying(_ app: XCUIApplication) {
+        let button = app.buttons["Show Now Playing"]
+        XCTAssertTrue(button.waitForExistence(timeout: 5) && button.isHittable)
+        button.tap()
+        XCTAssertTrue(app.buttons["More playback options"].waitForExistence(timeout: 5))
+    }
+
+    func testNowPlayingAlbumAndArtistUseCanonicalRoutesOnlineAndOffline() {
+        verifyNowPlayingCanonicalRoutes(state: "full", offlineOnly: false)
+    }
+
+    func testNowPlayingPartialOfflineAlbumAndArtistPreserveKnownTracksAndPlayback() {
+        verifyNowPlayingCanonicalRoutes(state: "partial", offlineOnly: true)
+    }
+
+    private struct ArtistPresentation: Equatable {
+        let title: String
+        let playEnabled: Bool
+        let shuffleEnabled: Bool
+        let albumLabel: String
+    }
+
+    private func canonicalArtistPresentation(_ app: XCUIApplication, captureName: String)
+        -> ArtistPresentation
+    {
+        let title = app.staticTexts["Fixture Artist"].firstMatch
+        XCTAssertTrue(title.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["Play"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["Shuffle"].exists)
+        let titleLabel = title.label
+        let playEnabled = app.buttons["Play"].isEnabled
+        let shuffleEnabled = app.buttons["Shuffle"].isEnabled
+        let album = app.buttons.matching(
+            NSPredicate(
+                format: "label == %@ OR label BEGINSWITH %@", "View Fixture Album", "Fixture Album")
+        )
+        .firstMatch
+        reveal(album, in: app)
+        let presentation = ArtistPresentation(
+            title: titleLabel, playEnabled: playEnabled,
+            shuffleEnabled: shuffleEnabled, albumLabel: album.label)
+        capture(captureName, in: app)
+        return presentation
+    }
+
+    private func verifyNowPlayingCanonicalRoutes(state: String, offlineOnly: Bool) {
+        continueAfterFailure = false
+        let app = launch(productionShell: true, canonicalDownloadState: state, longPlayback: true)
+        selectTab("Library", in: app)
+        if offlineOnly { app.switches["Simulate unavailable network"].switches.firstMatch.tap() }
+        tapVisible(app.buttons["library-category-artists"], in: app)
+        XCTAssertTrue(app.navigationBars["Artists"].waitForExistence(timeout: 5))
+        let libraryArtist = app.buttons.matching(
+            NSPredicate(
+                format: "label BEGINSWITH %@", "Fixture Artist")
+        ).firstMatch
+        tapVisible(libraryArtist, in: app)
+        let artistBaseline = canonicalArtistPresentation(
+            app,
+            captureName: "Canonical Library artist baseline for Now Playing routes")
+        app.navigationBars.buttons.firstMatch.tap()
+        app.navigationBars.buttons.firstMatch.tap()
+        openCanonicalCollection("album", fromDownloads: false, in: app)
+        let baseline = canonicalPresentation(
+            app, state: state, offline: offlineOnly,
+            captureName: "Canonical Library album baseline for Now Playing routes")
+        tapVisible(app.buttons["collection-track-0"], in: app)
+        let identity = app.staticTexts["fixture-playback-identity"]
+        let playing = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label CONTAINS %@", "state playing"), object: identity)
+        XCTAssertEqual(XCTWaiter.wait(for: [playing], timeout: 10), .completed)
+        let originalIdentity = identity.label
+        for offline in (offlineOnly ? [true] : [false, true]) {
+            if offline && !offlineOnly {
+                app.switches["Simulate unavailable network"].switches.firstMatch.tap()
+            }
+            for route in ["View Album", "View Artist", "View Album"] {
+                openNowPlaying(app)
+                XCTAssertTrue(app.buttons["More playback options"].waitForExistence(timeout: 5))
+                XCTAssertTrue(app.buttons["Pause"].exists)
+                app.buttons["More playback options"].tap()
+                XCTAssertTrue(app.buttons[route].waitForExistence(timeout: 5))
+                XCTAssertTrue(app.buttons[route].isEnabled)
+                app.buttons[route].tap()
+                if route == "View Artist" {
+                    let routedArtist = canonicalArtistPresentation(
+                        app,
+                        captureName: "Now Playing canonical artist route "
+                            + (offline ? "offline" : "online"))
+                    XCTAssertEqual(routedArtist, artistBaseline)
+                    let album = app.buttons.matching(
+                        NSPredicate(
+                            format: "label == %@ OR label BEGINSWITH %@", "View Fixture Album",
+                            "Fixture Album")
+                    ).firstMatch
+                    tapVisible(album, in: app)
+                }
+                XCTAssertTrue(
+                    app.descendants(matching: .any)["collection-detail-album-album"]
+                        .waitForExistence(timeout: 5))
+                let routed = canonicalPresentation(
+                    app, state: state, offline: offline,
+                    captureName: "Now Playing " + route + " canonical album "
+                        + (offline ? "offline" : "online"))
+                XCTAssertEqual(routed, baseline)
+                XCTAssertEqual(
+                    identity.label, originalIdentity,
+                    "Navigation must retain exact occurrence and playing state")
+                app.navigationBars.buttons.firstMatch.tap()
+                if route == "View Artist" { app.navigationBars.buttons.firstMatch.tap() }
+                XCTAssertTrue(app.buttons["Show Now Playing"].waitForExistence(timeout: 5))
+                XCTAssertEqual(identity.label, originalIdentity)
+            }
+        }
+    }
+
+    func testNowPlayingUnknownAlbumAndArtistStayDisabledWithoutInterruptingPlayback() {
+        continueAfterFailure = false
+        let app = launch(productionShell: true, longPlayback: true, unknownRelatedItems: true)
+        app.buttons["Queue fixture playlist"].tap()
+        waitForSavedDownload(app)
+        selectTab("Library", in: app)
+        tapVisible(app.buttons["library-category-songs"], in: app)
+        tapVisible(app.buttons["collection-track-0"], in: app)
+        let identity = app.staticTexts["fixture-playback-identity"]
+        let playing = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label CONTAINS %@", "state playing"), object: identity)
+        XCTAssertEqual(XCTWaiter.wait(for: [playing], timeout: 10), .completed)
+        let originalIdentity = identity.label
+        for offline in [false, true] {
+            if offline { app.switches["Simulate unavailable network"].switches.firstMatch.tap() }
+            openNowPlaying(app)
+            XCTAssertTrue(app.buttons["More playback options"].waitForExistence(timeout: 5))
+            app.buttons["More playback options"].tap()
+            for title in ["View Album", "View Artist"] {
+                XCTAssertTrue(app.buttons[title].waitForExistence(timeout: 5))
+                XCTAssertFalse(app.buttons[title].isEnabled)
+            }
+            capture("Now Playing missing related metadata has disabled native actions", in: app)
+            app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.2)).tap()
+            app.swipeDown()
+            XCTAssertTrue(identity.waitForExistence(timeout: 5))
+            XCTAssertEqual(identity.label, originalIdentity)
         }
     }
 

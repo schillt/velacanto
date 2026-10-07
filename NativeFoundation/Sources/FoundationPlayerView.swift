@@ -34,19 +34,9 @@ struct FoundationPlayerView: View {
         player.queue.first { $0.id == player.selectedEntryID }?.item
     }
 
-    private var album: FoundationItem? {
-        guard let reference = current?.album else { return nil }
-        return FoundationItem(
-            id: reference.id, title: reference.title, subtitle: current?.subtitle ?? "",
-            kind: .album, duration: nil, primaryImageTag: reference.primaryImageTag,
-            artist: current?.artist)
-    }
+    private var album: FoundationItem? { current?.relatedAlbum }
 
-    private var artist: FoundationItem? {
-        guard let reference = current?.artist else { return nil }
-        return FoundationItem(
-            id: reference.id, title: reference.title, subtitle: "", kind: .artist, duration: nil)
-    }
+    private var artist: FoundationItem? { current?.relatedArtist }
 
     var body: some View {
         NavigationStack {
@@ -340,7 +330,14 @@ struct FoundationPlayerView: View {
                     )
                     Button("View Artist", systemImage: "music.mic") {
                         if let artist { openLibraryItem?(artist) }
-                    }.disabled(connectivity.localOnly || artist == nil || openLibraryItem == nil)
+                    }.disabled(
+                        artist == nil || openLibraryItem == nil
+                            || (connectivity.localOnly
+                                && artist.map {
+                                    downloads.downloadedAlbums(artistID: $0.id).isEmpty
+                                }
+                                    == true)
+                    )
                 } label: {
                     Image(systemName: "ellipsis").frame(width: 44, height: 44)
                 }

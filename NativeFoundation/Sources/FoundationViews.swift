@@ -233,7 +233,6 @@ struct FoundationLibraryView: View {
                     FoundationItemDestination(
                         item: item, library: library, player: player, isActive: catalogIsActive(tab)
                     )
-                    .environment(\.foundationShowsDownloadBadges, false)
                 }
             }
             #if os(iOS)
@@ -1252,12 +1251,10 @@ struct FoundationTrackList: View {
                             .disabled(!library.supportsPlaylistManagement || connectivity.localOnly)
                         Divider()
                     }
-                    if collection.kind == .album, let artist = collection.artist {
-                        Button("View Artist", systemImage: "music.mic") {
-                            openedCollection = FoundationItem(
-                                id: artist.id, title: artist.title, subtitle: "", kind: .artist,
-                                duration: nil, primaryImageTag: artist.primaryImageTag)
-                        }
+                    if collection.kind == .album {
+                        FoundationRelatedDestinations(
+                            item: collection, navigate: { openedCollection = $0 },
+                            currentPageKind: .album)
                         Divider()
                     }
                     FoundationItemMenu(
