@@ -4,13 +4,19 @@ import XCTest
 final class FoundationDownloadsUITests: XCTestCase {
     private func launch(
         failOnce: Bool = false, account: Bool = false, delayedAuth: Bool = false,
-        productionShell: Bool = false, largeText: Bool = false
+        productionShell: Bool = false, largeText: Bool = false,
+        canonicalDownloadState: String? = nil
     )
         -> XCUIApplication
     {
         let app = XCUIApplication(bundleIdentifier: "com.chameleonenterprise.velacanto.uitesting")
         app.launchArguments = ["-foundationDownloadsUITesting", "-foundationTesting"]
         if productionShell { app.launchArguments.append("-fixtureProductionShell") }
+        if let canonicalDownloadState {
+            app.launchArguments += [
+                "-fixtureCanonicalCollections", "-fixtureDownloadState", canonicalDownloadState,
+            ]
+        }
         if failOnce { app.launchArguments.append("-fixtureFailOnce") }
         if account { app.launchArguments.append("-fixtureAccount") }
         if delayedAuth { app.launchArguments.append("-fixtureDelayedAuth") }
@@ -26,16 +32,19 @@ final class FoundationDownloadsUITests: XCTestCase {
         app.launch()
         let entry = account ? "Sign in" : "Queue fixture playlist"
         XCTAssertTrue(app.buttons[entry].waitForExistence(timeout: 10))
+        if canonicalDownloadState != nil {
+            XCTAssertTrue(app.staticTexts["Canonical fixture ready"].waitForExistence(timeout: 15))
+        }
         return app
     }
 
     private func openDownloads(_ app: XCUIApplication) {
-        app.buttons["Downloads"].tap()
+        tapVisible(app.buttons["Downloads"], in: app)
         XCTAssertTrue(app.navigationBars["Downloads"].waitForExistence(timeout: 5))
     }
 
     private func capture(_ name: String, in app: XCUIApplication) {
-        let attachment = XCTAttachment(screenshot: app.screenshot())
+        let attachment = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
         attachment.name = name
         attachment.lifetime = .keepAlways
         add(attachment)
@@ -50,10 +59,14 @@ final class FoundationDownloadsUITests: XCTestCase {
     }
 
     private func waitForSavedDownload(_ app: XCUIApplication) {
-        let available = app.descendants(matching: .any).matching(
-            NSPredicate(format: "label CONTAINS %@", "Available offline")
-        ).firstMatch
-        XCTAssertTrue(available.waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["Fixture download ready"].waitForExistence(timeout: 10))
+    }
+
+    private func chooseCollectionAction(_ title: String, in app: XCUIApplication) {
+        app.buttons["More actions"].tap()
+        let action = app.buttons[title]
+        XCTAssertTrue(action.waitForExistence(timeout: 5))
+        action.tap()
     }
 
     private func openFixturePlaylist(_ app: XCUIApplication) {
@@ -64,7 +77,7 @@ final class FoundationDownloadsUITests: XCTestCase {
         ).firstMatch
         XCTAssertTrue(playlist.waitForExistence(timeout: 5))
         playlist.tap()
-        XCTAssertTrue(app.buttons["Play Available Tracks"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["Play"].waitForExistence(timeout: 5))
     }
 
     private func returnToFixtureRoot(_ app: XCUIApplication) {
@@ -83,12 +96,54 @@ final class FoundationDownloadsUITests: XCTestCase {
     }
 
     private func tapVisible(_ element: XCUIElement, in app: XCUIApplication) {
-        for _ in 0..<5 {
-            if element.exists && element.isHittable { break }
-            app.swipeUp()
+        for step in 0..<24 {
+            if element.exists && element.isHittable && tapCenterIsVisible(element, in: app) {
+                break
+            }
+            scrollContent(in: app, upward: step < 12)
         }
-        XCTAssertTrue(element.exists && element.isHittable)
+        if !element.exists || !element.isHittable || !tapCenterIsVisible(element, in: app) {
+            capture("Unreachable navigation target", in: app)
+            let hierarchy = XCTAttachment(string: app.debugDescription)
+            hierarchy.name = "Synthetic unreachable navigation hierarchy"
+            hierarchy.lifetime = .keepAlways
+            add(hierarchy)
+        }
+        XCTAssertTrue(element.exists && element.isHittable && tapCenterIsVisible(element, in: app))
         element.tap()
+    }
+
+    // XCTest can report a clipped offscreen link as hittable and tap the adjacent row.
+    // Scroll the actual target's center into the viewport before using its native tap.
+    private func tapCenterIsVisible(_ element: XCUIElement, in app: XCUIApplication) -> Bool {
+        let scroll = [
+            app.collectionViews.firstMatch, app.scrollViews.firstMatch, app.tables.firstMatch,
+        ]
+        .first { $0.exists }
+        guard let scroll else { return true }
+        return element.frame.midY > scroll.frame.minY + 48
+            && element.frame.midY < scroll.frame.maxY - 24
+    }
+
+    private func scrollContent(in app: XCUIApplication, upward: Bool = true) {
+        let scroll = [
+            app.collectionViews.firstMatch, app.scrollViews.firstMatch, app.tables.firstMatch,
+        ]
+        .first { $0.exists && $0.frame.height > 0 }
+        if let scroll {
+            // The native header overlays part of the scroll frame. Move within its visible lower
+            // portion, in small steps, so accessibility-sized rows cannot be skipped between probes.
+            let start = scroll.coordinate(
+                withNormalizedOffset: CGVector(dx: 0.5, dy: upward ? 0.85 : 0.55))
+            let end = scroll.coordinate(
+                withNormalizedOffset: CGVector(dx: 0.5, dy: upward ? 0.55 : 0.85))
+            start.press(
+                forDuration: 0.1, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0.2)
+        } else if upward {
+            app.swipeUp()
+        } else {
+            app.swipeDown()
+        }
     }
 
     private func confirmRemoval(_ title: String, in app: XCUIApplication) {
@@ -138,6 +193,252 @@ final class FoundationDownloadsUITests: XCTestCase {
         }
     }
 
+    private struct CollectionPresentation: Equatable {
+        let rowLabels: [String]
+        let rowEnabled: [Bool]
+        let rowValues: [String]
+        let actionLabels: [String]
+        let playEnabled: Bool
+        let shuffleEnabled: Bool
+    }
+
+    private func openCanonicalCollection(
+        _ kind: String, fromDownloads: Bool, in app: XCUIApplication
+    ) {
+        if fromDownloads {
+            let downloads = app.buttons.matching(
+                NSPredicate(format: "label BEGINSWITH %@", "Downloads")
+            ).firstMatch
+            tapVisible(downloads, in: app)
+            XCTAssertTrue(app.navigationBars["Downloads"].waitForExistence(timeout: 5))
+        }
+        let category = kind == "album" ? "Albums" : "Playlists"
+        let link =
+            fromDownloads
+            ? app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", category)).firstMatch
+            : app.descendants(matching: .any).matching(
+                identifier: "library-category-" + category.lowercased()
+            ).firstMatch
+        tapVisible(link, in: app)
+        XCTAssertTrue(app.navigationBars[category].waitForExistence(timeout: 5))
+        let title = kind == "album" ? "Fixture Album" : "Fixture Playlist"
+        let collection = app.buttons.matching(
+            NSPredicate(format: "label == %@ OR label BEGINSWITH %@", "View " + title, title)
+        ).firstMatch
+        tapVisible(collection, in: app)
+        XCTAssertTrue(
+            app.descendants(matching: .any)["collection-detail-" + kind + "-" + kind]
+                .waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts[title].firstMatch.exists)
+        XCTAssertTrue(app.buttons["Play"].exists)
+        XCTAssertTrue(app.buttons["Shuffle"].exists)
+    }
+
+    private func canonicalPresentation(
+        _ app: XCUIApplication, state: String, offline: Bool, captureName: String
+    ) -> CollectionPresentation {
+        let expectedTitles = ["Fixture Tone", "Fixture Missing Tone", "Fixture Tone"]
+        var labels: [String] = []
+        var enabled: [Bool] = []
+        var actions: [String] = []
+        var values: [String] = []
+        let headerEnabled = !offline || state != "none"
+        for title in ["Play", "Shuffle"] {
+            let settled = expectation(
+                for: NSPredicate(format: "enabled == %@", NSNumber(value: headerEnabled)),
+                evaluatedWith: app.buttons[title])
+            wait(for: [settled], timeout: 5)
+        }
+        let playEnabled = app.buttons["Play"].isEnabled
+        let shuffleEnabled = app.buttons["Shuffle"].isEnabled
+        capture(captureName + " header", in: app)
+        for index in expectedTitles.indices {
+            let row = app.buttons["collection-track-\(index)"]
+            for _ in 0..<12 {
+                if row.exists { break }
+                scrollContent(in: app)
+            }
+            XCTAssertTrue(row.exists, "Known occurrence \(index) must remain in the collection")
+            XCTAssertTrue(row.label.contains(expectedTitles[index]))
+            let ready = state == "full" || (state == "partial" && index != 1)
+            let playable = !offline || ready
+            let settled = expectation(
+                for: NSPredicate(format: "enabled == %@", NSNumber(value: playable)),
+                evaluatedWith: row)
+            wait(for: [settled], timeout: 5)
+            if offline && !ready {
+                XCTAssertTrue((row.value as? String ?? "").contains("unavailable offline"))
+            }
+            let action = app.buttons["collection-track-actions-\(index)"]
+            XCTAssertTrue(action.exists)
+            XCTAssertEqual(action.label, "Actions for " + expectedTitles[index])
+            let badge = app.images["collection-track-download-\(index)"]
+            if ready {
+                XCTAssertTrue(badge.exists)
+                XCTAssertEqual(badge.label, "Available offline")
+                if badge.isHittable && action.isHittable {
+                    XCTAssertLessThan(badge.frame.maxX, action.frame.midX)
+                    XCTAssertEqual(badge.frame.midY, action.frame.midY, accuracy: 12)
+                }
+            } else {
+                XCTAssertFalse(badge.exists)
+            }
+            labels.append(row.label)
+            enabled.append(row.isEnabled)
+            values.append(row.value as? String ?? "")
+            actions.append(action.label)
+        }
+        for title in [
+            "Play All", "Play All Songs", "Play Available Tracks", "Saved download",
+            "2 of 3 available", "3 saved tracks", "Downloaded",
+        ] {
+            XCTAssertFalse(app.staticTexts[title].exists)
+            XCTAssertFalse(app.buttons[title].exists)
+        }
+        capture(captureName, in: app)
+        return CollectionPresentation(
+            rowLabels: labels, rowEnabled: enabled, rowValues: values, actionLabels: actions,
+            playEnabled: playEnabled, shuffleEnabled: shuffleEnabled)
+    }
+
+    private func verifyCanonicalEntryPoints(state: String, largeText: Bool = false) {
+        let app = launch(
+            productionShell: true, largeText: largeText, canonicalDownloadState: state)
+        if largeText {
+            XCTAssertEqual(
+                app.staticTexts["fixture-dynamic-type-size"].label,
+                "Synthetic Dynamic Type: accessibility3")
+            XCUIDevice.shared.orientation = .landscapeLeft
+            addTeardownBlock { @MainActor in XCUIDevice.shared.orientation = .portrait }
+        }
+        app.buttons["Library"].firstMatch.tap()
+        if largeText { capture("Accessibility-sized landscape Library navigation", in: app) }
+        for offline in [false, true] {
+            if offline {
+                app.switches["Simulate unavailable network"].switches.firstMatch.tap()
+            }
+            let status = app.descendants(matching: .any)["browsing-offline-status"]
+            if offline {
+                XCTAssertTrue(status.waitForExistence(timeout: 5))
+                XCTAssertLessThanOrEqual(
+                    status.frame.maxY, app.buttons["Profile and settings"].firstMatch.frame.minY + 1
+                )
+            } else {
+                XCTAssertFalse(status.exists)
+            }
+            for kind in ["playlist", "album"] {
+                var baseline: CollectionPresentation?
+                for downloadedEntry in [false, true] {
+                    openCanonicalCollection(kind, fromDownloads: downloadedEntry, in: app)
+                    let presentation = canonicalPresentation(
+                        app, state: state, offline: offline,
+                        captureName:
+                            "Canonical \(kind) \(state) \(offline ? "offline" : "online") via \(downloadedEntry ? "Downloads" : "Library")"
+                    )
+                    if let baseline {
+                        XCTAssertEqual(
+                            presentation, baseline,
+                            "Entry point must not change known occurrences or available actions")
+                    } else {
+                        baseline = presentation
+                    }
+                    XCTAssertEqual(presentation.playEnabled, !offline || state != "none")
+                    XCTAssertEqual(presentation.shuffleEnabled, !offline || state != "none")
+                    for _ in 0..<(downloadedEntry ? 3 : 2) {
+                        app.navigationBars.buttons.firstMatch.tap()
+                    }
+                }
+            }
+        }
+        app.switches["Simulate unavailable network"].switches.firstMatch.tap()
+        let status = app.descendants(matching: .any)["browsing-offline-status"]
+        let online = expectation(
+            for: NSPredicate(format: "exists == false"), evaluatedWith: status)
+        wait(for: [online], timeout: 5)
+        XCTAssertTrue(app.staticTexts["Library"].firstMatch.exists)
+    }
+
+    func testOfflineLandscapeHeaderAndInlineActionsRemainReachable() {
+        continueAfterFailure = false
+        XCUIDevice.shared.orientation = .landscapeLeft
+        addTeardownBlock { @MainActor in XCUIDevice.shared.orientation = .portrait }
+        let app = launch(productionShell: true, largeText: true, canonicalDownloadState: "full")
+        app.buttons["Library"].firstMatch.tap()
+        openCanonicalCollection("playlist", fromDownloads: false, in: app)
+        app.switches["Simulate unavailable network"].switches.firstMatch.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["browsing-offline-status"].exists)
+        capture("Full-screen offline landscape canonical playlist header", in: app)
+        XCTAssertTrue(app.buttons["More actions"].isHittable)
+        app.buttons["More actions"].tap()
+        XCTAssertTrue(app.buttons["Edit Playlist"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["Edit Playlist"].isEnabled)
+        capture("Full-screen offline landscape reachable playlist actions", in: app)
+        app.staticTexts["Canonical fixture ready"].tap()
+        _ = canonicalPresentation(
+            app, state: "full", offline: true,
+            captureName: "Full-screen offline landscape canonical playlist rows")
+        tapVisible(app.buttons["collection-track-actions-2"], in: app)
+        let removalActions = app.buttons.matching(
+            NSPredicate(format: "label == %@", "Remove Downloads")
+        ).allElementsBoundByIndex
+        XCTAssertTrue(removalActions.contains(where: { $0.isHittable }))
+        capture("Full-screen offline landscape reachable inline track actions", in: app)
+    }
+
+    func testPartialCollectionsHaveIdenticalLibraryAndDownloadsEntryPoints() {
+        continueAfterFailure = false
+        verifyCanonicalEntryPoints(state: "partial")
+    }
+
+    func testFullCollectionsHaveIdenticalEntryPointsAtAccessibilityTextSize() {
+        continueAfterFailure = false
+        verifyCanonicalEntryPoints(state: "full", largeText: true)
+    }
+
+    func testKnownUndownloadedCollectionsKeepAllOccurrencesAcrossEntryPoints() {
+        continueAfterFailure = false
+        let app = launch(productionShell: true, canonicalDownloadState: "none")
+        app.buttons["Library"].firstMatch.tap()
+        for kind in ["playlist", "album"] {
+            var onlineBaseline: CollectionPresentation?
+            var offlineBaseline: CollectionPresentation?
+            for downloadedEntry in [false, true] {
+                openCanonicalCollection(kind, fromDownloads: downloadedEntry, in: app)
+                let online = canonicalPresentation(
+                    app, state: "none", offline: false,
+                    captureName:
+                        "Known undownloaded \(kind) online via \(downloadedEntry ? "Downloads" : "Library")"
+                )
+                if let onlineBaseline { XCTAssertEqual(online, onlineBaseline) }
+                onlineBaseline = online
+                XCTAssertTrue(online.playEnabled)
+                XCTAssertTrue(online.shuffleEnabled)
+                // Zero-ready cards are intentionally filtered from offline catalog lists.
+                // An already-open canonical detail must nevertheless retain all occurrences.
+                for _ in 0..<4 { app.swipeDown() }
+                app.switches["Simulate unavailable network"].switches.firstMatch.tap()
+                let strip = app.descendants(matching: .any)["browsing-offline-status"]
+                XCTAssertTrue(strip.waitForExistence(timeout: 5))
+                XCTAssertTrue(
+                    app.descendants(matching: .any)["collection-detail-" + kind + "-" + kind].exists
+                )
+                let offline = canonicalPresentation(
+                    app, state: "none", offline: true,
+                    captureName:
+                        "Known undownloaded \(kind) preserved offline via \(downloadedEntry ? "Downloads" : "Library")"
+                )
+                if let offlineBaseline { XCTAssertEqual(offline, offlineBaseline) }
+                offlineBaseline = offline
+                XCTAssertFalse(offline.playEnabled)
+                XCTAssertFalse(offline.shuffleEnabled)
+                for _ in 0..<(downloadedEntry ? 3 : 2) {
+                    app.navigationBars.buttons.firstMatch.tap()
+                }
+                app.switches["Simulate unavailable network"].switches.firstMatch.tap()
+            }
+        }
+    }
+
     func testLimitedOfflineProductionShellKeepsSettingsAndExplicitRetry() {
         continueAfterFailure = false
         let app = launch(productionShell: true)
@@ -152,7 +453,19 @@ final class FoundationDownloadsUITests: XCTestCase {
         app.switches["Simulate unavailable network"].switches.firstMatch.tap()
         XCTAssertTrue(app.navigationBars["Downloads"].exists)
         XCTAssertFalse(app.buttons["Retry Online"].exists)
-        capture("Offline preserves useful Downloads without a banner", in: app)
+        XCTAssertTrue(
+            app.descendants(matching: .any)["browsing-offline-status"].waitForExistence(timeout: 5))
+        capture("Offline preserves Downloads beneath the compact status strip", in: app)
+        XCUIDevice.shared.orientation = .landscapeLeft
+        addTeardownBlock { @MainActor in XCUIDevice.shared.orientation = .portrait }
+        XCTAssertTrue(app.navigationBars["Downloads"].waitForExistence(timeout: 5))
+        let rotatedStatus = app.descendants(matching: .any)["browsing-offline-status"]
+        XCTAssertTrue(rotatedStatus.exists)
+        XCTAssertLessThanOrEqual(
+            rotatedStatus.frame.maxY, app.navigationBars["Downloads"].frame.minY + 1)
+        capture("Offline Downloads landscape keeps navigation below the status strip", in: app)
+        XCUIDevice.shared.orientation = .portrait
+        XCTAssertTrue(app.navigationBars["Downloads"].waitForExistence(timeout: 5))
         app.buttons["Search"].firstMatch.tap()
         XCTAssertTrue(app.buttons["Retry Online"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["Search"].firstMatch.exists)
@@ -162,8 +475,12 @@ final class FoundationDownloadsUITests: XCTestCase {
         if search.exists { XCTAssertFalse(search.isEnabled) }
         capture("Offline preserves Search and explains unavailable content", in: app)
         app.buttons["Profile and settings"].tap()
-        capture("Offline Profile and Settings", in: app)
         XCTAssertTrue(app.navigationBars["Profile & Settings"].waitForExistence(timeout: 5))
+        capture("Offline Profile and Settings", in: app)
+        XCTAssertFalse(app.staticTexts["Streaming Quality"].exists)
+        XCTAssertFalse(app.staticTexts["Download Quality"].exists)
+        XCTAssertTrue(app.staticTexts["Playback & Downloads"].exists)
+        XCTAssertTrue(app.buttons["Playback & Download Settings"].exists)
         app.buttons["Downloaded Music"].tap()
         XCTAssertTrue(app.navigationBars["Downloaded Music"].waitForExistence(timeout: 5))
         app.navigationBars.buttons.firstMatch.tap()
@@ -241,7 +558,7 @@ final class FoundationDownloadsUITests: XCTestCase {
         openDownloads(app)
         enableCellular(app)
         waitForSavedDownload(app)
-        app.buttons["Playlists"].tap()
+        tapVisible(app.buttons["Playlists"], in: app)
         XCTAssertTrue(app.navigationBars["Playlists"].waitForExistence(timeout: 5))
         let playlist = app.buttons.matching(
             NSPredicate(format: "label BEGINSWITH %@", "Fixture Playlist")
@@ -249,8 +566,8 @@ final class FoundationDownloadsUITests: XCTestCase {
         XCTAssertTrue(playlist.waitForExistence(timeout: 5))
         assertOfflineIconIsAccessible(in: app)
         capture("Accessibility-sized shared downloaded playlist grid", in: app)
-        playlist.tap()
-        XCTAssertTrue(app.buttons["Play Available Tracks"].waitForExistence(timeout: 5))
+        tapVisible(playlist, in: app)
+        XCTAssertTrue(app.buttons["Play"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["Shuffle"].exists)
         capture("Accessibility-sized shared downloaded playlist hero", in: app)
         app.swipeUp()
@@ -269,6 +586,8 @@ final class FoundationDownloadsUITests: XCTestCase {
         app.buttons["Songs"].tap()
         XCTAssertTrue(app.navigationBars["Songs"].waitForExistence(timeout: 5))
         assertOfflineIconIsAccessible(in: app)
+        XCTAssertFalse(app.buttons["Play All"].exists)
+        XCTAssertFalse(app.buttons["Play All Songs"].exists)
         capture("Accessibility-sized downloaded Songs icon badge", in: app)
     }
 
@@ -350,7 +669,7 @@ final class FoundationDownloadsUITests: XCTestCase {
             enableCellular(app)
             waitForSavedDownload(app)
             openFixturePlaylist(app)
-            app.buttons["Play Available Tracks"].tap()
+            app.buttons["Play"].tap()
             returnToFixtureRoot(app)
             let playing = expectation(
                 for: NSPredicate(format: "label == %@", "Fixture playback: playing"),
@@ -379,15 +698,19 @@ final class FoundationDownloadsUITests: XCTestCase {
         XCTAssertTrue(app.buttons["Albums"].exists)
         XCTAssertTrue(app.buttons["Playlists"].exists)
         XCTAssertTrue(app.staticTexts["Waiting for Wi-Fi"].waitForExistence(timeout: 5))
-        app.buttons["Cancel"].tap()
-        enableCellular(app)
+        openFixturePlaylist(app)
+        chooseCollectionAction("Cancel Download", in: app)
         XCTAssertTrue(
-            app.staticTexts["Cancelled — downloaded tracks are retained"].exists)
-        app.buttons["Retry Download"].tap()
-        XCTAssertTrue(app.progressIndicators.firstMatch.waitForExistence(timeout: 5))
+            app.staticTexts["Cancelled — downloaded tracks are retained"]
+                .waitForExistence(timeout: 5))
+        enableCellular(app)
+        chooseCollectionAction("Retry Download", in: app)
+        XCTAssertTrue(
+            app.descendants(matching: .any)["fixture-download-progress"]
+                .waitForExistence(timeout: 5))
         XCTAssertTrue(
             app.staticTexts["Download incomplete — retry when ready"].waitForExistence(timeout: 10))
-        app.buttons["Retry Download"].tap()
+        chooseCollectionAction("Retry Download", in: app)
         waitForSavedDownload(app)
         returnToFixtureRoot(app)
         openManagement(app)
@@ -434,7 +757,7 @@ final class FoundationDownloadsUITests: XCTestCase {
         XCTAssertTrue(occurrences.element(boundBy: 0).isEnabled)
         XCTAssertTrue(occurrences.element(boundBy: 1).isEnabled)
         capture("Downloaded playlist preserves duplicate occurrences", in: app)
-        app.buttons["Play Available Tracks"].tap()
+        app.buttons["Play"].tap()
         returnToFixtureRoot(app)
         let state = app.staticTexts["fixture-playback-state"]
         let playing = expectation(
@@ -488,14 +811,21 @@ final class FoundationDownloadsUITests: XCTestCase {
         app.launch()
         openDownloads(app)
         openFixturePlaylist(app)
-        let unavailable = app.buttons.matching(
-            NSPredicate(
-                format: "label BEGINSWITH %@ AND label CONTAINS %@",
-                "Fixture Tone", "Not available offline"))
-        XCTAssertTrue(unavailable.firstMatch.waitForExistence(timeout: 5))
-        XCTAssertEqual(unavailable.count, 2)
-        XCTAssertFalse(app.buttons["Play Available Tracks"].isEnabled)
-        XCTAssertTrue(app.buttons["Download Again"].exists)
+        app.switches["Simulate unavailable network"].switches.firstMatch.tap()
+        for index in 0..<2 {
+            let occurrence = app.buttons["collection-track-\(index)"]
+            XCTAssertTrue(occurrence.waitForExistence(timeout: 5))
+            XCTAssertEqual(occurrence.label, "Fixture Tone")
+            let unavailable = expectation(
+                for: NSPredicate(
+                    format: "enabled == false AND value CONTAINS %@", "unavailable offline"),
+                evaluatedWith: occurrence)
+            wait(for: [unavailable], timeout: 5)
+        }
+        XCTAssertFalse(app.buttons["Play"].isEnabled)
         capture("Removed song stays unavailable in saved playlist after relaunch", in: app)
+        app.buttons["More actions"].tap()
+        XCTAssertTrue(app.buttons["Remove Downloads"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["Download Again"].exists)
     }
 }

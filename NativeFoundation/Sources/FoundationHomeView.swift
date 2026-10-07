@@ -3,6 +3,7 @@ import SwiftUI
 /// Home composes independently owned, visible catalog sections around the existing player.
 struct FoundationHomeView<Profile: View>: View {
     @EnvironmentObject private var connectivity: FoundationConnectivity
+    @EnvironmentObject private var downloads: FoundationDownloads
     let profile: Profile
     let library: any FoundationLibrary
     let player: FoundationPlayer
@@ -21,9 +22,7 @@ struct FoundationHomeView<Profile: View>: View {
     var body: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 28) {
-                if connectivity.localOnly, recentTracks.items.isEmpty, favorites.items.isEmpty,
-                    recentAlbums.items.isEmpty, genres.items.isEmpty, !hasQueue
-                {
+                if connectivity.localOnly, !hasLocalContent {
                     FoundationOfflineNotice()
                 }
                 FoundationContinueListening(
@@ -83,6 +82,17 @@ struct FoundationHomeView<Profile: View>: View {
         }
     }
 
+    private var hasLocalContent: Bool {
+        let selected = player.queue.first { $0.id == player.selectedEntryID }?.item
+        if let selected, downloads.isReady(selected) { return true }
+        if recentTracks.items.prefix(6).contains(where: downloads.isReady) { return true }
+        return
+            (Array(favorites.items.prefix(5)) + Array(recentAlbums.items.prefix(5))
+            + Array(genres.items.prefix(5))).contains {
+                !downloads.browseTracks(for: $0).isEmpty
+            }
+    }
+
     private var genreShelves: some View {
         LazyVStack(alignment: .leading, spacing: 28) {
             ForEach(Array(genres.items.prefix(5).enumerated()), id: \.element.id) { _, genre in
@@ -122,13 +132,17 @@ struct FoundationHomeView<Profile: View>: View {
 
 private struct FoundationContinueListening: View {
     @EnvironmentObject private var currentArtwork: FoundationCurrentArtwork
+    @EnvironmentObject private var connectivity: FoundationConnectivity
+    @EnvironmentObject private var downloads: FoundationDownloads
     @ObservedObject var player: FoundationPlayer
     let library: any FoundationLibrary
     let isActive: Bool
     @Binding var showingPlayer: Bool
 
     var body: some View {
-        if let item = player.queue.first(where: { $0.id == player.selectedEntryID })?.item {
+        if let item = player.queue.first(where: { $0.id == player.selectedEntryID })?.item,
+            !connectivity.localOnly || downloads.isReady(item)
+        {
             continueListening(item)
         }
     }
@@ -347,7 +361,11 @@ private struct FoundationHomeShelf: View {
     }
 
     private var recentRows: some View {
-        ForEach(Array(model.items.prefix(6).enumerated()), id: \.offset) { index, item in
+        ForEach(
+            Array(model.items.prefix(6).enumerated()).filter {
+                !connectivity.localOnly || downloads.isReady($0.element)
+            }, id: \.offset
+        ) { index, item in
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 4) {
                     Button {
@@ -359,12 +377,12 @@ private struct FoundationHomeShelf: View {
                             VStack(alignment: .leading, spacing: 3) {
                                 Text(item.title).font(.body.weight(.medium))
                                     .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 1)
-                                FoundationDownloadBadge(item: item)
                                 Text(item.subtitle).font(.subheadline).foregroundStyle(.secondary)
                                     .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 1)
                             }.frame(maxWidth: .infinity, alignment: .leading)
                         }.contentShape(Rectangle())
                     }.buttonStyle(.plain)
+                    FoundationDownloadBadge(item: item)
                     Menu {
                         recentMenu(item, index: index)
                     } label: {

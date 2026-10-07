@@ -41,22 +41,20 @@ struct FoundationSettingsView: View {
                         }
                     }.padding(.vertical, 8)
                 }
-                Section("Music") {
+                Section("Storage") {
                     NavigationLink {
                         FoundationDownloadManagementView()
                     } label: {
                         Label("Downloaded Music", systemImage: "internaldrive")
                     }
+                }
+                Section("Playback & Downloads") {
                     #if os(iOS)
                         Button("Playback & Download Settings", systemImage: "gearshape") {
                             if let url = URL(string: UIApplication.openSettingsURLString) {
                                 UIApplication.shared.open(url)
                             }
                         }
-                        Text(
-                            "Cellular streaming and cellular downloads have separate controls in system Settings."
-                        )
-                        .font(.caption).foregroundStyle(.secondary)
                     #else
                         Toggle(
                             "Allow Cellular Streaming",
@@ -69,12 +67,6 @@ struct FoundationSettingsView: View {
                                 get: { preferences.allowsCellularDownloads },
                                 set: { preferences.setAllowsCellularDownloads($0) }))
                     #endif
-                    LabeledContent("Streaming Quality", value: "Native / AAC fallback")
-                    LabeledContent("Download Quality", value: "Original")
-                    Text(
-                        "Quality follows the current server and native playback support. Downloads preserve the original file; additional quality choices are not available."
-                    )
-                    .font(.caption).foregroundStyle(.secondary)
                 }
                 Section("About") {
                     Button {

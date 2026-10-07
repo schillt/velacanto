@@ -19,7 +19,7 @@ struct FoundationNewView<Profile: View>: View {
     var body: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 28) {
-                if connectivity.localOnly, tracks.items.isEmpty, albums.items.isEmpty {
+                if connectivity.localOnly, !hasLocalContent {
                     FoundationOfflineNotice()
                 }
                 trackSection
@@ -64,7 +64,11 @@ struct FoundationNewView<Profile: View>: View {
             sectionHeader("New Tracks", model: tracks) {
                 try await library.recentTracks(startIndex: $0)
             }
-            ForEach(Array(tracks.items.prefix(6).enumerated()), id: \.offset) { index, item in
+            ForEach(
+                Array(tracks.items.prefix(6).enumerated()).filter {
+                    !connectivity.localOnly || downloads.isReady($0.element)
+                }, id: \.offset
+            ) { index, item in
                 FoundationLibraryItemRow(
                     item: item, library: library, isActive: isActive && isVisible,
                     open: {},
@@ -152,6 +156,12 @@ struct FoundationNewView<Profile: View>: View {
         }
     }
 
+    private var hasLocalContent: Bool {
+        tracks.items.prefix(6).contains(where: downloads.isReady)
+            || albums.items.prefix(5).contains { !downloads.browseTracks(for: $0).isEmpty }
+            || recentGenres.contains { !downloads.browseTracks(for: $0.genre).isEmpty }
+    }
+
     /// Most recent occurrence wins; only the existing first 24 albums contribute.
     private var recentGenres: [(genre: FoundationItem, artwork: FoundationItem)] {
         var seen = Set<String>()
@@ -171,7 +181,9 @@ struct FoundationNewView<Profile: View>: View {
     }
 
     @ViewBuilder private var genreSection: some View {
-        let entries = recentGenres
+        let entries = recentGenres.filter {
+            !connectivity.localOnly || !downloads.browseTracks(for: $0.genre).isEmpty
+        }
         if !entries.isEmpty {
             VStack(alignment: .leading, spacing: 12) {
                 Text("Genres with New Music").font(.title2.bold())

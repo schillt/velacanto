@@ -22,6 +22,7 @@
         }
 
         @StateObject private var fixture = FoundationDownloadUIFixture()
+        @StateObject private var playlistChanges = FoundationPlaylistChanges()
         var onSignedOut: (() -> Void)?
         @State private var cleaningAccount = false
         @Environment(\.dynamicTypeSize) private var systemDynamicTypeSize
@@ -37,13 +38,17 @@
         var body: some View {
             VStack(spacing: 0) {
                 fixtureControls
+                if fixture.canonicalReady { Text("Canonical fixture ready").font(.caption) }
                 content
             }
+            .task { await fixture.prepareCanonicalCollections() }
+            .foundationDownloadRemovalPresentation()
             .environmentObject(fixture.downloads)
             .environmentObject(fixture.preferences)
             .environmentObject(fixture.connectivity)
             .environmentObject(fixture.actions)
             .environmentObject(fixture.artwork)
+            .environmentObject(playlistChanges)
             .environment(
                 \.dynamicTypeSize,
                 usesAccessibilitySizedText ? .accessibility3 : systemDynamicTypeSize)
@@ -65,7 +70,7 @@
                         fixture.downloads.download(fixture.playlist)
                     }
                     NavigationLink("Downloads") {
-                        FoundationDownloadsView(player: fixture.player)
+                        FoundationDownloadsView(library: fixture.library, player: fixture.player)
                     }
                     NavigationLink("Downloaded Music") {
                         FoundationDownloadManagementView()
@@ -117,16 +122,33 @@
                 }
                 if productionShell {
                     Button("Queue fixture playlist") { downloads.download(playlist) }
-                    Toggle(
-                        "Simulate unavailable network",
-                        isOn: Binding(
-                            get: { connectivity.localOnly },
-                            set: { offline in
-                                connectivity.update(
-                                    status: offline ? .unavailable : .available,
-                                    wifiOrWired: !offline, cellular: false)
-                            }))
                 }
+                if downloads.owners.contains(where: { $0.state == .ready }),
+                    !downloads.downloadedSongs.isEmpty
+                {
+                    Text("Fixture download ready").font(.caption)
+                }
+                if let owner = downloads.owners.first(where: { $0.state != .ready }) {
+                    Text(owner.status).font(.caption)
+                    if owner.state == .downloading {
+                        ProgressView()
+                            .accessibilityElement(children: .ignore)
+                            .accessibilityLabel("Fixture transfer in progress")
+                            .accessibilityIdentifier("fixture-download-progress")
+                    }
+                }
+                Toggle(
+                    "Simulate unavailable network",
+                    isOn: Binding(
+                        get: { connectivity.localOnly },
+                        set: { offline in
+                            connectivity.update(
+                                status: offline ? .unavailable : .available,
+                                wifiOrWired: !offline && productionShell,
+                                cellular: !offline && !productionShell)
+                            downloads.updateConnectivity(
+                                isConnected: !offline, usesWiFi: !offline && productionShell)
+                        }))
                 Toggle(
                     "Use Cellular Data",
                     isOn: Binding(
@@ -257,6 +279,7 @@
 
     @MainActor
     private final class FoundationDownloadUIFixture: ObservableObject {
+        @Published private(set) var canonicalReady = false
         let downloads: FoundationDownloads
         let player: FoundationPlayer
         let library: FoundationDownloadUILibrary
@@ -300,6 +323,45 @@
                 status: .available, wifiOrWired: productionShell, cellular: !productionShell)
         }
 
+        func prepareCanonicalCollections() async {
+            guard ProcessInfo.processInfo.arguments.contains("-fixtureCanonicalCollections"),
+                !canonicalReady
+            else { return }
+            let album = FoundationItem(
+                id: "album", title: "Fixture Album", subtitle: "Synthetic Artist", kind: .album,
+                duration: 90, primaryImageTag: "synthetic", isFavorite: false)
+            downloads.download(playlist)
+            downloads.download(album)
+            for _ in 0..<200 {
+                guard !Task.isCancelled else { return }
+                if downloads.owners.count == 2,
+                    downloads.owners.allSatisfy({ $0.state == .ready })
+                {
+                    break
+                }
+                try? await Task.sleep(for: .milliseconds(50))
+            }
+            guard downloads.owners.count == 2,
+                downloads.owners.allSatisfy({ $0.state == .ready })
+            else { return }
+            let arguments = ProcessInfo.processInfo.arguments
+            let state =
+                arguments.firstIndex(of: "-fixtureDownloadState").flatMap {
+                    arguments.indices.contains($0 + 1) ? arguments[$0 + 1] : nil
+                } ?? "partial"
+            let missing = FoundationItem(
+                id: "missing-tone", title: "Fixture Missing Tone", subtitle: "Generated silent PCM",
+                kind: .track, duration: 30)
+            if state != "full" { downloads.removeTrack(missing) }
+            if state == "none" {
+                downloads.removeTrack(
+                    FoundationItem(
+                        id: "tone", title: "Fixture Tone", subtitle: "", kind: .track,
+                        duration: 30))
+            }
+            canonicalReady = true
+        }
+
         isolated deinit {
             artwork.invalidate()
             actions.invalidate()
@@ -309,6 +371,30 @@
     }
 
     private actor FoundationDownloadUILibrary: FoundationLibrary {
+        private let canonical = ProcessInfo.processInfo.arguments.contains(
+            "-fixtureCanonicalCollections")
+        private let missing = FoundationItem(
+            id: "missing-tone", title: "Fixture Missing Tone", subtitle: "Generated silent PCM",
+            kind: .track, duration: 30, isFavorite: false,
+            album: .init(id: "album", title: "Fixture Album", primaryImageTag: "synthetic"))
+        private var orderedTracks: [FoundationItem] {
+            canonical ? [track, missing, track] : [track, track]
+        }
+        func songs(startIndex: Int) async throws -> FoundationPage {
+            .init(items: canonical ? [track, missing] : [track], nextStartIndex: nil)
+        }
+        func playlists(startIndex: Int) async throws -> FoundationPage {
+            .init(
+                items: [
+                    .init(
+                        id: "playlist", title: "Fixture Playlist", subtitle: "Synthetic",
+                        kind: .playlist, duration: nil, isFavorite: false)
+                ], nextStartIndex: nil)
+        }
+        func playlistTracks(playlistID: String, startIndex: Int) async throws -> FoundationPage {
+            .init(items: orderedTracks, nextStartIndex: nil)
+        }
+
         private let track = FoundationItem(
             id: "tone", title: "Fixture Tone", subtitle: "Generated silent PCM", kind: .track,
             duration: 30, isFavorite: false,
@@ -352,17 +438,18 @@
             }
         }
         func tracks(albumID: String, startIndex: Int) async throws -> FoundationPage {
-            .init(items: [track], nextStartIndex: nil)
+            .init(items: canonical ? orderedTracks : [track], nextStartIndex: nil)
         }
         func playlistPermissions(id: String) async throws -> FoundationPlaylistPermissions {
             .init(name: "Fixture Playlist", canEdit: false, canDelete: false)
         }
         func playlistEntries(id: String, startIndex: Int) async throws -> FoundationPlaylistPage {
             .init(
-                entries: [
-                    .init(id: "one", mutationID: "one", item: track),
-                    .init(id: "two", mutationID: "two", item: track),
-                ], nextStartIndex: nil)
+                entries: orderedTracks.enumerated().map {
+                    .init(
+                        id: "occurrence-\($0.offset)", mutationID: "occurrence-\($0.offset)",
+                        item: $0.element)
+                }, nextStartIndex: nil)
         }
         func playbackURL(for item: FoundationItem) async throws -> URL {
             throw FoundationLibraryError.unavailable

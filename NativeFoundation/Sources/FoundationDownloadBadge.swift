@@ -14,61 +14,34 @@ struct FoundationDownloadBadge: View {
                 if showsTransferStatus,
                     let owner = downloads.owners.first(where: {
                         $0.item.id == item.id && $0.item.kind == item.kind
-                    }),
-                    owner.state != .ready
+                    }), owner.state != .ready
                 {
-                    Label(
-                        owner.status,
-                        systemImage: owner.state == .failed
+                    Image(
+                        systemName: owner.state == .failed
                             ? "exclamationmark.circle" : "arrow.down.circle"
                     )
                     .font(.caption).foregroundStyle(.primary)
                     .accessibilityLabel(owner.status + ", not yet available offline")
-                } else if downloads.owners.contains(where: {
-                    $0.item.id == item.id && $0.item.kind == item.kind
-                }) {
-                    Label("No tracks downloaded", systemImage: "circle")
-                        .font(.caption).foregroundStyle(.primary)
-                        .accessibilityLabel("No tracks available offline")
                 }
             case .ready:
                 Image(systemName: "arrow.down.circle.fill")
                     .font(.caption).foregroundStyle(.primary)
                     .accessibilityLabel("Available offline")
             case .partial(let ready, let total):
-                Label(
-                    ready == total
-                        ? "\(ready) saved \(ready == 1 ? "track" : "tracks")"
-                        : "\(ready) of \(total) available",
-                    systemImage: "circle.lefthalf.filled"
-                )
-                .font(.caption).foregroundStyle(.primary)
-                .accessibilityLabel(
-                    "Partially available offline, \(ready) tracks in the saved snapshot of \(total)"
-                )
-                if showsTransferStatus,
-                    let owner = downloads.owners.first(where: {
-                        $0.item.id == item.id && $0.item.kind == item.kind
-                    }), owner.state != .ready
-                {
-                    Text(owner.status).font(.caption).foregroundStyle(.secondary)
-                }
+                Image(systemName: "arrow.down.circle.dotted")
+                    .font(.caption).foregroundStyle(.primary)
+                    .accessibilityLabel(
+                        "Partially available offline, \(ready) of \(total) known track occurrences"
+                    )
             }
         }
     }
 }
 
-private struct FoundationDownloadedBrowsingKey: EnvironmentKey {
-    static let defaultValue = false
-}
 private struct FoundationDownloadBadgesKey: EnvironmentKey {
     static let defaultValue = true
 }
 extension EnvironmentValues {
-    var foundationDownloadedBrowsing: Bool {
-        get { self[FoundationDownloadedBrowsingKey.self] }
-        set { self[FoundationDownloadedBrowsingKey.self] = newValue }
-    }
     var foundationShowsDownloadBadges: Bool {
         get { self[FoundationDownloadBadgesKey.self] }
         set { self[FoundationDownloadBadgesKey.self] = newValue }

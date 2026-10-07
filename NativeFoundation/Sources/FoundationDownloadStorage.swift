@@ -53,6 +53,8 @@ nonisolated struct FoundationDownloadManifest: Codable, Sendable {
         let tracks: [FoundationStoredDownloadItem]
         let paused: Bool
         let expanded: Bool
+        // Absent in existing manifests: ordinary intent never clears local exclusions.
+        var reacquiresExcludedTracks: Bool? = nil
     }
     struct File: Codable, Sendable {
         let name: String

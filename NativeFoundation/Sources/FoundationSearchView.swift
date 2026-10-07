@@ -91,6 +91,7 @@ struct FoundationSearchView<Profile: View>: View {
 /// Search and Library share card layout, ownership, pagination and local recovery.
 struct FoundationGenreIndex: View {
     @EnvironmentObject private var connectivity: FoundationConnectivity
+    @EnvironmentObject private var downloads: FoundationDownloads
     @ObservedObject var genres: FoundationBrowseModel
     let library: any FoundationLibrary
     @ObservedObject var player: FoundationPlayer
@@ -104,16 +105,21 @@ struct FoundationGenreIndex: View {
         @Environment(\.foundationTraceOrigin) private var traceOrigin
     #endif
 
+    private var visibleGenres: [FoundationItem] {
+        connectivity.localOnly
+            ? genres.items.filter { !downloads.browseTracks(for: $0).isEmpty } : genres.items
+    }
+
     var body: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 16) {
-                if connectivity.localOnly, genres.items.isEmpty { FoundationOfflineNotice() }
+                if connectivity.localOnly, visibleGenres.isEmpty { FoundationOfflineNotice() }
                 LazyVGrid(
                     columns: [
                         GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12),
                     ], spacing: 12
                 ) {
-                    ForEach(Array(genres.items.enumerated()), id: \.offset) { _, genre in
+                    ForEach(Array(visibleGenres.enumerated()), id: \.offset) { _, genre in
                         FoundationGenreCard(
                             genre: genre, library: library,
                             isActive: isActive && isVisible, open: { openedGenre = genre }

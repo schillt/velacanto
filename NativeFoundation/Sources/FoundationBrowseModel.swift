@@ -8,6 +8,7 @@ final class FoundationBrowseModel: ObservableObject {
     @Published private(set) var isLoading = false
     @Published private(set) var errorMessage: String?
     private(set) var loaded = false
+    private(set) var isRetainedSnapshot = false
     private var revision = UUID()
     private var pendingRequest = Request.initial
     private(set) var retryRequest = Request.initial
@@ -21,6 +22,29 @@ final class FoundationBrowseModel: ObservableObject {
             items.filter { $0.kind == .track },
             items.prefix(sourceIndex).filter { $0.kind == .track }.count
         )
+    }
+
+    /// Install complete known membership without inventing a remote page or filtering occurrences.
+    func installSnapshot(_ snapshot: [FoundationItem], complete: Bool = true) {
+        revision = UUID()
+        items = snapshot
+        nextStartIndex = nil
+        loaded = complete
+        isRetainedSnapshot = true
+        isLoading = false
+        errorMessage = nil
+        pendingRequest = .initial
+    }
+
+    func clearRetainedData() {
+        revision = UUID()
+        items = []
+        nextStartIndex = nil
+        loaded = false
+        isRetainedSnapshot = false
+        isLoading = false
+        errorMessage = nil
+        pendingRequest = .initial
     }
 
     func request(_ request: Request) {
@@ -103,6 +127,7 @@ final class FoundationBrowseModel: ObservableObject {
             }
             nextStartIndex = page.nextStartIndex
             loaded = true
+            isRetainedSnapshot = false
             #if DEBUG
                 FoundationJournal.shared.record(
                     "browse disposition=publication-committed \(FoundationTrace.fields)")

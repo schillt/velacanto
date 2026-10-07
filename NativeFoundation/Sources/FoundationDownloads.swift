@@ -46,6 +46,9 @@ final class FoundationDownloads: ObservableObject {
             FoundationDownloadSource, URL, Bool,
             @escaping @Sendable (Int64, Int64?) -> Void
         ) async throws -> Void
+    typealias FileVerifier =
+        @Sendable ([String: FoundationDownloadManifest.File], URL) async throws
+        -> [String: FoundationDownloadManifest.File]
 
     @Published private(set) var owners: [FoundationDownloadOwner] = []
     @Published private(set) var allowsCellular = false
@@ -56,9 +59,12 @@ final class FoundationDownloads: ObservableObject {
     private let library: any FoundationLibrary
     private let directory: URL
     private let transfer: Transfer
+    private let verifyReacquisitionFiles: FileVerifier
     private var manifest = FoundationDownloadManifest()
+    private var collectionModels: [String: FoundationBrowseModel] = [:]
     private var paused: Set<String> = []
     private var expanded: Set<String> = []
+    private var reacquiring: Set<String> = []
     private var leases: [String: Int] = [:]
     private var pendingDeletion: Set<String> = []
     private var readyFileIDs: Set<String> = []
@@ -81,9 +87,14 @@ final class FoundationDownloads: ObservableObject {
 
     init(
         scope: String, library: any FoundationLibrary, root: URL? = nil,
-        transfer: Transfer? = nil, monitorConnectivity: Bool = true
+        transfer: Transfer? = nil, monitorConnectivity: Bool = true,
+        verifyReacquisitionFiles: FileVerifier? = nil
     ) {
         self.library = library
+        self.verifyReacquisitionFiles =
+            verifyReacquisitionFiles ?? { files, directory in
+                try await FoundationDownloadStorage.verifiedFiles(files, directory: directory)
+            }
         directory = FoundationDownloadStorage.directory(scope: scope, root: root)
         self.transfer =
             transfer ?? { source, target, cellular, progress in
@@ -97,6 +108,7 @@ final class FoundationDownloads: ObservableObject {
             for saved in manifest.owners {
                 if saved.paused { paused.insert(saved.id) }
                 if saved.expanded { expanded.insert(saved.id) }
+                if saved.reacquiresExcludedTracks == true { reacquiring.insert(saved.id) }
                 owners.append(
                     FoundationDownloadOwner(
                         id: saved.id, item: saved.item.item, tracks: saved.tracks.map(\.item),
@@ -284,10 +296,12 @@ final class FoundationDownloads: ObservableObject {
         let old = owners.remove(at: index)
         let wasPaused = paused.remove(ownerID) != nil
         let wasExpanded = expanded.remove(ownerID) != nil
+        let wasReacquiring = reacquiring.remove(ownerID) != nil
         do { try save() } catch {
             owners.insert(old, at: index)
             if wasPaused { paused.insert(ownerID) }
             if wasExpanded { expanded.insert(ownerID) }
+            if wasReacquiring { reacquiring.insert(ownerID) }
             reportStorageFailure()
             return
         }
@@ -334,8 +348,105 @@ final class FoundationDownloads: ObservableObject {
         return items
     }
 
+    private func collectionKey(_ item: FoundationItem) -> String {
+        FoundationStoredDownloadItem(item).kind + ":" + item.id
+    }
+
+    /// One account-owned model serves every entry point for the same collection identity.
+    func collectionModel(for item: FoundationItem) -> FoundationBrowseModel {
+        guard isLive else { return FoundationBrowseModel() }
+        let key = collectionKey(item)
+        if let model = collectionModels[key] { return model }
+        let model = FoundationBrowseModel()
+        collectionModels[key] = model
+        let tracks = snapshotTracks(for: item)
+        let hasSnapshot = owners.contains {
+            $0.item.kind == item.kind && $0.id == ownerID(item) && expanded.contains($0.id)
+        }
+        if hasSnapshot || !tracks.isEmpty { model.installSnapshot(tracks, complete: hasSnapshot) }
+        return model
+    }
+
+    /// Known membership includes excluded and unavailable occurrences, in saved/server order.
+    func knownCollectionTracks(for item: FoundationItem) -> [FoundationItem] {
+        guard isLive else { return [] }
+        if let model = collectionModels[collectionKey(item)], model.loaded || !model.items.isEmpty {
+            return model.items
+        }
+        return snapshotTracks(for: item)
+    }
+
+    func hasCompleteCollectionSnapshot(for item: FoundationItem) -> Bool {
+        guard isLive else { return false }
+        if item.kind == .track { return true }
+        if let model = collectionModels[collectionKey(item)], model.loaded || !model.items.isEmpty {
+            // An established canonical page supersedes the older complete download snapshot.
+            return model.loaded && model.nextStartIndex == nil
+        }
+        return owners.contains {
+            $0.item.kind == item.kind && $0.id == ownerID(item) && expanded.contains($0.id)
+        }
+    }
+
+    private func installCollectionSnapshot(
+        _ item: FoundationItem, tracks: [FoundationItem], refreshed: Bool = false
+    ) {
+        guard let model = collectionModels[collectionKey(item)], !model.isLoading,
+            refreshed || !model.loaded || model.isRetainedSnapshot
+        else { return }
+        model.installSnapshot(tracks)
+    }
+
+    /// Intent remains removable when all audio is excluded or a transfer has not completed.
+    func hasDownloadedData(for item: FoundationItem) -> Bool {
+        guard isLive, storageUsable, [.track, .album, .playlist].contains(item.kind) else {
+            return false
+        }
+        if owners.contains(where: { $0.id == ownerID(item) }) { return true }
+        let tracks = knownCollectionTracks(for: item)
+        let retained = tracks.filter { track in
+            manifest.files[track.id] != nil || retainedTrackIDs.contains(track.id)
+        }
+        if !retained.isEmpty { return true }
+        if item.kind == .album || item.kind == .playlist {
+            return manifest.artwork?[artworkKey(item)] != nil
+        }
+        return false
+    }
+
+    func removalAffectsPlaylist(for item: FoundationItem) -> Bool {
+        guard isLive else { return false }
+        let ids: Set<String>
+        if item.kind == .track {
+            ids = [item.id]
+        } else if (item.kind == .album || item.kind == .playlist)
+            && !owners.contains(where: { $0.id == ownerID(item) })
+        {
+            ids = Set(knownCollectionTracks(for: item).map(\.id))
+        } else {
+            return false
+        }
+        return owners.contains { owner in
+            owner.item.kind == .playlist && owner.tracks.contains(where: { ids.contains($0.id) })
+        }
+    }
+
+    /// Explicit collection removal releases its owner; unowned groups remove their known shared songs.
+    func removeDownloads(for item: FoundationItem) {
+        guard isLive, storageUsable, [.track, .album, .playlist].contains(item.kind) else { return }
+        if item.kind == .track {
+            removeTrack(item)
+        } else if owners.contains(where: { $0.id == ownerID(item) }) {
+            remove(ownerID: ownerID(item))
+        } else if item.kind == .album || item.kind == .playlist {
+            let ids = Set(knownCollectionTracks(for: item).map(\.id)).intersection(retainedTrackIDs)
+            removeSelected(ownerIDs: [], trackIDs: ids)
+        }
+    }
+
     private func snapshotTracks(for item: FoundationItem) -> [FoundationItem] {
         if item.kind == .track { return [item] }
+        guard item.kind == .album || item.kind == .playlist else { return [] }
         if let owner = owners.first(where: { $0.id == ownerID(item) }),
             item.kind != .album || expanded.contains(owner.id) || !owner.tracks.isEmpty
         {
@@ -351,17 +462,16 @@ final class FoundationDownloads: ObservableObject {
     }
 
     func browseTracks(for item: FoundationItem) -> [FoundationItem] {
-        snapshotTracks(for: item).filter { isReady($0) }
+        knownCollectionTracks(for: item).filter { isReady($0) }
     }
 
     func availability(for item: FoundationItem) -> FoundationDownloadAvailability {
         if item.kind == .track { return isReady(item) ? .ready : .unavailable }
-        let tracks = snapshotTracks(for: item)
+        let tracks = knownCollectionTracks(for: item)
         let ready = tracks.filter { isReady($0) }.count
         guard ready > 0 else { return .unavailable }
-        // Derived album groups cannot prove full server album membership.
-        let explicit = owners.contains { $0.id == ownerID(item) && expanded.contains($0.id) }
-        if explicit && ready == tracks.count { return .ready }
+        // Partial derived groups do not prove complete membership; a full server snapshot does.
+        if hasCompleteCollectionSnapshot(for: item) && ready == tracks.count { return .ready }
         return .partial(ready: ready, total: tracks.count)
     }
 
@@ -406,17 +516,22 @@ final class FoundationDownloads: ObservableObject {
         let previousOwners = owners
         let previousPaused = paused
         let previousExpanded = expanded
+        let previousReacquiring = reacquiring
         let previousManifest = manifest
         owners.removeAll {
             ownerIDs.contains($0.id) || ($0.item.kind == .track && trackIDs.contains($0.item.id))
         }
         paused.formIntersection(Set(owners.map(\.id)))
         expanded.formIntersection(Set(owners.map(\.id)))
+        reacquiring.formIntersection(Set(owners.map(\.id)))
+        // A newer global song removal supersedes earlier pending collection reacquisition.
+        if !trackIDs.isEmpty { reacquiring = [] }
         manifest.excludedTrackIDs = (manifest.excludedTrackIDs ?? []).union(trackIDs)
         do { try save() } catch {
             owners = previousOwners
             paused = previousPaused
             expanded = previousExpanded
+            reacquiring = previousReacquiring
             manifest = previousManifest
             reportStorageFailure()
             return
@@ -432,9 +547,16 @@ final class FoundationDownloads: ObservableObject {
         let previousManifest = manifest
         let previousOwners = owners
         let previousPaused = paused
-        let ids = Set(snapshotTracks(for: item).map(\.id))
-        manifest.excludedTrackIDs = (manifest.excludedTrackIDs ?? []).subtracting(ids)
+        let previousExpanded = expanded
+        let previousReacquiring = reacquiring
+        let ids = Set(knownCollectionTracks(for: item).map(\.id))
         let id = ownerID(item)
+        if item.kind == .track {
+            manifest.excludedTrackIDs = (manifest.excludedTrackIDs ?? []).subtracting(ids)
+        } else {
+            reacquiring.insert(id)
+            expanded.remove(id)
+        }
         if let index = owners.firstIndex(where: { $0.id == id }) {
             paused.remove(id)
             owners[index].state = .queued
@@ -445,16 +567,24 @@ final class FoundationDownloads: ObservableObject {
             manifest = previousManifest
             owners = previousOwners
             paused = previousPaused
+            expanded = previousExpanded
+            reacquiring = previousReacquiring
             reportStorageFailure()
             return
         }
+        if activeOwner == id { worker?.cancel() }
         // A leased, previously excluded file can be retained again without replacing it.
         attemptedArtwork = attemptedArtwork.filter { attempt in
-            !snapshotTracks(for: item).contains(where: { attempt.hasPrefix(artworkKey($0) + ":") })
+            !knownCollectionTracks(for: item).contains(where: {
+                attempt.hasPrefix(artworkKey($0) + ":")
+            })
         }
         readyFileIDs.formUnion(
             ids.filter { id in
-                snapshotTracks(for: item).first(where: { $0.id == id }).map { fileIsPresent($0) }
+                guard !isExcluded(id) else { return false }
+                return knownCollectionTracks(for: item).first(where: { $0.id == id }).map {
+                    fileIsPresent($0)
+                }
                     == true
             })
         errorMessage = nil
@@ -518,17 +648,53 @@ final class FoundationDownloads: ObservableObject {
                     default: throw FoundationLibraryError.unavailable
                     }
                     try check(epoch: epoch, ownerID: owner.id)
+                    let reacquires = reacquiring.contains(owner.id)
+                    let leasedFiles = manifest.files.filter { id, _ in
+                        reacquires && tracks.contains(where: { $0.id == id })
+                            && (leases[id] ?? 0) > 0
+                    }
+                    let verified = try await verifyReacquisitionFiles(leasedFiles, directory)
+                    try check(epoch: epoch, ownerID: owner.id)
+                    // Lease release may collect an excluded file while verification suspends.
+                    // Only the same currently retained, present record can become ready.
+                    let reusable = verified.filter { id, file in
+                        guard let current = manifest.files[id],
+                            current.name == file.name, current.bytes == file.bytes,
+                            current.digest == file.digest,
+                            let track = tracks.first(where: { $0.id == id })
+                        else { return false }
+                        return fileIsPresent(track)
+                    }
+                    guard
+                        leasedFiles.keys.allSatisfy({
+                            (leases[$0] ?? 0) == 0 || reusable[$0] != nil
+                        })
+                    else {
+                        throw CocoaError(.fileReadCorruptFile)
+                    }
                     guard let index = owners.firstIndex(where: { $0.id == owner.id }) else {
                         return
                     }
                     let before = owners[index].tracks
+                    let previousManifest = manifest
+                    let previousExpanded = expanded
+                    let previousReacquiring = reacquiring
                     owners[index].tracks = tracks
                     expanded.insert(owner.id)
+                    if reacquires {
+                        manifest.excludedTrackIDs = (manifest.excludedTrackIDs ?? []).subtracting(
+                            Set(tracks.map(\.id)))
+                        reacquiring.remove(owner.id)
+                    }
                     do { try save() } catch {
                         owners[index].tracks = before
-                        expanded.remove(owner.id)
+                        manifest = previousManifest
+                        expanded = previousExpanded
+                        reacquiring = previousReacquiring
                         throw error
                     }
+                    readyFileIDs.formUnion(reusable.keys.filter { !isExcluded($0) })
+                    installCollectionSnapshot(owner.item, tracks: tracks)
                     scheduleArtwork()
                 }
                 guard let current = owners.first(where: { $0.id == owner.id }) else { continue }
@@ -668,7 +834,8 @@ final class FoundationDownloads: ObservableObject {
             .init(
                 id: $0.id, item: FoundationStoredDownloadItem($0.item),
                 tracks: $0.tracks.map(FoundationStoredDownloadItem.init),
-                paused: paused.contains($0.id), expanded: expanded.contains($0.id))
+                paused: paused.contains($0.id), expanded: expanded.contains($0.id),
+                reacquiresExcludedTracks: reacquiring.contains($0.id) ? true : nil)
         }
         try FoundationDownloadStorage.save(manifest, directory: directory)
     }
@@ -991,6 +1158,7 @@ final class FoundationDownloads: ObservableObject {
                         owners[index] = previous
                         throw error
                     }
+                    installCollectionSnapshot(item, tracks: entries.map(\.item), refreshed: true)
                     if activeOwner == owner.id { worker?.cancel() }
                     collectUnusedFiles()
                     scheduleArtwork()
@@ -1006,6 +1174,8 @@ final class FoundationDownloads: ObservableObject {
     }
 
     func invalidate() {
+        for model in collectionModels.values { model.clearRetainedData() }
+        collectionModels.removeAll()
         artworkTask?.cancel()
         isLive = false
         generation &+= 1
@@ -1041,15 +1211,18 @@ final class FoundationDownloads: ObservableObject {
             let previousOwners = owners
             let previousPaused = paused
             let previousExpanded = expanded
+            let previousReacquiring = reacquiring
             let previousManifest = manifest
             owners = []
             paused = []
             expanded = []
+            reacquiring = []
             manifest.excludedTrackIDs = nil
             do { try save() } catch {
                 owners = previousOwners
                 paused = previousPaused
                 expanded = previousExpanded
+                reacquiring = previousReacquiring
                 manifest = previousManifest
                 storageUsable = previouslyUsable
                 reportStorageFailure()
@@ -1071,6 +1244,7 @@ final class FoundationDownloads: ObservableObject {
             owners = []
             paused = []
             expanded = []
+            reacquiring = []
             pendingDeletion = []
             try save()
             storageUsable = true
@@ -1128,6 +1302,7 @@ final class FoundationDownloads: ObservableObject {
                 try FileManager.default.removeItem(at: directory)
             }
             owners = []
+            reacquiring = []
             readyFileIDs = []
             manifest = FoundationDownloadManifest()
             artworkRevision &+= 1
