@@ -62,6 +62,7 @@ struct FoundationLibraryView: View {
     @State private var profileImage: Image?
     @State private var showingFavorites = false
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.scenePhase) private var scenePhase
     @State private var openedItem: FoundationItem?
 
     init(library: any FoundationLibrary, player: FoundationPlayer, signOut: @escaping () -> Void) {
@@ -156,6 +157,10 @@ struct FoundationLibraryView: View {
             })
     }
 
+    private func catalogIsActive(_ tab: FoundationDestination) -> Bool {
+        selectedTab == tab && scenePhase == .active
+    }
+
     private var libraryPresentation: (@MainActor @Sendable () -> Void)? {
         guard selectedTab != .library else { return nil }
         return { tabSelection.wrappedValue = .library }
@@ -226,7 +231,7 @@ struct FoundationLibraryView: View {
             ) {
                 if let item = playerDestination, playerDestinationTab == tab {
                     FoundationItemDestination(
-                        item: item, library: library, player: player, isActive: selectedTab == tab
+                        item: item, library: library, player: player, isActive: catalogIsActive(tab)
                     )
                     .environment(\.foundationShowsDownloadBadges, false)
                 }
@@ -245,28 +250,28 @@ struct FoundationLibraryView: View {
                 #endif
         } else if destination == .new {
             FoundationNewView(
-                profile: profileButton(isActive: selectedTab == .new), library: library,
+                profile: profileButton(isActive: catalogIsActive(.new)), library: library,
                 player: player, tracks: recentTracks, albums: recentAlbums,
-                isActive: selectedTab == .new
+                isActive: catalogIsActive(.new)
             )
             #if DEBUG
                 .environment(\.foundationTraceOrigin, .new)
             #endif
         } else if destination == .search {
             FoundationSearchView(
-                profile: profileButton(isActive: selectedTab == .search),
+                profile: profileButton(isActive: catalogIsActive(.search)),
                 library: library, player: player, genres: searchGenres, query: $searchQuery,
-                isActive: selectedTab == .search, activation: searchActivation
+                isActive: catalogIsActive(.search), activation: searchActivation
             )
             #if DEBUG
                 .environment(\.foundationTraceOrigin, .search)
             #endif
         } else {
             FoundationHomeView(
-                profile: profileButton(isActive: selectedTab == .home), library: library,
+                profile: profileButton(isActive: catalogIsActive(.home)), library: library,
                 player: player, recentTracks: homeHistory,
                 favorites: homeFavorites, recentAlbums: recentAlbums, genres: homeGenres,
-                isActive: selectedTab == .home, hasQueue: !displayedQueue.isEmpty
+                isActive: catalogIsActive(.home), hasQueue: !displayedQueue.isEmpty
             )
             #if DEBUG
                 .environment(\.foundationTraceOrigin, .home)
@@ -329,7 +334,7 @@ struct FoundationLibraryView: View {
                     NavigationLink {
                         FoundationCatalogView(
                             title: "Albums", model: albums, library: library, player: player,
-                            isActive: selectedTab == .library
+                            isActive: catalogIsActive(.library)
                         ) { try await library.albums(startIndex: $0) }
                         #if os(iOS)
                             .toolbar(.visible, for: .navigationBar)
@@ -342,7 +347,7 @@ struct FoundationLibraryView: View {
                     NavigationLink {
                         FoundationCatalogView(
                             title: "Artists", model: artists, library: library, player: player,
-                            isActive: selectedTab == .library
+                            isActive: catalogIsActive(.library)
                         ) { try await library.artists(startIndex: $0) }
                         #if os(iOS)
                             .toolbar(.visible, for: .navigationBar)
@@ -354,7 +359,7 @@ struct FoundationLibraryView: View {
                     NavigationLink {
                         FoundationTrackList(
                             title: "Songs", tracks: songs, player: player, library: library,
-                            isActive: selectedTab == .library
+                            isActive: catalogIsActive(.library)
                         ) { try await library.songs(startIndex: $0) }
                         #if os(iOS)
                             .toolbar(.visible, for: .navigationBar)
@@ -366,7 +371,7 @@ struct FoundationLibraryView: View {
                     }.accessibilityIdentifier("library-category-songs")
                     NavigationLink {
                         FoundationPlaylistIndex(
-                            library: library, player: player, isActive: selectedTab == .library,
+                            library: library, player: player, isActive: catalogIsActive(.library),
                             model: playlists
                         )
                         #if os(iOS)
@@ -380,7 +385,7 @@ struct FoundationLibraryView: View {
                     NavigationLink {
                         FoundationGenreIndex(
                             genres: genres, library: library, player: player,
-                            isActive: selectedTab == .library
+                            isActive: catalogIsActive(.library)
                         ) {
                             try await library.genres(startIndex: $0)
                         }.foundationCatalogHeader("Genres")
@@ -393,7 +398,7 @@ struct FoundationLibraryView: View {
                     }.accessibilityIdentifier("library-category-genres")
                     NavigationLink {
                         FoundationDownloadsView(
-                            library: library, player: player, isActive: selectedTab == .library)
+                            library: library, player: player, isActive: catalogIsActive(.library))
                     } label: {
                         categoryRow(
                             "Downloads", subtitle: "Listen to music saved on this device",
@@ -402,15 +407,15 @@ struct FoundationLibraryView: View {
                 }
                 FoundationLibraryMostPlayedAlbums(
                     model: mostPlayedAlbums, library: library, player: player,
-                    isActive: selectedTab == .library)
+                    isActive: catalogIsActive(.library))
             }.padding(.horizontal, 16).padding(.bottom, 20)
         }
         .buttonStyle(.plain)
-        .foundationHeader("Library", profile: profileButton(isActive: selectedTab == .library))
+        .foundationHeader("Library", profile: profileButton(isActive: catalogIsActive(.library)))
         .navigationDestination(isPresented: $showingFavorites) {
             FoundationCatalogView(
                 title: "Favorites", model: favorites, library: library, player: player,
-                isActive: selectedTab == .library, isFavorites: true
+                isActive: catalogIsActive(.library), isFavorites: true
             ) { try await library.favorites(startIndex: $0) }
             #if os(iOS)
                 .toolbar(.visible, for: .navigationBar)
@@ -424,7 +429,7 @@ struct FoundationLibraryView: View {
             if let item = openedItem {
                 FoundationItemDestination(
                     item: item, library: library, player: player,
-                    isActive: selectedTab == .library
+                    isActive: catalogIsActive(.library)
                 )
                 #if os(iOS)
                     .toolbar(.visible, for: .navigationBar)
@@ -452,7 +457,7 @@ struct FoundationLibraryView: View {
                 GeometryReader { geometry in
                     FoundationCatalogArtwork(
                         item: item, library: library,
-                        isActive: selectedTab == .library, size: geometry.size.width
+                        isActive: catalogIsActive(.library), size: geometry.size.width
                     )
                     .id(item.sharedArtworkIdentity)
                     .overlay {

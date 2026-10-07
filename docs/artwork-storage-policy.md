@@ -136,7 +136,10 @@ Account teardown revokes writes and releases directory leases before removal. No
 credentials, request URLs or request headers are encoded. Visible Home/New/genre
 models restore local data before network work, preserve shelves through refresh,
 refresh at most once per minute automatically and stop that loop after an error.
-Explicit refresh and reconnect use the view's cancellable task lifetime. Offline
+Explicit refresh and reconnect use the view's cancellable task lifetime. Catalog
+activity also requires an active scene, so background audio does not keep periodic
+shelf reads alive. Returning to the app preserves content and resumes visible work.
+Offline
 reads make no catalog requests; existing download eligibility still controls offline
 playback and collection visibility. A cached page does not claim audio availability.
 
