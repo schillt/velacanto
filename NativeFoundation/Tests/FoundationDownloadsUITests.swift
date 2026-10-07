@@ -91,16 +91,7 @@ final class FoundationDownloadsUITests: XCTestCase {
                     for: [XCTNSPredicateExpectation(predicate: predicate, object: label)],
                     timeout: 5), .completed)
         }
-        func tab(_ title: String) {
-            let button = app.buttons[title].firstMatch
-            if !button.exists {
-                // Native scroll minimization leaves the current-tab bubble at the lower left.
-                // Expand that visible system control, then require the named destination.
-                app.coordinate(withNormalizedOffset: CGVector(dx: 0.14, dy: 0.95)).tap()
-            }
-            XCTAssertTrue(button.waitForExistence(timeout: 5) && button.isHittable)
-            button.tap()
-        }
+        func tab(_ title: String) { selectTab(title, in: app) }
         tab("Home")
         counts("Album 1")
         let genre = app.buttons.matching(
@@ -192,12 +183,33 @@ final class FoundationDownloadsUITests: XCTestCase {
         XCTAssertTrue(app.navigationBars["Downloaded Music"].waitForExistence(timeout: 5))
     }
 
+    private func selectTab(_ title: String, in app: XCUIApplication) {
+        let button = app.buttons[title].firstMatch
+        if !button.exists {
+            app.coordinate(withNormalizedOffset: CGVector(dx: 0.14, dy: 0.95)).tap()
+        }
+        XCTAssertTrue(button.waitForExistence(timeout: 5) && button.isHittable)
+        button.tap()
+    }
+
     private func tapVisible(_ element: XCUIElement, in app: XCUIApplication) {
-        for step in 0..<24 {
+        reveal(element, in: app)
+        element.tap()
+    }
+
+    private func reveal(_ element: XCUIElement, in app: XCUIApplication) {
+        for step in 0..<32 {
             if element.exists && element.isHittable && tapCenterIsVisible(element, in: app) {
                 break
             }
-            scrollContent(in: app, upward: step < 12)
+            let scroll = [
+                app.collectionViews.firstMatch, app.scrollViews.firstMatch, app.tables.firstMatch,
+            ]
+            .first { $0.exists }
+            let upward =
+                element.exists && element.frame.height > 0 && scroll != nil
+                ? element.frame.midY >= scroll!.frame.midY : step < 24
+            scrollContent(in: app, upward: upward)
         }
         if !element.exists || !element.isHittable || !tapCenterIsVisible(element, in: app) {
             capture("Unreachable navigation target", in: app)
@@ -207,7 +219,6 @@ final class FoundationDownloadsUITests: XCTestCase {
             add(hierarchy)
         }
         XCTAssertTrue(element.exists && element.isHittable && tapCenterIsVisible(element, in: app))
-        element.tap()
     }
 
     // XCTest can report a clipped offscreen link as hittable and tap the adjacent row.
@@ -218,8 +229,9 @@ final class FoundationDownloadsUITests: XCTestCase {
         ]
         .first { $0.exists }
         guard let scroll else { return true }
-        return element.frame.midY > scroll.frame.minY + 48
-            && element.frame.midY < scroll.frame.maxY - 24
+        let viewport = scroll.frame.intersection(app.frame)
+        return element.frame.midY > viewport.minY + min(48, viewport.height * 0.15)
+            && element.frame.midY < viewport.maxY - min(24, viewport.height * 0.1)
     }
 
     private func scrollContent(in app: XCUIApplication, upward: Bool = true) {
@@ -231,9 +243,9 @@ final class FoundationDownloadsUITests: XCTestCase {
             // The native header overlays part of the scroll frame. Move within its visible lower
             // portion, in small steps, so accessibility-sized rows cannot be skipped between probes.
             let start = scroll.coordinate(
-                withNormalizedOffset: CGVector(dx: 0.5, dy: upward ? 0.85 : 0.55))
+                withNormalizedOffset: CGVector(dx: 0.5, dy: upward ? 0.9 : 0.3))
             let end = scroll.coordinate(
-                withNormalizedOffset: CGVector(dx: 0.5, dy: upward ? 0.55 : 0.85))
+                withNormalizedOffset: CGVector(dx: 0.5, dy: upward ? 0.3 : 0.9))
             start.press(
                 forDuration: 0.1, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0.2)
         } else if upward {
@@ -628,7 +640,7 @@ final class FoundationDownloadsUITests: XCTestCase {
         app.navigationBars.buttons.firstMatch.tap()
         app.buttons["Home"].firstMatch.tap()
         XCTAssertTrue(app.staticTexts["Home"].firstMatch.waitForExistence(timeout: 5))
-        XCTAssertTrue(app.buttons["offline-retry"].exists)
+        XCTAssertTrue(app.buttons["offline-retry"].waitForExistence(timeout: 5))
         let resume = app.buttons["Open Now Playing"]
         XCTAssertTrue(resume.waitForExistence(timeout: 5))
         XCTAssertFalse(resume.label.contains("Available offline"))
@@ -751,7 +763,10 @@ final class FoundationDownloadsUITests: XCTestCase {
             let queue = app.buttons["Queue fixture playlist"]
             XCTAssertTrue(queue.waitForExistence(timeout: 10))
             let savePassword = app.alerts["Save Password?"]
-            if savePassword.waitForExistence(timeout: 2) {
+            let systemNotNow = XCUIApplication(bundleIdentifier: "com.apple.springboard").buttons[
+                "Not Now"]
+            if systemNotNow.waitForExistence(timeout: 5) { systemNotNow.tap() }
+            if savePassword.waitForExistence(timeout: 5) {
                 savePassword.buttons["Not Now"].tap()
                 let dismissed = expectation(
                     for: NSPredicate(format: "exists == false"), evaluatedWith: savePassword)
@@ -833,11 +848,11 @@ final class FoundationDownloadsUITests: XCTestCase {
             if category == "artists" { app.navigationBars.buttons.firstMatch.tap() }
             app.navigationBars.buttons.firstMatch.tap()
         }
-        app.buttons["Home"].firstMatch.tap()
+        selectTab("Home", in: app)
         XCTAssertTrue(
             app.descendants(matching: .any)["offline-notice"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.buttons["offline-retry"].exists)
-        app.buttons["Search"].firstMatch.tap()
+        XCTAssertTrue(app.buttons["offline-retry"].waitForExistence(timeout: 5))
+        selectTab("Search", in: app)
         let search = app.textFields["Search music"]
         XCTAssertTrue(search.waitForExistence(timeout: 5) && search.isEnabled)
         search.tap()
@@ -885,10 +900,13 @@ final class FoundationDownloadsUITests: XCTestCase {
         app.buttons["Queue fixture playlist"].tap()
         app.buttons["Library"].firstMatch.tap()
         tapVisible(app.buttons["library-category-songs"], in: app)
-        let progress = app.descendants(matching: .any)["download-state-active-measured"].firstMatch
+        let progress = app.descendants(matching: .any)["collection-track-download-0"].firstMatch
         XCTAssertTrue(progress.waitForExistence(timeout: 8))
+        XCTAssertEqual(progress.label, "Downloading")
         XCTAssertEqual(progress.value as? String, "50 percent")
-        XCTAssertTrue(app.descendants(matching: .any)["download-state-queued"].firstMatch.exists)
+        let queued = app.descendants(matching: .any)["collection-track-download-1"].firstMatch
+        XCTAssertTrue(queued.exists)
+        XCTAssertEqual(queued.label, "Download queued")
         capture("Measured track uses accessible determinate circular progress", in: app)
         app.navigationBars.buttons.firstMatch.tap()
         tapVisible(app.buttons["library-category-playlists"], in: app)
@@ -897,7 +915,7 @@ final class FoundationDownloadsUITests: XCTestCase {
         XCTAssertTrue(aggregate.waitForExistence(timeout: 5))
         XCTAssertFalse((aggregate.value as? String ?? "").contains("percent"))
         capture("Collection feedback does not invent aggregate percentages", in: app)
-        XCTAssertTrue(app.staticTexts["Fixture download ready"].waitForExistence(timeout: 20))
+        XCTAssertTrue(app.staticTexts["Fixture download ready"].waitForExistence(timeout: 65))
         assertOfflineIconIsAccessible(in: app)
     }
 
@@ -934,6 +952,7 @@ final class FoundationDownloadsUITests: XCTestCase {
         ).firstMatch
         tapVisible(playlist, in: app)
         XCTAssertEqual(playlist.value as? String, "Selected")
+        reveal(app.buttons["Remove Selected"], in: app)
         XCTAssertTrue(app.buttons["Remove Selected"].isEnabled)
         tapVisible(app.buttons["Remove Selected"], in: app)
         confirmRemoval("Remove", in: app)
@@ -1005,6 +1024,7 @@ final class FoundationDownloadsUITests: XCTestCase {
         ).firstMatch
         tapVisible(song, in: app)
         XCTAssertEqual(song.value as? String, "Selected")
+        reveal(app.buttons["Remove Selected"], in: app)
         XCTAssertTrue(app.buttons["Remove Selected"].isEnabled)
         tapVisible(app.buttons["Remove Selected"], in: app)
         let warning = app.staticTexts.matching(

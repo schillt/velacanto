@@ -112,10 +112,10 @@ struct FoundationHomeView<Profile: View>: View {
                     isActive: isActive, refreshRevision: refreshRevision,
                     openedItem: $openedItem)
             }
-            if genres.isLoading, genres.items.isEmpty {
+            if genres.isLoading, genres.items.isEmpty, !connectivity.localOnly {
                 FoundationLoadingPlaceholder(layout: .albumShelf)
             }
-            if let error = genres.errorMessage {
+            if let error = genres.errorMessage, !genres.hasConnectionIssue {
                 Text(error).foregroundStyle(.red)
                 Button("Retry genres") {
                     guard !connectivity.localOnly else { return }
@@ -340,17 +340,22 @@ private struct FoundationHomeShelf: View {
                 .scrollTargetBehavior(.viewAligned)
                 .scrollIndicators(.hidden)
             }
-            if model.isLoading, model.items.isEmpty {
+            if model.hasConnectionIssue, !connectivity.hasConnectionIssue {
+                FoundationOfflineNotice()
+            }
+            if model.isLoading, model.items.isEmpty, !connectivity.localOnly {
                 FoundationLoadingPlaceholder(layout: showsTracks ? .rows : .albumShelf)
             }
-            if let error = model.errorMessage {
+            if let error = model.errorMessage, !model.hasConnectionIssue {
                 Text(error).foregroundStyle(.red)
                 Button("Retry") {
                     guard !connectivity.localOnly else { return }
                     model.request(model.retryRequest)
                     retryRevision += 1
                 }.disabled(connectivity.localOnly)
-            } else if !connectivity.localOnly, model.loaded, model.items.isEmpty {
+            } else if !connectivity.localOnly, !model.hasConnectionIssue, model.loaded,
+                model.items.isEmpty
+            {
                 Text("No items yet.").foregroundStyle(.secondary)
             }
         }

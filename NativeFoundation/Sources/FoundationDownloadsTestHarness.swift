@@ -174,6 +174,9 @@
                         get: { downloads.allowsCellular },
                         set: { downloads.setAllowsCellular($0) }))
             }.padding().background(.regularMaterial)
+                // Synthetic controls must not consume the landscape app viewport. Production
+                // content still receives accessibility3 from the enclosing harness environment.
+                .dynamicTypeSize(.medium)
         }
     }
 
@@ -627,7 +630,7 @@
                     failOnce
                         ? 5
                         : (ProcessInfo.processInfo.arguments.contains("-fixtureSlowTransfer")
-                            ? 8 : 1)))
+                            ? 30 : 1)))
             if failOnce {
                 failOnce = false
                 throw CocoaError(.fileWriteOutOfSpace)

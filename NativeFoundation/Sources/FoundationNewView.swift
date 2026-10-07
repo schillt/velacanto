@@ -250,16 +250,18 @@ struct FoundationNewView<Profile: View>: View {
     @ViewBuilder private func sectionState(
         _ model: FoundationBrowseModel, retry: @escaping () -> Void
     ) -> some View {
-        if model.isLoading, model.items.isEmpty {
+        if model.isLoading, model.items.isEmpty, !connectivity.localOnly {
             FoundationLoadingPlaceholder(layout: model === albums ? .albumShelf : .rows)
         }
-        if let error = model.errorMessage {
+        if let error = model.errorMessage, !model.hasConnectionIssue {
             Text(error).foregroundStyle(.red)
             Button("Retry") {
                 guard !connectivity.localOnly else { return }
                 retry()
             }.disabled(connectivity.localOnly)
-        } else if !connectivity.localOnly, model.loaded, model.items.isEmpty {
+        } else if !connectivity.localOnly, !model.hasConnectionIssue, model.loaded,
+            model.items.isEmpty
+        {
             Text("No recently added items.").foregroundStyle(.secondary)
         }
     }
@@ -292,22 +294,31 @@ struct FoundationLibraryMostPlayedAlbums: View {
                         navigate: { openedItem = $0 })
                 }
             }
-            if model.isLoading, model.items.isEmpty {
+            if connectivity.hasConnectionIssue || model.hasConnectionIssue {
+                FoundationOfflineNotice()
+            }
+            if model.isLoading, model.items.isEmpty, !connectivity.localOnly {
                 FoundationLoadingPlaceholder(layout: .albumGrid)
             }
-            if let error = model.errorMessage {
+            if let error = model.errorMessage, !model.hasConnectionIssue {
                 Text(error).foregroundStyle(.red)
                 Button("Retry") {
                     guard !connectivity.localOnly else { return }
                     model.request(model.retryRequest)
                     revision += 1
                 }.disabled(connectivity.localOnly)
-            } else if !connectivity.localOnly, model.loaded, model.items.isEmpty {
+            } else if !connectivity.localOnly, !model.hasConnectionIssue, model.loaded,
+                model.items.isEmpty
+            {
                 Text("No album listening history yet.").foregroundStyle(.secondary)
             }
         }
         .onAppear { isVisible = true }
         .onDisappear { isVisible = false }
+        .onChange(of: connectivity.successfulRetryRevision) { _, _ in
+            model.request(.refresh)
+            revision += 1
+        }
         .navigationDestination(
             isPresented: Binding(get: { openedItem != nil }, set: { if !$0 { openedItem = nil } })
         ) {

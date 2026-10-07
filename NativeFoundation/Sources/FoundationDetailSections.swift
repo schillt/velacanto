@@ -106,7 +106,10 @@ struct FoundationRelatedSection<Card: View>: View {
                     }.padding(.horizontal)
                 }.scrollIndicators(.hidden)
             }
-            if let error = model.errorMessage {
+            if model.hasConnectionIssue {
+                FoundationOfflineNotice().padding(.horizontal)
+            }
+            if let error = model.errorMessage, !model.hasConnectionIssue {
                 if connectivity.localOnly {
                     if model.items.isEmpty { FoundationOfflineNotice().padding(.horizontal) }
                 } else {
@@ -114,7 +117,7 @@ struct FoundationRelatedSection<Card: View>: View {
                     Button("Retry") { request(model.retryRequest) }.padding(.horizontal)
                 }
             }
-            if model.isLoading {
+            if model.isLoading, !connectivity.localOnly {
                 VStack(spacing: 20) {
                     FoundationLoadingPlaceholder(layout: .albumShelf)
                     if twoRows { FoundationLoadingPlaceholder(layout: .albumShelf) }
@@ -128,6 +131,10 @@ struct FoundationRelatedSection<Card: View>: View {
             }
         }
         .padding(.vertical, model.items.isEmpty && model.errorMessage == nil ? 0 : 12)
+        .onChange(of: connectivity.successfulRetryRevision) { _, _ in
+            model.request(.refresh)
+            revision += 1
+        }
         .task(id: isActive && !connectivity.localOnly ? revision : nil) {
             await model.loadPending(ifActive: isActive && !connectivity.localOnly, using: loader)
         }
@@ -178,7 +185,10 @@ struct FoundationArtistMostPlayed: View {
                     }.padding(.horizontal)
                 }.scrollIndicators(.hidden)
             }
-            if let error = model.errorMessage {
+            if model.hasConnectionIssue {
+                FoundationOfflineNotice().padding(.horizontal)
+            }
+            if let error = model.errorMessage, !model.hasConnectionIssue {
                 Text(error).font(.caption).foregroundStyle(.secondary).padding(.horizontal)
                 Button("Retry") {
                     guard !connectivity.localOnly else { return }
@@ -186,11 +196,15 @@ struct FoundationArtistMostPlayed: View {
                     revision += 1
                 }.disabled(connectivity.localOnly).padding(.horizontal)
             }
-            if model.isLoading {
+            if model.isLoading, !connectivity.localOnly {
                 FoundationLoadingPlaceholder().padding(.horizontal)
             }
         }
         .padding(.vertical, model.items.isEmpty && model.errorMessage == nil ? 0 : 12)
+        .onChange(of: connectivity.successfulRetryRevision) { _, _ in
+            model.request(.refresh)
+            revision += 1
+        }
         .task(id: isActive && !connectivity.localOnly ? revision : nil) {
             await model.loadPending(ifActive: isActive && !connectivity.localOnly) { _ in
                 try await library.mostPlayed(artistID: artist.id)
