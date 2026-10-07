@@ -206,9 +206,10 @@ final class FoundationDownloadsUITests: XCTestCase {
                 app.collectionViews.firstMatch, app.scrollViews.firstMatch, app.tables.firstMatch,
             ]
             .first { $0.exists }
+            let viewport = scroll.map { uncoveredViewport($0, in: app) }
             let upward =
-                element.exists && element.frame.height > 0 && scroll != nil
-                ? element.frame.midY >= scroll!.frame.midY : step < 24
+                element.exists && element.frame.height > 0 && viewport != nil
+                ? element.frame.midY >= viewport!.midY : step < 24
             scrollContent(in: app, upward: upward)
         }
         if !element.exists || !element.isHittable || !tapCenterIsVisible(element, in: app) {
@@ -229,9 +230,46 @@ final class FoundationDownloadsUITests: XCTestCase {
         ]
         .first { $0.exists }
         guard let scroll else { return true }
-        let viewport = scroll.frame.intersection(app.frame)
-        return element.frame.midY > viewport.minY + min(48, viewport.height * 0.15)
-            && element.frame.midY < viewport.maxY - min(24, viewport.height * 0.1)
+        let viewport = uncoveredViewport(scroll, in: app)
+        return viewport.height > 20
+            && viewport.contains(
+                CGPoint(x: element.frame.midX, y: element.frame.midY))
+    }
+
+    /// Reported scroll frames include native bars; gestures must start in actual content.
+    private func uncoveredViewport(_ scroll: XCUIElement, in app: XCUIApplication) -> CGRect {
+        let original = scroll.frame.intersection(app.frame)
+        var top = original.minY
+        var bottom = original.maxY
+        for bar in app.navigationBars.allElementsBoundByIndex {
+            let frame = bar.frame
+            if frame.intersects(original), frame.maxY < original.maxY { top = max(top, frame.maxY) }
+        }
+        let profile = app.buttons["Profile and settings"].firstMatch
+        if profile.exists && profile.isHittable && profile.frame.minY < original.midY {
+            top = max(top, profile.frame.maxY + 12)
+        }
+        let search = app.textFields["Search music"]
+        if search.exists && search.isHittable && search.frame.minY < original.midY {
+            top = max(top, search.frame.maxY + 8)
+        }
+        let tabBar = app.tabBars.firstMatch
+        if tabBar.exists && tabBar.frame.intersects(original) {
+            bottom = min(bottom, tabBar.frame.minY)
+        }
+        let miniPlayer = app.buttons["Show Now Playing"]
+        if miniPlayer.exists && miniPlayer.isHittable && miniPlayer.frame.minY > original.midY {
+            bottom = min(bottom, miniPlayer.frame.minY)
+        }
+        let keyboard = app.keyboards.firstMatch
+        if keyboard.exists && keyboard.frame.intersects(original) {
+            bottom = min(bottom, keyboard.frame.minY)
+        }
+        let height = max(0, bottom - top)
+        let margin = min(12, height * 0.05)
+        return CGRect(
+            x: original.minX, y: top + margin, width: original.width,
+            height: max(0, height - 2 * margin))
     }
 
     private func scrollContent(in app: XCUIApplication, upward: Bool = true) {
@@ -240,14 +278,20 @@ final class FoundationDownloadsUITests: XCTestCase {
         ]
         .first { $0.exists && $0.frame.height > 0 }
         if let scroll {
-            // The native header overlays part of the scroll frame. Move within its visible lower
-            // portion, in small steps, so accessibility-sized rows cannot be skipped between probes.
-            let start = scroll.coordinate(
-                withNormalizedOffset: CGVector(dx: 0.5, dy: upward ? 0.9 : 0.3))
-            let end = scroll.coordinate(
-                withNormalizedOffset: CGVector(dx: 0.5, dy: upward ? 0.3 : 0.9))
+            let viewport = uncoveredViewport(scroll, in: app)
+            guard viewport.height > 20 else { return }
+            let origin = app.coordinate(withNormalizedOffset: .zero)
+            let start = origin.withOffset(
+                CGVector(
+                    dx: viewport.midX - app.frame.minX,
+                    dy: viewport.minY + viewport.height * (upward ? 0.8 : 0.2) - app.frame.minY))
+            let end = origin.withOffset(
+                CGVector(
+                    dx: viewport.midX - app.frame.minX,
+                    dy: viewport.minY + viewport.height * (upward ? 0.2 : 0.8) - app.frame.minY))
             start.press(
-                forDuration: 0.1, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0.2)
+                forDuration: 0.1, thenDragTo: end, withVelocity: .slow,
+                thenHoldForDuration: 0.2)
         } else if upward {
             app.swipeUp()
         } else {

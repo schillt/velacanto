@@ -38,8 +38,12 @@
         var body: some View {
             VStack(spacing: 0) {
                 fixtureControls
-                if fixture.canonicalReady { Text("Canonical fixture ready").font(.caption) }
-                if fixture.membershipReady { Text("Membership fixture ready").font(.caption) }
+                if fixture.canonicalReady {
+                    Text("Canonical fixture ready").font(.caption).dynamicTypeSize(.medium)
+                }
+                if fixture.membershipReady {
+                    Text("Membership fixture ready").font(.caption).dynamicTypeSize(.medium)
+                }
                 content
             }
             .task {
@@ -126,57 +130,82 @@
         let playlist: FoundationItem
         let productionShell: Bool
         @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+        @Environment(\.verticalSizeClass) private var verticalSizeClass
 
         var body: some View {
-            VStack {
-                Text("Synthetic fixture controls").font(.caption)
-                if ProcessInfo.processInfo.environment["FOUNDATION_UI_LARGE_TEXT"] == "1" {
-                    Text(
-                        dynamicTypeSize == .accessibility3
-                            ? "Synthetic Dynamic Type: accessibility3"
-                            : "Synthetic Dynamic Type override missing"
-                    )
-                    .font(.caption)
-                    .accessibilityIdentifier("fixture-dynamic-type-size")
+            Group {
+                if verticalSizeClass == .compact {
+                    HStack(spacing: 16) {
+                        VStack(spacing: 2) { statusControls }
+                        networkToggle
+                        cellularToggle
+                    }.padding(.horizontal).padding(.vertical, 4)
+                } else {
+                    VStack {
+                        statusControls
+                        networkToggle
+                        cellularToggle
+                    }.padding()
                 }
-                if productionShell {
-                    Button("Queue fixture playlist") { downloads.download(playlist) }
-                }
-                if downloads.owners.contains(where: { $0.state == .ready }),
-                    !downloads.downloadedSongs.isEmpty
-                {
-                    Text("Fixture download ready").font(.caption)
-                }
-                if let owner = downloads.owners.first(where: { $0.state != .ready }) {
-                    Text(owner.status).font(.caption)
-                    if owner.state == .downloading {
-                        ProgressView()
-                            .accessibilityElement(children: .ignore)
-                            .accessibilityLabel("Fixture transfer in progress")
-                            .accessibilityIdentifier("fixture-download-progress")
-                    }
-                }
-                Toggle(
-                    "Simulate unavailable network",
-                    isOn: Binding(
-                        get: { connectivity.localOnly },
-                        set: { offline in
-                            connectivity.update(
-                                status: offline ? .unavailable : .available,
-                                wifiOrWired: !offline && productionShell,
-                                cellular: !offline && !productionShell)
-                            downloads.updateConnectivity(
-                                isConnected: !offline, usesWiFi: !offline && productionShell)
-                        }))
-                Toggle(
-                    "Use Cellular Data",
-                    isOn: Binding(
-                        get: { downloads.allowsCellular },
-                        set: { downloads.setAllowsCellular($0) }))
-            }.padding().background(.regularMaterial)
-                // Synthetic controls must not consume the landscape app viewport. Production
-                // content still receives accessibility3 from the enclosing harness environment.
+            }.background(.regularMaterial)
+                // Only synthetic controls are capped; production content remains accessibility3.
                 .dynamicTypeSize(.medium)
+        }
+
+        @ViewBuilder private var statusControls: some View {
+            if verticalSizeClass != .compact { Text("Synthetic fixture controls").font(.caption) }
+            if ProcessInfo.processInfo.environment["FOUNDATION_UI_LARGE_TEXT"] == "1" {
+                Text(
+                    dynamicTypeSize == .accessibility3
+                        ? "Synthetic Dynamic Type: accessibility3"
+                        : "Synthetic Dynamic Type override missing"
+                )
+                .font(.caption)
+                .accessibilityIdentifier("fixture-dynamic-type-size")
+            }
+            if productionShell {
+                Button("Queue fixture playlist") { downloads.download(playlist) }
+            }
+            if verticalSizeClass != .compact,
+                downloads.owners.contains(where: { $0.state == .ready }),
+                !downloads.downloadedSongs.isEmpty
+            {
+                Text("Fixture download ready").font(.caption)
+            }
+            if verticalSizeClass != .compact,
+                let owner = downloads.owners.first(where: { $0.state != .ready })
+            {
+                Text(owner.status).font(.caption)
+                if owner.state == .downloading {
+                    ProgressView()
+                        .accessibilityElement(children: .ignore)
+                        .accessibilityLabel("Fixture transfer in progress")
+                        .accessibilityIdentifier("fixture-download-progress")
+                }
+            }
+        }
+
+        private var networkToggle: some View {
+            Toggle(
+                "Simulate unavailable network",
+                isOn: Binding(
+                    get: { connectivity.localOnly },
+                    set: { offline in
+                        connectivity.update(
+                            status: offline ? .unavailable : .available,
+                            wifiOrWired: !offline && productionShell,
+                            cellular: !offline && !productionShell)
+                        downloads.updateConnectivity(
+                            isConnected: !offline, usesWiFi: !offline && productionShell)
+                    }))
+        }
+
+        private var cellularToggle: some View {
+            Toggle(
+                "Use Cellular Data",
+                isOn: Binding(
+                    get: { downloads.allowsCellular },
+                    set: { downloads.setAllowsCellular($0) }))
         }
     }
 
