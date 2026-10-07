@@ -184,12 +184,15 @@ final class FoundationDownloadsUITests: XCTestCase {
     }
 
     private func selectTab(_ title: String, in app: XCUIApplication) {
-        let button = app.buttons[title].firstMatch
+        let button = app.tabBars.buttons[title].firstMatch
         if !button.exists {
             app.coordinate(withNormalizedOffset: CGVector(dx: 0.14, dy: 0.95)).tap()
         }
         XCTAssertTrue(button.waitForExistence(timeout: 5) && button.isHittable)
         button.tap()
+        let selected = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "selected == true"), object: button)
+        XCTAssertEqual(XCTWaiter.wait(for: [selected], timeout: 5), .completed)
     }
 
     private func tapVisible(_ element: XCUIElement, in app: XCUIApplication) {
@@ -457,15 +460,26 @@ final class FoundationDownloadsUITests: XCTestCase {
     private func verifyCanonicalEntryPoints(state: String, largeText: Bool = false) {
         let app = launch(
             productionShell: true, largeText: largeText, canonicalDownloadState: state)
+        selectTab("Library", in: app)
+        XCTAssertTrue(app.staticTexts["Library"].firstMatch.waitForExistence(timeout: 5))
         if largeText {
             XCTAssertEqual(
                 app.staticTexts["fixture-dynamic-type-size"].label,
                 "Synthetic Dynamic Type: accessibility3")
             XCUIDevice.shared.orientation = .landscapeLeft
             addTeardownBlock { @MainActor in XCUIDevice.shared.orientation = .portrait }
+            let landscape = XCTNSPredicateExpectation(
+                predicate: NSPredicate { element, _ in
+                    MainActor.assumeIsolated {
+                        guard let app = element as? XCUIApplication else { return false }
+                        return app.frame.width > app.frame.height
+                    }
+                }, object: app)
+            XCTAssertEqual(XCTWaiter.wait(for: [landscape], timeout: 5), .completed)
+            XCTAssertTrue(app.tabBars.buttons["Library"].firstMatch.isSelected)
+            XCTAssertTrue(app.staticTexts["Library"].firstMatch.exists)
+            capture("Accessibility-sized landscape Library navigation", in: app)
         }
-        app.buttons["Library"].firstMatch.tap()
-        if largeText { capture("Accessibility-sized landscape Library navigation", in: app) }
         for offline in [false, true] {
             if offline {
                 app.switches["Simulate unavailable network"].switches.firstMatch.tap()
