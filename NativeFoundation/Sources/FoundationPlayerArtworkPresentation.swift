@@ -836,14 +836,23 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
             reveal.isUserInteractionEnabled = false
             reveal.isAccessibilityElement = false
             let glass: UIView?
+            let nativeGlass: UIVisualEffectView?
             if let surfaceRect {
-                let surface: UIView
+                // UIKit-owned clipping geometry moves with the artwork and player reveal.
+                // Keep the effect's backing geometry fixed while its material changes.
+                let surface = UIView()
                 if model?.reduceTransparency == true {
-                    surface = UIView()
+                    nativeGlass = nil
                     surface.backgroundColor = UIColor.systemBackground.resolvedColor(
                         with: UITraitCollection(userInterfaceStyle: .dark))
                 } else {
-                    surface = UIVisualEffectView(effect: nil)
+                    let effect = UIVisualEffectView(effect: nil)
+                    effect.frame = CGRect(origin: .zero, size: container.bounds.size)
+                    effect.cornerConfiguration = .uniformCorners(radius: .fixed(0))
+                    effect.isUserInteractionEnabled = false
+                    effect.isAccessibilityElement = false
+                    surface.addSubview(effect)
+                    nativeGlass = effect
                 }
                 surface.isUserInteractionEnabled = false
                 surface.isAccessibilityElement = false
@@ -852,7 +861,7 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
                 surface.frame = presenting ? surfaceRect : container.bounds
                 surface.layer.cornerRadius = presenting ? surfaceRect.height / 2 : 0
                 // Effect views keep alpha 1. Native material is absent at both endpoints.
-                if !(surface is UIVisualEffectView) { surface.alpha = 0 }
+                if nativeGlass == nil { surface.alpha = 0 }
                 container.addSubview(surface)
                 glass = surface
                 reveal.frame =
@@ -863,6 +872,7 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
                 playerView.mask = reveal
             } else {
                 glass = nil
+                nativeGlass = nil
             }
             let imageView: FoundationPlayerArtworkSnapshot?
             if let endpoints {
@@ -924,15 +934,15 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
                         options: [.calculationModeLinear]
                     ) {
                         UIView.addKeyframe(withRelativeStartTime: 0, relativeDuration: 0.2) {
-                            if let effectView = glass as? UIVisualEffectView {
-                                effectView.effect = UIGlassEffect(style: .regular)
+                            if let nativeGlass {
+                                nativeGlass.effect = UIGlassEffect(style: .regular)
                             } else {
                                 glass.alpha = 1
                             }
                         }
                         UIView.addKeyframe(withRelativeStartTime: 0.8, relativeDuration: 0.2) {
-                            if let effectView = glass as? UIVisualEffectView {
-                                effectView.effect = nil
+                            if let nativeGlass {
+                                nativeGlass.effect = nil
                             } else {
                                 glass.alpha = 0
                             }

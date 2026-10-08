@@ -631,7 +631,6 @@ private struct FoundationQueueView: View {
         .listRowInsets(EdgeInsets(top: 8, leading: 24, bottom: 8, trailing: 24))
         .listRowBackground(Color.clear)
         .id(entry.id)
-        .contextMenu { menu(entry) }
     }
 
     @ViewBuilder private func menu(_ entry: FoundationQueueEntry) -> some View {

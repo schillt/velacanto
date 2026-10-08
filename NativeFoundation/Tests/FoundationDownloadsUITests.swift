@@ -263,7 +263,7 @@ final class FoundationDownloadsUITests: XCTestCase {
         reveal(source, in: app)
         XCTAssertTrue(source.isHittable && destination.isHittable)
         source.press(
-            forDuration: 0.1, thenDragTo: destination, withVelocity: .slow,
+            forDuration: 0.8, thenDragTo: destination, withVelocity: .slow,
             thenHoldForDuration: 0.3)
         let reordered = [initial[3]] + Array(initial.prefix(3))
         XCTAssertEqual(queueSnapshot(app)["upcoming"] as? [String], reordered)
