@@ -3,6 +3,7 @@ import SwiftUI
 /// Storage actions change account-local retention, never the server library.
 struct FoundationDownloadManagementView: View {
     @EnvironmentObject private var downloads: FoundationDownloads
+    @EnvironmentObject private var preferences: FoundationPlaybackPreferences
     @State private var editing = false
     @State private var selectedOwners: Set<String> = []
     @State private var selectedTracks: Set<String> = []
@@ -22,6 +23,7 @@ struct FoundationDownloadManagementView: View {
             storageSection
             songsSection
             collectionsSection
+            settingsSection
             actionsSection
         }
         .navigationTitle("Downloaded Music")
@@ -75,7 +77,7 @@ struct FoundationDownloadManagementView: View {
             LabeledContent("Other files", value: bytes(downloads.otherBytes))
             LabeledContent("Unique songs", value: "\(downloads.downloadedSongs.count)")
             Text(
-                "Songs shared by several albums or playlists count once in the total. Collection sizes show their downloaded files and may overlap."
+                "Storage is for this account on this device. Download-owned artwork stays with downloaded music. Songs shared by several albums or playlists count once in the total. Collection sizes show their downloaded files and may overlap."
             )
             .font(.caption).foregroundStyle(.secondary)
             if downloads.isLoading { ProgressView("Verifying downloaded files…") }
@@ -131,6 +133,24 @@ struct FoundationDownloadManagementView: View {
             Text(
                 "Removal affects only this device. Your server library, playlists and favorites stay unchanged. Files in use are deleted after playback releases them."
             )
+        }
+    }
+
+    private var settingsSection: some View {
+        Section("Settings") {
+            #if os(iOS)
+                Button("Download Settings", systemImage: "gearshape") {
+                    if let url = URL(string: UIApplication.openSettingsURLString) {
+                        UIApplication.shared.open(url)
+                    }
+                }
+            #else
+                Toggle(
+                    "Allow Cellular Downloads",
+                    isOn: Binding(
+                        get: { preferences.allowsCellularDownloads },
+                        set: { preferences.setAllowsCellularDownloads($0) }))
+            #endif
         }
     }
 

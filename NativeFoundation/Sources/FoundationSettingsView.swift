@@ -7,17 +7,8 @@ struct FoundationSettingsView: View {
     let signOut: () -> Void
     var library: (any FoundationLibrary)? = nil
     var librarySelection: FoundationMusicLibrarySelection? = nil
-    @EnvironmentObject private var downloads: FoundationDownloads
-    @State private var measuredCaches = false
-    @State private var artworkDisk: Int64?
-    @State private var artworkMemory: Int64?
-    @State private var pageDisk: Int64?
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var preferences: FoundationPlaybackPreferences
-    @State private var showingLicenses = false
-    #if DEBUG
-        @State private var showingJournal = false
-    #endif
 
     private static let versionLabel: String = {
         let version =
@@ -53,36 +44,21 @@ struct FoundationSettingsView: View {
                     }
                     .accessibilityIdentifier("FoundationSettingsAccount")
                 }
-                Section {
-                    if downloads.isLoading {
-                        ProgressView("Verifying downloaded storage…")
-                    } else {
-                        storageRow("Downloaded audio", bytes: downloads.audioBytes)
-                        storageRow("Download-owned artwork", bytes: downloads.artworkBytes)
-                        storageRow("Download metadata & other files", bytes: downloads.otherBytes)
-                    }
-                    if measuredCaches {
-                        storageRow("Cached artwork", bytes: artworkDisk)
-                        storageRow("Cached catalog pages", bytes: pageDisk)
-                        storageRow("Artwork cache memory cost", bytes: artworkMemory)
-                    } else {
-                        ProgressView("Measuring caches…")
-                    }
+                Section("Storage") {
                     NavigationLink {
                         FoundationDownloadManagementView()
                     } label: {
                         Label("Downloaded Music", systemImage: "internaldrive")
                     }
-                } header: {
-                    Text("Storage")
-                } footer: {
-                    Text(
-                        "Storage is for this account on this device. Download-owned artwork stays with downloaded music. Cached artwork and catalog pages are disposable and cleared on app updates. Artwork cache memory cost includes encoded images and decoded pixels, is temporary, and is not added to disk storage."
-                    )
+                    NavigationLink {
+                        FoundationCachedMediaView(library: library)
+                    } label: {
+                        Label("Cached Media", systemImage: "photo.stack")
+                    }
                 }
-                Section("Playback & Downloads") {
+                Section("Playback") {
                     #if os(iOS)
-                        Button("Playback & Download Settings", systemImage: "gearshape") {
+                        Button("Playback Settings", systemImage: "gearshape") {
                             if let url = URL(string: UIApplication.openSettingsURLString) {
                                 UIApplication.shared.open(url)
                             }
@@ -93,36 +69,20 @@ struct FoundationSettingsView: View {
                             isOn: Binding(
                                 get: { preferences.allowsCellularStreaming },
                                 set: { preferences.setAllowsCellularStreaming($0) }))
-                        Toggle(
-                            "Allow Cellular Downloads",
-                            isOn: Binding(
-                                get: { preferences.allowsCellularDownloads },
-                                set: { preferences.setAllowsCellularDownloads($0) }))
                     #endif
                 }
-                Section("About") {
-                    Button {
-                        showingLicenses = true
-                    } label: {
-                        Label("Open-source licenses", systemImage: "doc.text")
-                    }
-                }
-                Section {
-                    #if DEBUG
-                        Button {
-                            showingJournal = true
-                        } label: {
-                            Label("Local diagnostic snapshot", systemImage: "waveform.path.ecg")
-                        }
-                    #else
+                #if DEBUG
+                    FoundationJournalSection()
+                #else
+                    Section {
                         Text("Version and build information appear below.")
                             .foregroundStyle(.secondary)
-                    #endif
-                } header: {
-                    Text("Diagnostics")
-                } footer: {
-                    Text("No telemetry or diagnostic reports are sent automatically.")
-                }
+                    } header: {
+                        Text("Diagnostics")
+                    } footer: {
+                        Text("No telemetry or diagnostic reports are sent automatically.")
+                    }
+                #endif
                 Section {
                     Button("Sign out", role: .destructive, action: signOut)
                 } footer: {
@@ -132,10 +92,16 @@ struct FoundationSettingsView: View {
                             .frame(maxWidth: .infinity, alignment: .center)
                     }
                 }
+                Section {
+                    NavigationLink {
+                        FoundationLicensesView()
+                    } label: {
+                        Label("Open-source licenses", systemImage: "doc.text")
+                    }
+                }
             }
             .formStyle(.grouped)
-            .task { await measureCaches() }
-            .refreshable { await measureCaches() }
+            .accessibilityIdentifier("foundation-profile-form")
             .navigationTitle("Profile & Settings")
             #if os(iOS)
                 .navigationBarTitleDisplayMode(.inline)
@@ -145,34 +111,10 @@ struct FoundationSettingsView: View {
                     Button("Done") { dismiss() }
                 }
             }
-            .sheet(isPresented: $showingLicenses) { FoundationLicensesView() }
-            #if DEBUG
-                .sheet(isPresented: $showingJournal) { FoundationJournalView() }
-            #endif
         }
         #if os(macOS)
             .frame(minWidth: 420, idealWidth: 480, minHeight: 520)
         #endif
-    }
-
-    private func storageRow(_ title: String, bytes: Int64?) -> some View {
-        LabeledContent(
-            title,
-            value: bytes.map {
-                ByteCountFormatter.string(fromByteCount: $0, countStyle: .file)
-            } ?? "Unavailable")
-    }
-
-    @MainActor
-    private func measureCaches() async {
-        let adapter = library as? FoundationJellyfinLibrary
-        let usage = await adapter?.artworkCache?.storageUsage()
-        let pages = await library?.catalogPageCache?.storageBytes()
-        guard !Task.isCancelled else { return }
-        artworkDisk = usage?.disk
-        artworkMemory = usage?.memory
-        pageDisk = pages
-        measuredCaches = true
     }
 
     private var accountDetails: some View {
@@ -407,52 +349,174 @@ private struct FoundationMusicLibrarySelectionView: View {
     }
 }
 
+private struct FoundationCachedMediaView: View {
+    let library: (any FoundationLibrary)?
+    @State private var measured = false
+    @State private var measuring = false
+    @State private var artworkDisk: Int64?
+    @State private var artworkMemory: Int64?
+    @State private var pageDisk: Int64?
+    @State private var measurementRevision = 0
+
+    var body: some View {
+        Form {
+            Section {
+                if measured {
+                    storageRow("Cached artwork", bytes: artworkDisk)
+                    storageRow("Cached catalog pages", bytes: pageDisk)
+                } else {
+                    ProgressView("Measuring caches…")
+                }
+            } header: {
+                Text("On This Device")
+            } footer: {
+                Text(
+                    "Cached artwork and catalog pages are disposable storage for this account on this device. They are cleared on app updates and are separate from downloaded music and its artwork."
+                )
+            }
+            Section {
+                if measured {
+                    storageRow("Artwork cache memory cost", bytes: artworkMemory)
+                }
+            } header: {
+                Text("Temporary Memory")
+            } footer: {
+                Text(
+                    "Artwork cache memory cost includes encoded images and decoded pixels. It is temporary and is not added to disk storage."
+                )
+            }
+            Section {
+                Button("Refresh measurements") { measurementRevision += 1 }
+                    .disabled(measuring)
+            }
+        }
+        .formStyle(.grouped)
+        .navigationTitle("Cached Media")
+        #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+        #endif
+        .task(id: measurementRevision) { await measure() }
+        .refreshable { await measure() }
+    }
+
+    private func storageRow(_ title: String, bytes: Int64?) -> some View {
+        LabeledContent(
+            title,
+            value: bytes.map {
+                ByteCountFormatter.string(fromByteCount: $0, countStyle: .file)
+            } ?? "Unavailable")
+    }
+
+    @MainActor private func measure() async {
+        guard !measuring else { return }
+        measuring = true
+        defer { measuring = false }
+        let adapter = library as? FoundationJellyfinLibrary
+        let usage = await adapter?.artworkCache?.storageUsage()
+        let pages = await library?.catalogPageCache?.storageBytes()
+        guard !Task.isCancelled else { return }
+        artworkDisk = usage?.disk
+        artworkMemory = usage?.memory
+        pageDisk = pages
+        measured = true
+    }
+}
+
+private struct FoundationLicenseNotice: Identifiable {
+    let title: String
+    let version: String
+    let text: String
+    var id: String { title }
+}
+
 private struct FoundationLicensesView: View {
-    @Environment(\.dismiss) private var dismiss
-    private static let notices: String = {
+    private static let notices: (introduction: String, dependencies: [FoundationLicenseNotice]) = {
         guard let url = Bundle.main.url(forResource: "ThirdPartyNotices", withExtension: "txt"),
             let text = try? String(contentsOf: url, encoding: .utf8)
-        else { return "License notices could not be loaded." }
-        return text
+        else { return ("License notices could not be loaded.", []) }
+        let sections = text.components(
+            separatedBy:
+                "\n========================================================================\n")
+        let names = [
+            "get": "Get",
+            "jellyfin-sdk-swift": "Jellyfin Swift SDK",
+            "swift-atomics": "Swift Atomics",
+            "swift-collections": "Swift Collections",
+            "swift-nio": "Swift NIO",
+            "swift-nio-transport-services": "Swift NIO Transport Services",
+            "swift-system": "Swift System",
+        ]
+        let dependencies = sections.dropFirst().compactMap { section -> FoundationLicenseNotice? in
+            guard let header = section.split(separator: "\n", maxSplits: 1).first else {
+                return nil
+            }
+            let fields = header.split(separator: " ", maxSplits: 1)
+            guard let package = fields.first else { return nil }
+            let title = names[String(package)] ?? String(package)
+            let version = fields.count > 1 ? String(fields[1]) : ""
+            return FoundationLicenseNotice(title: title, version: version, text: section)
+        }.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+        return (sections.first ?? "", dependencies)
     }()
 
     var body: some View {
-        NavigationStack {
-            ScrollView {
-                Text(Self.notices).font(.footnote).textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading).padding()
+        List {
+            Section {
+                ForEach(Self.notices.dependencies) { notice in
+                    NavigationLink {
+                        ScrollView {
+                            Text(verbatim: notice.text).font(.footnote).textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading).padding()
+                        }
+                        .navigationTitle(notice.title)
+                        #if os(iOS)
+                            .navigationBarTitleDisplayMode(.inline)
+                        #endif
+                    } label: {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(notice.title)
+                            Text(notice.version).font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                }
             }
-            .navigationTitle("Open-source licenses")
-            .toolbar { Button("Done") { dismiss() } }
+            Section {
+                DisclosureGroup("About these notices") {
+                    Text(verbatim: Self.notices.introduction).font(.footnote)
+                        .textSelection(.enabled)
+                }
+            }
         }
-        #if os(macOS)
-            .frame(minWidth: 540, minHeight: 420)
+        .navigationTitle("Open-source licenses")
+        #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
         #endif
     }
 }
 
 #if DEBUG
-    private struct FoundationJournalView: View {
-        @Environment(\.dismiss) private var dismiss
+    private struct FoundationJournalSection: View {
         @State private var recording = true
         @State private var text = ""
         var body: some View {
-            NavigationStack {
-                Form {
-                    Toggle("Record local diagnostics", isOn: $recording)
-                        .onChange(of: recording) { _, value in
-                            FoundationJournal.shared.setEnabled(value)
-                        }
-                    Button("Refresh snapshot") { text = FoundationJournal.shared.snapshot() }
-                    ShareLink("Share diagnostic snapshot", item: text)
-                    Text(text).font(.caption.monospaced()).textSelection(.enabled)
+            Section {
+                Toggle("Record local diagnostics", isOn: $recording)
+                    .onChange(of: recording) { _, value in
+                        FoundationJournal.shared.setEnabled(value)
+                    }
+                Button("Refresh snapshot") { text = FoundationJournal.shared.snapshot() }
+                ShareLink("Share diagnostic snapshot", item: text)
+                DisclosureGroup("Diagnostic snapshot") {
+                    Text(verbatim: text).font(.caption.monospaced()).textSelection(.enabled)
                 }
-                .navigationTitle("Diagnostics")
-                .toolbar { Button("Done") { dismiss() } }
-                .task {
-                    recording = FoundationJournal.shared.isEnabled
-                    text = FoundationJournal.shared.snapshot()
-                }
+            } header: {
+                Text("Diagnostics")
+            } footer: {
+                Text("No telemetry or diagnostic reports are sent automatically.")
+            }
+            .task {
+                recording = FoundationJournal.shared.isEnabled
+                text = FoundationJournal.shared.snapshot()
             }
         }
     }

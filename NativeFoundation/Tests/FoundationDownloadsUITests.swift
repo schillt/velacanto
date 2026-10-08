@@ -16,7 +16,8 @@ final class FoundationDownloadsUITests: XCTestCase {
         alphabetFailOnce: Bool = false, delayedAlphabetCapability: Bool = false,
         heldArtistAlbums: Bool = false, partialGridRow: Bool = false,
         compactFixtureControls: Bool = false, queuePresentation: Bool = false,
-        alphabetCapabilityFailOnce: Bool = false
+        alphabetCapabilityFailOnce: Bool = false, detachedPlayerArtwork: Bool = false,
+        holdPlayerGlass: Bool = false, heldAlphabetPage: Bool = false
     )
         -> XCUIApplication
     {
@@ -24,6 +25,9 @@ final class FoundationDownloadsUITests: XCTestCase {
         app.launchArguments = ["-foundationDownloadsUITesting", "-foundationTesting"]
         if productionShell { app.launchArguments.append("-fixtureProductionShell") }
         if queuePresentation { app.launchArguments.append("-fixtureQueuePresentation") }
+        if detachedPlayerArtwork { app.launchArguments.append("-fixtureDetachedPlayerArtwork") }
+        if holdPlayerGlass { app.launchArguments.append("-fixtureHoldPlayerGlass") }
+        if heldAlphabetPage { app.launchArguments.append("-fixtureHoldOrdinaryAlphabetPage") }
         if compactFixtureControls { app.launchArguments.append("-fixtureCompactControls") }
         if heldArtistAlbums { app.launchArguments.append("-fixtureHoldArtistAlbums") }
         if partialGridRow { app.launchArguments.append("-fixtureGridPartialRow") }
@@ -223,6 +227,34 @@ final class FoundationDownloadsUITests: XCTestCase {
         capture("Repeated occurrence drag keeps current playback and dismissal", in: app)
     }
 
+    func testMiniPlayerControlsRemainInteractiveAboveAlbumNavigation() {
+        continueAfterFailure = false
+        let app = launch(
+            productionShell: true, canonicalDownloadState: "full", longPlayback: true)
+        selectTab("Library", in: app)
+        openCanonicalCollection("album", fromDownloads: false, in: app)
+        tapVisible(app.buttons["collection-track-0"], in: app)
+        let identity = app.staticTexts["fixture-playback-identity"]
+        let playing = expectation(
+            for: NSPredicate(format: "label CONTAINS %@", "state playing"), evaluatedWith: identity)
+        wait(for: [playing], timeout: 10)
+        let selected = identity.label.components(separatedBy: ";").first
+        app.buttons["foundation-mini-playback-toggle"].tap()
+        let paused = expectation(
+            for: NSPredicate(format: "label CONTAINS %@", "intent false"), evaluatedWith: identity)
+        wait(for: [paused], timeout: 5)
+        XCTAssertEqual(identity.label.components(separatedBy: ";").first, selected)
+        app.buttons["foundation-mini-playback-toggle"].tap()
+        let resumed = expectation(
+            for: NSPredicate(format: "label CONTAINS %@", "intent true"), evaluatedWith: identity)
+        wait(for: [resumed], timeout: 5)
+        XCTAssertEqual(identity.label.components(separatedBy: ";").first, selected)
+        openNowPlaying(app)
+        app.buttons["Collapse Now Playing"].tap()
+        XCTAssertTrue(app.buttons["Show Now Playing"].waitForExistence(timeout: 5))
+        capture("Owned mini-player controls retain their occurrence above album content", in: app)
+    }
+
     func testNativeQueuePresentationActionsReorderAndPlaybackContinuity() {
         continueAfterFailure = false
         let app = launch(
@@ -236,9 +268,18 @@ final class FoundationDownloadsUITests: XCTestCase {
             for: NSPredicate(format: "label CONTAINS %@", "state playing"),
             evaluatedWith: rootIdentity)
         wait(for: [playing], timeout: 10)
-        let originalIdentity = rootIdentity.label
+        let startingIdentity = rootIdentity.label
         openNowPlaying(app)
         let identity = app.staticTexts["fixture-player-playback-identity"]
+        XCTAssertEqual(identity.label, startingIdentity)
+        // Check menu semantics with a paused clock; advancing playback is covered
+        // separately by repeated handle reorder and interrupted dismissal tests.
+        app.buttons["Pause"].tap()
+        let paused = expectation(
+            for: NSPredicate(format: "label CONTAINS %@", "state paused"),
+            evaluatedWith: identity)
+        wait(for: [paused], timeout: 5)
+        let originalIdentity = identity.label
         app.buttons["Show queue"].tap()
         let snapshot = queueSnapshot(app)
         guard let queue = snapshot["queue"] as? [String],
@@ -258,10 +299,9 @@ final class FoundationDownloadsUITests: XCTestCase {
         XCTAssertEqual(snapshot["history"] as? [String], [])
         capture("Native Queue baseline light", in: app)
         func action(_ title: String, entry: String) {
-            let menu = app.buttons["fixture-queue-actions-" + entry]
-            revealQueueControl(menu, entryID: entry, in: app)
-            XCTAssertTrue(menu.exists && menu.isHittable)
-            menu.tap()
+            let row = app.buttons["fixture-queue-select-" + entry]
+            revealQueueControl(row, entryID: entry, in: app)
+            row.press(forDuration: 1)
             let button = app.cells.buttons.matching(
                 NSPredicate(format: "label == %@", title))
             XCTAssertEqual(button.count, 1)
@@ -276,8 +316,8 @@ final class FoundationDownloadsUITests: XCTestCase {
         XCTAssertEqual(queueSnapshot(app)["upcoming"] as? [String], initial)
         XCTAssertEqual(identity.label, originalIdentity)
         // Cancel a real native menu without selecting any queue action.
-        let menu = app.buttons["fixture-queue-actions-" + initial[1]]
-        menu.tap()
+        let menu = app.buttons["fixture-queue-select-" + initial[1]]
+        menu.press(forDuration: 1)
         let lastAction = app.cells.buttons["Play Last"]
         XCTAssertTrue(lastAction.waitForExistence(timeout: 5))
         let artworkToggle = app.buttons["Show artwork"]
@@ -1035,7 +1075,7 @@ final class FoundationDownloadsUITests: XCTestCase {
         XCTAssertFalse(app.staticTexts["Streaming Quality"].exists)
         XCTAssertFalse(app.staticTexts["Download Quality"].exists)
         XCTAssertTrue(app.staticTexts["Playback & Downloads"].exists)
-        XCTAssertTrue(app.buttons["Playback & Download Settings"].exists)
+        XCTAssertTrue(app.buttons["Playback Settings"].exists)
         app.buttons["Downloaded Music"].tap()
         XCTAssertTrue(app.navigationBars["Downloaded Music"].waitForExistence(timeout: 5))
         app.navigationBars.buttons.firstMatch.tap()
@@ -1454,22 +1494,58 @@ final class FoundationDownloadsUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["All music available to this Jellyfin account"].exists)
         capture("Account details explain library access without credentials", in: app)
         app.navigationBars.buttons.firstMatch.tap()
-        for label in [
-            "Downloaded audio", "Download-owned artwork", "Download metadata & other files",
-            "Cached artwork", "Cached catalog pages", "Artwork cache memory cost",
-        ] {
-            let row = app.staticTexts.matching(
-                NSPredicate(format: "label BEGINSWITH %@", label + ",")
+        XCTAssertFalse(app.staticTexts["Downloaded audio"].exists)
+        XCTAssertFalse(app.staticTexts["Cached artwork"].exists)
+        tapVisible(app.buttons["Downloaded Music"], in: app)
+        XCTAssertTrue(app.navigationBars["Downloaded Music"].waitForExistence(timeout: 5))
+        XCTAssertTrue(
+            app.descendants(matching: .any).matching(
+                NSPredicate(format: "label BEGINSWITH %@", "Audio")
+            ).firstMatch.exists)
+        capture("Download storage details remain in Downloaded Music", in: app)
+        app.navigationBars.buttons.firstMatch.tap()
+        tapVisible(app.buttons["Cached Media"], in: app)
+        XCTAssertTrue(app.navigationBars["Cached Media"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Cached artwork"].waitForExistence(timeout: 5))
+        let memory = app.descendants(matching: .any).matching(
+            NSPredicate(format: "label BEGINSWITH %@", "Artwork cache memory cost")
+        ).firstMatch
+        XCTAssertTrue(memory.exists)
+
+        capture("Cache disk and memory details have their own page", in: app)
+        app.navigationBars.buttons.firstMatch.tap()
+        let profileForm = app.collectionViews["foundation-profile-form"]
+        profileForm.swipeUp()
+        XCTAssertTrue(app.switches["Record local diagnostics"].exists)
+        XCTAssertTrue(app.buttons["Refresh snapshot"].exists)
+        XCTAssertTrue(app.buttons["Share diagnostic snapshot"].exists)
+        XCTAssertFalse(app.buttons["Local diagnostic snapshot"].exists)
+        capture("Diagnostic options directly on Profile", in: app)
+        tapVisible(app.buttons["Open-source licenses"], in: app, context: profileForm)
+        XCTAssertTrue(app.navigationBars["Open-source licenses"].waitForExistence(timeout: 5))
+        let titles = [
+            "Get", "Jellyfin Swift SDK", "Swift Atomics", "Swift Collections", "Swift NIO",
+            "Swift NIO Transport Services", "Swift System",
+        ]
+        for title in titles {
+            let row = app.buttons.matching(
+                NSPredicate(format: "label BEGINSWITH %@", title)
             ).firstMatch
-            reveal(row, in: app)
-            XCTAssertTrue(app.staticTexts[label].exists)
+            XCTAssertTrue(row.exists)
         }
-        capture("Separate account scoped storage and cache metrics", in: app)
-        reveal(app.staticTexts["Diagnostics"], in: app)
-        XCTAssertTrue(app.staticTexts["Diagnostics"].exists)
-        XCTAssertFalse(app.staticTexts["Internal"].exists)
-        XCTAssertTrue(app.buttons["Local diagnostic snapshot"].exists)
-        capture("Settings diagnostics section and native Done", in: app)
+        capture("Alphabetical dependency license list", in: app)
+        let sdk = app.buttons.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "Jellyfin Swift SDK")
+        ).firstMatch
+        tapNativeChrome(sdk, in: app)
+        XCTAssertTrue(app.navigationBars["Jellyfin Swift SDK"].waitForExistence(timeout: 5))
+        XCTAssertTrue(
+            app.staticTexts.containing(
+                NSPredicate(format: "label CONTAINS %@", "Mozilla Public License Version 2.0")
+            ).firstMatch.exists)
+        capture("Individual full license text", in: app)
+        app.navigationBars.buttons.firstMatch.tap()
+        app.navigationBars.buttons.firstMatch.tap()
         tapNativeChrome(app.buttons["Done"], in: app)
         XCTAssertTrue(app.buttons["library-category-albums"].waitForExistence(timeout: 5))
     }
@@ -1626,7 +1702,6 @@ final class FoundationDownloadsUITests: XCTestCase {
         tapVisible(app.buttons["library-category-songs"], in: app)
         let table = app.tables["library-index-track"]
         XCTAssertTrue(table.waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts["Loaded display names; All restores browsing"].exists)
         let index = table.descendants(matching: .any).matching(
             NSPredicate(format: "label == %@", "Section index")
         ).firstMatch
@@ -1636,15 +1711,16 @@ final class FoundationDownloadsUITests: XCTestCase {
         ).firstMatch
         XCTAssertTrue(first.exists)
         index.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.98)).tap()
-        XCTAssertTrue(app.staticTexts["Z and following"].waitForExistence(timeout: 5))
-        XCTAssertFalse(first.exists)
+        XCTAssertTrue(first.exists)
+        XCTAssertFalse(app.staticTexts["Z and following"].exists)
         tapNativeAlphabet("All", in: app)
         XCTAssertTrue(first.waitForExistence(timeout: 5))
         let start = index.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.05))
         let end = index.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.98))
         start.press(
             forDuration: 0.1, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0.2)
-        XCTAssertTrue(app.staticTexts["Z and following"].waitForExistence(timeout: 5))
+        XCTAssertTrue(first.exists)
+        XCTAssertFalse(app.staticTexts["Z and following"].exists)
         tapNativeAlphabet("All", in: app)
         XCTAssertTrue(first.waitForExistence(timeout: 5))
         capture("Complete loaded Songs alphabet tap drag and All without server seek", in: app)
@@ -1654,7 +1730,7 @@ final class FoundationDownloadsUITests: XCTestCase {
         continueAfterFailure = false
         let app = launch(
             productionShell: true, canonicalDownloadState: "full", longPlayback: true,
-            queuePresentation: true)
+            queuePresentation: true, detachedPlayerArtwork: true)
         selectTab("Library", in: app)
         openCanonicalCollection("album", fromDownloads: false, in: app)
         tapVisible(app.buttons["collection-track-0"], in: app)
@@ -1696,6 +1772,61 @@ final class FoundationDownloadsUITests: XCTestCase {
         XCTAssertTrue(app.textFields["Search music"].waitForExistence(timeout: 5))
         capture(
             "Repeated queue skips and playback controls retain collapse and navigation", in: app)
+    }
+
+    func testPlayerPlaybackInteractionsDismissWithoutAnArtworkAnchor() {
+        continueAfterFailure = false
+        let app = launch(
+            productionShell: true, canonicalDownloadState: "full", longPlayback: true,
+            queuePresentation: true, detachedPlayerArtwork: true)
+        selectTab("Library", in: app)
+        openCanonicalCollection("album", fromDownloads: false, in: app)
+        tapVisible(app.buttons["collection-track-0"], in: app)
+        for iteration in 0..<3 {
+            openNowPlaying(app)
+            app.buttons["Next"].tap()
+            app.buttons["Pause"].tap()
+            app.buttons["Play"].tap()
+            if iteration == 0 {
+                let grabber = app.buttons["Collapse Now Playing"].coordinate(
+                    withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+                grabber.press(
+                    forDuration: 0.1,
+                    thenDragTo: grabber.withOffset(CGVector(dx: 0, dy: app.frame.height * 0.5)),
+                    withVelocity: .slow, thenHoldForDuration: 0.2)
+            } else if iteration == 1 {
+                let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.01, dy: 0.3))
+                start.press(
+                    forDuration: 0.1,
+                    thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: 0.3)),
+                    withVelocity: .slow, thenHoldForDuration: 0.2)
+            } else {
+                app.buttons["Collapse Now Playing"].tap()
+            }
+            XCTAssertTrue(app.buttons["Show Now Playing"].waitForExistence(timeout: 5))
+            XCTAssertTrue(app.buttons["Show Now Playing"].isHittable)
+        }
+        capture(
+            "Playback controls retain header edge and button dismissal without artwork", in: app)
+    }
+
+    func testOwnedMiniPlayerGlassHasVisibleIntermediateExpansion() {
+        continueAfterFailure = false
+        let app = launch(
+            productionShell: true, canonicalDownloadState: "full", artworkCache: true,
+            longPlayback: true, holdPlayerGlass: true)
+        selectTab("Library", in: app)
+        openCanonicalCollection("album", fromDownloads: false, in: app)
+        tapVisible(app.buttons["collection-track-0"], in: app)
+        capture("Owned compact glass source above navigation", in: app)
+        app.buttons["Show Now Playing"].tap()
+        let resume = app.buttons["Finish glass transition"]
+        XCTAssertTrue(resume.waitForExistence(timeout: 5))
+        capture("Actual glass geometry paused partway through expansion", in: app)
+        XCTAssertTrue(app.buttons["More playback options"].waitForExistence(timeout: 5))
+        app.buttons["Collapse Now Playing"].tap()
+        XCTAssertTrue(app.buttons["Show Now Playing"].waitForExistence(timeout: 5))
+        capture("Owned compact glass restored after reverse transition", in: app)
     }
 
     func testSearchKeyboardAutofocusCancelManualFocusAndReentryPreserveQuery() {
@@ -1905,7 +2036,7 @@ final class FoundationDownloadsUITests: XCTestCase {
     }
 
     private func tapNativeAlphabet(_ letter: String, in app: XCUIApplication) {
-        if letter == "All" {
+        if letter == "All", app.buttons["library-alphabet-all-track"].exists {
             tapNativeChrome(app.buttons["library-alphabet-all-track"], in: app)
             return
         }
@@ -1924,10 +2055,7 @@ final class FoundationDownloadsUITests: XCTestCase {
         XCTAssertTrue(index.exists && index.isHittable)
         XCTAssertGreaterThan(index.frame.width, 0)
         XCTAssertGreaterThan(index.frame.height, 0)
-        let offline = app.buttons["Fixture controls"].value as? String == "offline"
-        let titles =
-            ["All"] + (offline ? ["#"] : [])
-            + (65...90).map { String(UnicodeScalar($0)!) }
+        let titles = ["All", "#"] + (65...90).map { String(UnicodeScalar($0)!) }
         guard let position = titles.firstIndex(of: letter) else {
             XCTFail("Requested letter must belong to the approved native index order")
             return
@@ -2051,17 +2179,74 @@ final class FoundationDownloadsUITests: XCTestCase {
             app.buttons["Fixture controls"].value as? String, offline ? "offline" : "online")
     }
 
-    func testNativeSongsAlphabetServerWindowRelativePagingAllRestoreAndPlayback() {
+    func testTracksAlphabetJumpsRetainEarlierRowsAndUseOrdinaryPages() {
         continueAfterFailure = false
         let app = launch(
             productionShell: true, canonicalDownloadState: "full", longPlayback: true,
-            alphabetCatalog: true, alphabetFailOnce: true, compactFixtureControls: true)
-        // Start a genuinely downloaded fixture occurrence through the unchanged Home row.
+            alphabetCatalog: true, compactFixtureControls: true)
+        selectTab("Library", in: app)
+        tapVisible(app.buttons["library-category-songs"], in: app)
+        let table = app.tables["library-index-track"]
+        XCTAssertTrue(table.waitForExistence(timeout: 5))
+        // The simulator gives hosted buttons stale zero-sized accessibility frames
+        // after an index jump. Touch the rendered first row instead, and verify the
+        // selected canonical item. This exercises hit testing as well as scrolling.
+        func touchFirstRenderedRow() {
+            table.coordinate(withNormalizedOffset: .zero)
+                .withOffset(CGVector(dx: table.frame.width * 0.5, dy: 60)).tap()
+        }
+        func expectSelection(_ index: Int) {
+            let identity = app.staticTexts["fixture-playback-identity"]
+            let observed = XCTAttachment(string: identity.label)
+            observed.name = "Synthetic rendered-row selection"
+            observed.lifetime = .keepAlways
+            add(observed)
+            let selected = expectation(
+                for: NSPredicate(format: "label CONTAINS %@", "item alphabet-track-\(index);"),
+                evaluatedWith: identity)
+            wait(for: [selected], timeout: 5)
+        }
+        tapNativeAlphabet("F", in: app)
+        XCTAssertTrue(app.buttons["Actions for F Fixture track 100"].waitForExistence(timeout: 10))
+        capture("F anchor within retained full Tracks list", in: app)
+        touchFirstRenderedRow()
+        expectSelection(100)
+        // Scroll backwards across F without All and touch an earlier retained A row.
+        table.swipeDown()
+        touchFirstRenderedRow()
+        let identity = app.staticTexts["fixture-playback-identity"].label
+        let prefix = "item alphabet-track-"
+        let value = identity.components(separatedBy: prefix).last?
+            .components(separatedBy: ";").first
+        let earlier = value.flatMap(Int.init)
+        XCTAssertNotNil(earlier)
+        XCTAssertLessThan(earlier ?? 100, 100)
+        tapNativeAlphabet("A", in: app)
+        touchFirstRenderedRow()
+        expectSelection(0)
+        tapNativeAlphabet("G", in: app)
+        touchFirstRenderedRow()
+        expectSelection(150)
+        tapNativeAlphabet("All", in: app)
+        touchFirstRenderedRow()
+        expectSelection(0)
+        let counts = readAlphabetCounts(app)
+        XCTAssertTrue(counts.contains("track-all-0 1"))
+        XCTAssertTrue(counts.contains("track-all-100 1"))
+        XCTAssertFalse(counts.contains("track-F-"))
+        XCTAssertFalse(counts.contains("track-G-"))
+        capture("All returns to retained first row with no filtered requests", in: app)
+    }
+
+    func testTracksAlphabetOfflineAndRelatedNavigationRetainPlayback() {
+        continueAfterFailure = false
+        let app = launch(
+            productionShell: true, canonicalDownloadState: "full", longPlayback: true,
+            alphabetCatalog: true, compactFixtureControls: true)
         selectTab("Home", in: app)
         let tone = app.buttons.matching(
             NSPredicate(format: "label BEGINSWITH %@", "# Fixture Tone")
-        )
-        .firstMatch
+        ).firstMatch
         tapVisible(tone, in: app)
         let identity = app.staticTexts["fixture-playback-identity"]
         let playing = expectation(
@@ -2070,251 +2255,87 @@ final class FoundationDownloadsUITests: XCTestCase {
         let original = identity.label
         selectTab("Library", in: app)
         tapVisible(app.buttons["library-category-songs"], in: app)
+        tapNativeAlphabet("F", in: app)
+        tapNativeAlphabet("All", in: app)
+        tapVisible(app.buttons["Actions for A Fixture track 0"], in: app)
+        app.cells.buttons["View Album"].tap()
+        XCTAssertTrue(
+            app.descendants(matching: .any)["collection-detail-album-album"]
+                .waitForExistence(timeout: 5))
+        XCTAssertEqual(identity.label, original)
+        app.navigationBars.buttons.firstMatch.tap()
         XCTAssertTrue(app.tables["library-index-track"].waitForExistence(timeout: 5))
-        let a = app.buttons.matching(
-            NSPredicate(format: "label BEGINSWITH %@", "A Fixture track 0")
-        ).firstMatch
-        XCTAssertTrue(a.waitForExistence(timeout: 5))
-        XCTAssertFalse(
-            app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "F Fixture track 100"))
-                .firstMatch.exists)
+        toggleAlphabetNetwork(app, offline: true)
         let before = readAlphabetCounts(app)
-        XCTAssertTrue(before.contains("track-all-0 1"))
-        XCTAssertFalse(before.contains("track-all-100"))
+        tapNativeAlphabet("F", in: app)
+        tapNativeAlphabet("#", in: app)
+        tapNativeAlphabet("All", in: app)
+        XCTAssertTrue(tone.waitForExistence(timeout: 5) && tone.isHittable)
+        XCTAssertEqual(readAlphabetCounts(app), before)
+        XCTAssertEqual(identity.label, original)
+        toggleAlphabetNetwork(app, offline: false)
+        tapNativeAlphabet("All", in: app)
+        XCTAssertTrue(app.buttons["Actions for A Fixture track 0"].waitForExistence(timeout: 5))
+        XCTAssertEqual(identity.label, original)
+        capture("Full-list anchors offline and related navigation retain playback", in: app)
+    }
+
+    func testTracksOrdinaryPageFailureRetryKeepsEarlierRowsAndRail() {
+        continueAfterFailure = false
+        let app = launch(
+            productionShell: true, canonicalDownloadState: "full", alphabetCatalog: true,
+            alphabetFailOnce: true, compactFixtureControls: true)
+        selectTab("Library", in: app)
+        tapVisible(app.buttons["library-category-songs"], in: app)
         tapNativeAlphabet("F", in: app)
         XCTAssertTrue(app.buttons["Retry"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.tables["library-index-track"].exists)
+        XCTAssertTrue(app.buttons["Actions for A Fixture track 0"].exists)
         tapNativeChrome(app.buttons["Retry"], in: app)
+        tapNativeAlphabet("F", in: app)
         let f = app.buttons.matching(
             NSPredicate(format: "label BEGINSWITH %@", "F Fixture track 100")
         ).firstMatch
         XCTAssertTrue(f.waitForExistence(timeout: 10))
-        capture("Native Songs alphabet F loads beyond initial hundred-song page", in: app)
-        let g = app.buttons.matching(
-            NSPredicate(format: "label BEGINSWITH %@", "G Fixture track 179")
-        ).firstMatch
-        // This known later item is beyond the first fifty-item selected-letter window.
-        for _ in 0..<80 {
-            if g.exists && g.frame.width > 0 && g.frame.height > 0
-                && g.isHittable && tapCenterIsVisible(g, in: app)
-            {
-                break
-            }
-            scrollContent(in: app, upward: true)
-        }
-        XCTAssertTrue(
-            g.exists && g.frame.width > 0 && g.frame.height > 0
-                && g.isHittable && tapCenterIsVisible(g, in: app))
-        XCTAssertTrue(g.exists)
-        XCTAssertEqual(identity.label, original)
-        let paged = readAlphabetCounts(app)
-        XCTAssertTrue(paged.contains("track-F-0 2"))
-        XCTAssertTrue(paged.contains("track-F-50 1"))
-        XCTAssertFalse(paged.contains("track-all-100"))
+        capture("Loaded F anchor after ordinary page retry", in: app)
         tapNativeAlphabet("All", in: app)
-        XCTAssertTrue(a.waitForExistence(timeout: 5))
-        XCTAssertEqual(
-            readAlphabetCounts(app), paged, "All restores retained browsing without a catalog fetch"
-        )
-        tapNativeAlphabet("A", in: app)
-        var startedCounts = ""
-        for _ in 0..<5 {
-            startedCounts = readAlphabetCounts(app)
-            if startedCounts.contains("track-A-0 1") { break }
-        }
-        XCTAssertTrue(
-            startedCounts.contains("track-A-0 1"),
-            "Cancellation coverage requires the held provider request to actually start")
-        XCTAssertFalse(
-            startedCounts.contains("cancelled 1"),
-            "Reading the held request must not cancel it before switching letters")
-        tapNativeAlphabet("G", in: app)
-        XCTAssertTrue(
-            app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "G Fixture track 150"))
-                .firstMatch.waitForExistence(timeout: 10))
-        XCTAssertFalse(a.exists, "Cancelled letter response cannot replace the latest window")
-        XCTAssertTrue(
-            readAlphabetCounts(app).contains("cancelled 1"),
-            "Switching letters must actually cancel the held provider task")
-        XCTAssertEqual(identity.label, original)
-        capture("Rapid native alphabet selection retains latest server window", in: app)
-        tapNativeAlphabet("All", in: app)
-        let relatedActions = app.buttons["Actions for A Fixture track 0"]
-        tapVisible(relatedActions, in: app)
-        app.cells.buttons["View Album"].tap()
-        let detail = app.descendants(matching: .any)["collection-detail-album-album"]
-        XCTAssertTrue(detail.waitForExistence(timeout: 5))
-        let edge = app.coordinate(withNormalizedOffset: CGVector(dx: 0.005, dy: 0.5))
-        edge.press(
-            forDuration: 0.1,
-            thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.07, dy: 0.5)),
-            withVelocity: .slow, thenHoldForDuration: 0.2)
-        XCTAssertTrue(detail.exists, "Cancelled native back keeps alphabet-source collection open")
-        XCTAssertEqual(identity.label, original)
-        app.navigationBars.buttons.firstMatch.tap()
-        XCTAssertTrue(app.tables["library-index-track"].waitForExistence(timeout: 5))
-        XCTAssertEqual(identity.label, original)
-        let field = app.searchFields["Search songs"]
-        for _ in 0..<12 {
-            if field.exists && field.isHittable { break }
-            scrollContent(in: app, upward: false)
-        }
-        tapNativeChrome(field, in: app)
-        field.typeText("G Fixture track 179")
-        XCTAssertTrue(g.waitForExistence(timeout: 10))
-        XCTAssertFalse(
-            app.tables["library-index-track"].descendants(matching: .any)
-                .matching(NSPredicate(format: "label == %@", "Section index")).firstMatch.exists,
-            "Typed search must hide the native alphabet index")
-        field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 19))
-        tapNativeChrome(app.navigationBars["Songs"].buttons["Close"], in: app)
-        XCTAssertTrue(a.waitForExistence(timeout: 5))
-        let beforeOffline = readAlphabetCounts(app)
-        toggleAlphabetNetwork(app, offline: true)
-        tapNativeAlphabet("#", in: app)
-        XCTAssertTrue(
-            app.tables["library-index-track"].staticTexts["Other downloaded names"]
-                .waitForExistence(timeout: 5))
-        let numbered = app.buttons.matching(
-            NSPredicate(format: "label BEGINSWITH %@", "# Fixture Tone")
-        ).firstMatch
-        XCTAssertTrue(numbered.waitForExistence(timeout: 5))
-        XCTAssertEqual(
-            readAlphabetCounts(app), beforeOffline,
-            "Offline alphabet operates only on complete known downloaded membership")
-        capture("Native offline number index uses complete known collections", in: app)
-        toggleAlphabetNetwork(app, offline: false)
-        tapNativeAlphabet("F", in: app)
-        XCTAssertTrue(f.waitForExistence(timeout: 10))
-        XCTAssertEqual(identity.label, original)
-        capture("Reconnect reuses server alphabet without playback replacement", in: app)
-    }
-
-    func testSongsAlphabetTransientCapabilityRecoversOnExplicitPullRefresh() {
-        continueAfterFailure = false
-        let app = launch(
-            productionShell: true, canonicalDownloadState: "full", longPlayback: true,
-            alphabetCatalog: true, compactFixtureControls: true, alphabetCapabilityFailOnce: true)
-        selectTab("Home", in: app)
-        let tone = app.buttons.matching(
-            NSPredicate(format: "label BEGINSWITH %@", "# Fixture Tone")
-        )
-        .firstMatch
-        tapVisible(tone, in: app)
-        let identity = app.staticTexts["fixture-playback-identity"]
-        let playing = expectation(
-            for: NSPredicate(format: "label CONTAINS %@", "state playing"), evaluatedWith: identity)
-        wait(for: [playing], timeout: 10)
-        let original = identity.label
-        selectTab("Library", in: app)
-        tapVisible(app.buttons["library-category-songs"], in: app)
-        let first = app.buttons.matching(
-            NSPredicate(format: "label BEGINSWITH %@", "A Fixture track 0")
-        ).firstMatch
-        let second = app.buttons.matching(
-            NSPredicate(format: "label BEGINSWITH %@", "A Fixture track 1, ")
-        ).firstMatch
-        XCTAssertTrue(first.waitForExistence(timeout: 10))
-        XCTAssertTrue(second.exists)
-        XCTAssertLessThan(first.frame.minY, second.frame.minY)
-        XCTAssertFalse(app.tables["library-index-track"].exists)
-        XCTAssertFalse(
-            app.descendants(matching: .any).matching(
-                NSPredicate(format: "label == %@", "Section index")
-            ).firstMatch.exists)
+        XCTAssertTrue(app.buttons["Actions for A Fixture track 0"].isHittable)
         let before = readAlphabetCounts(app)
-        XCTAssertEqual(
-            before.components(separatedBy: ", ").first { $0.hasPrefix("capability ") },
-            "capability 1")
-        XCTAssertEqual(identity.label, original)
-        capture("Songs unavailable alphabet capability retains sorted usable rows", in: app)
-        let list = app.collectionViews.firstMatch
-        XCTAssertTrue(list.exists)
-        // First reveal the native search drawer; this gesture is not refresh acceptance.
-        list.swipeDown(velocity: .slow)
-        let drawer = app.searchFields["Search songs"]
-        XCTAssertTrue(drawer.waitForExistence(timeout: 5) && drawer.isHittable)
-        let viewport = uncoveredViewport(list, in: app)
-        XCTAssertGreaterThan(viewport.height, 100)
-        let pullStartY = max(viewport.minY + 20, drawer.frame.maxY + 12)
-        let pullEndY = viewport.minY + viewport.height * 0.75
-        XCTAssertLessThan(pullStartY, pullEndY)
-        let origin = app.coordinate(withNormalizedOffset: .zero)
-        let start = origin.withOffset(
-            CGVector(
-                dx: viewport.midX - app.frame.minX,
-                dy: pullStartY - app.frame.minY))
-        let end = origin.withOffset(
-            CGVector(
-                dx: viewport.midX - app.frame.minX,
-                dy: pullEndY - app.frame.minY))
-        // One bounded real pull after the drawer settles; counts and the rail prove recovery.
-        start.press(
-            forDuration: 0.1, thenDragTo: end, withVelocity: .slow,
-            thenHoldForDuration: 0.2)
-        XCTAssertTrue(app.tables["library-index-track"].waitForExistence(timeout: 10))
-        XCTAssertTrue(
-            app.tables["library-index-track"].descendants(matching: .any)
-                .matching(NSPredicate(format: "label == %@", "Section index")).firstMatch.exists)
-        let recovered = readAlphabetCounts(app)
-        XCTAssertEqual(
-            recovered.components(separatedBy: ", ").first { $0.hasPrefix("capability ") },
-            "capability 2")
-        XCTAssertTrue(first.exists)
-        XCTAssertEqual(identity.label, original)
-        capture(
-            "Explicit Songs pull refresh recovers one alphabet probe and keeps playback", in: app)
+        tapNativeAlphabet("F", in: app)
+        tapNativeAlphabet("All", in: app)
+        XCTAssertEqual(readAlphabetCounts(app), before)
+        capture("Ordinary page retry preserves prior rows and loaded anchors", in: app)
     }
 
-    func testDelayedSongsAlphabetCapabilityPreservesRelatedRouteAndPlayback() {
+    func testTracksPendingAnchorCancelAndRetargetRejectStaleScroll() {
         continueAfterFailure = false
         let app = launch(
-            productionShell: true, canonicalDownloadState: "full", longPlayback: true,
-            alphabetCatalog: true, delayedAlphabetCapability: true)
-        selectTab("Home", in: app)
-        let tone = app.buttons.matching(
-            NSPredicate(format: "label BEGINSWITH %@", "# Fixture Tone")
-        )
-        .firstMatch
-        tapVisible(tone, in: app)
-        let identity = app.staticTexts["fixture-playback-identity"]
-        let playing = expectation(
-            for: NSPredicate(format: "label CONTAINS %@", "state playing"), evaluatedWith: identity)
-        wait(for: [playing], timeout: 10)
-        let original = identity.label
+            productionShell: true, canonicalDownloadState: "full", alphabetCatalog: true,
+            compactFixtureControls: true, heldAlphabetPage: true)
         selectTab("Library", in: app)
         tapVisible(app.buttons["library-category-songs"], in: app)
-        let row = app.buttons.matching(
-            NSPredicate(format: "label BEGINSWITH %@", "A Fixture track 0")
-        ).firstMatch
-        XCTAssertTrue(row.waitForExistence(timeout: 10))
-        XCTAssertFalse(app.tables["library-index-track"].exists)
-        tapVisible(app.buttons["Actions for A Fixture track 0"], in: app)
-        app.cells.buttons["View Album"].tap()
-        let detail = app.descendants(matching: .any)["collection-detail-album-album"]
-        XCTAssertTrue(detail.waitForExistence(timeout: 5))
-        tapNativeChrome(app.buttons["Release alphabet capability"], in: app)
-        XCTAssertTrue(detail.exists)
-        XCTAssertFalse(
-            app.tables["library-index-track"].exists,
-            "Capability completion must not replace the Songs source beneath its related destination"
-        )
-        XCTAssertEqual(identity.label, original)
-        capture("Delayed Songs capability preserves related album and active occurrence", in: app)
-        app.navigationBars.buttons.firstMatch.tap()
-        XCTAssertTrue(app.tables["library-index-track"].waitForExistence(timeout: 10))
-        XCTAssertTrue(row.exists)
-        XCTAssertTrue(
-            app.tables["library-index-track"].descendants(matching: .any)
-                .matching(NSPredicate(format: "label == %@", "Section index")).firstMatch.exists)
-        XCTAssertEqual(identity.label, original)
-        capture("Native Songs index adopts capability after related Back", in: app)
+        tapNativeAlphabet("F", in: app)
+        let cancel = app.buttons["library-alphabet-cancel-track"]
+        XCTAssertTrue(cancel.waitForExistence(timeout: 5))
+        cancel.tap()
+        tapNativeAlphabet("All", in: app)
+        XCTAssertTrue(app.buttons["Actions for A Fixture track 0"].isHittable)
+        XCTAssertFalse(app.buttons["Actions for F Fixture track 100"].exists)
+        tapNativeAlphabet("G", in: app)
+        XCTAssertTrue(app.buttons["Actions for G Fixture track 150"].waitForExistence(timeout: 10))
+        tapNativeAlphabet("All", in: app)
+        XCTAssertTrue(app.buttons["Actions for A Fixture track 0"].isHittable)
+        XCTAssertTrue(readAlphabetCounts(app).contains("cancelled 1"))
+        capture("Pending anchor cancel and retarget keep canonical membership", in: app)
     }
 
     private func openNowPlaying(_ app: XCUIApplication) {
         let button = app.buttons["Show Now Playing"]
         XCTAssertTrue(button.waitForExistence(timeout: 5) && button.isHittable)
         button.tap()
-        XCTAssertTrue(app.buttons["More playback options"].waitForExistence(timeout: 5))
+        let opened = app.buttons["More playback options"].waitForExistence(timeout: 5)
+        if !opened { capture("Player failed opening controls", in: app) }
+        XCTAssertTrue(opened)
     }
 
     private func relatedSheet(_ app: XCUIApplication) -> XCUIElement {

@@ -62,6 +62,7 @@ struct FoundationLibraryView: View {
         @StateObject private var playerArtworkPresentation =
             FoundationPlayerArtworkPresentationModel()
         @AccessibilityFocusState private var miniPlayerFocused: Bool
+        @ScaledMetric(relativeTo: .callout) private var miniPlayerReservation = 62.0
     #endif
     @State private var showingPlayer = false
     @State private var showingSettings = false
@@ -220,17 +221,7 @@ struct FoundationLibraryView: View {
 
     @ViewBuilder private var shell: some View {
         #if os(iOS)
-            if #available(iOS 26.1, *) {
-                tabs
-                    .tabBarMinimizeBehavior(.onScrollDown)
-                    .tabViewBottomAccessory(isEnabled: !displayedQueue.isEmpty) {
-                        FoundationNativeAccessory { miniPlayer(showNext: $0) }
-                    }
-            } else {
-                tabs.safeAreaInset(edge: .bottom) {
-                    if !displayedQueue.isEmpty { miniPlayer().background(.regularMaterial) }
-                }
-            }
+            tabs.tabBarMinimizeBehavior(.onScrollDown)
         #else
             FoundationMacLibraryShell(
                 selection: tabSelection, showsMiniPlayer: !displayedQueue.isEmpty
@@ -260,7 +251,19 @@ struct FoundationLibraryView: View {
                     Tab(value: destination, role: destination == .search ? .search : nil) {
                         NavigationStack {
                             browsingContent(destination)
-                        }.id(library.catalogScopeID + String(destination.rawValue))
+                                .safeAreaPadding(
+                                    .bottom, displayedQueue.isEmpty ? 0 : miniPlayerReservation)
+                        }
+                        // Keep the owned surface above the native navigation view's
+                        // touch layer. An outer safe-area inset can draw above an album
+                        // while its taps still reach the underlying native list.
+                        .overlay(alignment: .bottom) {
+                            if selectedTab == destination, !displayedQueue.isEmpty {
+                                miniPlayer()
+                                    .padding(.horizontal, 12).padding(.bottom, 6)
+                            }
+                        }
+                        .id(library.catalogScopeID + String(destination.rawValue))
                     } label: {
                         Label {
                             Text(destination.title)
@@ -583,6 +586,7 @@ struct FoundationLibraryView: View {
             }
             .buttonStyle(.plain).disabled(displayedEntryID == nil)
             .accessibilityLabel(player.wantsPlayback ? "Pause" : "Play")
+            .accessibilityIdentifier("foundation-mini-playback-toggle")
             if showNext {
                 Button {
                     player.next()
@@ -597,6 +601,16 @@ struct FoundationLibraryView: View {
             }
         }.padding(.horizontal, 10).padding(.vertical, 6)
             #if os(iOS)
+                .overlay {
+                    FoundationMiniPlayerTouchLayer(
+                        showsNext: showNext, allowsToggle: displayedEntryID != nil,
+                        allowsNext: displayedEntryID != nil
+                            && displayedEntryID != displayedQueue.last?.id,
+                        onOpen: { showingPlayer = true },
+                        onToggle: { player.togglePlayback() }, onNext: { player.next() }
+                    )
+                    .accessibilityHidden(true)
+                }
                 .foundationPlayerSurfaceRegistration(identity: item?.sharedArtworkIdentity)
             #endif
     }
@@ -1427,16 +1441,6 @@ struct FoundationTrackList: View {
         }
     }
 }
-
-#if os(iOS)
-    @available(iOS 26.1, *)
-    private struct FoundationNativeAccessory<Content: View>: View {
-        @Environment(\.tabViewBottomAccessoryPlacement) private var placement
-        let content: (Bool) -> Content
-
-        var body: some View { content(placement != .inline) }
-    }
-#endif
 
 /// Optional account artwork belongs to the visible profile entry point only.
 private struct FoundationProfileImage: View {

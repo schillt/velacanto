@@ -700,8 +700,25 @@
         private func alphabetBrowse(kind: FoundationItem.Kind, startIndex: Int) async throws
             -> FoundationPage
         {
-            catalogRequests["\(kind)-all-\(startIndex)", default: 0] += 1
+            let key = "\(kind)-all-\(startIndex)"
+            catalogRequests[key, default: 0] += 1
+            defer { if Task.isCancelled { catalogRequests["cancelled", default: 0] += 1 } }
+            if kind == .track, startIndex == 100,
+                ProcessInfo.processInfo.arguments.contains("-fixtureHoldOrdinaryAlphabetPage"),
+                catalogRequests[key] == 1
+            {
+                while true {
+                    try Task.checkCancellation()
+                    try await Task.sleep(for: .milliseconds(50))
+                }
+            }
             try Task.checkCancellation()
+            if kind == .track, startIndex == 100,
+                ProcessInfo.processInfo.arguments.contains("-fixtureAlphabetFailOnce"),
+                alphabetFailures.insert(key).inserted
+            {
+                throw FoundationLibraryError.invalidResponse
+            }
             let items = alphabetItems(kind: kind)
             let end = min(startIndex + (kind == .track ? 100 : 50), items.count)
             guard startIndex < end else { return .init(items: [], nextStartIndex: nil) }

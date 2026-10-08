@@ -150,6 +150,29 @@ final class FoundationBrowseModel: ObservableObject {
         await load(request, using: loader)
     }
 
+    /// An explicit rail gesture appends ordinary pages until its anchor is loaded.
+    /// Earlier rows stay in the canonical list. The view owns cancellation/retargeting.
+    func loadThroughAlphabetAnchor(
+        _ letter: String,
+        using loader: (Int) async throws -> FoundationPage
+    ) async -> Int? {
+        if !loaded { await loadPending(using: loader) }
+        while !Task.isCancelled {
+            if let index = FoundationAlphabetAnchors.index(for: letter, in: items) { return index }
+            guard errorMessage == nil, let previousOffset = nextStartIndex else {
+                return errorMessage == nil
+                    ? (FoundationAlphabetAnchors.followingIndex(for: letter, in: items)
+                        ?? items.indices.last)
+                    : nil
+            }
+            await loadNextPage(using: loader)
+            guard !Task.isCancelled else { return nil }
+            // A cancelled/revoked or non-progressing load must not spin at the same cursor.
+            guard nextStartIndex != previousOffset || errorMessage != nil else { return nil }
+        }
+        return nil
+    }
+
     /// The view owns this loop; disappearing/offline transitions cancel its network work.
     func refreshVisible(
         allowsNetwork: Bool, using loader: (Int) async throws -> FoundationPage

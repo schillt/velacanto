@@ -15,6 +15,7 @@ struct FoundationItem: Identifiable, Equatable, Codable, Sendable {
     var artist: FoundationItemReference? = nil
     var genres: [FoundationItemReference] = []
     var playCount: Int = 0
+    var sortName: String? = nil
 }
 
 extension FoundationItem {
@@ -782,7 +783,8 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
     }
 
     func songs(startIndex: Int = 0) async throws -> FoundationPage {
-        try await page(kinds: [.track], parent: nil, startIndex: startIndex, limit: 100)
+        try await page(
+            kinds: [.track], parent: nil, startIndex: startIndex, limit: 100, fields: [.sortName])
     }
 
     func playlists(startIndex: Int = 0) async throws -> FoundationPage {
@@ -1197,7 +1199,7 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
                         !title.isEmpty
                     else { return nil }
                     return FoundationItemReference(id: id, title: title)
-                }, playCount: max(0, entry.userData?.playCount ?? 0))
+                }, playCount: max(0, entry.userData?.playCount ?? 0), sortName: entry.sortName)
         }
     }
 

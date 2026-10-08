@@ -5,6 +5,124 @@ import XCTest
 
 final class FoundationLibraryTests: XCTestCase {
 
+    @MainActor
+    func testAlphabetAnchorAppendsContiguousPagesWithoutFilteringMembership() async {
+        let model = FoundationBrowseModel()
+        model.configureCatalogPagination()
+        let a = FoundationItem(id: "a", title: "Alpha", subtitle: "", kind: .track, duration: nil)
+        let c = FoundationItem(id: "c", title: "Charlie", subtitle: "", kind: .track, duration: nil)
+        let f = FoundationItem(id: "f", title: "Foxtrot", subtitle: "", kind: .track, duration: nil)
+        var offsets: [Int] = []
+        let anchor = await model.loadThroughAlphabetAnchor("F") { offset in
+            offsets.append(offset)
+            switch offset {
+            case 0: return .init(items: [a], nextStartIndex: 50)
+            case 50: return .init(items: [c], nextStartIndex: 100)
+            default: return .init(items: [f], nextStartIndex: 150)
+            }
+        }
+        XCTAssertEqual(offsets, [0, 50, 100])
+        XCTAssertEqual(anchor, 2)
+        XCTAssertEqual(model.items, [a, c, f])
+        XCTAssertEqual(model.nextStartIndex, 150)
+        let all = await model.loadThroughAlphabetAnchor("All") { _ in
+            XCTFail("All must only scroll to the retained first row")
+            return .init(items: [], nextStartIndex: nil)
+        }
+        XCTAssertEqual(all, 0)
+        XCTAssertEqual(model.items, [a, c, f])
+        let loaded = await model.loadThroughAlphabetAnchor("C") { _ in
+            XCTFail("A loaded letter must jump without a fetch")
+            return .init(items: [], nextStartIndex: nil)
+        }
+        XCTAssertEqual(loaded, 1)
+    }
+
+    @MainActor
+    func testAlphabetAnchorCancelAndAllRejectStalePageWithoutLosingEarlierRows() async {
+        let model = FoundationBrowseModel()
+        model.configureCatalogPagination()
+        let a = FoundationItem(id: "a", title: "Alpha", subtitle: "", kind: .track, duration: nil)
+        let stale = FoundationItem(
+            id: "f", title: "Foxtrot", subtitle: "", kind: .track, duration: nil)
+        await model.loadPending { _ in .init(items: [a], nextStartIndex: 50) }
+        let gate = FoundationAlphabetTestGate()
+        let old = Task {
+            await model.loadThroughAlphabetAnchor("F") { offset in
+                XCTAssertEqual(offset, 50)
+                await gate.suspend()
+                return .init(items: [stale], nextStartIndex: 100)
+            }
+        }
+        await gate.entered()
+        old.cancel()
+        model.request(.initial)
+        let all = await model.loadThroughAlphabetAnchor("All") { _ in
+            XCTFail("Retargeting All cannot request a replacement page")
+            return .init(items: [], nextStartIndex: nil)
+        }
+        await gate.release()
+        let cancelled = await old.value
+        XCTAssertNil(cancelled)
+        XCTAssertEqual(all, 0)
+        XCTAssertEqual(model.items, [a])
+        XCTAssertEqual(model.nextStartIndex, 50)
+        XCTAssertFalse(model.isLoading)
+    }
+
+    @MainActor
+    func testAlphabetAnchorMissingLetterStopsAtEndAndPreservesCompleteList() async {
+        let model = FoundationBrowseModel()
+        model.configureCatalogPagination()
+        let a = FoundationItem(id: "a", title: "Alpha", subtitle: "", kind: .track, duration: nil)
+        let g = FoundationItem(id: "g", title: "Golf", subtitle: "", kind: .track, duration: nil)
+        var requests = 0
+        let anchor = await model.loadThroughAlphabetAnchor("F") { offset in
+            requests += 1
+            return offset == 0
+                ? .init(items: [a], nextStartIndex: 50)
+                : .init(items: [g], nextStartIndex: nil)
+        }
+        XCTAssertEqual(requests, 2)
+        XCTAssertEqual(anchor, 1)
+        XCTAssertEqual(model.items, [a, g])
+        XCTAssertNil(model.nextStartIndex)
+    }
+
+    func testAlphabetAnchorUsesOptionalProviderSortNameAndDecodesOlderCaches() throws {
+        let a = FoundationItem(
+            id: "a", title: "The Zebra", subtitle: "", kind: .track,
+            duration: nil, sortName: "alpha")
+        let b = FoundationItem(id: "b", title: "Bravo", subtitle: "", kind: .track, duration: nil)
+        XCTAssertEqual(FoundationAlphabetAnchors.letter(for: a), "A")
+        XCTAssertEqual(FoundationAlphabetAnchors.index(for: "A", in: [a, b]), 0)
+        XCTAssertEqual(FoundationAlphabetAnchors.index(for: "B", in: [a, b]), 1)
+        let encoded = try JSONEncoder().encode(a)
+        XCTAssertEqual(
+            try JSONDecoder().decode(FoundationItem.self, from: encoded).sortName, "alpha")
+        var older = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        older.removeValue(forKey: "sortName")
+        let legacy = try JSONSerialization.data(withJSONObject: older)
+        XCTAssertNil(try JSONDecoder().decode(FoundationItem.self, from: legacy).sortName)
+    }
+
+    func testOrdinarySongsPageRequestsProviderSortNameForFullListAnchors() async throws {
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!
+                .queryItems!
+            XCTAssertEqual(query.first { $0.name == "fields" }?.value, "SortName")
+            XCTAssertNil(query.first { $0.name == "nameStartsWithOrGreater" })
+            return (
+                Data(
+                    #"{"Items":[{"Id":"00000000000000000000000000000001","Type":"Audio","Name":"The Zebra","SortName":"alpha"}],"StartIndex":0,"TotalRecordCount":1}"#
+                        .utf8), Self.response(request)
+            )
+        }
+        let page = try await library.songs(startIndex: 0)
+        XCTAssertEqual(page.items.first?.sortName, "alpha")
+        XCTAssertEqual(page.items.first?.title, "The Zebra")
+    }
+
     func testFunctionalAlphabetProbeUsesSortNameNotDisplayTitleAndHasNoVersionGate() async {
         let recorder = Recorder()
         let library = FoundationJellyfinLibrary(session: session) { request in

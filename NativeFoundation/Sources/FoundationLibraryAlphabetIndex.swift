@@ -8,7 +8,7 @@
         let id: String
         let title: String
         let availability: Availability
-        let rows: [FoundationAlphabetRow]
+        var rows: [FoundationAlphabetRow]
     }
 
     /// Occurrence identity must survive cell reuse without matching another canonical item.
@@ -24,9 +24,12 @@
         let indexTitles: [String]
         var columnCount = 1
         var isCoverGrid = false
+        var rowHeight: CGFloat = 72
         var allowsDemand = false
         var isRefreshing = false
         var nextPageIdentity: String?
+        var anchorRowID: String?
+        var anchorRevision = 0
         let onChooseLetter: (String) -> Void
         let onDemandNextPage: () -> Void
         let onRefresh: () -> Void
@@ -38,10 +41,10 @@
             let table = UITableView(frame: .zero, style: .plain)
             table.dataSource = context.coordinator
             table.delegate = context.coordinator
-            table.rowHeight = UITableView.automaticDimension
-            table.estimatedRowHeight = 72
+            table.rowHeight = isCoverGrid ? UITableView.automaticDimension : rowHeight
+            table.estimatedRowHeight = rowHeight
             table.sectionHeaderHeight = UITableView.automaticDimension
-            table.estimatedSectionHeaderHeight = 32
+            table.estimatedSectionHeaderHeight = 0
             table.sectionIndexMinimumDisplayRowCount = 0
             table.separatorStyle = isCoverGrid ? .none : .singleLine
             table.register(UITableViewCell.self, forCellReuseIdentifier: "catalog-row")
@@ -59,12 +62,15 @@
             let layoutChanged =
                 coordinator.parent.columnCount != columnCount
                 || coordinator.parent.isCoverGrid != isCoverGrid
+                || coordinator.parent.rowHeight != rowHeight
             if contextChanged || (!coordinator.parent.allowsDemand && allowsDemand) {
                 coordinator.lastDemandIdentity = nil
             }
             coordinator.parent = self
             // Snapshot changes are explicit; the table never discovers/fetches another letter.
             table.separatorStyle = isCoverGrid ? .none : .singleLine
+            table.rowHeight = isCoverGrid ? UITableView.automaticDimension : rowHeight
+            table.estimatedRowHeight = rowHeight
             if contextChanged || layoutChanged || coordinator.snapshot != sections
                 || coordinator.indexSnapshot != indexTitles
             {
@@ -72,6 +78,10 @@
                 coordinator.indexSnapshot = indexTitles
                 coordinator.geometryRevision += 1
                 table.reloadData()
+            }
+            if coordinator.appliedAnchorRevision != anchorRevision {
+                coordinator.appliedAnchorRevision = anchorRevision
+                coordinator.scrollToAnchor(in: table)
             }
             coordinator.checkVisibleDemandAfterLayout(in: table)
             if !isRefreshing { table.refreshControl?.endRefreshing() }
@@ -90,6 +100,7 @@
             var indexSnapshot: [String] = []
             var lastDemandIdentity: String?
             var geometryRevision = 0
+            var appliedAnchorRevision = 0
 
             init(parent: FoundationLibraryAlphabetIndex) { self.parent = parent }
 
@@ -146,10 +157,32 @@
             func tableView(
                 _ tableView: UITableView, sectionForSectionIndexTitle title: String, at index: Int
             ) -> Int {
-                // UIKit invokes this for a genuine native scrub/tap, even before rows arrive.
-                // Do not block its synchronous mapping callback on an asynchronous provider load.
+                // UIKit invokes each real tap/scrub synchronously; membership never changes.
                 parent.onChooseLetter(title)
-                return parent.sections.firstIndex { $0.id == title } ?? 0
+                if title == "All" { return 0 }
+                return parent.sections.firstIndex { $0.title == title } ?? 0
+            }
+
+            func scrollToAnchor(in table: UITableView) {
+                guard let target = parent.anchorRowID else { return }
+                let contextID = parent.contextID
+                let request = parent.anchorRevision
+                // Apply after UIKit's synchronous index callback; a newer scrub revokes this scroll.
+                DispatchQueue.main.async { [weak self, weak table] in
+                    guard let self, let table, table.delegate === self,
+                        self.parent.contextID == contextID, self.parent.anchorRevision == request,
+                        self.parent.anchorRowID == target
+                    else { return }
+                    for (section, value) in self.parent.sections.enumerated() {
+                        if let row = value.rows.firstIndex(where: { $0.id == target }) {
+                            table.layoutIfNeeded()
+                            table.scrollToRow(
+                                at: IndexPath(row: row, section: section),
+                                at: .top, animated: false)
+                            return
+                        }
+                    }
+                }
             }
 
             func tableView(

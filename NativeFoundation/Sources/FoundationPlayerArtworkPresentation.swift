@@ -117,6 +117,7 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
             }
         #endif
         @Published fileprivate(set) var isPlayerPresented = false
+        @Published fileprivate(set) var isSurfaceTransitioning = false
         var artwork: () -> Artwork? = { nil }
         var reduceMotion = false
         var reduceTransparency = false
@@ -210,15 +211,18 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
 
         fileprivate func mayBeginPan(at location: CGPoint, in view: UIView) -> Bool {
             guard allowsInteractiveDismissal, let host,
-                !host.hasPresentedContent, !host.isBeingPresented,
-                !host.isBeingDismissed, let anchor = expanded, let artView = anchor.view,
-                artView.window === view.window
+                !host.hasPresentedContent, !host.isBeingPresented, !host.isBeingDismissed
             else { return false }
-            // Lyrics, queue, scrub, nested sheet state is supplied by PlayerView.
-            // Only the artwork region starts this app-owned gesture; controls stay native.
-            return location.y <= view.safeAreaInsets.top + 64
-                || (!interactiveDismissalHeaderOnly
-                    && artView.convert(artView.bounds, to: view).contains(location))
+            // Header dismissal never depends on artwork attachment. Queue playback can
+            // replace the hidden artwork anchor while a different album is resolving.
+            if location.y <= view.safeAreaInsets.top + 64 { return true }
+            guard !interactiveDismissalHeaderOnly else { return false }
+            if let artView = expanded?.view, artView.window === view.window {
+                return artView.convert(artView.bounds, to: view).contains(location)
+            }
+            // Playback/artwork replacement must not turn the player into an undismissable
+            // surface. Control/scroll hit testing still excludes interactive chrome.
+            return location.y < view.bounds.height * 0.65
         }
 
         fileprivate func beginAnimation(
@@ -228,6 +232,7 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
             generation &+= 1
             activeAnimator = animator
             hiddenArtworkIdentity = identity
+            isSurfaceTransitioning = glass
             #if DEBUG && targetEnvironment(simulator)
                 if identity != nil { morphCount &+= 1 } else { fadeCount &+= 1 }
                 if glass { glassCount &+= 1 }
@@ -239,7 +244,13 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
         fileprivate func endAnimation(generation: UInt) {
             guard generation == self.generation else { return }
             hiddenArtworkIdentity = nil
+            isSurfaceTransitioning = false
             activeAnimator = nil
+        }
+
+        fileprivate func retireArtwork(generation: UInt) {
+            guard generation == self.generation else { return }
+            hiddenArtworkIdentity = nil
         }
 
         // Invoke on selection/art identity changes. A resolution upgrade with the
@@ -259,6 +270,7 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
             activeAnimator?.invalidate()
             activeAnimator = nil
             hiddenArtworkIdentity = nil
+            isSurfaceTransitioning = false
             self.host = nil
             isPlayerPresented = false
         }
@@ -269,6 +281,7 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
             activeAnimator = nil
             hiddenArtworkIdentity = nil
             isPlayerPresented = false
+            isSurfaceTransitioning = false
             compact = nil
             expanded = nil
             compactSurface = nil
@@ -308,6 +321,14 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
                 context.coordinator.unregister = nil
                 return
             }
+            #if DEBUG && targetEnvironment(simulator)
+                if role == .expanded,
+                    ProcessInfo.processInfo.arguments.contains("-fixtureDetachedPlayerArtwork")
+                {
+                    context.coordinator.unregister = nil
+                    return
+                }
+            #endif
             let token = context.coordinator.token
             model.register(
                 view, token: token, role: role, identity: identity,
@@ -373,22 +394,106 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
         }
     }
 
+    // Native navigation views can receive taps through a SwiftUI-only accessory.
+    // Keep SwiftUI's existing appearance/accessibility, with native controls owning
+    // the same three touch regions above the native navigation view.
+    struct FoundationMiniPlayerTouchLayer: UIViewRepresentable {
+        let showsNext: Bool
+        let allowsToggle: Bool
+        let allowsNext: Bool
+        let onOpen: @MainActor @Sendable () -> Void
+        let onToggle: @MainActor @Sendable () -> Void
+        let onNext: @MainActor @Sendable () -> Void
+
+        func makeUIView(context: Context) -> TouchView { TouchView() }
+        func updateUIView(_ view: TouchView, context: Context) {
+            view.onOpen = onOpen
+            view.onToggle = onToggle
+            view.onNext = onNext
+            view.showsNext = showsNext
+            view.toggle.isEnabled = allowsToggle
+            view.nextButton.isEnabled = allowsNext
+            view.semanticContentAttribute =
+                context.environment.layoutDirection == .rightToLeft
+                ? .forceRightToLeft : .forceLeftToRight
+            view.setNeedsLayout()
+        }
+        static func dismantleUIView(_ view: TouchView, coordinator: ()) {
+            view.onOpen = {}
+            view.onToggle = {}
+            view.onNext = {}
+        }
+
+        @MainActor final class TouchView: UIView {
+            let open = UIButton(type: .custom)
+            let toggle = UIButton(type: .custom)
+            let nextButton = UIButton(type: .custom)
+            var showsNext = true
+            var onOpen: @MainActor @Sendable () -> Void = {}
+            var onToggle: @MainActor @Sendable () -> Void = {}
+            var onNext: @MainActor @Sendable () -> Void = {}
+
+            init() {
+                super.init(frame: .zero)
+                backgroundColor = .clear
+                accessibilityElementsHidden = true
+                for button in [open, toggle, nextButton] { addSubview(button) }
+                open.addAction(UIAction { [weak self] _ in self?.onOpen() }, for: .touchUpInside)
+                toggle.addAction(
+                    UIAction { [weak self] _ in self?.onToggle() }, for: .touchUpInside)
+                nextButton.addAction(
+                    UIAction { [weak self] _ in self?.onNext() }, for: .touchUpInside)
+            }
+            required init?(coder: NSCoder) { fatalError("Not implemented") }
+            override func layoutSubviews() {
+                super.layoutSubviews()
+                let y = (bounds.height - 44) / 2
+                let toggleX = bounds.width - 54 - (showsNext ? 54 : 0)
+                var frames = [
+                    CGRect(x: 10, y: 0, width: max(0, toggleX - 20), height: bounds.height),
+                    CGRect(x: toggleX, y: y, width: 44, height: 44),
+                    CGRect(x: bounds.width - 54, y: y, width: 44, height: 44),
+                ]
+                if effectiveUserInterfaceLayoutDirection == .rightToLeft {
+                    frames = frames.map {
+                        CGRect(
+                            x: bounds.width - $0.maxX, y: $0.minY, width: $0.width,
+                            height: $0.height)
+                    }
+                }
+                for (button, frame) in zip([open, toggle, nextButton], frames) {
+                    button.frame = frame
+                }
+                nextButton.isHidden = !showsNext
+            }
+        }
+    }
+
     struct FoundationPlayerSurfaceAnchor: UIViewRepresentable {
         let model: FoundationPlayerArtworkPresentationModel
         let identity: String?
+        let reduceTransparency: Bool
         @MainActor final class Coordinator {
             let token = UUID()
             weak var model: FoundationPlayerArtworkPresentationModel?
+            var reduceTransparency: Bool?
         }
         func makeCoordinator() -> Coordinator { Coordinator() }
         func makeUIView(context: Context) -> UIView {
-            let view = UIView()
+            let view = UIVisualEffectView()
             view.isUserInteractionEnabled = false
             view.isAccessibilityElement = false
-            view.backgroundColor = .clear
+            view.cornerConfiguration = .capsule()
             return view
         }
         func updateUIView(_ view: UIView, context: Context) {
+            if context.coordinator.reduceTransparency != reduceTransparency,
+                let glass = view as? UIVisualEffectView
+            {
+                context.coordinator.reduceTransparency = reduceTransparency
+                glass.effect = reduceTransparency ? nil : UIGlassEffect(style: .regular)
+                glass.backgroundColor = reduceTransparency ? .systemBackground : .clear
+            }
             context.coordinator.model?.unregisterSurface(token: context.coordinator.token)
             context.coordinator.model = model
             if let identity {
@@ -403,13 +508,35 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
     private struct FoundationPlayerSurfaceRegistration: ViewModifier {
         let identity: String?
         @Environment(\.foundationPlayerArtworkPresentation) private var model
-        func body(content: Content) -> some View {
-            content.overlay {
-                if let model {
-                    FoundationPlayerSurfaceAnchor(model: model, identity: identity)
-                        .allowsHitTesting(false).accessibilityHidden(true)
-                }
+        @Environment(\.foundationReduceTransparency) private var reduceTransparency
+        @ViewBuilder func body(content: Content) -> some View {
+            if let model {
+                FoundationRegisteredPlayerSurface(
+                    model: model, identity: identity,
+                    reduceTransparency: reduceTransparency, content: content)
+            } else {
+                content.background(.regularMaterial, in: Capsule())
             }
+        }
+    }
+
+    private struct FoundationRegisteredPlayerSurface<Content: View>: View {
+        @ObservedObject var model: FoundationPlayerArtworkPresentationModel
+        let identity: String?
+        let reduceTransparency: Bool
+        let content: Content
+        var body: some View {
+            content.background {
+                FoundationPlayerSurfaceAnchor(
+                    model: model, identity: identity, reduceTransparency: reduceTransparency
+                )
+                .allowsHitTesting(false).accessibilityHidden(true)
+            }
+            // Hide the owned source as its matching material takes over the presentation.
+            // Keep its geometry attached for interrupted and reverse transitions.
+            .opacity(model.isSurfaceTransitioning ? 0 : 1)
+            .allowsHitTesting(!model.isSurfaceTransitioning)
+            .accessibilityHidden(model.isSurfaceTransitioning)
         }
     }
 
@@ -426,6 +553,7 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
         let model: FoundationPlayerArtworkPresentationModel
         let content: AnyView
         let inheritedEnvironment: EnvironmentValues
+        let contentContextID: String
         let artwork: () -> FoundationPlayerArtworkPresentationModel.Artwork?
         let reduceMotion: Bool
         let reduceTransparency: Bool
@@ -447,10 +575,11 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
             var playerEnvironment = inheritedEnvironment
             playerEnvironment.foundationPlayerArtworkPresentation = model
             playerEnvironment.foundationClosePlayer = { [weak model] in model?.dismiss() }
-            controller.playerContent = AnyView(
-                content
-                    .environment(\.self, playerEnvironment)
-                    .environmentObject(model))
+            controller.updatePlayerContent(
+                AnyView(
+                    content
+                        .environment(\.self, playerEnvironment)
+                        .environmentObject(model)), contextID: contentContextID)
             controller.onDismissed = { binding.wrappedValue = false }
             controller.queueReconcile()
         }
@@ -471,7 +600,8 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
         }
         private var requestGeneration: UInt = 0
         private var dismissalRequestGeneration: UInt?
-        var playerContent = AnyView(EmptyView())
+        private var playerContent = AnyView(EmptyView())
+        private var contentContextID: String?
         private var playerHost: FoundationPlayerArtworkHost?
         private var tornDown = false
         private var reconcileScheduled = false
@@ -495,6 +625,16 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
             reconcile()
         }
 
+        func updatePlayerContent(_ content: AnyView, contextID: String) {
+            playerContent = content
+            guard contentContextID != contextID else { return }
+            contentContextID = contextID
+            // PlayerView observes playback itself. Replacing the hosting root on every
+            // playback tick tears through native gestures, menus and artwork registration.
+            // Rehost only when inherited presentation context actually changes.
+            playerHost?.rootView = content
+        }
+
         func queueReconcile() {
             guard !reconcileScheduled, !tornDown else { return }
             reconcileScheduled = true
@@ -509,7 +649,6 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
             guard !tornDown else { return }
             model.artworkSelectionChanged()
             if let host = playerHost {
-                host.rootView = playerContent
                 if !requestedPresentation, !host.isBeingDismissed,
                     !host.isBeingPresented, !host.hasPresentedContent
                 {
@@ -559,6 +698,10 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
                     host?.dismiss(animated: false)
                     return
                 }
+                // Refresh the first root once after UIKit establishes fullscreen layout.
+                // Later playback updates are observed in place rather than rehosting it.
+                host?.rootView = self.playerContent
+                UIAccessibility.post(notification: .screenChanged, argument: nil)
                 // Close requests received during presentation must be applied now.
                 self.reconcile()
             }
@@ -600,6 +743,12 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
         private var animator: FoundationPlayerArtworkAnimator?
         private lazy var pan = UIPanGestureRecognizer(
             target: self, action: #selector(handlePan(_:)))
+        private lazy var edgePan: UIScreenEdgePanGestureRecognizer = {
+            let gesture = UIScreenEdgePanGestureRecognizer(
+                target: self, action: #selector(handlePan(_:)))
+            gesture.edges = .left
+            return gesture
+        }()
 
         init(rootView: AnyView, model: FoundationPlayerArtworkPresentationModel) {
             self.model = model
@@ -632,6 +781,9 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
             pan.delegate = self
             pan.maximumNumberOfTouches = 1
             view.addGestureRecognizer(pan)
+            edgePan.delegate = self
+            edgePan.maximumNumberOfTouches = 1
+            view.addGestureRecognizer(edgePan)
         }
 
         override func viewDidAppear(_ animated: Bool) {
@@ -652,6 +804,12 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
         }
 
         func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+            if gestureRecognizer === edgePan {
+                let velocity = edgePan.velocity(in: view)
+                return model.allowsInteractiveDismissal && !hasPresentedContent
+                    && !isBeingPresented && !isBeingDismissed
+                    && velocity.x > 0 && velocity.x > abs(velocity.y)
+            }
             guard gestureRecognizer === pan,
                 model.mayBeginPan(at: pan.location(in: view), in: view)
             else { return false }
@@ -663,6 +821,7 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
             _ gestureRecognizer: UIGestureRecognizer,
             shouldReceive touch: UITouch
         ) -> Bool {
+            if gestureRecognizer === edgePan { return true }
             // The grabber is also a button. Let a downward pan begin on that
             // header while keeping queue rows, sliders and other controls native.
             if touch.location(in: view).y <= view.safeAreaInsets.top + 64 { return true }
@@ -686,8 +845,10 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
                 interaction = nil
                 return
             }
-            let distance = max(1, view.bounds.height * 0.55)
-            let progress = min(1, max(0, gesture.translation(in: view).y / distance))
+            let isEdge = gesture === edgePan
+            let distance = max(1, isEdge ? view.bounds.width : view.bounds.height * 0.55)
+            let translation = gesture.translation(in: view)
+            let progress = min(1, max(0, (isEdge ? translation.x : translation.y) / distance))
             switch gesture.state {
             case .began:
                 let interaction = UIPercentDrivenInteractiveTransition()
@@ -697,7 +858,8 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
             case .changed:
                 interaction?.update(progress)
             case .ended:
-                if progress > 0.35 || gesture.velocity(in: view).y > 900 {
+                let velocity = gesture.velocity(in: view)
+                if progress > 0.35 || (isEdge ? velocity.x : velocity.y) > 900 {
                     interaction?.finish()
                 } else {
                     interaction?.cancel()
@@ -797,6 +959,9 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
         private var snapshotIdentity: String?
         private var snapshotImageID: UUID?
         private var generation: UInt?
+        #if DEBUG && targetEnvironment(simulator)
+            private weak var fixtureResume: UIButton?
+        #endif
 
         init(model: FoundationPlayerArtworkPresentationModel, presenting: Bool) {
             self.model = model
@@ -805,7 +970,14 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
 
         func transitionDuration(using context: (any UIViewControllerContextTransitioning)?)
             -> TimeInterval
-        { model?.reduceMotion == true ? 0.18 : 0.42 }
+        {
+            #if DEBUG && targetEnvironment(simulator)
+                if ProcessInfo.processInfo.arguments.contains("-fixtureHoldPlayerGlass") {
+                    return 1.2
+                }
+            #endif
+            return model?.reduceMotion == true ? 0.18 : 0.42
+        }
 
         func animateTransition(using context: any UIViewControllerContextTransitioning) {
             interruptibleAnimator(using: context).startAnimation()
@@ -854,8 +1026,10 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
                         with: UITraitCollection(userInterfaceStyle: .dark))
                 } else {
                     let effect = UIVisualEffectView(effect: UIGlassEffect(style: .regular))
-                    effect.cornerConfiguration = .uniformCorners(
-                        radius: .fixed(presenting ? surfaceRect.height / 2 : 0))
+                    // Native corners follow the changing bounds throughout the morph.
+                    // Assigning a destination corner configuration inside the animation
+                    // snaps it immediately, producing a square card mid-transition.
+                    effect.cornerConfiguration = .capsule(maximumRadius: surfaceRect.height / 2)
                     effect.isUserInteractionEnabled = false
                     effect.isAccessibilityElement = false
                     surface = effect
@@ -866,7 +1040,9 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
                 surface.clipsToBounds = nativeGlass == nil
                 surface.layer.cornerCurve = .continuous
                 surface.frame = presenting ? surfaceRect : container.bounds
-                surface.layer.cornerRadius = presenting ? surfaceRect.height / 2 : 0
+                if nativeGlass == nil {
+                    surface.layer.cornerRadius = presenting ? surfaceRect.height / 2 : 0
+                }
                 // Effect views keep alpha 1. Native material is absent at both endpoints.
                 if nativeGlass == nil { surface.alpha = 0 }
                 container.addSubview(surface)
@@ -911,12 +1087,12 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
                 duration: transitionDuration(using: context),
                 dampingRatio: 0.9)
             animator.addAnimations { [presenting] in
-                playerView.alpha = presenting ? 1 : 0
+                if glass == nil { playerView.alpha = presenting ? 1 : 0 }
                 if let surfaceRect, let glass {
                     glass.frame = presenting ? container.bounds : surfaceRect
-                    glass.layer.cornerRadius = presenting ? 0 : surfaceRect.height / 2
-                    nativeGlass?.cornerConfiguration = .uniformCorners(
-                        radius: .fixed(presenting ? 0 : surfaceRect.height / 2))
+                    if nativeGlass == nil {
+                        glass.layer.cornerRadius = presenting ? 0 : surfaceRect.height / 2
+                    }
                     reveal.frame =
                         presenting
                         ? playerView.bounds : container.convert(surfaceRect, to: playerView)
@@ -937,19 +1113,25 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
                 // this surface cannot replace the native material in one visible frame.
                 // Animate native material through effect, not effect-view alpha.
                 let duration = animator.duration
-                animator.addAnimations {
+                animator.addAnimations { [presenting] in
                     UIView.animateKeyframes(
                         withDuration: duration, delay: 0,
                         options: [.calculationModeLinear]
                     ) {
-                        UIView.addKeyframe(withRelativeStartTime: 0, relativeDuration: 0.2) {
+                        UIView.addKeyframe(
+                            withRelativeStartTime: presenting ? 0.35 : 0,
+                            relativeDuration: 0.65
+                        ) {
+                            playerView.alpha = presenting ? 1 : 0
+                        }
+                        UIView.addKeyframe(withRelativeStartTime: 0, relativeDuration: 0.15) {
                             if let nativeGlass {
                                 nativeGlass.effect = UIGlassEffect(style: .regular)
                             } else {
                                 glass.alpha = 1
                             }
                         }
-                        UIView.addKeyframe(withRelativeStartTime: 0.8, relativeDuration: 0.2) {
+                        UIView.addKeyframe(withRelativeStartTime: 0.75, relativeDuration: 0.25) {
                             if let nativeGlass {
                                 nativeGlass.effect = nil
                             } else {
@@ -968,6 +1150,9 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
                     playerView.mask = originalMask
                 }
                 glass?.removeFromSuperview()
+                #if DEBUG && targetEnvironment(simulator)
+                    self?.fixtureResume?.removeFromSuperview()
+                #endif
                 if let self, let generation = self.generation {
                     #if DEBUG && targetEnvironment(simulator)
                         self.model?.recordCompletion(cancelled: !success)
@@ -982,22 +1167,60 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
                 DispatchQueue.main.async { [weak imageView] in imageView?.removeFromSuperview() }
             }
             propertyAnimator = animator
+            #if DEBUG && targetEnvironment(simulator)
+                if presenting, glass != nil,
+                    ProcessInfo.processInfo.arguments.contains("-fixtureHoldPlayerGlass")
+                {
+                    // Freeze real rendered geometry for one synthetic screenshot check.
+                    // Production transitions never expose this control or pause.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) { [weak self] in
+                        guard let self, self.propertyAnimator === animator,
+                            animator.isRunning
+                        else { return }
+                        animator.pauseAnimation()
+                        let button = UIButton(type: .system)
+                        button.setTitle("Finish glass transition", for: .normal)
+                        button.backgroundColor = .systemBackground
+                        button.frame = CGRect(x: 16, y: 64, width: 220, height: 44)
+                        button.addAction(
+                            UIAction { [weak button] _ in
+                                button?.removeFromSuperview()
+                                animator.continueAnimation(
+                                    withTimingParameters: nil, durationFactor: 1)
+                            }, for: .touchUpInside)
+                        container.addSubview(button)
+                        self.fixtureResume = button
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+                            guard self?.propertyAnimator === animator else { return }
+                            button.removeFromSuperview()
+                            if animator.state == .active, !animator.isRunning {
+                                animator.continueAnimation(
+                                    withTimingParameters: nil, durationFactor: 1)
+                            }
+                        }
+                    }
+                }
+            #endif
             return animator
         }
 
         func retireSnapshotIfIdentityChanged() {
-            guard let snapshot, let artwork = model?.artwork(),
+            guard let snapshot else { return }
+            guard let artwork = model?.artwork(),
                 artwork.identity == snapshotIdentity, artwork.imageID == snapshotImageID
             else {
-                snapshot?.isHidden = true
-                if let generation { model?.endAnimation(generation: generation) }
+                snapshot.isHidden = true
+                // The glass has its own lifetime. A skip retires only stale artwork;
+                // completion/cancellation still owns source-glass restoration.
+                if let generation { model?.retireArtwork(generation: generation) }
                 return
             }
-            // Same image identity/revision upgrade: retain the transition CGImage.
-            _ = snapshot
         }
 
         func invalidate() {
+            #if DEBUG && targetEnvironment(simulator)
+                fixtureResume?.removeFromSuperview()
+            #endif
             snapshot?.removeFromSuperview()
             snapshot = nil
             model = nil

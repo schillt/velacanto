@@ -586,6 +586,7 @@ private struct FoundationQueueView: View {
                 .environment(\.editMode, .constant(.active))
             #endif
             .listStyle(.plain)
+            .environment(\.colorScheme, .dark)
             .scrollContentBackground(.hidden)
             .modifier(FoundationQueueFixtureIdentifier(kind: "list", entryID: nil))
             .clipped()
@@ -631,16 +632,9 @@ private struct FoundationQueueView: View {
             .accessibilityValue(entry.id == player.selectedEntryID ? "Current track" : "")
             .accessibilityAddTraits(entry.id == player.selectedEntryID ? .isSelected : [])
             .modifier(FoundationQueueFixtureIdentifier(kind: "select", entryID: entry.id))
-            Menu {
-                menu(entry)
-            } label: {
-                Image(systemName: "ellipsis").frame(width: 44, height: 44)
-            }
-            .menuStyle(.borderlessButton)
-            .accessibilityLabel("Queue actions for " + entry.item.title)
-            .modifier(FoundationQueueFixtureIdentifier(kind: "actions", entryID: entry.id))
         }
         .frame(minHeight: 44)
+        .contextMenu { menu(entry) }
         .listRowInsets(EdgeInsets(top: 8, leading: 24, bottom: 8, trailing: 24))
         .listRowBackground(Color.clear)
         .id(entry.id)
@@ -741,6 +735,11 @@ private struct FoundationPlayerPresentation<PlayerContent: View>: ViewModifier {
                             .environment(\.colorScheme, colorScheme)
                             .environment(\.scenePhase, scenePhase)),
                     inheritedEnvironment: inheritedEnvironment,
+                    contentContextID: [
+                        String(describing: dynamicTypeSize), String(describing: colorScheme),
+                        String(describing: scenePhase), String(reduceMotion),
+                        String(reduceTransparency),
+                    ].joined(separator: ":"),
                     artwork: { [weak player, weak artwork = currentArtwork] in
                         guard let player, let artwork,
                             let item = player.queue.first(where: {
