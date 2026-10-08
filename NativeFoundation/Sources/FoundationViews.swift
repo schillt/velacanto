@@ -1614,7 +1614,6 @@ struct FoundationLoadingPlaceholder: View {
     var rowSpacing = 16.0
     @Environment(\.foundationReduceMotion) private var reduceMotion
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
-    @State private var bright = false
 
     var body: some View {
         shapes
@@ -1628,18 +1627,16 @@ struct FoundationLoadingPlaceholder: View {
                             startPoint: .leading, endPoint: .trailing
                         )
                         .frame(width: geometry.size.width * 0.55)
-                        .animation(
-                            .linear(duration: 1.4).repeatForever(autoreverses: false)
-                        ) { content in
+                        .phaseAnimator([false, true]) { content, bright in
                             content.offset(
                                 x: bright ? geometry.size.width : -geometry.size.width * 0.55)
+                        } animation: { bright in
+                            bright ? .linear(duration: 1.4) : nil
                         }
                     }
                     .mask(shapes.transaction { $0.animation = nil })
                 }
             }
-            .onAppear { bright = true }
-            .onDisappear { bright = false }
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("Loading")
             .accessibilityIdentifier("loading-placeholder-\(layout)")

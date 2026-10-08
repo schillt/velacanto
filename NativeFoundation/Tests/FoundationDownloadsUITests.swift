@@ -1,3 +1,4 @@
+import UIKit
 import XCTest
 
 @MainActor
@@ -1181,6 +1182,37 @@ final class FoundationDownloadsUITests: XCTestCase {
         let frame = skeleton.frame
         XCTAssertGreaterThan(frame.width, 140)
         XCTAssertGreaterThan(frame.height, 140)
+        // Compare only the visible skeleton interior, excluding clocks, chrome and controls.
+        let textureFrame = frame.intersection(uncoveredViewport(scroll, in: app))
+            .insetBy(dx: 4, dy: 4)
+        func skeletonTexture() -> Data? {
+            guard let screen = XCUIScreen.main.screenshot().image.cgImage else { return nil }
+            let scaleX = CGFloat(screen.width) / app.frame.width
+            let scaleY = CGFloat(screen.height) / app.frame.height
+            let pixels = CGRect(
+                x: textureFrame.minX * scaleX, y: textureFrame.minY * scaleY,
+                width: textureFrame.width * scaleX, height: textureFrame.height * scaleY
+            ).integral
+            guard let crop = screen.cropping(to: pixels) else { return nil }
+            var bytes = Data(count: crop.width * crop.height * 4)
+            let rendered = bytes.withUnsafeMutableBytes { buffer -> Bool in
+                guard
+                    let context = CGContext(
+                        data: buffer.baseAddress, width: crop.width, height: crop.height,
+                        bitsPerComponent: 8, bytesPerRow: crop.width * 4,
+                        space: CGColorSpaceCreateDeviceRGB(),
+                        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+                else { return false }
+                context.draw(
+                    crop,
+                    in: CGRect(x: 0, y: 0, width: CGFloat(crop.width), height: CGFloat(crop.height))
+                )
+                return true
+            }
+            return rendered ? bytes : nil
+        }
+        let firstTexture = skeletonTexture()
+        XCTAssertNotNil(firstTexture)
         capture("Artist initial fixed album grid shimmer", in: app)
         let phaseStart = Date()
         let oneCycle = expectation(
@@ -1190,6 +1222,10 @@ final class FoundationDownloadsUITests: XCTestCase {
         XCTAssertEqual(skeleton.frame.minY, frame.minY, accuracy: 1)
         XCTAssertEqual(skeleton.frame.width, frame.width, accuracy: 1)
         XCTAssertEqual(skeleton.frame.height, frame.height, accuracy: 1)
+        let secondTexture = skeletonTexture()
+        XCTAssertNotNil(secondTexture)
+        XCTAssertNotEqual(
+            firstTexture, secondTexture, "Default shimmer must change skeleton pixels")
         capture("Artist shimmer second phase same reserved geometry", in: app)
         tapNativeChrome(app.buttons["Release artist albums"], in: app)
         let gone = expectation(
@@ -1283,6 +1319,13 @@ final class FoundationDownloadsUITests: XCTestCase {
                 let first = app.buttons["View Paged " + kind + " 0"]
                 XCTAssertTrue(first.waitForExistence(timeout: 10))
                 let firstFrame = first.frame
+                let firstRowFrames = (0..<6).compactMap { index -> CGRect? in
+                    let cover = app.buttons["View Paged " + kind + " " + String(index)]
+                    guard cover.exists else { return nil }
+                    let frame = cover.frame
+                    return abs(frame.minY - firstFrame.minY) <= 2 ? frame : nil
+                }
+                XCTAssertFalse(firstRowFrames.isEmpty)
                 if largeText {
                     XCTAssertGreaterThanOrEqual(firstFrame.width, 240)
                 } else {
@@ -1293,12 +1336,25 @@ final class FoundationDownloadsUITests: XCTestCase {
                 }
                 capture(
                     "Canonical Library cover grid " + kind
-                        + (largeText ? " large text" : " two columns"), in: app)
+                        + (largeText ? " large text" : " regular columns"), in: app)
                 let last = app.buttons["View Paged " + kind + " 6"]
                 reveal(last, in: app)
-                XCTAssertEqual(last.frame.minX, firstFrame.minX, accuracy: 2)
+                XCTAssertEqual(
+                    last.frame.minX, firstRowFrames[6 % firstRowFrames.count].minX, accuracy: 2)
                 XCTAssertFalse(app.buttons["View Paged " + kind + " 7"].exists)
                 capture("Partial last cover grid row " + kind, in: app)
+                // The known first cover is above this last row and may be absent from lazy AX.
+                for _ in 0..<32 {
+                    if first.exists && first.frame.width > 0 && first.frame.height > 0
+                        && first.isHittable && tapCenterIsVisible(first, in: app)
+                    {
+                        break
+                    }
+                    scrollContent(in: app, upward: false)
+                }
+                XCTAssertTrue(
+                    first.exists && first.frame.width > 0 && first.frame.height > 0
+                        && first.isHittable && tapCenterIsVisible(first, in: app))
                 tapVisible(first, in: app)
                 let detail = app.descendants(matching: .any)[
                     "collection-detail-" + kind + "-paged-" + kind + "-0"]
