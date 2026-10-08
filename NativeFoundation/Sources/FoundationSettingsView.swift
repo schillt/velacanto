@@ -1,5 +1,13 @@
 import SwiftUI
 
+#if DEBUG
+    #if os(iOS)
+        import UIKit
+    #else
+        import AppKit
+    #endif
+#endif
+
 /// Presentation only: reuse the profile already loaded by the visible header.
 struct FoundationSettingsView: View {
     let name: String
@@ -9,6 +17,9 @@ struct FoundationSettingsView: View {
     var librarySelection: FoundationMusicLibrarySelection? = nil
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var preferences: FoundationPlaybackPreferences
+    #if DEBUG
+        @State private var diagnosticSnapshot: FoundationJournalSnapshot?
+    #endif
 
     private static let versionLabel: String = {
         let version =
@@ -72,7 +83,9 @@ struct FoundationSettingsView: View {
                     #endif
                 }
                 #if DEBUG
-                    FoundationJournalSection()
+                    FoundationJournalSection { text in
+                        diagnosticSnapshot = FoundationJournalSnapshot(text: text)
+                    }
                 #else
                     Section {
                         Text("Version and build information appear below.")
@@ -112,6 +125,13 @@ struct FoundationSettingsView: View {
                 }
             }
         }
+        #if DEBUG
+            .sheet(item: $diagnosticSnapshot) { snapshot in
+                FoundationJournalSnapshotViewer(text: snapshot.text)
+                .accessibilityElement(children: .contain)
+                .accessibilityAddTraits(.isModal)
+            }
+        #endif
         #if os(macOS)
             .frame(minWidth: 420, idealWidth: 480, minHeight: 520)
         #endif
@@ -495,9 +515,18 @@ private struct FoundationLicensesView: View {
 }
 
 #if DEBUG
+    private struct FoundationJournalSnapshot: Identifiable {
+        let id = UUID()
+        let text: String
+    }
+
     private struct FoundationJournalSection: View {
+        let openSnapshot: (String) -> Void
         @State private var recording = true
         @State private var text = ""
+        private var hasSnapshot: Bool {
+            !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
         var body: some View {
             Section {
                 Toggle("Record local diagnostics", isOn: $recording)
@@ -505,10 +534,10 @@ private struct FoundationLicensesView: View {
                         FoundationJournal.shared.setEnabled(value)
                     }
                 Button("Refresh snapshot") { text = FoundationJournal.shared.snapshot() }
-                ShareLink("Share diagnostic snapshot", item: text)
-                DisclosureGroup("Diagnostic snapshot") {
-                    Text(verbatim: text).font(.caption.monospaced()).textSelection(.enabled)
-                }
+                ShareLink("Share diagnostic snapshot", item: text).disabled(!hasSnapshot)
+                Button("Diagnostic snapshot") { openSnapshot(text) }
+                    .disabled(!hasSnapshot)
+                    .accessibilityIdentifier("diagnostic-snapshot-open")
             } header: {
                 Text("Diagnostics")
             } footer: {
@@ -520,4 +549,83 @@ private struct FoundationLicensesView: View {
             }
         }
     }
+
+    private struct FoundationJournalSnapshotViewer: View {
+        let text: String
+        @Environment(\.dismiss) private var dismiss
+
+        var body: some View {
+            NavigationStack {
+                FoundationJournalTextView(text: text)
+                    .navigationTitle("Diagnostic snapshot")
+                    #if os(iOS)
+                        .navigationBarTitleDisplayMode(.inline)
+                    #endif
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("Done") { dismiss() }
+                        }
+                    }
+            }
+            #if os(macOS)
+                .frame(minWidth: 520, idealWidth: 720, minHeight: 420, idealHeight: 600)
+            #endif
+        }
+    }
+    // Native text containers lay out the visible viewport instead of measuring
+    // the entire bounded journal as one SwiftUI Text before the sheet appears.
+    #if os(iOS)
+        private struct FoundationJournalTextView: UIViewRepresentable {
+            let text: String
+
+            func makeUIView(context: Context) -> UITextView {
+                let view = UITextView(usingTextLayoutManager: true)
+                view.isEditable = false
+                view.isSelectable = true
+                view.alwaysBounceVertical = true
+                view.backgroundColor = .clear
+                view.textColor = .label
+                view.font = .monospacedSystemFont(
+                    ofSize: UIFont.preferredFont(forTextStyle: .caption1).pointSize,
+                    weight: .regular)
+                view.adjustsFontForContentSizeCategory = true
+                view.textContainerInset = UIEdgeInsets(top: 16, left: 16, bottom: 16, right: 16)
+                view.isAccessibilityElement = true
+                view.accessibilityLabel = "Diagnostic snapshot text"
+                view.accessibilityIdentifier = "diagnostic-snapshot-content"
+                view.text = text
+                return view
+            }
+
+            func updateUIView(_ view: UITextView, context: Context) {
+                if view.text != text { view.text = text }
+            }
+        }
+    #else
+        private struct FoundationJournalTextView: NSViewRepresentable {
+            let text: String
+
+            func makeNSView(context: Context) -> NSScrollView {
+                let scrollView = NSTextView.scrollableTextView()
+                guard let view = scrollView.documentView as? NSTextView else {
+                    return scrollView
+                }
+                view.isEditable = false
+                view.isSelectable = true
+                view.drawsBackground = false
+                view.textColor = .labelColor
+                view.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+                view.textContainerInset = NSSize(width: 16, height: 16)
+                view.setAccessibilityIdentifier("diagnostic-snapshot-content")
+                view.string = text
+                scrollView.drawsBackground = false
+                return scrollView
+            }
+
+            func updateNSView(_ scrollView: NSScrollView, context: Context) {
+                guard let view = scrollView.documentView as? NSTextView else { return }
+                if view.string != text { view.string = text }
+            }
+        }
+    #endif
 #endif

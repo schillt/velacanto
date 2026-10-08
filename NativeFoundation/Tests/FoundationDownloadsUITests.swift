@@ -1520,6 +1520,16 @@ final class FoundationDownloadsUITests: XCTestCase {
         XCTAssertTrue(app.buttons["Refresh snapshot"].exists)
         XCTAssertTrue(app.buttons["Share diagnostic snapshot"].exists)
         XCTAssertFalse(app.buttons["Local diagnostic snapshot"].exists)
+        let snapshotButton = app.buttons["diagnostic-snapshot-open"]
+        XCTAssertTrue(snapshotButton.exists)
+        if snapshotButton.isEnabled {
+            tapVisible(snapshotButton, in: app, context: profileForm)
+            XCTAssertTrue(
+                app.textViews["diagnostic-snapshot-content"].firstMatch.waitForExistence(
+                    timeout: 5))
+            tapNativeChrome(app.navigationBars["Diagnostic snapshot"].buttons["Done"], in: app)
+            XCTAssertTrue(profileForm.waitForExistence(timeout: 5))
+        }
         capture("Diagnostic options directly on Profile", in: app)
         tapVisible(app.buttons["Open-source licenses"], in: app, context: profileForm)
         XCTAssertTrue(app.navigationBars["Open-source licenses"].waitForExistence(timeout: 5))
@@ -2366,7 +2376,32 @@ final class FoundationDownloadsUITests: XCTestCase {
 
     private func dismissNowPlaying(_ app: XCUIApplication) {
         dragExpandedPlayerArtwork(app, distance: app.frame.height * 0.5)
-        XCTAssertTrue(app.buttons["Show Now Playing"].waitForExistence(timeout: 5))
+        let restored = expectation(
+            for: NSPredicate(format: "exists == true AND hittable == true"),
+            evaluatedWith: app.buttons["Show Now Playing"])
+        wait(for: [restored], timeout: 5)
+    }
+
+    func testNativeZoomBoundedPerformance() {
+        continueAfterFailure = false
+        let app = launch(
+            productionShell: true, canonicalDownloadState: "full", artworkCache: true,
+            longPlayback: true)
+        selectTab("Library", in: app)
+        openCanonicalCollection("album", fromDownloads: false, in: app)
+        tapVisible(app.buttons["collection-track-0"], in: app)
+        let options = XCTMeasureOptions()
+        options.iterationCount = 3
+        measure(
+            metrics: [
+                XCTClockMetric(), XCTCPUMetric(application: app), XCTMemoryMetric(application: app),
+            ],
+            options: options
+        ) {
+            openNowPlaying(app)
+            XCTAssertTrue(app.descendants(matching: .any)["foundation-now-playing"].exists)
+            dismissNowPlaying(app)
+        }
     }
 
     func testMiniPlayerNativeZoomReverseAndCancelledDismissalKeepsPlayback() {

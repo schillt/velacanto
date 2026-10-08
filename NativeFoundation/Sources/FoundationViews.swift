@@ -156,6 +156,19 @@ struct FoundationLibraryView: View {
             favorites.request(.refresh)
             homeFavorites.request(.refresh)
         }
+        .onChange(of: albums.items, initial: true) { _, items in
+            if !albums.isRetainedSnapshot { actions.observeFavorites(in: items) }
+        }
+        .onChange(of: favorites.items, initial: true) { _, items in
+            if !favorites.isRetainedSnapshot {
+                actions.observeFavorites(in: items, knownFavorites: true)
+            }
+        }
+        .onChange(of: homeFavorites.items, initial: true) { _, items in
+            if !homeFavorites.isRetainedSnapshot {
+                actions.observeFavorites(in: items, knownFavorites: true)
+            }
+        }
         .foundationPlayerCover(
             isPresented: $showingPlayer, player: player, sourceNamespace: playerTransition,
             onDismiss: playerDidDismiss
@@ -731,6 +744,11 @@ struct FoundationCatalogView: View {
             // Root owns invalidation; this visible consumer only schedules the load.
             // Main-actor change callbacks finish before the asynchronous task begins.
             if isFavorites, isActive, isVisible { revision += 1 }
+        }
+        .onChange(of: model.items, initial: true) { _, items in
+            if !model.isRetainedSnapshot {
+                actions.observeFavorites(in: items, knownFavorites: isFavorites)
+            }
         }
         .foundationCollectionDestination(
             item: $openedItem, library: library, player: player, isActive: isActive
@@ -1317,6 +1335,17 @@ struct FoundationTrackList: View {
         .accessibilityIdentifier(
             collection.map { "collection-detail-\($0.kind)-\($0.id)" } ?? "track-list"
         )
+        .task(
+            id:
+                "favorite-\(library.catalogScopeID)-\(collection?.id ?? "")-\(isActive && isVisible)-\(connectivity.localOnly)-\(revision)"
+        ) {
+            guard isActive, isVisible, !connectivity.localOnly, let collection,
+                collection.kind == .album
+            else { return }
+            await actions.resolveFavorite(for: collection) { [library, collection] in
+                try await library.itemDetails(for: collection)
+            }
+        }
         .toolbar {
             if !relatedItemSheet { collectionActions }
         }

@@ -32,8 +32,8 @@ struct FoundationCatalogArtwork: View {
         ZStack {
             RoundedRectangle(cornerRadius: isHero ? 0 : (item.kind == .artist ? size / 2 : 6)).fill(
                 .quaternary)
-            if let image {
-                image.resizable().scaledToFill()
+            if let displayImage {
+                displayImage.resizable().scaledToFill()
                     .scaleEffect(item.kind == .genre ? 2 : 1, anchor: .topLeading)
             } else {
                 Image(systemName: item.kind == .artist ? "music.mic" : "music.note")
@@ -47,7 +47,7 @@ struct FoundationCatalogArtwork: View {
         .accessibilityHidden(true)
         .task(id: currentResultRevision) {
             if case .current(let result) = source {
-                installImage(result?.image)
+                installImage(result?.image, precomputedColor: result?.tint)
             }
         }
         .task(id: artworkTaskIdentity) {
@@ -81,6 +81,15 @@ struct FoundationCatalogArtwork: View {
         }
     }
 
+    // Current artwork is already decoded before presentation. Use it in the first
+    // render rather than waiting for the task to copy it into view state.
+    private var displayImage: Image? {
+        if case .current(let result) = source {
+            return result.map { Image(decorative: $0.image, scale: 1) }
+        }
+        return image
+    }
+
     private func loadCatalogArtwork() async {
         do {
             let result = try await library.artworkResult(
@@ -99,7 +108,9 @@ struct FoundationCatalogArtwork: View {
             "\(isActive)-\(key.identity)-\(key.pixels)-\(downloads.retainedArtworkIdentity(for: item) ?? "")-\(connectivity.localOnly)"
     }
 
-    private func installImage(_ cgImage: CGImage?, displayImage: Image? = nil) {
+    private func installImage(
+        _ cgImage: CGImage?, displayImage: Image? = nil, precomputedColor: Color? = nil
+    ) {
         image = displayImage ?? cgImage.map { Image(decorative: $0, scale: 1) }
         loadedImage?.wrappedValue = image
         guard let cgImage else {
@@ -136,9 +147,19 @@ struct FoundationCatalogArtwork: View {
             }
         }
         guard sampledColor != nil else { return }
+        if let precomputedColor {
+            sampledColor?.wrappedValue = precomputedColor
+            return
+        }
+        if let color = Self.sampledColor(for: cgImage, isGenre: item.kind == .genre) {
+            sampledColor?.wrappedValue = color
+        }
+    }
+
+    nonisolated static func sampledColor(for cgImage: CGImage, isGenre: Bool = false) -> Color? {
         // Genre artwork displays the top-left tile of the supplied image.
         let source =
-            item.kind == .genre
+            isGenre
             ? cgImage.cropping(
                 to: CGRect(
                     x: 0, y: 0, width: max(1, cgImage.width / 2),
@@ -183,11 +204,10 @@ struct FoundationCatalogArtwork: View {
             }
             return Color(red: channels[0], green: channels[1], blue: channels[2])
         }
-        if let color { sampledColor?.wrappedValue = color }
+        return color
     }
 
 }
-
 /// Project a supplied album reference for track covers without a metadata lookup.
 extension FoundationItem {
     /// Stable across rendition upgrades and missing revision metadata; no provider lookup.

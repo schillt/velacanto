@@ -133,6 +133,7 @@ protocol FoundationLibrary: Sendable {
 
     func lyrics(for item: FoundationItem) async throws -> FoundationLyrics?
     func overview(for item: FoundationItem) async throws -> String?
+    func itemDetails(for item: FoundationItem) async throws -> FoundationItem?
     func appearances(artistID: String, startIndex: Int) async throws -> FoundationPage
     func similarItems(for item: FoundationItem) async throws -> FoundationPage
     func mostPlayedAlbums() async throws -> FoundationPage
@@ -232,6 +233,7 @@ extension FoundationLibrary {
         throw FoundationLibraryError.unavailable
     }
     func overview(for item: FoundationItem) async throws -> String? { nil }
+    func itemDetails(for item: FoundationItem) async throws -> FoundationItem? { nil }
     func tracks(artistID: String, startIndex: Int) async throws -> FoundationPage {
         throw FoundationLibraryError.unavailable
     }
@@ -724,6 +726,16 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
             Paths.getItem(itemID: item.id, userID: session.userID))
         guard detail.id == item.id else { throw FoundationLibraryError.invalidResponse }
         return detail.overview?.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    func itemDetails(for item: FoundationItem) async throws -> FoundationItem? {
+        guard Self.validID(item.id), item.kind == .album else {
+            throw FoundationLibraryError.invalidResponse
+        }
+        let detail: BaseItemDto = try await send(
+            Paths.getItem(itemID: item.id, userID: session.userID))
+        guard detail.id == item.id else { throw FoundationLibraryError.invalidResponse }
+        return try mappedItems([detail], kinds: [item.kind]).first
     }
 
     func artists(startIndex: Int = 0) async throws -> FoundationPage {

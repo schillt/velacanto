@@ -74,6 +74,7 @@ final class FoundationLibraryActions: ObservableObject {
     @Published private(set) var pins: [FoundationItem] = []
     @Published private(set) var favoriteRevision: UInt = 0
     @Published private var favorites: [Key: Bool] = [:]
+    @Published private var observedFavorites: [Key: Bool] = [:]
     @Published private var pending: Set<Key> = []
     @Published private var errors: [Key: String] = [:]
     @Published private(set) var pinErrorMessage: String?
@@ -83,6 +84,7 @@ final class FoundationLibraryActions: ObservableObject {
     private let write: (String, Data) throws -> Void
     private let mutateFavorite: @Sendable (FoundationItem, Bool) async throws -> Void
     private var tasks: [Key: Task<Void, Error>] = [:]
+    private var favoriteReads: [UUID: Task<FoundationItem?, Error>] = [:]
     private var active = true
     private(set) var queueTask: Task<Void, Never>?
     private var playbackPreparation: AnyCancellable?
@@ -132,7 +134,51 @@ final class FoundationLibraryActions: ObservableObject {
     }
 
     func favoriteState(for item: FoundationItem, initial: Bool?) -> Bool? {
-        favorites[Key(item)] ?? initial
+        favorites[Key(item)] ?? observedFavorites[Key(item)] ?? initial
+    }
+
+    /// Server observations never override successful mutations from this account session.
+    /// Membership in a favorites response is itself positive favorite metadata.
+    func observeFavorites(in items: [FoundationItem], knownFavorites: Bool = false) {
+        guard active, !Task.isCancelled else { return }
+        var updated = observedFavorites
+        for item in items where item.kind != .genre {
+            let key = Key(item)
+            guard favorites[key] == nil,
+                let value = knownFavorites ? true : item.isFavorite,
+                updated[key] != value
+            else { continue }
+            updated[key] = value
+        }
+        if updated != observedFavorites { observedFavorites = updated }
+    }
+
+    /// A visible metadata-light destination owns one cancellable detail read.
+    func resolveFavorite(
+        for item: FoundationItem,
+        using load: @escaping @Sendable () async throws -> FoundationItem?
+    ) async {
+        guard active, !Task.isCancelled, item.kind == .album,
+            favoriteState(for: item, initial: item.isFavorite) == nil
+        else { return }
+        let id = UUID()
+        let operation = Task { try await load() }
+        favoriteReads[id] = operation
+        defer { favoriteReads[id] = nil }
+        do {
+            let detail = try await withTaskCancellationHandler {
+                try await operation.value
+            } onCancel: {
+                operation.cancel()
+            }
+            guard active, !Task.isCancelled, !operation.isCancelled,
+                let detail, detail.id == item.id, detail.kind == item.kind,
+                favoriteState(for: item, initial: item.isFavorite) == nil
+            else { return }
+            observeFavorites(in: [detail])
+        } catch {
+            // Unknown remains unknown; returning to the destination can retry explicitly.
+        }
     }
 
     func isPending(_ item: FoundationItem) -> Bool { pending.contains(Key(item)) }
@@ -259,5 +305,6 @@ final class FoundationLibraryActions: ObservableObject {
         active = false
         cancelQueueAddition()
         for task in tasks.values { task.cancel() }
+        for task in favoriteReads.values { task.cancel() }
     }
 }

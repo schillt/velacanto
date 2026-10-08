@@ -36,26 +36,38 @@
         func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
 
         func makeUIView(context: Context) -> UITableView {
+            makeTable(coordinator: context.coordinator)
+        }
+
+        func makeTable(coordinator: Coordinator) -> UITableView {
             let table = UITableView(frame: .zero, style: .plain)
-            table.dataSource = context.coordinator
-            table.delegate = context.coordinator
+            table.dataSource = coordinator
+            table.delegate = coordinator
             table.rowHeight = isCoverGrid ? UITableView.automaticDimension : rowHeight
-            table.estimatedRowHeight = rowHeight
+            // Songs have fixed metrics. Estimates and hosted self-sizing can move a distant
+            // anchor again when previously offscreen cells settle after the rail is released.
+            table.estimatedRowHeight = isCoverGrid ? rowHeight : 0
+            table.selfSizingInvalidation = isCoverGrid ? .enabled : .disabled
             table.sectionHeaderHeight = 28
-            table.estimatedSectionHeaderHeight = 28
+            table.estimatedSectionHeaderHeight = 0
+            table.sectionFooterHeight = 0
+            table.estimatedSectionFooterHeight = 0
             table.sectionHeaderTopPadding = 0
             table.separatorStyle = isCoverGrid ? .none : .singleLine
             table.register(UITableViewCell.self, forCellReuseIdentifier: "catalog-row")
             let refresh = UIRefreshControl()
             refresh.addTarget(
-                context.coordinator, action: #selector(Coordinator.refreshRequested),
+                coordinator, action: #selector(Coordinator.refreshRequested),
                 for: .valueChanged)
             table.refreshControl = refresh
             return table
         }
 
         func updateUIView(_ table: UITableView, context: Context) {
-            let coordinator = context.coordinator
+            updateTable(table, coordinator: context.coordinator)
+        }
+
+        func updateTable(_ table: UITableView, coordinator: Coordinator) {
             let contextChanged = coordinator.parent.contextID != contextID
             let layoutChanged =
                 coordinator.parent.columnCount != columnCount
@@ -64,15 +76,23 @@
             if contextChanged || (!coordinator.parent.allowsDemand && allowsDemand) {
                 coordinator.lastDemandIdentity = nil
             }
+            let visibleAnchor = contextChanged ? nil : coordinator.visibleAnchor(in: table)
             coordinator.parent = self
             // Snapshot changes are explicit; the table never discovers/fetches another letter.
             table.separatorStyle = isCoverGrid ? .none : .singleLine
             table.rowHeight = isCoverGrid ? UITableView.automaticDimension : rowHeight
-            table.estimatedRowHeight = rowHeight
+            // Songs have fixed metrics. Estimates and hosted self-sizing can move a distant
+            // anchor again when previously offscreen cells settle after the rail is released.
+            table.estimatedRowHeight = isCoverGrid ? rowHeight : 0
+            table.selfSizingInvalidation = isCoverGrid ? .enabled : .disabled
             if contextChanged || layoutChanged || coordinator.snapshot != sections {
                 coordinator.snapshot = sections
                 coordinator.geometryRevision += 1
                 table.reloadData()
+                table.layoutIfNeeded()
+                if coordinator.appliedAnchorRevision == anchorRevision, let visibleAnchor {
+                    coordinator.restoreVisibleAnchor(visibleAnchor, in: table)
+                }
             }
             if coordinator.appliedAnchorRevision != anchorRevision {
                 coordinator.appliedAnchorRevision = anchorRevision
@@ -143,6 +163,51 @@
                 header.accessibilityIdentifier =
                     "library-letter-section-" + parent.sections[section].title
                 return header
+            }
+
+            struct VisibleAnchor {
+                let rowID: String
+                let offsetFromTop: CGFloat
+            }
+
+            func visibleAnchor(in table: UITableView) -> VisibleAnchor? {
+                // Ignore the previous row hidden behind the pinned section header.
+                let visibleTop =
+                    table.contentOffset.y + table.adjustedContentInset.top
+                    + table.sectionHeaderHeight
+                guard
+                    let path = table.indexPathsForVisibleRows?.sorted().first(where: {
+                        table.rectForRow(at: $0).maxY > visibleTop
+                    }), parent.sections.indices.contains(path.section)
+                else { return nil }
+                let rows = parent.sections[path.section].rows
+                let index = path.row * max(1, parent.columnCount)
+                guard rows.indices.contains(index) else { return nil }
+                return VisibleAnchor(
+                    rowID: rows[index].id,
+                    offsetFromTop: table.rectForRow(at: path).minY - table.contentOffset.y)
+            }
+
+            func restoreVisibleAnchor(_ anchor: VisibleAnchor, in table: UITableView) {
+                // New pages can sort before the visible section. Preserve the row and its
+                // on-screen position rather than leaving the same offset on different songs.
+                for (section, value) in parent.sections.enumerated() {
+                    guard let row = value.rows.firstIndex(where: { $0.id == anchor.rowID }) else {
+                        continue
+                    }
+                    let path = IndexPath(row: row / max(1, parent.columnCount), section: section)
+                    let minimum = -table.adjustedContentInset.top
+                    let maximum = max(
+                        minimum,
+                        table.contentSize.height - table.bounds.height
+                            + table.adjustedContentInset.bottom)
+                    let offset = min(
+                        maximum,
+                        max(minimum, table.rectForRow(at: path).minY - anchor.offsetFromTop))
+                    table.setContentOffset(
+                        CGPoint(x: table.contentOffset.x, y: offset), animated: false)
+                    return
+                }
             }
 
             func scrollToAnchor(in table: UITableView) {

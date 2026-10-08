@@ -1,5 +1,9 @@
 import SwiftUI
 
+#if os(iOS)
+    import UIKit
+#endif
+
 /// Optional item text owns one visible-page read; presenting it adds no work.
 struct FoundationOverviewSection: View {
     @EnvironmentObject private var connectivity: FoundationConnectivity
@@ -48,7 +52,8 @@ struct FoundationOverviewSection: View {
                     }
                     #if os(iOS)
                         .presentationDetents([.medium, .large])
-                        .presentationDragIndicator(.visible)
+                        .presentationDragIndicator(.hidden)
+                        .foundationIdleGrabber(showsOverlay: true)
                         .accessibilityAction(.escape) { showingOverview = false }
                     #else
                         .frame(minWidth: 360, idealWidth: 480, minHeight: 320, idealHeight: 520)
@@ -226,3 +231,187 @@ struct FoundationArtistMostPlayed: View {
 
     }
 }
+
+/// A visual hint only; native sheet and player gestures keep ownership of dismissal.
+private struct FoundationIdleGrabber: ViewModifier {
+    let showsOverlay: Bool
+    @Environment(\.foundationReduceMotion) private var reduceMotion
+    @State private var visible = true
+    @State private var activity = 0
+    @State private var touching = false
+    #if os(macOS)
+        @GestureState private var dragging = false
+    #endif
+
+    func body(content: Content) -> some View {
+        content
+            .environment(\.foundationGrabberVisible, visible)
+            .overlay(alignment: .top) {
+                if showsOverlay {
+                    Capsule().fill(.secondary.opacity(0.65))
+                        .frame(width: 36, height: 5)
+                        .padding(.top, 8)
+                        .opacity(visible ? 1 : 0)
+                        .allowsHitTesting(false)
+                        .accessibilityHidden(true)
+                }
+            }
+            #if os(iOS)
+                .background {
+                    FoundationGrabberTouchObserver { active in
+                        touching = active
+                        activity += 1
+                    }
+                    .allowsHitTesting(false)
+                }
+            #else
+                .simultaneousGesture(TapGesture().onEnded { activity += 1 })
+                .simultaneousGesture(
+                    DragGesture(minimumDistance: 10)
+                        .updating($dragging) { _, state, _ in state = true }
+                )
+                .onChange(of: dragging) { _, active in
+                    touching = active
+                    activity += 1
+                }
+                .onHover { hovering in
+                    if hovering { activity += 1 }
+                }
+            #endif
+            .task(id: activity) {
+                visible = true
+                guard !touching else { return }
+                do {
+                    try await Task.sleep(for: .seconds(3))
+                    try Task.checkCancellation()
+                    withAnimation(reduceMotion ? nil : .easeOut(duration: 0.35)) {
+                        visible = false
+                    }
+                } catch {}
+            }
+    }
+}
+
+private struct FoundationGrabberVisibleKey: EnvironmentKey {
+    static let defaultValue = true
+}
+
+extension EnvironmentValues {
+    fileprivate var foundationGrabberVisible: Bool {
+        get { self[FoundationGrabberVisibleKey.self] }
+        set { self[FoundationGrabberVisibleKey.self] = newValue }
+    }
+}
+
+private struct FoundationGrabberVisibility: ViewModifier {
+    @Environment(\.foundationGrabberVisible) private var visible
+    func body(content: Content) -> some View {
+        content.opacity(visible ? 1 : 0)
+    }
+}
+
+extension View {
+    func foundationIdleGrabber(showsOverlay: Bool = false) -> some View {
+        modifier(FoundationIdleGrabber(showsOverlay: showsOverlay))
+    }
+
+    func foundationGrabberVisibility() -> some View {
+        modifier(FoundationGrabberVisibility())
+    }
+}
+
+#if os(iOS)
+    /// Observes activity without winning, cancelling, or delaying any app gesture.
+    private struct FoundationGrabberTouchObserver: UIViewRepresentable {
+        let interaction: (Bool) -> Void
+
+        func makeUIView(context: Context) -> ObserverView {
+            let view = ObserverView()
+            view.recognizer.interaction = interaction
+            return view
+        }
+
+        func updateUIView(_ view: ObserverView, context: Context) {
+            view.recognizer.interaction = interaction
+        }
+
+        static func dismantleUIView(_ view: ObserverView, coordinator: ()) {
+            view.recognizer.interaction = nil
+            view.recognizer.view?.removeGestureRecognizer(view.recognizer)
+        }
+
+        final class ObserverView: UIView {
+            let recognizer = ActivityRecognizer()
+
+            override func didMoveToWindow() {
+                super.didMoveToWindow()
+                guard recognizer.view !== window else { return }
+                recognizer.view?.removeGestureRecognizer(recognizer)
+                window?.addGestureRecognizer(recognizer)
+            }
+        }
+
+        final class ActivityRecognizer: UIGestureRecognizer, UIGestureRecognizerDelegate {
+            var interaction: ((Bool) -> Void)?
+            private var activeTouches: Set<UITouch> = []
+
+            init() {
+                super.init(target: nil, action: nil)
+                cancelsTouchesInView = false
+                delaysTouchesBegan = false
+                delaysTouchesEnded = false
+                delegate = self
+            }
+
+            override func canPrevent(_ preventedGestureRecognizer: UIGestureRecognizer) -> Bool {
+                false
+            }
+
+            override func canBePrevented(by preventingGestureRecognizer: UIGestureRecognizer)
+                -> Bool
+            {
+                false
+            }
+
+            func gestureRecognizer(
+                _ gestureRecognizer: UIGestureRecognizer,
+                shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
+            ) -> Bool {
+                true
+            }
+
+            override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
+                let wasEmpty = activeTouches.isEmpty
+                activeTouches.formUnion(touches)
+                state = wasEmpty ? .began : .changed
+                if wasEmpty { interaction?(true) }
+            }
+
+            override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) {
+                state = .changed
+            }
+
+            override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) {
+                finish(touches)
+            }
+
+            override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent) {
+                finish(touches)
+            }
+
+            private func finish(_ touches: Set<UITouch>) {
+                activeTouches.subtract(touches)
+                if activeTouches.isEmpty {
+                    interaction?(false)
+                    state = .ended
+                }
+            }
+
+            override func reset() {
+                super.reset()
+                if !activeTouches.isEmpty { interaction?(false) }
+                activeTouches.removeAll()
+            }
+        }
+    }
+#endif

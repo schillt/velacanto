@@ -39,9 +39,14 @@ struct FoundationPlayerView: View {
     // The first transition frame uses the same already-decoded cover as the bar.
     // Palette sampling may publish later, without an initial uncolored background.
     private var backgroundArtwork: Image? {
-        if let artworkFill { return artworkFill }
-        guard let current, let result = currentArtwork.result(for: current) else { return nil }
-        return Image(decorative: result.image, scale: 1)
+        if let current, let result = currentArtwork.result(for: current) {
+            return Image(decorative: result.image, scale: 1)
+        }
+        return artworkFill
+    }
+
+    private var backgroundTint: Color {
+        current.flatMap { currentArtwork.result(for: $0)?.tint } ?? artworkTint
     }
 
     private var album: FoundationItem? { current?.relatedAlbum }
@@ -170,7 +175,7 @@ struct FoundationPlayerView: View {
                 .background {
                     GeometryReader { background in
                         ZStack {
-                            artworkTint
+                            backgroundTint
                             if let backgroundArtwork {
                                 backgroundArtwork.resizable().scaledToFill().blur(radius: 28)
                                     .frame(
@@ -181,8 +186,8 @@ struct FoundationPlayerView: View {
                                 stops: [
                                     .init(color: .clear, location: 0),
                                     .init(color: .black.opacity(0.12), location: 0.50),
-                                    .init(color: artworkTint.opacity(0.8), location: 0.80),
-                                    .init(color: artworkTint, location: 1),
+                                    .init(color: backgroundTint.opacity(0.8), location: 0.80),
+                                    .init(color: backgroundTint, location: 1),
                                 ], startPoint: .top, endPoint: .bottom)
                             Color.black.opacity(contentMode == .artwork ? 0 : 0.6)
                                 .allowsHitTesting(false)
@@ -213,6 +218,7 @@ struct FoundationPlayerView: View {
                 Button(action: dismissPlayer) {
                     Capsule().fill(.white.opacity(0.65))
                         .frame(width: 36, height: 5)
+                        .foundationGrabberVisibility()
                         .frame(width: 80, height: 32, alignment: .top)
                         .padding(.top, 8)
                         .contentShape(Rectangle())
@@ -221,6 +227,7 @@ struct FoundationPlayerView: View {
                 .accessibilityLabel("Collapse Now Playing")
             #endif
         }
+        .foundationIdleGrabber(showsOverlay: false)
         .sheet(item: $relatedItem) { item in
             FoundationPlayerRelatedSheet(item: item, library: library, player: player)
                 .environment(\.foundationShowsDownloadBadges, true)
@@ -817,7 +824,8 @@ private struct FoundationPlayerRelatedSheet: View {
             .accessibilityAction(named: "Expand details") { detent = .large }
             .accessibilityAction(named: "Collapse details") { detent = .medium }
             .presentationDetents([.medium, .large], selection: $detent)
-            .presentationDragIndicator(.visible)
+            .presentationDragIndicator(.hidden)
+            .foundationIdleGrabber(showsOverlay: true)
             .presentationContentInteraction(.resizes)
             .preferredColorScheme(.dark)
             #if os(macOS)

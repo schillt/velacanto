@@ -2,6 +2,7 @@ import Combine
 import Foundation
 import ImageIO
 import NowPlaying
+import SwiftUI
 
 /// One account-owned result serves the current player and system artwork requests.
 @MainActor
@@ -12,6 +13,7 @@ final class FoundationCurrentArtwork: ObservableObject {
         let revision = UUID()
         let data: Data
         let image: CGImage
+        let tint: Color
     }
     private struct Key: Equatable {
         let account: UUID
@@ -158,7 +160,9 @@ final class FoundationCurrentArtwork: ObservableObject {
                     kCGImageSourceShouldCacheImmediately: true,
                 ] as CFDictionary)
         else { return nil }
-        return Result(id: id, data: data, image: image)
+        return Result(
+            id: id, data: data, image: image,
+            tint: FoundationCatalogArtwork.sampledColor(for: image) ?? Color(white: 0.12))
     }
 
     func result(for item: FoundationItem) -> Result? {

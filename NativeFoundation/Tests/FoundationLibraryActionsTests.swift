@@ -216,6 +216,113 @@ final class FoundationLibraryActionsTests: XCTestCase {
         XCTAssertEqual(calls, 1)
     }
 
+    func testFavoriteMembershipHydratesRelatedAlbumWithoutOverwritingMutation() async {
+        let actions = FoundationLibraryActions(
+            sourceScope: "source", read: { _ in nil }, write: { _, _ in },
+            mutateFavorite: { _, _ in })
+        XCTAssertNil(actions.favoriteState(for: album, initial: nil))
+        actions.observeFavorites(in: [album], knownFavorites: true)
+        XCTAssertEqual(actions.favoriteState(for: album, initial: nil), true)
+        XCTAssertEqual(actions.favoriteRevision, 0)
+        await actions.setFavorite(for: album, isFavorite: false)
+        actions.observeFavorites(in: [album], knownFavorites: true)
+        var stale = album
+        stale.isFavorite = true
+        actions.observeFavorites(in: [stale])
+        XCTAssertEqual(actions.favoriteState(for: album, initial: true), false)
+        XCTAssertEqual(actions.favoriteRevision, 1)
+    }
+
+    func testAlbumDetailHydrationPreservesUnknownAndExplicitFalse() async {
+        for state: Bool? in [nil, false, true] {
+            let actions = FoundationLibraryActions(
+                sourceScope: "source", read: { _ in nil }, write: { _, _ in },
+                mutateFavorite: { _, _ in })
+            var detail = album
+            detail.isFavorite = state
+            let response = detail
+            await actions.resolveFavorite(for: album) { response }
+            XCTAssertEqual(actions.favoriteState(for: album, initial: nil), state)
+            XCTAssertEqual(actions.favoriteRevision, 0)
+        }
+    }
+
+    func testLateAlbumDetailCannotOverwriteMutationOrNewObservation() async {
+        for mutates in [false, true] {
+            let gate = MutationGate()
+            let actions = FoundationLibraryActions(
+                sourceScope: "source", read: { _ in nil }, write: { _, _ in },
+                mutateFavorite: { _, _ in })
+            var detail = album
+            detail.isFavorite = false
+            let response = detail
+            let item = album
+            let task = Task {
+                await actions.resolveFavorite(for: item) {
+                    await gate.hold()
+                    return response
+                }
+            }
+            await gate.waitUntilStarted()
+            if mutates {
+                await actions.setFavorite(for: album, isFavorite: true)
+            } else {
+                actions.observeFavorites(in: [album], knownFavorites: true)
+            }
+            await gate.release()
+            await task.value
+            XCTAssertEqual(actions.favoriteState(for: album, initial: nil), true)
+        }
+    }
+
+    func testAlbumDetailCancellationAndAccountInvalidationDiscardLateMetadata() async {
+        for invalidates in [false, true] {
+            let gate = MutationGate()
+            let actions = FoundationLibraryActions(
+                sourceScope: "source", read: { _ in nil }, write: { _, _ in },
+                mutateFavorite: { _, _ in })
+            var detail = album
+            detail.isFavorite = true
+            let response = detail
+            let item = album
+            let task = Task {
+                await actions.resolveFavorite(for: item) {
+                    await gate.hold()
+                    return response
+                }
+            }
+            await gate.waitUntilStarted()
+            if invalidates { actions.invalidate() } else { task.cancel() }
+            await gate.release()
+            await task.value
+            actions.observeFavorites(in: [])
+            XCTAssertNil(actions.favoriteState(for: album, initial: nil))
+        }
+    }
+
+    func testAlbumDetailReadUsesCanonicalIDAndPreservesFavoriteMetadata() async throws {
+        let item = FoundationItem(
+            id: "00000000000000000000000000000002", title: "Album", subtitle: "",
+            kind: .album, duration: nil)
+        let session = FoundationSession(
+            serverURL: URL(string: "https://example.invalid")!, accessToken: "synthetic",
+            userID: "00000000000000000000000000000001", deviceID: "synthetic")
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            XCTAssertTrue(request.url!.path.hasSuffix("/Items/" + item.id))
+            let body = """
+                {"Id":"00000000000000000000000000000002","Type":"MusicAlbum","UserData":{"Key":"synthetic-key","IsFavorite":true}}
+                """
+            return (
+                Data(body.utf8),
+                HTTPURLResponse(
+                    url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            )
+        }
+        let result = try await library.itemDetails(for: item)
+        XCTAssertEqual(result?.id, item.id)
+        XCTAssertEqual(result?.isFavorite, true)
+    }
+
     func testPendingFavoriteDeduplicatesAndPublishesOnlyAfterSuccess() async {
         let gate = MutationGate()
         let actions = FoundationLibraryActions(

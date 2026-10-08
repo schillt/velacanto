@@ -138,6 +138,12 @@ struct FoundationLibraryIndexView: View {
             isVisible = true
             if openedItem == nil { usesNativeAlphabet = wantsNativeAlphabet }
         }
+        .onChange(of: model.items, initial: true) { _, items in
+            if !model.isRetainedSnapshot { actions.observeFavorites(in: items) }
+        }
+        .onChange(of: searchModel.items, initial: true) { _, items in
+            if !searchModel.isRetainedSnapshot { actions.observeFavorites(in: items) }
+        }
         .onChange(of: wantsNativeAlphabet) { _, desired in
             // Keep the actual matched source hierarchy in place until navigation returns.
             guard openedItem == nil else { return }
@@ -705,9 +711,7 @@ enum FoundationAlphabetRailGeometry {
                         Text(scrubbedLetter)
                             .font(.system(size: 28, weight: .semibold, design: .rounded))
                             .frame(width: 54, height: 54)
-                            .background(.regularMaterial, in: Circle())
-                            .overlay(Circle().strokeBorder(.primary.opacity(0.12)))
-                            .shadow(color: .black.opacity(0.12), radius: 8, y: 3)
+                            .glassEffect(.regular, in: Circle())
                             .offset(
                                 x: -64,
                                 y: FoundationAlphabetRailGeometry.bubbleTop(

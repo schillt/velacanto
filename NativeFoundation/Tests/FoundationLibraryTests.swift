@@ -3,6 +3,11 @@ import XCTest
 
 @testable import VelacantoFoundation
 
+#if os(iOS)
+    import SwiftUI
+    import UIKit
+#endif
+
 final class FoundationLibraryTests: XCTestCase {
 
     @MainActor
@@ -1828,3 +1833,84 @@ private actor FoundationAlphabetTestGate {
         blocked = nil
     }
 }
+
+#if os(iOS)
+    @MainActor
+    final class FoundationAlphabetTableLayoutTests: XCTestCase {
+        private func section(_ letter: String, count: Int) -> FoundationAlphabetSection {
+            .init(
+                id: letter, title: letter, availability: .loaded,
+                rows: (0..<count).map { index in
+                    let id = letter + "-" + String(index)
+                    return .init(
+                        id: id,
+                        item: FoundationItem(
+                            id: id, title: id, subtitle: "", kind: .track, duration: nil))
+                })
+        }
+
+        private func view(_ sections: [FoundationAlphabetSection])
+            -> FoundationLibraryAlphabetIndex<Text>
+        {
+            FoundationLibraryAlphabetIndex(
+                contextID: "synthetic-layout", sections: sections,
+                onDemandNextPage: {}, onRefresh: {}, row: { Text($0.item.title) })
+        }
+
+        func testDistantRailLandingSurvivesHostedLayoutAndSortedPageReload() async throws {
+            let initial = view([
+                section("A", count: 30), section("M", count: 30), section("Z", count: 30),
+            ])
+            let coordinator = initial.makeCoordinator()
+            let table = initial.makeTable(coordinator: coordinator)
+            let controller = UIViewController()
+            guard
+                let scene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }
+                ).first
+            else {
+                throw XCTSkip("A connected host scene is required for native table layout")
+            }
+            let window = UIWindow(windowScene: scene)
+            window.frame = CGRect(x: 0, y: 0, width: 390, height: 700)
+            window.rootViewController = controller
+            table.frame = window.bounds
+            controller.view.addSubview(table)
+            window.isHidden = false
+            defer { window.isHidden = true }
+            initial.updateTable(table, coordinator: coordinator)
+            XCTAssertEqual(table.estimatedRowHeight, 0)
+            XCTAssertEqual(table.estimatedSectionHeaderHeight, 0)
+            XCTAssertEqual(table.selfSizingInvalidation, .disabled)
+
+            var jump = initial
+            jump.anchorRowID = "M-0"
+            jump.anchorRevision = 1
+            jump.updateTable(table, coordinator: coordinator)
+            // Let the real deferred rail callback run, then force subsequent hosted layout.
+            await withCheckedContinuation { continuation in
+                DispatchQueue.main.async { continuation.resume() }
+            }
+            table.layoutIfNeeded()
+            let landed = try XCTUnwrap(coordinator.visibleAnchor(in: table))
+            XCTAssertEqual(landed.rowID, "M-0")
+            let landedOffset = table.contentOffset.y
+            table.setNeedsLayout()
+            table.layoutIfNeeded()
+            XCTAssertEqual(table.contentOffset.y, landedOffset, accuracy: 0.5)
+
+            var appended = view([
+                section("A", count: 30), section("B", count: 25),
+                section("M", count: 30), section("Z", count: 30),
+            ])
+            appended.anchorRowID = "M-0"
+            appended.anchorRevision = 1
+            appended.updateTable(table, coordinator: coordinator)
+            table.setNeedsLayout()
+            table.layoutIfNeeded()
+            let retained = try XCTUnwrap(coordinator.visibleAnchor(in: table))
+            XCTAssertEqual(retained.rowID, landed.rowID)
+            XCTAssertEqual(retained.offsetFromTop, landed.offsetFromTop, accuracy: 0.5)
+            XCTAssertGreaterThan(table.contentOffset.y, landedOffset)
+        }
+    }
+#endif
