@@ -1405,19 +1405,25 @@ final class FoundationDownloadsUITests: XCTestCase {
             playlistPresentation: true)
         selectTab("Library", in: app)
         openCanonicalCollection("album", fromDownloads: false, in: app)
-        tapNativeChrome(app.buttons["More actions"], in: app)
+        let detail = app.descendants(matching: .any)["collection-detail-album-album"]
+        let toolbar = app.buttons["More actions"]
+        let detailFrame = detail.frame
+        let toolbarFrame = toolbar.frame
+        XCTAssertGreaterThan(detailFrame.width, 0)
+        XCTAssertGreaterThan(detailFrame.height, 0)
+        XCTAssertGreaterThan(toolbarFrame.width, 0)
+        XCTAssertGreaterThan(toolbarFrame.height, 0)
+        tapNativeChrome(toolbar, in: app)
         let baselineAdd = app.buttons["Add to Playlist"]
         XCTAssertTrue(baselineAdd.waitForExistence(timeout: 5))
         XCTAssertTrue(baselineAdd.isEnabled)
         let baselineAddEnabled = baselineAdd.isEnabled
-        let detail = app.descendants(matching: .any)["collection-detail-album-album"]
-        let toolbar = app.buttons["More actions"]
         let menuRemoval = app.buttons["Remove Downloads"]
         let point = CGPoint(
-            x: detail.frame.minX + detail.frame.width * 0.06,
-            y: toolbar.frame.maxY + 32)
-        XCTAssertTrue(app.frame.contains(point) && detail.frame.contains(point))
-        XCTAssertFalse(toolbar.frame.insetBy(dx: -12, dy: -12).contains(point))
+            x: detailFrame.minX + detailFrame.width * 0.06,
+            y: toolbarFrame.maxY + 32)
+        XCTAssertTrue(app.frame.contains(point) && detailFrame.contains(point))
+        XCTAssertFalse(toolbarFrame.insetBy(dx: -12, dy: -12).contains(point))
         XCTAssertFalse(baselineAdd.frame.insetBy(dx: -12, dy: -12).contains(point))
         if menuRemoval.exists {
             XCTAssertFalse(menuRemoval.frame.insetBy(dx: -12, dy: -12).contains(point))
