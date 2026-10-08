@@ -940,10 +940,14 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
                     }
                 }
             }
-            animator.addCompletion { [weak self, weak imageView, weak glass] _ in
+            animator.addCompletion { [presenting, weak self, weak imageView, weak glass] _ in
                 let success = !context.transitionWasCancelled
-                playerView.alpha = 1
-                playerView.mask = originalMask
+                // Restore a retained player only. A successful dismissal must remain
+                // hidden and clipped until UIKit removes the outgoing container.
+                if presenting || !success {
+                    playerView.alpha = 1
+                    playerView.mask = originalMask
+                }
                 glass?.removeFromSuperview()
                 if let self, let generation = self.generation {
                     #if DEBUG && targetEnvironment(simulator)
