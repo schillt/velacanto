@@ -200,13 +200,59 @@ final class FoundationLibraryTests: XCTestCase {
         XCTAssertNil(FoundationAlphabetRailGeometry.index(y: 0, height: 0, count: 27))
     }
 
-    func testAlphabetAnchorUsesOptionalProviderSortNameAndDecodesOlderCaches() throws {
+    @MainActor
+    func testSongsSortActualTitlesAcrossShuffledPagesAndKeepQueueAligned() async {
+        let model = FoundationBrowseModel()
+        model.configureCatalogPagination(sortByTitle: true)
+        let z = FoundationItem(
+            id: "z", title: "Zulu", subtitle: "", kind: .track, duration: nil, sortName: "001 album"
+        )
+        let a = FoundationItem(
+            id: "a", title: "Alpha", subtitle: "", kind: .track, duration: nil,
+            sortName: "999 album")
+        let number = FoundationItem(
+            id: "n", title: "42", subtitle: "", kind: .track, duration: nil, sortName: "z")
+        let accented = FoundationItem(
+            id: "e", title: "Écho", subtitle: "", kind: .track, duration: nil, sortName: "0")
+        var offsets: [Int] = []
+        await model.loadCompleteCatalog { offset in
+            offsets.append(offset)
+            return offset == 0
+                ? .init(items: [z, accented], nextStartIndex: 2)
+                : .init(items: [a, number], nextStartIndex: nil)
+        }
+        XCTAssertEqual(offsets, [0, 2])
+        XCTAssertEqual(model.items.map(\.id), ["n", "a", "e", "z"])
+        XCTAssertEqual(model.items.map(FoundationAlphabetAnchors.letter), ["#", "A", "E", "Z"])
+        let anchor = FoundationAlphabetAnchors.index(for: "E", in: model.items)
+        XCTAssertEqual(anchor, 2)
+        let queue = model.trackQueue(selecting: anchor ?? -1)
+        XCTAssertEqual(queue?.items.map(\.id), ["n", "a", "e", "z"])
+        XCTAssertEqual(queue?.index, 2)
+        XCTAssertEqual(FoundationAlphabetAnchors.sorted([a, z, number, accented]), model.items)
+    }
+
+    func testTitleSortTieBreakAndScrubBubbleStayDeterministic() {
+        let first = FoundationItem(
+            id: "1", title: "Echo", subtitle: "", kind: .track, duration: nil)
+        let second = FoundationItem(
+            id: "2", title: "ÉCHO", subtitle: "", kind: .track, duration: nil)
+        XCTAssertEqual(FoundationAlphabetAnchors.sorted([second, first]).map(\.id), ["1", "2"])
+        XCTAssertEqual(
+            FoundationAlphabetRailGeometry.bubbleTop(index: 0, height: 594, count: 27), 0)
+        XCTAssertEqual(
+            FoundationAlphabetRailGeometry.bubbleTop(index: 13, height: 594, count: 27), 270)
+        XCTAssertEqual(
+            FoundationAlphabetRailGeometry.bubbleTop(index: 26, height: 594, count: 27), 540)
+    }
+
+    func testAlphabetAnchorUsesActualTitleAndDecodesOlderCaches() throws {
         let a = FoundationItem(
             id: "a", title: "The Zebra", subtitle: "", kind: .track,
             duration: nil, sortName: "alpha")
         let b = FoundationItem(id: "b", title: "Bravo", subtitle: "", kind: .track, duration: nil)
-        XCTAssertEqual(FoundationAlphabetAnchors.letter(for: a), "A")
-        XCTAssertEqual(FoundationAlphabetAnchors.index(for: "A", in: [a, b]), 0)
+        XCTAssertEqual(FoundationAlphabetAnchors.letter(for: a), "T")
+        XCTAssertEqual(FoundationAlphabetAnchors.index(for: "T", in: [b, a]), 1)
         XCTAssertEqual(FoundationAlphabetAnchors.index(for: "B", in: [a, b]), 1)
         let encoded = try JSONEncoder().encode(a)
         XCTAssertEqual(

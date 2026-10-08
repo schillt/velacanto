@@ -1728,6 +1728,35 @@ final class FoundationDownloadsUITests: XCTestCase {
         capture("Complete loaded Songs alphabet tap drag without server seek", in: app)
     }
 
+    func testNativeZoomQueueScrollKeepsPlayerAndReturnsToBar() {
+        continueAfterFailure = false
+        let app = launch(
+            productionShell: true, canonicalDownloadState: "full", longPlayback: true,
+            queuePresentation: true)
+        selectTab("Library", in: app)
+        openCanonicalCollection("album", fromDownloads: false, in: app)
+        tapVisible(app.buttons["collection-track-0"], in: app)
+        openNowPlaying(app)
+        app.buttons["Show queue"].tap()
+        let queue = app.descendants(matching: .any)["fixture-queue-list"]
+        XCTAssertTrue(queue.waitForExistence(timeout: 5))
+        queue.swipeUp()
+        XCTAssertTrue(app.buttons["Show artwork"].exists)
+        let modal = app.descendants(matching: .any)["foundation-now-playing"]
+        XCTAssertTrue(modal.exists)
+        XCTAssertFalse(app.buttons["Show Now Playing"].isHittable)
+        modal.buttons["Next"].tap()
+        modal.buttons["Pause"].tap()
+        modal.buttons["Play"].tap()
+        app.buttons["Collapse Now Playing"].tap()
+        XCTAssertTrue(app.buttons["Show Now Playing"].waitForExistence(timeout: 5))
+        openNowPlaying(app)
+        XCTAssertTrue(app.buttons["Pause"].exists)
+        app.buttons["Collapse Now Playing"].tap()
+        XCTAssertTrue(app.buttons["Show Now Playing"].isHittable)
+        capture("Native zoom preserves queue scrolling and playback controls", in: app)
+    }
+
     func testQueueSkipPauseCollapseAndReopenRepeatedly() {
         continueAfterFailure = false
         let app = launch(
@@ -1844,24 +1873,6 @@ final class FoundationDownloadsUITests: XCTestCase {
         dismissNowPlaying(app)
         XCTAssertTrue(open.isHittable)
         capture("Native player restored to normal placement", in: app)
-    }
-
-    func testMiniPlayerGlassRendersIntermediateGeometry() {
-        continueAfterFailure = false
-        let app = launch(
-            productionShell: true, canonicalDownloadState: "full", artworkCache: true,
-            longPlayback: true, holdPlayerGlass: true)
-        selectTab("Library", in: app)
-        openCanonicalCollection("album", fromDownloads: false, in: app)
-        tapVisible(app.buttons["collection-track-0"], in: app)
-        capture("Owned compact glass source above navigation", in: app)
-        app.buttons["Show Now Playing"].tap()
-        XCTAssertTrue(app.buttons["More playback options"].waitForExistence(timeout: 5))
-        XCTAssertGreaterThanOrEqual(artworkTransitionCount("intermediate", in: app), 1)
-        capture("Player after measured intermediate glass expansion", in: app)
-        app.buttons["Collapse Now Playing"].tap()
-        XCTAssertTrue(app.buttons["Show Now Playing"].waitForExistence(timeout: 5))
-        capture("Owned compact glass restored after reverse transition", in: app)
     }
 
     func testSearchKeyboardAutofocusCancelManualFocusAndReentryPreserveQuery() {
@@ -2358,22 +2369,7 @@ final class FoundationDownloadsUITests: XCTestCase {
         XCTAssertTrue(app.buttons["Show Now Playing"].waitForExistence(timeout: 5))
     }
 
-    private func artworkTransitionCount(_ key: String, in app: XCUIApplication) -> Int {
-        let metrics = app.staticTexts["fixture-player-artwork-transition"]
-        XCTAssertTrue(metrics.waitForExistence(timeout: 5))
-        let fields = metrics.label.split(separator: ";").map {
-            $0.trimmingCharacters(in: .whitespaces).split(separator: " ")
-        }
-        guard let field = fields.first(where: { $0.first == Substring(key) }),
-            field.count == 2, let count = Int(field[1])
-        else {
-            XCTFail("Missing bounded artwork transition counter: " + key)
-            return -1
-        }
-        return count
-    }
-
-    func testMiniPlayerCohesiveGlassMorphReverseAndCancelledDismissalKeepsPlayback() {
+    func testMiniPlayerNativeZoomReverseAndCancelledDismissalKeepsPlayback() {
         continueAfterFailure = false
         let app = launch(
             productionShell: true, canonicalDownloadState: "full", artworkCache: true,
@@ -2394,9 +2390,6 @@ final class FoundationDownloadsUITests: XCTestCase {
         let artwork = app.descendants(matching: .any)["fixture-player-expanded-artwork"]
         XCTAssertTrue(artwork.waitForExistence(timeout: 5))
         let expandedFrame = artwork.frame
-        XCTAssertGreaterThanOrEqual(artworkTransitionCount("morph", in: app), 1)
-        XCTAssertEqual(artworkTransitionCount("fade", in: app), 0)
-        XCTAssertGreaterThanOrEqual(artworkTransitionCount("glass", in: app), 1)
         capture("Cohesive glass mini bar expands into player surface", in: app)
         dragExpandedPlayerArtwork(app, distance: 28)
         XCTAssertTrue(app.buttons["More playback options"].waitForExistence(timeout: 5))
@@ -2406,8 +2399,6 @@ final class FoundationDownloadsUITests: XCTestCase {
         XCTAssertEqual(artwork.frame.width, expandedFrame.width, accuracy: 2)
         XCTAssertEqual(artwork.frame.height, expandedFrame.height, accuracy: 2)
         XCTAssertEqual(app.staticTexts["fixture-player-playback-identity"].label, originalIdentity)
-        XCTAssertGreaterThanOrEqual(artworkTransitionCount("cancelled", in: app), 1)
-        XCTAssertGreaterThanOrEqual(artworkTransitionCount("morph", in: app), 2)
         capture("Artwork native interactive cancellation restores expanded snapshot", in: app)
         dismissNowPlaying(app)
         XCTAssertTrue(app.descendants(matching: .any)["collection-detail-album-album"].exists)
@@ -2415,10 +2406,6 @@ final class FoundationDownloadsUITests: XCTestCase {
         capture("Artwork reverse morph restores same canonical mini player", in: app)
         openNowPlaying(app)
         XCTAssertTrue(app.buttons["Pause"].exists)
-        XCTAssertGreaterThanOrEqual(artworkTransitionCount("morph", in: app), 4)
-        XCTAssertGreaterThanOrEqual(artworkTransitionCount("glass", in: app), 4)
-        XCTAssertGreaterThanOrEqual(artworkTransitionCount("completed", in: app), 3)
-        XCTAssertEqual(artworkTransitionCount("fade", in: app), 0)
         dismissNowPlaying(app)
         XCTAssertEqual(identity.label, originalIdentity)
     }

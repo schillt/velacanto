@@ -133,7 +133,7 @@ struct FoundationLibraryIndexView: View {
             item: $openedItem, library: library, player: player, isActive: isActive
         )
         .onAppear {
-            model.configureCatalogPagination()
+            model.configureCatalogPagination(sortByTitle: kind == .track)
             searchModel.configureCatalogPagination()
             isVisible = true
             if openedItem == nil { usesNativeAlphabet = wantsNativeAlphabet }
@@ -595,14 +595,25 @@ enum FoundationLibraryGridLayout {
     }
 }
 
-/// Anchor policy operates on the full loaded list, retaining provider order and membership.
+/// Songs use actual display titles for both ordering and section anchors, independent of server order.
 enum FoundationAlphabetAnchors {
     static func key(for item: FoundationItem) -> String {
-        let name = item.sortName.flatMap { $0.isEmpty ? nil : $0 } ?? item.title
-        return name.folding(
+        item.title.trimmingCharacters(in: .whitespacesAndNewlines).folding(
             options: [.caseInsensitive, .diacriticInsensitive],
             locale: Locale(identifier: "en_US_POSIX")
         ).lowercased()
+    }
+
+    static func sorted(_ items: [FoundationItem]) -> [FoundationItem] {
+        items.sorted { lhs, rhs in
+            let leftOther = letter(for: lhs) == "#"
+            let rightOther = letter(for: rhs) == "#"
+            if leftOther != rightOther { return leftOther }
+            let order = key(for: lhs).compare(
+                key(for: rhs), options: .numeric, locale: Locale(identifier: "en_US_POSIX"))
+            if order != .orderedSame { return order == .orderedAscending }
+            return lhs.id == rhs.id ? lhs.kind.rawValue < rhs.kind.rawValue : lhs.id < rhs.id
+        }
     }
 
     static func letter(for item: FoundationItem) -> String {
@@ -631,6 +642,12 @@ enum FoundationAlphabetAnchors {
 
 /// Rail geometry is independent of table scrolling and uses one equal hit region per letter.
 enum FoundationAlphabetRailGeometry {
+    static func bubbleTop(index: Int, height: Double, count: Int) -> Double {
+        guard count > 0, height.isFinite, height > 0 else { return 0 }
+        let center = (Double(max(0, min(count - 1, index))) + 0.5) * height / Double(count)
+        return min(max(0, height - 54), max(0, center - 27))
+    }
+
     static func index(y: Double, height: Double, count: Int) -> Int? {
         guard count > 0, height.isFinite, height > 0, y.isFinite else { return nil }
         let fraction = min(1, max(0, y / height))
@@ -642,6 +659,7 @@ enum FoundationAlphabetRailGeometry {
     private struct FoundationAlphabetRail: View {
         let onChooseLetter: (String) -> Void
         @State private var scrubbedLetter: String?
+        @GestureState private var isScrubbing = false
 
         var body: some View {
             GeometryReader { geometry in
@@ -664,6 +682,7 @@ enum FoundationAlphabetRailGeometry {
                 .contentShape(Rectangle())
                 .gesture(
                     DragGesture(minimumDistance: 0)
+                        .updating($isScrubbing) { _, active, _ in active = true }
                         .onChanged { value in
                             guard
                                 let index = FoundationAlphabetRailGeometry.index(
@@ -676,6 +695,32 @@ enum FoundationAlphabetRailGeometry {
                         }
                         .onEnded { _ in scrubbedLetter = nil }
                 )
+                .sensoryFeedback(.selection, trigger: scrubbedLetter) { old, new in
+                    new != nil && old != new
+                }
+                .overlay(alignment: .topLeading) {
+                    if isScrubbing, let scrubbedLetter,
+                        let index = titles.firstIndex(of: scrubbedLetter)
+                    {
+                        Text(scrubbedLetter)
+                            .font(.system(size: 28, weight: .semibold, design: .rounded))
+                            .frame(width: 54, height: 54)
+                            .background(.regularMaterial, in: Circle())
+                            .overlay(Circle().strokeBorder(.primary.opacity(0.12)))
+                            .shadow(color: .black.opacity(0.12), radius: 8, y: 3)
+                            .offset(
+                                x: -64,
+                                y: FoundationAlphabetRailGeometry.bubbleTop(
+                                    index: index, height: height, count: titles.count)
+                            )
+                            .allowsHitTesting(false)
+                            .accessibilityHidden(true)
+                    }
+                }
+                .onChange(of: isScrubbing) { _, active in
+                    if !active { scrubbedLetter = nil }
+                }
+                .onDisappear { scrubbedLetter = nil }
                 .accessibilityElement(children: .contain)
                 .accessibilityLabel("Section index")
                 .accessibilityIdentifier("library-alphabet-rail")

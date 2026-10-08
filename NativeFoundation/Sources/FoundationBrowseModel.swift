@@ -22,6 +22,7 @@ final class FoundationBrowseModel: ObservableObject {
     private var cacheKey: String?
     private var restoredCache = false
     private var deduplicatesCatalogItems = false
+    private var sortsCatalogByTitle = false
     private var cachedRawPrefix: [FoundationItem] = []
     private var lastRefreshAttempt: Date?
     private let now: () -> Date
@@ -40,15 +41,17 @@ final class FoundationBrowseModel: ObservableObject {
     }
 
     /// Catalog indexes have unique items; collection track lists keep occurrence identity.
-    func configureCatalogPagination() {
-        guard !deduplicatesCatalogItems else { return }
+    func configureCatalogPagination(sortByTitle: Bool = false) {
+        guard !deduplicatesCatalogItems || sortsCatalogByTitle != sortByTitle else { return }
         deduplicatesCatalogItems = true
+        sortsCatalogByTitle = sortByTitle
         items = uniqueCatalogItems(items)
     }
 
     private func uniqueCatalogItems(_ candidates: [FoundationItem]) -> [FoundationItem] {
         var seen: Set<String> = []
-        return candidates.filter { seen.insert($0.kind.rawValue + ":" + $0.id).inserted }
+        let unique = candidates.filter { seen.insert($0.kind.rawValue + ":" + $0.id).inserted }
+        return sortsCatalogByTitle ? FoundationAlphabetAnchors.sorted(unique) : unique
     }
 
     /// One visible demand fetches one bounded server page. Errors require explicit retry.

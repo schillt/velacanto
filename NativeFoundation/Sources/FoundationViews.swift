@@ -63,6 +63,7 @@ struct FoundationLibraryView: View {
             FoundationPlayerArtworkPresentationModel()
         @AccessibilityFocusState private var miniPlayerFocused: Bool
     #endif
+    @Namespace private var playerTransition
     @State private var showingPlayer = false
     @State private var showingSettings = false
     @State private var playlistSource: FoundationItem?
@@ -155,7 +156,10 @@ struct FoundationLibraryView: View {
             favorites.request(.refresh)
             homeFavorites.request(.refresh)
         }
-        .foundationPlayerCover(isPresented: $showingPlayer, player: player) {
+        .foundationPlayerCover(
+            isPresented: $showingPlayer, player: player, sourceNamespace: playerTransition,
+            onDismiss: playerDidDismiss
+        ) {
             FoundationPlayerView(player: player, library: accountLibrary)
         }
         .foundationSettingsPresentation(isPresented: $showingSettings) {
@@ -183,6 +187,12 @@ struct FoundationLibraryView: View {
         #endif
         .environment(\.foundationOpenLibrary, libraryPresentation)
 
+    }
+
+    private func playerDidDismiss() {
+        #if os(iOS)
+            miniPlayerFocused = true
+        #endif
     }
 
     private func resetCatalogScope() {
@@ -598,6 +608,9 @@ struct FoundationLibraryView: View {
         }.padding(.horizontal, showNext ? 10 : 6).padding(.vertical, showNext ? 6 : 0)
             #if os(iOS)
                 .foundationPlayerSurfaceRegistration(identity: item?.sharedArtworkIdentity)
+                .matchedTransitionSource(id: "now-playing", in: playerTransition) { source in
+                    source.clipShape(.rect(cornerRadius: showNext ? 28 : 22))
+                }
             #endif
     }
 }

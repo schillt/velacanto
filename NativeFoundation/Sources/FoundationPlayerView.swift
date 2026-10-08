@@ -247,7 +247,7 @@ struct FoundationPlayerView: View {
             }
         #endif
         .environment(\.foundationShowsDownloadBadges, false)
-        .interactiveDismissDisabled(scrubbing)
+        .interactiveDismissDisabled(scrubbing || lyricsPresentation != nil || relatedItem != nil)
         .accessibilityAction(.escape) { dismissPlayer() }
         #if os(iOS)
             .onAppear { updateArtworkDismissalAvailability() }
@@ -660,17 +660,21 @@ extension FoundationPlayer.State {
 extension View {
     func foundationPlayerCover<PlayerContent: View>(
         isPresented: Binding<Bool>, player: FoundationPlayer,
+        sourceNamespace: Namespace.ID? = nil, onDismiss: (() -> Void)? = nil,
         @ViewBuilder content: @escaping () -> PlayerContent
     ) -> some View {
         modifier(
             FoundationPlayerPresentation(
-                isPresented: isPresented, player: player, playerContent: content))
+                isPresented: isPresented, player: player, sourceNamespace: sourceNamespace,
+                onDismiss: onDismiss, playerContent: content))
     }
 }
 
 private struct FoundationPlayerPresentation<PlayerContent: View>: ViewModifier {
     @Binding var isPresented: Bool
     let player: FoundationPlayer
+    let sourceNamespace: Namespace.ID?
+    let onDismiss: (() -> Void)?
     @ViewBuilder let playerContent: () -> PlayerContent
     #if os(iOS)
         @StateObject private var standalone = FoundationPlayerArtworkPresentationModel()
@@ -691,38 +695,50 @@ private struct FoundationPlayerPresentation<PlayerContent: View>: ViewModifier {
 
     func body(content: Content) -> some View {
         #if os(iOS)
-            content.background {
-                FoundationPlayerArtworkFullscreen(
-                    isPresented: $isPresented, model: shared ?? standalone,
-                    content: AnyView(
-                        playerContent()
-                            .environmentObject(currentArtwork)
-                            .environmentObject(actions)
-                            .environmentObject(connectivity)
-                            .environmentObject(downloads)
-                            .environmentObject(playbackPreferences)
-                            .environmentObject(playlistChanges)
-                            .environment(\.foundationReduceMotion, reduceMotion)
-                            .environment(\.foundationReduceTransparency, reduceTransparency)
-                            .environment(\.dynamicTypeSize, dynamicTypeSize)
-                            .environment(\.colorScheme, colorScheme)
-                            .environment(\.scenePhase, scenePhase)),
-                    inheritedEnvironment: inheritedEnvironment,
-                    contentContextID: [
-                        String(describing: dynamicTypeSize), String(describing: colorScheme),
-                        String(describing: scenePhase), String(reduceMotion),
-                        String(reduceTransparency),
-                    ].joined(separator: ":"),
-                    artwork: { [weak player, weak artwork = currentArtwork] in
-                        guard let player, let artwork,
-                            let item = player.queue.first(where: {
-                                $0.id == player.selectedEntryID
-                            })?.item,
-                            let result = artwork.result(for: item)
-                        else { return nil }
-                        return .init(identity: item.sharedArtworkIdentity, result: result)
-                    }, reduceMotion: reduceMotion, reduceTransparency: reduceTransparency
-                ).frame(width: 0, height: 0)
+            if let sourceNamespace {
+                content.fullScreenCover(isPresented: $isPresented, onDismiss: onDismiss) {
+                    playerContent()
+                        .accessibilityElement(children: .contain)
+                        .accessibilityIdentifier("foundation-now-playing")
+                        .accessibilityAddTraits(.isModal)
+                        .environment(\.foundationClosePlayer, { isPresented = false })
+                        .navigationTransition(
+                            .zoom(sourceID: "now-playing", in: sourceNamespace))
+                }
+            } else {
+                content.background {
+                    FoundationPlayerArtworkFullscreen(
+                        isPresented: $isPresented, model: shared ?? standalone,
+                        content: AnyView(
+                            playerContent()
+                                .environmentObject(currentArtwork)
+                                .environmentObject(actions)
+                                .environmentObject(connectivity)
+                                .environmentObject(downloads)
+                                .environmentObject(playbackPreferences)
+                                .environmentObject(playlistChanges)
+                                .environment(\.foundationReduceMotion, reduceMotion)
+                                .environment(\.foundationReduceTransparency, reduceTransparency)
+                                .environment(\.dynamicTypeSize, dynamicTypeSize)
+                                .environment(\.colorScheme, colorScheme)
+                                .environment(\.scenePhase, scenePhase)),
+                        inheritedEnvironment: inheritedEnvironment,
+                        contentContextID: [
+                            String(describing: dynamicTypeSize), String(describing: colorScheme),
+                            String(describing: scenePhase), String(reduceMotion),
+                            String(reduceTransparency),
+                        ].joined(separator: ":"),
+                        artwork: { [weak player, weak artwork = currentArtwork] in
+                            guard let player, let artwork,
+                                let item = player.queue.first(where: {
+                                    $0.id == player.selectedEntryID
+                                })?.item,
+                                let result = artwork.result(for: item)
+                            else { return nil }
+                            return .init(identity: item.sharedArtworkIdentity, result: result)
+                        }, reduceMotion: reduceMotion, reduceTransparency: reduceTransparency
+                    ).frame(width: 0, height: 0)
+                }
             }
         #else
             content.sheet(isPresented: $isPresented) { playerContent() }
