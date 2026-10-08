@@ -465,9 +465,27 @@ final class FoundationDownloadsUITests: XCTestCase {
     }
 
     private func selectTab(_ title: String, in app: XCUIApplication) {
-        let button = app.tabBars.buttons[title].firstMatch
+        var button = app.tabBars.buttons[title].firstMatch
         if !button.exists {
-            app.coordinate(withNormalizedOffset: CGVector(dx: 0.14, dy: 0.95)).tap()
+            // iPad's native top tab controls are buttons outside a TabBar AX container.
+            let symbol: String? =
+                switch title {
+                case "New": "square.grid.2x2"
+                case "Library": "music.pages"
+                case "Search": "magnifyingglass"
+                default: nil
+                }
+            if let symbol {
+                button =
+                    app.buttons.matching(
+                        NSPredicate(format: "label == %@ AND identifier == %@", title, symbol)
+                    ).firstMatch
+            } else {
+                button =
+                    app.buttons.matching(
+                        NSPredicate(format: "label == %@ AND identifier != %@", title, "BackButton")
+                    ).firstMatch
+            }
         }
         XCTAssertTrue(button.waitForExistence(timeout: 5) && button.isHittable)
         button.tap()
@@ -2296,9 +2314,15 @@ final class FoundationDownloadsUITests: XCTestCase {
         XCTAssertGreaterThan(toolbarFrame.width, 0)
         XCTAssertGreaterThan(toolbarFrame.height, 0)
         tapNativeChrome(toolbar, in: app)
-        let baselineAdd = app.buttons["Add to Playlist"]
-        XCTAssertTrue(baselineAdd.waitForExistence(timeout: 5))
+        let baselineAddMatches = app.cells.buttons.matching(
+            NSPredicate(format: "label == %@", "Add to Playlist"))
+        XCTAssertEqual(baselineAddMatches.count, 1)
+        let baselineAdd = baselineAddMatches.element
+        XCTAssertTrue(baselineAdd.waitForExistence(timeout: 5) && baselineAdd.isHittable)
         XCTAssertTrue(baselineAdd.isEnabled)
+        XCTAssertGreaterThan(baselineAdd.frame.width, 0)
+        XCTAssertGreaterThan(baselineAdd.frame.height, 0)
+        XCTAssertTrue(app.frame.contains(baselineAdd.frame))
         let baselineAddEnabled = baselineAdd.isEnabled
         let menuRemoval = app.buttons["Remove Downloads"]
         XCTAssertTrue(menuRemoval.exists)
@@ -2355,8 +2379,32 @@ final class FoundationDownloadsUITests: XCTestCase {
         let sheet = relatedSheet(app)
         let more = sheet.buttons["More actions"]
         tapNativeChrome(more, in: app)
-        let add = app.buttons["Add to Playlist"]
+        let globalAddCandidates = app.buttons.matching(
+            NSPredicate(format: "label == %@", "Add to Playlist"))
+        let globalAddCount = globalAddCandidates.count
+        var addCandidateRows = ["Synthetic Add to Playlist candidates: \(globalAddCount)"]
+        for index in 0..<min(globalAddCount, 16) {
+            let candidate = globalAddCandidates.element(boundBy: index)
+            addCandidateRows.append(
+                "\(index): identifier=\(candidate.identifier); frame=\(candidate.frame); enabled=\(candidate.isEnabled); hittable=\(candidate.isHittable)"
+            )
+        }
+        if globalAddCount > 16 {
+            addCandidateRows.append("Additional candidates omitted: \(globalAddCount - 16)")
+        }
+        let addCandidateEvidence = XCTAttachment(string: addCandidateRows.joined(separator: "\n"))
+        addCandidateEvidence.name = "Synthetic related menu Add to Playlist candidates"
+        addCandidateEvidence.lifetime = .keepAlways
+        self.add(addCandidateEvidence)
+        capture("Synthetic related native menu before Add to Playlist", in: app)
+        let addMatches = app.cells.buttons.matching(
+            NSPredicate(format: "label == %@", "Add to Playlist"))
+        XCTAssertEqual(addMatches.count, 1)
+        let add = addMatches.element
         XCTAssertTrue(add.waitForExistence(timeout: 5) && add.isHittable)
+        XCTAssertGreaterThan(add.frame.width, 0)
+        XCTAssertGreaterThan(add.frame.height, 0)
+        XCTAssertTrue(app.frame.contains(add.frame))
         XCTAssertEqual(add.isEnabled, baselineAddEnabled)
         add.tap()
         let picker = app.navigationBars["Add to Playlist"]
