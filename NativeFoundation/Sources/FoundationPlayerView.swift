@@ -667,7 +667,10 @@ private struct FoundationQueueView: View {
         .padding(.leading, 16).padding(.trailing, canReorder ? 4 : 16)
         .padding(.vertical, 8)
         .contentShape(.dragPreview, RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: 16, style: .continuous))
+        #if os(iOS)
+            .contentShape(
+                .contextMenuPreview, RoundedRectangle(cornerRadius: 16, style: .continuous))
+        #endif
         .id(entry.id)
     }
 
