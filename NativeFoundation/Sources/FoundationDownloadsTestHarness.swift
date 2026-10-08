@@ -31,7 +31,7 @@
         var onSignedOut: (() -> Void)?
         @State private var cleaningAccount = false
         @Environment(\.dynamicTypeSize) private var systemDynamicTypeSize
-        @Environment(\.verticalSizeClass) private var systemVerticalSizeClass
+        @State private var showingFixtureControls = false
 
         private var usesAccessibilitySizedText: Bool {
             ProcessInfo.processInfo.environment["FOUNDATION_UI_LARGE_TEXT"] == "1"
@@ -47,7 +47,7 @@
 
         var body: some View {
             VStack(spacing: 0) {
-                fixtureControls
+                if compactFixtureControls { fixtureControlBand } else { fixtureControls }
                 if ProcessInfo.processInfo.environment["FOUNDATION_UI_REDUCE_MOTION"] == "1",
                     ProcessInfo.processInfo.environment["FOUNDATION_UI_REDUCE_TRANSPARENCY"] == "1"
                 {
@@ -55,7 +55,7 @@
                         .font(.caption).dynamicTypeSize(.medium)
                         .accessibilityIdentifier("fixture-accessibility-effects")
                 }
-                if fixture.canonicalReady {
+                if fixture.canonicalReady && !compactFixtureControls {
                     Text("Canonical fixture ready").font(.caption).dynamicTypeSize(.medium)
                 }
                 if fixture.membershipReady {
@@ -125,6 +125,47 @@
             }
         }
 
+        private var fixtureControlBand: some View {
+            HStack {
+                Button("Fixture controls") { showingFixtureControls = true }
+                    .frame(minWidth: 44, minHeight: 44)
+                    .accessibilityValue(fixture.connectivity.localOnly ? "offline" : "online")
+                Button("Read catalog counts") {
+                    Task { catalogCounts = await fixture.library.catalogCounts() }
+                }
+                .frame(minWidth: 44, minHeight: 44)
+                .accessibilityValue(catalogCounts)
+                VStack(spacing: 0) {
+                    if ProcessInfo.processInfo.arguments.contains("-fixtureLongPlayback") {
+                        FoundationDownloadUIPlaybackIdentity(player: fixture.player)
+                            .lineLimit(1)
+                    }
+                    if fixture.canonicalReady {
+                        Text("Canonical fixture ready").font(.caption)
+                    }
+                }
+            }
+            .frame(height: 44)
+            .sheet(isPresented: $showingFixtureControls) {
+                NavigationStack {
+                    ScrollView {
+                        VStack {
+                            fixtureControls
+                            if fixture.canonicalReady {
+                                Text("Canonical fixture ready").font(.caption)
+                            }
+                        }.padding()
+                    }
+                    .navigationTitle("Fixture controls")
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("Close fixture controls") { showingFixtureControls = false }
+                        }
+                    }
+                }
+            }
+        }
+
         @State private var artworkCounts = ""
         @State private var catalogCounts = ""
         private var fixtureControls: some View {
@@ -152,12 +193,7 @@
                     Button("Read catalog counts") {
                         Task { catalogCounts = await fixture.library.catalogCounts() }
                     }
-                    if compactFixtureControls {
-                        Text(catalogCounts).lineLimit(1).accessibilityLabel(catalogCounts)
-                            .accessibilityIdentifier("fixture-catalog-counts")
-                    } else {
-                        Text(catalogCounts).accessibilityIdentifier("fixture-catalog-counts")
-                    }
+                    Text(catalogCounts).accessibilityIdentifier("fixture-catalog-counts")
                 }
                 if ProcessInfo.processInfo.arguments.contains("-fixtureArtworkCache") {
                     Button("Read artwork counts") {
@@ -175,14 +211,12 @@
                     downloads: fixture.downloads, connectivity: fixture.connectivity,
                     playlist: fixture.playlist, productionShell: productionShell
                 )
-                .environment(
-                    \.verticalSizeClass,
-                    compactFixtureControls ? .compact : systemVerticalSizeClass)
-                if ProcessInfo.processInfo.arguments.contains("-fixtureLongPlayback") {
+                if ProcessInfo.processInfo.arguments.contains("-fixtureLongPlayback")
+                    && !compactFixtureControls
+                {
                     FoundationDownloadUIPlaybackIdentity(player: fixture.player)
                 }
             }
-            .font(compactFixtureControls ? .caption2 : nil)
         }
     }
 
@@ -469,7 +503,7 @@
             if ProcessInfo.processInfo.arguments.contains("-fixtureLibrarySelection") {
                 let store = FoundationMusicLibraryStore(
                     scope: FoundationMusicLibraryStore.digest("synthetic-selection-account"),
-                    root: root.appendingPathComponent("library-selections"))
+                    root: root.appendingPathComponent("library-selections", isDirectory: true))
                 let selected = try? store.load()
                 catalogLibrary = FoundationDownloadUILibrary(selectionID: selected?.id)
                 librarySelection = FoundationMusicLibrarySelection(

@@ -68,14 +68,21 @@ final class FoundationDownloadsUITests: XCTestCase {
             app.terminate()
         }
         app.launch()
-        let entry = account ? "Sign in" : "Queue fixture playlist"
-        XCTAssertTrue(app.buttons[entry].waitForExistence(timeout: 10))
+        if compactFixtureControls { openAlphabetFixtureControls(app) }
+        if account && largeText {
+            XCTAssertTrue(app.textFields["Jellyfin HTTPS address"].waitForExistence(timeout: 10))
+            XCTAssertTrue(app.navigationBars["Velacanto"].exists)
+        } else {
+            let entry = account ? "Sign in" : "Queue fixture playlist"
+            XCTAssertTrue(app.buttons[entry].waitForExistence(timeout: 10))
+        }
         if canonicalDownloadState != nil {
             XCTAssertTrue(app.staticTexts["Canonical fixture ready"].waitForExistence(timeout: 15))
         }
         if membership != nil {
             XCTAssertTrue(app.staticTexts["Membership fixture ready"].waitForExistence(timeout: 20))
         }
+        if compactFixtureControls { closeAlphabetFixtureControls(app) }
         return app
     }
 
@@ -1488,8 +1495,7 @@ final class FoundationDownloadsUITests: XCTestCase {
         XCTAssertTrue(index.exists && index.isHittable)
         XCTAssertGreaterThan(index.frame.width, 0)
         XCTAssertGreaterThan(index.frame.height, 0)
-        let offline =
-            app.switches["Simulate unavailable network"].switches.firstMatch.value as? String == "1"
+        let offline = app.buttons["Fixture controls"].value as? String == "offline"
         let titles =
             ["All"] + (offline ? ["#"] : [])
             + (65...90).map { String(UnicodeScalar($0)!) }
@@ -1556,9 +1562,38 @@ final class FoundationDownloadsUITests: XCTestCase {
         return center / CGFloat(height)
     }
 
+    private func openAlphabetFixtureControls(_ app: XCUIApplication) {
+        let button = app.buttons["Fixture controls"]
+        XCTAssertTrue(button.waitForExistence(timeout: 5) && button.isHittable)
+        button.tap()
+        XCTAssertTrue(app.buttons["Close fixture controls"].waitForExistence(timeout: 5))
+    }
+
+    private func closeAlphabetFixtureControls(_ app: XCUIApplication) {
+        let close = app.buttons["Close fixture controls"]
+        XCTAssertTrue(close.exists && close.isHittable)
+        close.tap()
+        let gone = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == false"), object: close)
+        XCTAssertEqual(XCTWaiter.wait(for: [gone], timeout: 5), .completed)
+        XCTAssertTrue(app.buttons["Fixture controls"].isHittable)
+    }
+
     private func readAlphabetCounts(_ app: XCUIApplication) -> String {
-        tapNativeChrome(app.buttons["Read catalog counts"], in: app)
-        return app.staticTexts["fixture-catalog-counts"].label
+        let read = app.buttons["Read catalog counts"]
+        tapNativeChrome(read, in: app)
+        return read.value as? String ?? ""
+    }
+
+    private func toggleAlphabetNetwork(_ app: XCUIApplication, offline: Bool) {
+        openAlphabetFixtureControls(app)
+        let toggle = app.switches["Simulate unavailable network"].switches.firstMatch
+        XCTAssertTrue(toggle.exists && toggle.isHittable)
+        toggle.tap()
+        XCTAssertEqual(toggle.value as? String, offline ? "1" : "0")
+        closeAlphabetFixtureControls(app)
+        XCTAssertEqual(
+            app.buttons["Fixture controls"].value as? String, offline ? "offline" : "online")
     }
 
     func testNativeAlphabetServerWindowRelativePagingAllRestoreAndPlayback() {
@@ -1626,6 +1661,9 @@ final class FoundationDownloadsUITests: XCTestCase {
         XCTAssertTrue(
             startedCounts.contains("album-A-0 1"),
             "Cancellation coverage requires the held provider request to actually start")
+        XCTAssertFalse(
+            startedCounts.contains("cancelled 1"),
+            "Reading the held request must not cancel it before switching letters")
         tapNativeAlphabet("G", in: app)
         XCTAssertTrue(
             app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "G Fixture album 100"))
@@ -1666,7 +1704,7 @@ final class FoundationDownloadsUITests: XCTestCase {
         tapNativeChrome(app.navigationBars["Albums"].buttons["Close"], in: app)
         XCTAssertTrue(a.waitForExistence(timeout: 5))
         let beforeOffline = readAlphabetCounts(app)
-        app.switches["Simulate unavailable network"].switches.firstMatch.tap()
+        toggleAlphabetNetwork(app, offline: true)
         tapNativeAlphabet("#", in: app)
         XCTAssertTrue(
             app.tables["library-index-album"].staticTexts["Other downloaded names"]
@@ -1679,7 +1717,7 @@ final class FoundationDownloadsUITests: XCTestCase {
             readAlphabetCounts(app), beforeOffline,
             "Offline alphabet operates only on complete known downloaded membership")
         capture("Native offline number index uses complete known collections", in: app)
-        app.switches["Simulate unavailable network"].switches.firstMatch.tap()
+        toggleAlphabetNetwork(app, offline: false)
         tapNativeAlphabet("F", in: app)
         XCTAssertTrue(f.waitForExistence(timeout: 10))
         XCTAssertEqual(identity.label, original)
@@ -1948,7 +1986,6 @@ final class FoundationDownloadsUITests: XCTestCase {
         XCTAssertTrue(sheet.waitForExistence(timeout: 5))
         XCTAssertEqual(app.staticTexts["fixture-related-playback-identity"].label, originalIdentity)
         tapNativeChrome(more, in: app)
-        let remove = app.buttons["Remove Downloads"]
         let removalHierarchy = XCTAttachment(string: String(app.debugDescription.prefix(120_000)))
         removalHierarchy.name = "Synthetic related removal menu hierarchy (120000 character cap)"
         removalHierarchy.lifetime = .keepAlways
@@ -1972,7 +2009,14 @@ final class FoundationDownloadsUITests: XCTestCase {
         removalEvidence.name = "Synthetic related removal menu matching controls (16 candidate cap)"
         removalEvidence.lifetime = .keepAlways
         self.add(removalEvidence)
+        let menuRemovals = app.cells.buttons.matching(
+            NSPredicate(format: "label == %@", "Remove Downloads"))
+        XCTAssertEqual(menuRemovals.count, 1, "The native menu must expose one removal action")
+        let remove = menuRemovals.element
         XCTAssertTrue(remove.waitForExistence(timeout: 5) && remove.isHittable)
+        XCTAssertGreaterThan(remove.frame.width, 0)
+        XCTAssertGreaterThan(remove.frame.height, 0)
+        XCTAssertTrue(app.frame.contains(remove.frame))
         remove.tap()
         let destructive = app.buttons["Remove"]
         XCTAssertTrue(destructive.waitForExistence(timeout: 5))
