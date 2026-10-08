@@ -658,6 +658,10 @@
 
         func alphabetCapability() async -> FoundationAlphabetCapability {
             guard alphabetCatalog else { return .unavailable }
+            if ProcessInfo.processInfo.arguments.contains("-fixtureAlphabetCapabilityFailOnce") {
+                catalogRequests["capability", default: 0] += 1
+                if catalogRequests["capability"] == 1 { return .unavailable }
+            }
             if ProcessInfo.processInfo.arguments.contains("-fixtureDelayedAlphabetCapability") {
                 while !alphabetCapabilityReleased {
                     guard !Task.isCancelled else { return .unavailable }
@@ -668,13 +672,18 @@
         }
 
         private func alphabetItems(kind: FoundationItem.Kind) -> [FoundationItem] {
-            (0..<120).map { index in
-                let letter = index < 50 ? "A" : (index < 100 ? "F" : "G")
+            let firstWindow = kind == .track ? 100 : 50
+            let count = kind == .track ? 180 : 120
+            return (0..<count).map { index in
+                let letter = index < firstWindow ? "A" : (index < firstWindow + 50 ? "F" : "G")
                 return .init(
                     id: "alphabet-\(kind)-\(index)",
                     title: "\(letter) Fixture \(kind) \(index)", subtitle: "Synthetic catalog",
                     kind: kind, duration: kind == .track ? 30 : nil,
-                    primaryImageTag: "synthetic", isFavorite: false)
+                    primaryImageTag: "synthetic", isFavorite: false,
+                    album: kind == .track
+                        ? .init(id: "album", title: "Fixture Album", primaryImageTag: "synthetic")
+                        : nil)
             }
         }
 
@@ -684,7 +693,7 @@
             catalogRequests["\(kind)-all-\(startIndex)", default: 0] += 1
             try Task.checkCancellation()
             let items = alphabetItems(kind: kind)
-            let end = min(startIndex + 50, items.count)
+            let end = min(startIndex + (kind == .track ? 100 : 50), items.count)
             guard startIndex < end else { return .init(items: [], nextStartIndex: nil) }
             return .init(
                 items: Array(items[startIndex..<end]),
@@ -976,7 +985,10 @@
         }
 
         private let track = FoundationItem(
-            id: "tone", title: "Fixture Tone", subtitle: "Generated silent PCM", kind: .track,
+            id: "tone",
+            title: ProcessInfo.processInfo.arguments.contains("-fixtureAlphabetCatalog")
+                ? "# Fixture Tone" : "Fixture Tone",
+            subtitle: "Generated silent PCM", kind: .track,
             duration: TimeInterval(FoundationDownloadsTestHarness.generatedToneSeconds),
             isFavorite: false,
             album: ProcessInfo.processInfo.arguments.contains("-fixtureUnknownRelatedItems")
