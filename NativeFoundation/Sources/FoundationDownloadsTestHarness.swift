@@ -463,11 +463,19 @@
                         if ProcessInfo.processInfo.arguments.contains(
                             "-fixtureSelectedLibraryUnavailable")
                         {
-                            return [.init(id: "silver", name: "Fixture Silver Library")]
+                            return [
+                                .init(
+                                    id: "000000000000000000000000000000c2",
+                                    name: "Fixture Silver Library")
+                            ]
                         }
                         return [
-                            .init(id: "cedar", name: "Fixture Cedar Library"),
-                            .init(id: "silver", name: "Fixture Silver Library"),
+                            .init(
+                                id: "000000000000000000000000000000c1",
+                                name: "Fixture Cedar Library"),
+                            .init(
+                                id: "000000000000000000000000000000c2",
+                                name: "Fixture Silver Library"),
                         ]
                     }, save: { try store.save($0) },
                     apply: { [weak self] id, available in
@@ -670,11 +678,17 @@
             }
             guard selectionAvailable else { throw FoundationLibraryError.unavailable }
             guard let selectionID else { return nil }
+            let selectionName: String
+            switch selectionID {
+            case "000000000000000000000000000000c1": selectionName = "Cedar"
+            case "000000000000000000000000000000c2": selectionName = "Silver"
+            default: throw FoundationLibraryError.invalidResponse
+            }
             return .init(
                 items: [
                     .init(
                         id: selectionID + "-album",
-                        title: "Fixture " + selectionID.capitalized + " Album",
+                        title: "Fixture " + selectionName + " Album",
                         subtitle: "Synthetic catalog", kind: .album, duration: 30,
                         primaryImageTag: "synthetic")
                 ],

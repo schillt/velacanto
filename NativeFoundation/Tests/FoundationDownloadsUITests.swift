@@ -882,7 +882,12 @@ final class FoundationDownloadsUITests: XCTestCase {
             XCTAssertFalse(app.buttons["Sign in"].isEnabled)
             capture("Mature mobile sign in " + scheme, in: app)
             fillSyntheticSignIn(app)
-            tapVisible(app.buttons["Sign in"], in: app)
+            XCTAssertTrue(app.buttons["Sign in"].isEnabled)
+            let go = app.keyboards.firstMatch.buttons.matching(
+                NSPredicate(format: "label ==[c] %@", "go")
+            ).firstMatch
+            XCTAssertTrue(go.waitForExistence(timeout: 5) && go.isHittable)
+            go.tap()
             let error = app.descendants(matching: .any)["sign-in-error"]
             XCTAssertTrue(error.waitForExistence(timeout: 10))
             XCTAssertTrue(
@@ -1144,9 +1149,11 @@ final class FoundationDownloadsUITests: XCTestCase {
             "Downloaded audio", "Download-owned artwork", "Download metadata & other files",
             "Cached artwork", "Cached catalog pages", "Artwork cache memory cost",
         ] {
-            let row = app.staticTexts[label]
+            let row = app.staticTexts.matching(
+                NSPredicate(format: "label BEGINSWITH %@", label + ",")
+            ).firstMatch
             reveal(row, in: app)
-            XCTAssertTrue(row.exists)
+            XCTAssertTrue(app.staticTexts[label].exists)
         }
         capture("Separate account scoped storage and cache metrics", in: app)
         reveal(app.staticTexts["Diagnostics"], in: app)
@@ -2044,7 +2051,7 @@ final class FoundationDownloadsUITests: XCTestCase {
         let removalHierarchy = XCTAttachment(string: String(app.debugDescription.prefix(120_000)))
         removalHierarchy.name = "Synthetic related removal menu hierarchy (120000 character cap)"
         removalHierarchy.lifetime = .keepAlways
-        add(removalHierarchy)
+        self.add(removalHierarchy)
         capture("Synthetic related removal menu before unchanged hit assertion", in: app)
         let removalCandidates = app.buttons.matching(
             NSPredicate(format: "label == %@", "Remove Downloads"))
@@ -2057,13 +2064,13 @@ final class FoundationDownloadsUITests: XCTestCase {
             let candidate = removalCandidates.element(boundBy: candidateIndex)
             removalDiagnostics.append(
                 "index \(candidateIndex); identifier \(candidate.identifier); "
-                    + "frame \(NSStringFromCGRect(candidate.frame)); enabled \(candidate.isEnabled); "
+                    + "frame \(String(describing: candidate.frame)); enabled \(candidate.isEnabled); "
                     + "hittable \(candidate.isHittable)")
         }
         let removalEvidence = XCTAttachment(string: removalDiagnostics.joined(separator: "\n"))
         removalEvidence.name = "Synthetic related removal menu matching controls (16 candidate cap)"
         removalEvidence.lifetime = .keepAlways
-        add(removalEvidence)
+        self.add(removalEvidence)
         XCTAssertTrue(remove.waitForExistence(timeout: 5) && remove.isHittable)
         remove.tap()
         let destructive = app.buttons["Remove"]
