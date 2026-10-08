@@ -29,7 +29,8 @@ enum FoundationDownloadError: Error, LocalizedError, Equatable {
 enum FoundationDownloadTransport {
     typealias Progress = @Sendable (Int64, Int64?) -> Void
     typealias Load =
-        @Sendable (URLRequest, Bool, @escaping Progress) async throws -> (URL, URLResponse)
+        @Sendable (URLRequest, Bool, FoundationDownloadByteBudget, @escaping Progress) async throws
+        -> (URL, URLResponse)
     typealias Validate = @Sendable (URL) async throws -> Void
 
     static func supports(container: String, codec: String) -> Bool {
@@ -68,6 +69,7 @@ enum FoundationDownloadTransport {
             source.request.httpMethod == "GET",
             source.expectedBytes == nil || source.expectedBytes! > 0
         else { throw FoundationDownloadError.response }
+        let budget = try receiveBudget(source: source, destination: destination)
         var temporary: URL?
         var ownsDestination = false
         do {
@@ -78,7 +80,7 @@ enum FoundationDownloadTransport {
             request.allowsConstrainedNetworkAccess = false
             request.cachePolicy = .reloadIgnoringLocalCacheData
             request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
-            let (location, response) = try await load(request, allowsCellular, progress)
+            let (location, response) = try await load(request, allowsCellular, budget, progress)
             temporary = location
             try Task.checkCancellation()
             if let response = response as? HTTPURLResponse,
@@ -94,6 +96,9 @@ enum FoundationDownloadTransport {
                         == "identity"
             else { throw FoundationDownloadError.response }
             let attributes = try files.attributesOfItem(atPath: location.path)
+            if let size = (attributes[.size] as? NSNumber)?.int64Value {
+                try budget.check(received: size, announced: response.expectedContentLength)
+            }
             guard attributes[.type] as? FileAttributeType == .typeRegular,
                 let size = (attributes[.size] as? NSNumber)?.int64Value, size > 0,
                 source.expectedBytes == nil || source.expectedBytes == size,
@@ -147,11 +152,44 @@ enum FoundationDownloadTransport {
         return configuration
     }
 
-    static let nativeLoad: Load = { request, allowsCellular, progress in
+    /// Keep a local free-space reserve without imposing a format or duration limit on originals.
+    static func receiveBudget(source: FoundationDownloadSource, destination: URL) throws
+        -> FoundationDownloadByteBudget
+    {
+        let reserve: Int64 = 256 * 1_024 * 1_024
+        let files = FileManager.default
+        let paths = [files.temporaryDirectory, destination.deletingLastPathComponent()]
+        var capacity = Int64.max
+        do {
+            for path in paths {
+                let attributes = try files.attributesOfFileSystem(forPath: path.path)
+                guard let free = (attributes[.systemFreeSize] as? NSNumber)?.int64Value,
+                    free > reserve
+                else { throw FoundationDownloadError.storage }
+                capacity = min(capacity, free - reserve)
+            }
+        } catch { throw FoundationDownloadError.storage }
+        return try FoundationDownloadByteBudget(
+            expectedBytes: source.expectedBytes, availableBytes: capacity)
+    }
+
+    static let nativeLoad: Load = { request, allowsCellular, budget, progress in
         let session = URLSession(configuration: configuration(allowsCellular: allowsCellular))
         defer { session.invalidateAndCancel() }
-        return try await session.download(
-            for: request, delegate: FoundationDownloadDelegate(progress: progress))
+        let delegate = FoundationDownloadDelegate(budget: budget, progress: progress)
+        let result: (URL, URLResponse)
+        do {
+            result = try await session.download(for: request, delegate: delegate)
+        } catch {
+            throw delegate.failure ?? error
+        }
+        if let failure = delegate.failure {
+            do { try FileManager.default.removeItem(at: result.0) } catch {
+                throw FoundationDownloadError.cleanup
+            }
+            throw failure
+        }
+        return result
     }
 
     static let validateAsset: Validate = { url in
@@ -169,9 +207,45 @@ enum FoundationDownloadTransport {
     }
 }
 
-private final class FoundationDownloadDelegate: NSObject, URLSessionDownloadDelegate, Sendable {
+/// Both values are locally bounded; a server cannot increase the receive ceiling with headers.
+struct FoundationDownloadByteBudget: Sendable {
+    let maximumBytes: Int64
+    let exceededError: FoundationDownloadError
+
+    init(expectedBytes: Int64?, availableBytes: Int64) throws {
+        guard availableBytes > 0 else { throw FoundationDownloadError.storage }
+        if let expectedBytes {
+            guard expectedBytes > 0 else { throw FoundationDownloadError.response }
+            guard expectedBytes <= availableBytes else { throw FoundationDownloadError.storage }
+            maximumBytes = expectedBytes
+            exceededError = .incomplete
+        } else {
+            maximumBytes = availableBytes
+            exceededError = .storage
+        }
+    }
+
+    func check(received: Int64, announced: Int64) throws {
+        guard received >= 0 else { throw FoundationDownloadError.response }
+        guard received <= maximumBytes, announced <= maximumBytes else { throw exceededError }
+    }
+}
+
+final class FoundationDownloadDelegate: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
+    let budget: FoundationDownloadByteBudget
     let progress: FoundationDownloadTransport.Progress
-    init(progress: @escaping FoundationDownloadTransport.Progress) { self.progress = progress }
+    private let lock = NSLock()
+    private var budgetFailure: FoundationDownloadError?
+
+    var failure: FoundationDownloadError? { lock.withLock { budgetFailure } }
+
+    init(
+        budget: FoundationDownloadByteBudget,
+        progress: @escaping FoundationDownloadTransport.Progress
+    ) {
+        self.budget = budget
+        self.progress = progress
+    }
 
     func urlSession(
         _ session: URLSession, task: URLSessionTask,
@@ -184,6 +258,18 @@ private final class FoundationDownloadDelegate: NSObject, URLSessionDownloadDele
         didWriteData bytesWritten: Int64,
         totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64
     ) {
+        do {
+            try budget.check(received: totalBytesWritten, announced: totalBytesExpectedToWrite)
+        } catch {
+            lock.withLock {
+                if budgetFailure == nil {
+                    budgetFailure = error as? FoundationDownloadError ?? .response
+                }
+            }
+            downloadTask.cancel()
+            return
+        }
+        guard failure == nil else { return }
         progress(totalBytesWritten, totalBytesExpectedToWrite > 0 ? totalBytesExpectedToWrite : nil)
     }
 

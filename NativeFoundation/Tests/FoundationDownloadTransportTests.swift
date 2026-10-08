@@ -93,14 +93,108 @@ final class FoundationDownloadTransportTests: XCTestCase {
         XCTAssertTrue(cellular.allowsExpensiveNetworkAccess)
     }
 
+    func testReceiveBudgetRejectsForgedMetadataAndBoundsUnknownLengths() throws {
+        XCTAssertThrowsError(
+            try FoundationDownloadByteBudget(expectedBytes: Int64.max, availableBytes: 16)
+        ) { XCTAssertEqual($0 as? FoundationDownloadError, .storage) }
+        XCTAssertThrowsError(
+            try FoundationDownloadByteBudget(expectedBytes: nil, availableBytes: 0)
+        ) { XCTAssertEqual($0 as? FoundationDownloadError, .storage) }
+        let unknown = try FoundationDownloadByteBudget(expectedBytes: nil, availableBytes: 16)
+        XCTAssertNoThrow(try unknown.check(received: 16, announced: -1))
+        XCTAssertThrowsError(try unknown.check(received: 17, announced: -1)) {
+            XCTAssertEqual($0 as? FoundationDownloadError, .storage)
+        }
+        XCTAssertThrowsError(try unknown.check(received: 1, announced: Int64.max)) {
+            XCTAssertEqual($0 as? FoundationDownloadError, .storage)
+        }
+    }
+
+    func testNativeDelegateCancelsOversizedAnnouncedChunkedAndFalseLengths() throws {
+        let budget = try FoundationDownloadByteBudget(expectedBytes: 4, availableBytes: 16)
+        for (received, announced) in [(1, 5), (5, -1), (5, 1)] {
+            let session = URLSession(configuration: .ephemeral)
+            defer { session.invalidateAndCancel() }
+            let task = session.downloadTask(with: URL(string: "https://example.invalid/original")!)
+            let delegate = FoundationDownloadDelegate(budget: budget) { _, _ in
+                XCTFail("Rejected bytes must not be published as ordinary progress")
+            }
+            delegate.urlSession(
+                session, downloadTask: task, didWriteData: 1,
+                totalBytesWritten: Int64(received), totalBytesExpectedToWrite: Int64(announced))
+            XCTAssertEqual(delegate.failure, .incomplete)
+            XCTAssertNotEqual(task.state, .suspended)
+            // A later callback cannot revive progress or erase the first budget failure.
+            delegate.urlSession(
+                session, downloadTask: task, didWriteData: 0,
+                totalBytesWritten: 4, totalBytesExpectedToWrite: 4)
+            XCTAssertEqual(delegate.failure, .incomplete)
+        }
+    }
+
+    func testNativeDelegateAcceptsExactExpectedOriginal() throws {
+        let budget = try FoundationDownloadByteBudget(expectedBytes: 4, availableBytes: 16)
+        let session = URLSession(configuration: .ephemeral)
+        defer { session.invalidateAndCancel() }
+        let task = session.downloadTask(with: URL(string: "https://example.invalid/original")!)
+        let progress = expectation(description: "Permitted original progress")
+        let delegate = FoundationDownloadDelegate(budget: budget) { bytes, total in
+            XCTAssertEqual(bytes, 4)
+            XCTAssertEqual(total, 4)
+            progress.fulfill()
+        }
+        delegate.urlSession(
+            session, downloadTask: task, didWriteData: 4,
+            totalBytesWritten: 4, totalBytesExpectedToWrite: 4)
+        XCTAssertNil(delegate.failure)
+        XCTAssertEqual(task.state, .suspended)
+        wait(for: [progress], timeout: 1)
+    }
+
+    func testOversizedCompletedFileCannotBypassBudgetThroughInjectedLoader() async throws {
+        let fixture = try DownloadFileFixture()
+        defer { fixture.remove() }
+        try Data(repeating: 0, count: 8_192).write(to: fixture.temporary)
+        do {
+            try await FoundationDownloadTransport.transfer(
+                source: fixture.source, to: fixture.destination, allowsCellular: false,
+                progress: { _, _ in },
+                load: { _, _, _, _ in
+                    (fixture.temporary, fixture.response(length: 8_192))
+                }, validate: { _ in XCTFail("Oversized bytes must not reach native validation") })
+            XCTFail("Injected loaders cannot publish oversized files")
+        } catch { XCTAssertEqual(error as? FoundationDownloadError, .incomplete) }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.temporary.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.destination.path))
+    }
+
+    func testOriginalBeyondLocalFreeSpaceFailsBeforeNetworkLoad() async throws {
+        let fixture = try DownloadFileFixture()
+        defer { fixture.remove() }
+        let source = FoundationDownloadSource(
+            request: fixture.source.request, fileExtension: "m4a", expectedBytes: Int64.max)
+        do {
+            try await FoundationDownloadTransport.transfer(
+                source: source, to: fixture.destination, allowsCellular: false,
+                progress: { _, _ in },
+                load: { _, _, _, _ in
+                    XCTFail("Insufficient local space must stop before loading")
+                    return (fixture.temporary, fixture.response())
+                }, validate: { _ in XCTFail("No file may be promoted") })
+            XCTFail("Server metadata cannot enlarge the local storage budget")
+        } catch { XCTAssertEqual(error as? FoundationDownloadError, .storage) }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.destination.path))
+    }
+
     func testTransferStagesOriginalAndPassesNativeConnectionPolicy() async throws {
         let fixture = try DownloadFileFixture()
         defer { fixture.remove() }
         try await FoundationDownloadTransport.transfer(
             source: fixture.source, to: fixture.destination, allowsCellular: false,
             progress: { _, _ in },
-            load: { request, cellular, progress in
+            load: { request, cellular, budget, progress in
                 XCTAssertFalse(cellular)
+                XCTAssertEqual(budget.maximumBytes, 4)
                 XCTAssertFalse(request.allowsCellularAccess)
                 XCTAssertFalse(request.allowsExpensiveNetworkAccess)
                 progress(4, 4)
@@ -128,7 +222,7 @@ final class FoundationDownloadTransportTests: XCTestCase {
             do {
                 try await FoundationDownloadTransport.transfer(
                     source: fixture.source, to: fixture.destination, allowsCellular: false,
-                    progress: { _, _ in }, load: { _, _, _ in (fixture.temporary, response) },
+                    progress: { _, _ in }, load: { _, _, _, _ in (fixture.temporary, response) },
                     validate: { _ in XCTFail("Rejected response must not reach validation") })
                 XCTFail("Unverified download must fail")
             } catch {
@@ -149,7 +243,7 @@ final class FoundationDownloadTransportTests: XCTestCase {
             try await FoundationDownloadTransport.transfer(
                 source: source, to: fixture.destination, allowsCellular: false,
                 progress: { _, _ in },
-                load: { _, _, _ in (fixture.temporary, fixture.response()) }, validate: { _ in })
+                load: { _, _, _, _ in (fixture.temporary, fixture.response()) }, validate: { _ in })
             XCTFail("Server metadata length must be honored")
         } catch { XCTAssertEqual(error as? FoundationDownloadError, .incomplete) }
         XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.temporary.path))
@@ -163,7 +257,7 @@ final class FoundationDownloadTransportTests: XCTestCase {
                 try await FoundationDownloadTransport.transfer(
                     source: fixture.source, to: fixture.destination, allowsCellular: false,
                     progress: { _, _ in },
-                    load: { _, _, _ in (fixture.temporary, fixture.response()) },
+                    load: { _, _, _, _ in (fixture.temporary, fixture.response()) },
                     validate: { _ in
                         if cancelled { throw CancellationError() }
                         throw FoundationDownloadError.incomplete
