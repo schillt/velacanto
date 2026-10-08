@@ -1,3 +1,4 @@
+import Combine
 import SwiftUI
 
 /// Library indexes share native rows; collection details keep their own canonical presentation.
@@ -245,6 +246,7 @@ struct FoundationLibraryIndexView: View {
     private func indexList(placeholderRows: Int) -> some View {
         let active = isActive && isVisible
         let allowsNetwork = !connectivity.localOnly
+        let pageModel = displayed
         return List {
             if selectedLetter != nil, term.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
@@ -310,9 +312,8 @@ struct FoundationLibraryIndexView: View {
                     id:
                         "\(active)-\(allowsNetwork)-\(term)-\(displayed.nextStartIndex ?? -1)-\(revision)"
                 ) {
-                    await displayed.loadNextPage(
-                        ifActive: active,
-                        allowsNetwork: allowsNetwork, using: loadPage)
+                    await loadDemandedPage(
+                        pageModel, active: active, allowsNetwork: allowsNetwork)
                 }
             }
         }
@@ -354,6 +355,7 @@ struct FoundationLibraryIndexView: View {
     private func collectionGrid(viewport: CGSize) -> some View {
         let active = isActive && isVisible
         let allowsNetwork = !connectivity.localOnly
+        let pageModel = displayed
         return ScrollView {
             LazyVStack(alignment: .leading, spacing: 20) {
                 if selectedLetter != nil {
@@ -413,9 +415,8 @@ struct FoundationLibraryIndexView: View {
                         id:
                             "\(active)-\(allowsNetwork)-\(term)-\(selectedLetter ?? "All")-\(displayed.nextStartIndex ?? -1)-\(revision)"
                     ) {
-                        await displayed.loadNextPage(
-                            ifActive: active,
-                            allowsNetwork: allowsNetwork, using: loadPage)
+                        await loadDemandedPage(
+                            pageModel, active: active, allowsNetwork: allowsNetwork)
                     }
                 }
             }.padding(.horizontal, 16).padding(.vertical, 12)
@@ -425,6 +426,21 @@ struct FoundationLibraryIndexView: View {
             guard isActive, isVisible, !connectivity.localOnly else { return }
             displayed.request(.refresh)
             revision += 1
+        }
+    }
+
+    /// A visible footer retains one demand through initial publication/cache completion.
+    /// The stable task host owns the subscription and cancels it when the footer leaves.
+    private func loadDemandedPage(
+        _ pageModel: FoundationBrowseModel, active: Bool, allowsNetwork: Bool
+    ) async {
+        guard active, allowsNetwork, !Task.isCancelled else { return }
+        // Filter before the async bridge so a busy value cannot consume its demand.
+        for await _ in pageModel.$isLoading.filter({ !$0 }).values {
+            guard !Task.isCancelled else { return }
+            await pageModel.loadNextPage(
+                ifActive: active, allowsNetwork: allowsNetwork, using: loadPage)
+            return
         }
     }
 
