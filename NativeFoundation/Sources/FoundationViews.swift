@@ -1619,6 +1619,9 @@ struct FoundationLoadingPlaceholder: View {
         shapes
             .foregroundStyle(.quaternary)
             .transaction { $0.animation = nil }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Loading")
+            .accessibilityIdentifier("loading-placeholder-\(layout)")
             .overlay {
                 if !reduceMotion {
                     GeometryReader { geometry in
@@ -1635,11 +1638,9 @@ struct FoundationLoadingPlaceholder: View {
                         }
                     }
                     .mask(shapes.transaction { $0.animation = nil })
+                    .accessibilityHidden(true)
                 }
             }
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel("Loading")
-            .accessibilityIdentifier("loading-placeholder-\(layout)")
             .allowsHitTesting(false)
     }
 
