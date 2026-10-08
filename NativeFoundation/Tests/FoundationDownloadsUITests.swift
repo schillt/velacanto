@@ -309,7 +309,7 @@ final class FoundationDownloadsUITests: XCTestCase {
             let frame = bar.frame
             if frame.intersects(original), frame.maxY < original.maxY { top = max(top, frame.maxY) }
         }
-        let profile = root.buttons["Profile and settings"].firstMatch
+        let profile = root.descendants(matching: .any)["Profile and settings"].firstMatch
         if profile.exists && profile.frame.height > 0 && profile.frame.intersects(original)
             && profile.frame.minY < original.midY && profile.isHittable
         {
