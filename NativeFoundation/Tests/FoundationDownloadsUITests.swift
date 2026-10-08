@@ -1686,7 +1686,7 @@ final class FoundationDownloadsUITests: XCTestCase {
         capture("Repeated Search split merge and tab reentry preserves query", in: app)
     }
 
-    func testCompleteLoadedSongsAlphabetFallbackDragAndAllStayInTracks() {
+    func testCompleteLoadedSongsAlphabetTapAndDragStayInTracks() {
         continueAfterFailure = false
         // This fixture has no server alphabet capability and complete two-song membership.
         let app = launch(productionShell: true, canonicalDownloadState: "full")
@@ -1713,7 +1713,7 @@ final class FoundationDownloadsUITests: XCTestCase {
         index.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.98)).tap()
         XCTAssertTrue(first.exists)
         XCTAssertFalse(app.staticTexts["Z and following"].exists)
-        tapNativeAlphabet("All", in: app)
+        tapNativeAlphabet("A", in: app)
         XCTAssertTrue(first.waitForExistence(timeout: 5))
         let start = index.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.05))
         let end = index.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.98))
@@ -1721,9 +1721,9 @@ final class FoundationDownloadsUITests: XCTestCase {
             forDuration: 0.1, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0.2)
         XCTAssertTrue(first.exists)
         XCTAssertFalse(app.staticTexts["Z and following"].exists)
-        tapNativeAlphabet("All", in: app)
+        tapNativeAlphabet("A", in: app)
         XCTAssertTrue(first.waitForExistence(timeout: 5))
-        capture("Complete loaded Songs alphabet tap drag and All without server seek", in: app)
+        capture("Complete loaded Songs alphabet tap drag without server seek", in: app)
     }
 
     func testQueueSkipPauseCollapseAndReopenRepeatedly() {
@@ -1810,7 +1810,41 @@ final class FoundationDownloadsUITests: XCTestCase {
             "Playback controls retain header edge and button dismissal without artwork", in: app)
     }
 
-    func testOwnedMiniPlayerGlassHasVisibleIntermediateExpansion() {
+    func testNativeMiniPlayerMinimizesExpandsAndReturnsToNormal() {
+        continueAfterFailure = false
+        let app = launch(
+            productionShell: true, canonicalDownloadState: "full", artworkCache: true,
+            longPlayback: true, alphabetCatalog: true, compactFixtureControls: true)
+        selectTab("Library", in: app)
+        tapVisible(app.buttons["library-category-songs"], in: app)
+        let table = app.tables["library-index-track"]
+        XCTAssertTrue(table.waitForExistence(timeout: 5))
+        table.coordinate(withNormalizedOffset: .zero)
+            .withOffset(CGVector(dx: table.frame.width * 0.5, dy: 60)).tap()
+        let open = app.buttons["Show Now Playing"]
+        XCTAssertTrue(open.waitForExistence(timeout: 5))
+        let normal = app.buttons["foundation-mini-player-normal"]
+        let minimized = app.buttons["foundation-mini-player-minimized"]
+        XCTAssertTrue(normal.waitForExistence(timeout: 5) && normal.isHittable)
+        table.swipeUp()
+        XCTAssertTrue(minimized.waitForExistence(timeout: 5) && minimized.isHittable)
+        capture("Native scroll-minimized player", in: app)
+        openNowPlaying(app)
+        dismissNowPlaying(app)
+        XCTAssertTrue(open.isHittable)
+        // Scroll back to the top, where UIKit restores the normal tab accessory.
+        for _ in 0..<5 {
+            if normal.exists && normal.isHittable { break }
+            table.swipeDown()
+        }
+        XCTAssertTrue(normal.waitForExistence(timeout: 5) && normal.isHittable)
+        openNowPlaying(app)
+        dismissNowPlaying(app)
+        XCTAssertTrue(open.isHittable)
+        capture("Native player restored to normal placement", in: app)
+    }
+
+    func testMiniPlayerGlassRendersIntermediateGeometry() {
         continueAfterFailure = false
         let app = launch(
             productionShell: true, canonicalDownloadState: "full", artworkCache: true,
@@ -1820,10 +1854,9 @@ final class FoundationDownloadsUITests: XCTestCase {
         tapVisible(app.buttons["collection-track-0"], in: app)
         capture("Owned compact glass source above navigation", in: app)
         app.buttons["Show Now Playing"].tap()
-        let resume = app.buttons["Finish glass transition"]
-        XCTAssertTrue(resume.waitForExistence(timeout: 5))
-        capture("Actual glass geometry paused partway through expansion", in: app)
         XCTAssertTrue(app.buttons["More playback options"].waitForExistence(timeout: 5))
+        XCTAssertGreaterThanOrEqual(artworkTransitionCount("intermediate", in: app), 1)
+        capture("Player after measured intermediate glass expansion", in: app)
         app.buttons["Collapse Now Playing"].tap()
         XCTAssertTrue(app.buttons["Show Now Playing"].waitForExistence(timeout: 5))
         capture("Owned compact glass restored after reverse transition", in: app)
@@ -2036,10 +2069,6 @@ final class FoundationDownloadsUITests: XCTestCase {
     }
 
     private func tapNativeAlphabet(_ letter: String, in app: XCUIApplication) {
-        if letter == "All", app.buttons["library-alphabet-all-track"].exists {
-            tapNativeChrome(app.buttons["library-alphabet-all-track"], in: app)
-            return
-        }
         let table = app.tables["library-index-track"]
         XCTAssertTrue(table.waitForExistence(timeout: 5))
         // UIKit exposes one native Section index AX control, rather than letter children.
@@ -2055,7 +2084,7 @@ final class FoundationDownloadsUITests: XCTestCase {
         XCTAssertTrue(index.exists && index.isHittable)
         XCTAssertGreaterThan(index.frame.width, 0)
         XCTAssertGreaterThan(index.frame.height, 0)
-        let titles = ["All", "#"] + (65...90).map { String(UnicodeScalar($0)!) }
+        let titles = (65...90).map { String(UnicodeScalar($0)!) }
         guard let position = titles.firstIndex(of: letter) else {
             XCTFail("Requested letter must belong to the approved native index order")
             return
@@ -2206,6 +2235,9 @@ final class FoundationDownloadsUITests: XCTestCase {
                 evaluatedWith: identity)
             wait(for: [selected], timeout: 5)
         }
+        XCTAssertTrue(app.buttons["Actions for G Fixture track 150"].waitForExistence(timeout: 10))
+        XCTAssertFalse(app.buttons["library-alphabet-all-track"].exists)
+        let before = readAlphabetCounts(app)
         tapNativeAlphabet("F", in: app)
         XCTAssertTrue(app.buttons["Actions for F Fixture track 100"].waitForExistence(timeout: 10))
         capture("F anchor within retained full Tracks list", in: app)
@@ -2227,15 +2259,17 @@ final class FoundationDownloadsUITests: XCTestCase {
         tapNativeAlphabet("G", in: app)
         touchFirstRenderedRow()
         expectSelection(150)
-        tapNativeAlphabet("All", in: app)
+        tapNativeAlphabet("A", in: app)
         touchFirstRenderedRow()
         expectSelection(0)
         let counts = readAlphabetCounts(app)
+        XCTAssertEqual(counts, before, "Rail gestures must not request pages")
+        XCTAssertFalse(app.progressIndicators["Jumping to F…"].exists)
         XCTAssertTrue(counts.contains("track-all-0 1"))
         XCTAssertTrue(counts.contains("track-all-100 1"))
         XCTAssertFalse(counts.contains("track-F-"))
         XCTAssertFalse(counts.contains("track-G-"))
-        capture("All returns to retained first row with no filtered requests", in: app)
+        capture("A returns to retained first row with no filtered requests", in: app)
     }
 
     func testTracksAlphabetOfflineAndRelatedNavigationRetainPlayback() {
@@ -2256,7 +2290,7 @@ final class FoundationDownloadsUITests: XCTestCase {
         selectTab("Library", in: app)
         tapVisible(app.buttons["library-category-songs"], in: app)
         tapNativeAlphabet("F", in: app)
-        tapNativeAlphabet("All", in: app)
+        tapNativeAlphabet("A", in: app)
         tapVisible(app.buttons["Actions for A Fixture track 0"], in: app)
         app.cells.buttons["View Album"].tap()
         XCTAssertTrue(
@@ -2268,13 +2302,13 @@ final class FoundationDownloadsUITests: XCTestCase {
         toggleAlphabetNetwork(app, offline: true)
         let before = readAlphabetCounts(app)
         tapNativeAlphabet("F", in: app)
-        tapNativeAlphabet("#", in: app)
-        tapNativeAlphabet("All", in: app)
-        XCTAssertTrue(tone.waitForExistence(timeout: 5) && tone.isHittable)
+        tapNativeAlphabet("Z", in: app)
+        tapNativeAlphabet("A", in: app)
+        XCTAssertTrue(tone.waitForExistence(timeout: 5))
         XCTAssertEqual(readAlphabetCounts(app), before)
         XCTAssertEqual(identity.label, original)
         toggleAlphabetNetwork(app, offline: false)
-        tapNativeAlphabet("All", in: app)
+        tapNativeAlphabet("A", in: app)
         XCTAssertTrue(app.buttons["Actions for A Fixture track 0"].waitForExistence(timeout: 5))
         XCTAssertEqual(identity.label, original)
         capture("Full-list anchors offline and related navigation retain playback", in: app)
@@ -2298,35 +2332,41 @@ final class FoundationDownloadsUITests: XCTestCase {
         ).firstMatch
         XCTAssertTrue(f.waitForExistence(timeout: 10))
         capture("Loaded F anchor after ordinary page retry", in: app)
-        tapNativeAlphabet("All", in: app)
+        tapNativeAlphabet("A", in: app)
         XCTAssertTrue(app.buttons["Actions for A Fixture track 0"].isHittable)
         let before = readAlphabetCounts(app)
         tapNativeAlphabet("F", in: app)
-        tapNativeAlphabet("All", in: app)
+        tapNativeAlphabet("A", in: app)
         XCTAssertEqual(readAlphabetCounts(app), before)
         capture("Ordinary page retry preserves prior rows and loaded anchors", in: app)
     }
 
-    func testTracksPendingAnchorCancelAndRetargetRejectStaleScroll() {
+    func testTracksActivationLoadCancelsOnExitAndRailDoesNotRetargetLoading() {
         continueAfterFailure = false
         let app = launch(
             productionShell: true, canonicalDownloadState: "full", alphabetCatalog: true,
             compactFixtureControls: true, heldAlphabetPage: true)
         selectTab("Library", in: app)
         tapVisible(app.buttons["library-category-songs"], in: app)
+        XCTAssertTrue(app.buttons["Actions for A Fixture track 0"].waitForExistence(timeout: 5))
+        let before = readAlphabetCounts(app)
         tapNativeAlphabet("F", in: app)
-        let cancel = app.buttons["library-alphabet-cancel-track"]
-        XCTAssertTrue(cancel.waitForExistence(timeout: 5))
-        cancel.tap()
-        tapNativeAlphabet("All", in: app)
-        XCTAssertTrue(app.buttons["Actions for A Fixture track 0"].isHittable)
-        XCTAssertFalse(app.buttons["Actions for F Fixture track 100"].exists)
         tapNativeAlphabet("G", in: app)
+        tapNativeAlphabet("A", in: app)
+        XCTAssertFalse(app.buttons["library-alphabet-cancel-track"].exists)
+        XCTAssertFalse(app.buttons["library-alphabet-all-track"].exists)
+        XCTAssertEqual(readAlphabetCounts(app), before)
+        XCTAssertTrue(app.buttons["Actions for A Fixture track 0"].isHittable)
+        app.navigationBars.buttons.firstMatch.tap()
+        tapVisible(app.buttons["library-category-songs"], in: app)
         XCTAssertTrue(app.buttons["Actions for G Fixture track 150"].waitForExistence(timeout: 10))
-        tapNativeAlphabet("All", in: app)
+        tapNativeAlphabet("G", in: app)
+        XCTAssertTrue(app.buttons["Actions for G Fixture track 150"].isHittable)
+        tapNativeAlphabet("A", in: app)
         XCTAssertTrue(app.buttons["Actions for A Fixture track 0"].isHittable)
         XCTAssertTrue(readAlphabetCounts(app).contains("cancelled 1"))
-        capture("Pending anchor cancel and retarget keep canonical membership", in: app)
+        capture(
+            "Activation load resumes after exit; rail never starts or retargets requests", in: app)
     }
 
     private func openNowPlaying(_ app: XCUIApplication) {

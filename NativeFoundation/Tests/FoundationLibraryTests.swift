@@ -6,87 +6,176 @@ import XCTest
 final class FoundationLibraryTests: XCTestCase {
 
     @MainActor
-    func testAlphabetAnchorAppendsContiguousPagesWithoutFilteringMembership() async {
+    func testSongsActivationLoadsCompleteMembershipBeforeAnyLetterSelection() async {
         let model = FoundationBrowseModel()
         model.configureCatalogPagination()
         let a = FoundationItem(id: "a", title: "Alpha", subtitle: "", kind: .track, duration: nil)
         let c = FoundationItem(id: "c", title: "Charlie", subtitle: "", kind: .track, duration: nil)
         let f = FoundationItem(id: "f", title: "Foxtrot", subtitle: "", kind: .track, duration: nil)
         var offsets: [Int] = []
-        let anchor = await model.loadThroughAlphabetAnchor("F") { offset in
+        await model.loadCompleteCatalog { offset in
             offsets.append(offset)
             switch offset {
             case 0: return .init(items: [a], nextStartIndex: 50)
             case 50: return .init(items: [c], nextStartIndex: 100)
-            default: return .init(items: [f], nextStartIndex: 150)
+            default: return .init(items: [f], nextStartIndex: nil)
             }
         }
         XCTAssertEqual(offsets, [0, 50, 100])
-        XCTAssertEqual(anchor, 2)
         XCTAssertEqual(model.items, [a, c, f])
-        XCTAssertEqual(model.nextStartIndex, 150)
-        let all = await model.loadThroughAlphabetAnchor("All") { _ in
-            XCTFail("All must only scroll to the retained first row")
+        XCTAssertNil(model.nextStartIndex)
+        for letter in FoundationAlphabetAnchors.titles {
+            XCTAssertNotNil(FoundationAlphabetAnchors.index(for: letter, in: model.items))
+        }
+        XCTAssertEqual(model.items, [a, c, f])
+        XCTAssertEqual(offsets, [0, 50, 100])
+        await model.loadCompleteCatalog { _ in
+            XCTFail("Reactivation retains the complete catalog without a cache refresh")
             return .init(items: [], nextStartIndex: nil)
         }
-        XCTAssertEqual(all, 0)
-        XCTAssertEqual(model.items, [a, c, f])
-        let loaded = await model.loadThroughAlphabetAnchor("C") { _ in
-            XCTFail("A loaded letter must jump without a fetch")
-            return .init(items: [], nextStartIndex: nil)
-        }
-        XCTAssertEqual(loaded, 1)
     }
 
     @MainActor
-    func testAlphabetAnchorCancelAndAllRejectStalePageWithoutLosingEarlierRows() async {
+    func testSongsActivationCancellationRejectsStalePageAndResumesRemainingMembership() async {
         let model = FoundationBrowseModel()
         model.configureCatalogPagination()
         let a = FoundationItem(id: "a", title: "Alpha", subtitle: "", kind: .track, duration: nil)
-        let stale = FoundationItem(
-            id: "f", title: "Foxtrot", subtitle: "", kind: .track, duration: nil)
+        let f = FoundationItem(id: "f", title: "Foxtrot", subtitle: "", kind: .track, duration: nil)
         await model.loadPending { _ in .init(items: [a], nextStartIndex: 50) }
         let gate = FoundationAlphabetTestGate()
         let old = Task {
-            await model.loadThroughAlphabetAnchor("F") { offset in
+            await model.loadCompleteCatalog { offset in
                 XCTAssertEqual(offset, 50)
                 await gate.suspend()
-                return .init(items: [stale], nextStartIndex: 100)
+                return .init(items: [f], nextStartIndex: nil)
             }
         }
         await gate.entered()
         old.cancel()
-        model.request(.initial)
-        let all = await model.loadThroughAlphabetAnchor("All") { _ in
-            XCTFail("Retargeting All cannot request a replacement page")
-            return .init(items: [], nextStartIndex: nil)
-        }
         await gate.release()
-        let cancelled = await old.value
-        XCTAssertNil(cancelled)
-        XCTAssertEqual(all, 0)
+        await old.value
         XCTAssertEqual(model.items, [a])
         XCTAssertEqual(model.nextStartIndex, 50)
+        XCTAssertFalse(model.isLoading)
+        await model.loadCompleteCatalog { offset in
+            XCTAssertEqual(offset, 50)
+            return .init(items: [f], nextStartIndex: nil)
+        }
+        XCTAssertEqual(model.items, [a, f])
+        XCTAssertNil(model.nextStartIndex)
+    }
+
+    @MainActor
+    func testCompleteCatalogStopsOnFailureWithoutAutomaticRetry() async {
+        let model = FoundationBrowseModel()
+        model.configureCatalogPagination()
+        let a = FoundationItem(id: "a", title: "Alpha", subtitle: "", kind: .track, duration: nil)
+        var requests = 0
+        await model.loadCompleteCatalog { offset in
+            requests += 1
+            if offset == 0 { return .init(items: [a], nextStartIndex: 50) }
+            throw FoundationLibraryError.network
+        }
+        XCTAssertEqual(requests, 2)
+        XCTAssertEqual(model.items, [a])
+        XCTAssertNotNil(model.errorMessage)
+        await model.loadCompleteCatalog { _ in
+            XCTFail("A failed catalog requires explicit retry")
+            return .init(items: [], nextStartIndex: nil)
+        }
+    }
+
+    @MainActor
+    func testCachedCatalogFailureRequiresExplicitRetryOnRevisit() async {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cache = FoundationCatalogPageCache(scope: "synthetic-rail-retry", root: directory)
+        let a = FoundationItem(id: "a", title: "Alpha", subtitle: "", kind: .track, duration: nil)
+        let f = FoundationItem(id: "f", title: "Foxtrot", subtitle: "", kind: .track, duration: nil)
+        // Cover a refresh failure retaining disk data and a later-page failure retaining live data.
+        for failRefresh in [true, false] {
+            let key = "songs-\(failRefresh)"
+            await cache.write(.init(items: [a], nextStartIndex: 50), key: key)
+            let model = FoundationBrowseModel(refreshInterval: 0)
+            model.configureCatalogPagination()
+            model.configureCache(cache, key: key)
+            await model.loadCompleteCatalog { offset in
+                if !failRefresh, offset == 0 {
+                    return .init(items: [a], nextStartIndex: 50)
+                }
+                throw FoundationLibraryError.network
+            }
+            XCTAssertEqual(model.items, [a])
+            XCTAssertEqual(model.isRetainedSnapshot, failRefresh)
+            XCTAssertEqual(model.errorCategory, .network)
+            await model.loadCompleteCatalog { _ in
+                XCTFail("Revisiting a failed cached catalog must not retry any page")
+                return .init(items: [], nextStartIndex: nil)
+            }
+            XCTAssertEqual(model.items, [a])
+            XCTAssertEqual(model.errorCategory, .network)
+            model.request(model.retryRequest)
+            await model.loadCompleteCatalog { offset in
+                offset == 0
+                    ? .init(items: [a], nextStartIndex: 50)
+                    : .init(items: [f], nextStartIndex: nil)
+            }
+            XCTAssertEqual(model.items, [a, f])
+            XCTAssertNil(model.errorMessage)
+            XCTAssertNil(model.nextStartIndex)
+        }
+    }
+
+    @MainActor
+    func testCompleteCatalogAccountResetRejectsLatePageAndStopsPaging() async {
+        let model = FoundationBrowseModel()
+        model.configureCatalogPagination()
+        let a = FoundationItem(id: "a", title: "Alpha", subtitle: "", kind: .track, duration: nil)
+        let gate = FoundationAlphabetTestGate()
+        var requests = 0
+        let loading = Task {
+            await model.loadCompleteCatalog { _ in
+                requests += 1
+                await gate.suspend()
+                return .init(items: [a], nextStartIndex: 50)
+            }
+        }
+        await gate.entered()
+        model.clearRetainedData()
+        await gate.release()
+        await loading.value
+        XCTAssertEqual(requests, 1)
+        XCTAssertTrue(model.items.isEmpty)
+        XCTAssertNil(model.nextStartIndex)
         XCTAssertFalse(model.isLoading)
     }
 
     @MainActor
-    func testAlphabetAnchorMissingLetterStopsAtEndAndPreservesCompleteList() async {
+    func testCompleteCatalogRejectsNonAdvancingCursor() async {
         let model = FoundationBrowseModel()
         model.configureCatalogPagination()
         let a = FoundationItem(id: "a", title: "Alpha", subtitle: "", kind: .track, duration: nil)
-        let g = FoundationItem(id: "g", title: "Golf", subtitle: "", kind: .track, duration: nil)
         var requests = 0
-        let anchor = await model.loadThroughAlphabetAnchor("F") { offset in
+        await model.loadCompleteCatalog { offset in
             requests += 1
-            return offset == 0
-                ? .init(items: [a], nextStartIndex: 50)
-                : .init(items: [g], nextStartIndex: nil)
+            return .init(items: [a], nextStartIndex: offset)
         }
-        XCTAssertEqual(requests, 2)
-        XCTAssertEqual(anchor, 1)
-        XCTAssertEqual(model.items, [a, g])
-        XCTAssertNil(model.nextStartIndex)
+        XCTAssertEqual(requests, 1)
+        XCTAssertEqual(model.errorCategory, .invalidResponse)
+    }
+
+    func testAlphabetRailOnlyOffersAZAndMissingLettersUseFollowingOrFinalAnchor() {
+        let a = FoundationItem(id: "a", title: "Alpha", subtitle: "", kind: .track, duration: nil)
+        let g = FoundationItem(id: "g", title: "Golf", subtitle: "", kind: .track, duration: nil)
+        XCTAssertEqual(FoundationAlphabetAnchors.titles.count, 26)
+        XCTAssertEqual(FoundationAlphabetAnchors.titles.first, "A")
+        XCTAssertEqual(FoundationAlphabetAnchors.titles.last, "Z")
+        XCTAssertNil(FoundationAlphabetAnchors.index(for: "All", in: [a, g]))
+        XCTAssertNil(FoundationAlphabetAnchors.index(for: "#", in: [a, g]))
+        XCTAssertEqual(FoundationAlphabetAnchors.index(for: "F", in: [a, g]), 1)
+        XCTAssertEqual(FoundationAlphabetAnchors.index(for: "Z", in: [a, g]), 1)
+        XCTAssertNil(FoundationAlphabetAnchors.index(for: "A", in: []))
     }
 
     func testAlphabetAnchorUsesOptionalProviderSortNameAndDecodesOlderCaches() throws {

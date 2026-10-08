@@ -23,8 +23,6 @@ struct FoundationLibraryIndexView: View {
         @Environment(\.foundationTraceOrigin) private var traceOrigin
     #endif
     @State private var selectedLetter: String?
-    @State private var seekingLetter: String?
-    @State private var performsAlphabetJump = false
     @State private var anchorRowID: String?
     @State private var anchorRevision = 0
     @State private var usesNativeAlphabet = false
@@ -40,7 +38,7 @@ struct FoundationLibraryIndexView: View {
     private var alphabetAvailable: Bool { kind == .track && term.isEmpty }
     private var wantsNativeAlphabet: Bool { alphabetAvailable }
     private var alphabetTitles: [String] {
-        ["All", "#"] + (65...90).compactMap { UnicodeScalar($0).map { String($0) } }
+        FoundationAlphabetAnchors.titles
     }
     private var windowDescription: String { selectedLetter ?? "All" }
     private var isCoverGrid: Bool { kind == .album || kind == .playlist }
@@ -77,9 +75,7 @@ struct FoundationLibraryIndexView: View {
         // Reading live @State after onAppear could start work under a superseded key.
         let active = isActive && isVisible
         let allowsNetwork = !connectivity.localOnly
-        let jumpLetter = selectedLetter
         let requestRevision = revision
-        let jumpRequested = performsAlphabetJump
         return GeometryReader { geometry in
             FoundationCollectionTransitionReader { transition in
                 #if os(iOS)
@@ -120,11 +116,10 @@ struct FoundationLibraryIndexView: View {
                             Picker(
                                 "Jump to letter",
                                 selection: Binding(
-                                    get: { selectedLetter ?? "All" }, set: chooseLetter)
+                                    get: { selectedLetter ?? "A" }, set: chooseLetter)
                             ) {
                                 ForEach(alphabetTitles, id: \.self) { letter in
-                                    Text(letter == "#" ? "Other downloaded names" : letter).tag(
-                                        letter)
+                                    Text(letter).tag(letter)
                                 }
                             }
                         }
@@ -153,7 +148,6 @@ struct FoundationLibraryIndexView: View {
         }
         .onDisappear {
             isVisible = false
-            seekingLetter = nil
         }
         .onChange(of: query) { old, new in
             guard
@@ -162,13 +156,9 @@ struct FoundationLibraryIndexView: View {
             else { return }
             searchModel.clearRetainedData()
             selectedLetter = nil
-            seekingLetter = nil
-            performsAlphabetJump = false
         }
         .onChange(of: refreshToken) { _, _ in
             selectedLetter = nil
-            seekingLetter = nil
-            performsAlphabetJump = false
             model.request(.refresh)
             if !term.isEmpty { searchModel.request(.refresh) }
             revision += 1
@@ -176,15 +166,11 @@ struct FoundationLibraryIndexView: View {
         .onChange(of: connectivity.successfulRetryRevision) { _, _ in
             guard isActive, isVisible else { return }
             selectedLetter = nil
-            seekingLetter = nil
-            performsAlphabetJump = false
             displayed.request(.refresh)
             revision += 1
         }
         .onChange(of: connectivity.localOnly) { _, _ in
             selectedLetter = nil
-            seekingLetter = nil
-            performsAlphabetJump = false
             anchorRowID = nil
             revision += 1
         }
@@ -193,8 +179,6 @@ struct FoundationLibraryIndexView: View {
         }
         .onChange(of: library.catalogScopeID) { _, _ in
             selectedLetter = nil
-            seekingLetter = nil
-            performsAlphabetJump = false
             searchModel.clearRetainedData()
             revision += 1
         }
@@ -210,24 +194,10 @@ struct FoundationLibraryIndexView: View {
                         [$0.title, $0.subtitle, $0.album?.title ?? "", $0.artist?.title ?? ""]
                             .contains { $0.localizedStandardContains(term) }
                     }
-                if !jumpRequested || !displayed.loaded {
-                    displayed.installSnapshot(
-                        items.sorted { offlineSortKey($0) < offlineSortKey($1) })
-                }
-                if jumpRequested, jumpLetter == nil { performsAlphabetJump = false }
-            } else if term.isEmpty, jumpRequested {
-                guard let jumpLetter else {
-                    performsAlphabetJump = false
-                    return
-                }
-                seekingLetter = jumpLetter
-                let target = await model.loadThroughAlphabetAnchor(jumpLetter, using: loadPage)
-                guard !Task.isCancelled, revision == requestRevision else { return }
-                anchorRowID = target.map { "\(kind):\(model.items[$0].id)" }
-                anchorRevision += 1
-                seekingLetter = nil
-                performsAlphabetJump = false
-                return
+                displayed.installSnapshot(
+                    items.sorted { offlineSortKey($0) < offlineSortKey($1) })
+            } else if alphabetAvailable {
+                await model.loadCompleteCatalog(using: loadPage)
             } else {
                 if !term.isEmpty {
                     do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
@@ -236,16 +206,7 @@ struct FoundationLibraryIndexView: View {
                 await displayed.loadPending(
                     ifActive: active, allowsNetwork: allowsNetwork, using: loadPage)
             }
-            if let jumpLetter, !Task.isCancelled, revision == requestRevision {
-                let target =
-                    FoundationAlphabetAnchors.index(for: jumpLetter, in: model.items)
-                    ?? FoundationAlphabetAnchors.followingIndex(for: jumpLetter, in: model.items)
-                    ?? model.items.indices.last
-                anchorRowID = target.map { "\(kind):\(model.items[$0].id)" }
-                anchorRevision += 1
-                seekingLetter = nil
-                performsAlphabetJump = false
-            }
+
         }
     }
 
@@ -285,14 +246,12 @@ struct FoundationLibraryIndexView: View {
                         Text(error).foregroundStyle(.red)
                         Button("Retry") {
                             selectedLetter = nil
-                            seekingLetter = nil
-                            performsAlphabetJump = false
                             displayed.request(displayed.retryRequest)
                             revision += 1
                         }.disabled(connectivity.localOnly)
                     }
                 }
-                if displayed.nextStartIndex != nil, !connectivity.localOnly {
+                if displayed.nextStartIndex != nil, !connectivity.localOnly, !alphabetAvailable {
                     VStack(spacing: 0) {
                         if displayed.isLoading {
                             ProgressView("Loading more…")
@@ -315,7 +274,6 @@ struct FoundationLibraryIndexView: View {
             .refreshable {
                 guard isActive, isVisible, !connectivity.localOnly else { return }
                 selectedLetter = nil
-                performsAlphabetJump = false
                 displayed.request(.refresh)
                 revision += 1
             }
@@ -388,7 +346,7 @@ struct FoundationLibraryIndexView: View {
                         }.disabled(connectivity.localOnly)
                     }
                 }
-                if displayed.nextStartIndex != nil, !connectivity.localOnly {
+                if displayed.nextStartIndex != nil, !connectivity.localOnly, !alphabetAvailable {
                     VStack(spacing: 0) {
                         if displayed.isLoading {
                             ProgressView("Loading more…")
@@ -446,41 +404,14 @@ struct FoundationLibraryIndexView: View {
         FoundationAlphabetAnchors.key(for: item)
     }
 
-    private func requestNextPage() {
-        guard isActive, isVisible, !connectivity.localOnly, !performsAlphabetJump,
-            !displayed.isLoading,
-            displayed.errorMessage == nil, displayed.nextStartIndex != nil
-        else { return }
-        // The existing keyed task owns execution, cancellation and publication.
-        selectedLetter = nil
-        performsAlphabetJump = false
-        displayed.request(.more)
-        revision += 1
-    }
-
     private func chooseLetter(_ letter: String) {
-        // A rail gesture moves an anchor; it never installs another membership snapshot.
-        model.request(.initial)
-        selectedLetter = letter
-        seekingLetter = nil
-        performsAlphabetJump = true
-        anchorRowID = nil
-        anchorRevision += 1
-        if let index = FoundationAlphabetAnchors.index(for: letter, in: model.items) {
-            anchorRowID = "\(kind):\(model.items[index].id)"
-            anchorRevision += 1
+        // Selection changes only the scroll position of the existing full list.
+        guard let index = FoundationAlphabetAnchors.index(for: letter, in: model.items) else {
+            return
         }
-        revision += 1
-    }
-
-    private func cancelAlphabetJump() {
-        model.request(.initial)
-        selectedLetter = nil
-        seekingLetter = nil
-        performsAlphabetJump = true
-        anchorRowID = nil
+        selectedLetter = letter
+        anchorRowID = "\(kind):\(model.items[index].id)"
         anchorRevision += 1
-        revision += 1
     }
 
     #if os(iOS)
@@ -507,18 +438,6 @@ struct FoundationLibraryIndexView: View {
                 sections = [.init(id: "All", title: title, availability: .loaded, rows: [])]
             }
             return VStack(spacing: 0) {
-                if let seekingLetter, seekingLetter != "All" {
-                    HStack {
-                        ProgressView("Jumping to " + seekingLetter + "…")
-                        Spacer()
-                        Button("Cancel", action: cancelAlphabetJump)
-                            .accessibilityIdentifier("library-alphabet-cancel-track")
-                    }.padding(.horizontal).padding(.vertical, 4)
-                }
-                if selectedLetter != nil {
-                    Button("All") { chooseLetter("All") }
-                        .accessibilityIdentifier("library-alphabet-all-\(kind)")
-                }
                 FoundationLibraryAlphabetIndex(
                     contextID: library.catalogScopeID,
                     sections: sections,
@@ -527,20 +446,16 @@ struct FoundationLibraryIndexView: View {
                         ? gridColumnCount(width: viewport.width, nativeIndex: true) : 1,
                     isCoverGrid: isCoverGrid,
                     rowHeight: rowHeight,
-                    allowsDemand: isActive && isVisible && !connectivity.localOnly
-                        && !performsAlphabetJump && seekingLetter == nil && !displayed.isLoading
-                        && displayed.errorMessage == nil,
+                    allowsDemand: false,
                     isRefreshing: displayed.isLoading,
                     nextPageIdentity: displayed.nextStartIndex.map { "\($0):\(revision)" },
                     anchorRowID: anchorRowID,
                     anchorRevision: anchorRevision,
                     onChooseLetter: chooseLetter,
-                    onDemandNextPage: requestNextPage,
+                    onDemandNextPage: {},
                     onRefresh: {
                         guard isActive, isVisible, !connectivity.localOnly else { return }
                         selectedLetter = nil
-                        seekingLetter = nil
-                        performsAlphabetJump = false
                         displayed.request(.refresh)
                         revision += 1
                     }
@@ -612,8 +527,6 @@ struct FoundationLibraryIndexView: View {
                     Text(error).foregroundStyle(.red)
                     Button("Retry") {
                         selectedLetter = nil
-                        seekingLetter = nil
-                        performsAlphabetJump = false
                         displayed.request(displayed.retryRequest)
                         revision += 1
                     }.disabled(connectivity.localOnly)
@@ -696,19 +609,17 @@ enum FoundationAlphabetAnchors {
         return String(scalar).uppercased()
     }
 
+    static let titles = (65...90).compactMap { UnicodeScalar($0).map { String($0) } }
+
     static func index(for letter: String, in items: [FoundationItem]) -> Int? {
-        if letter == "All" { return items.indices.first }
-        if let exact = items.firstIndex(where: { self.letter(for: $0) == letter }) { return exact }
-        // A loaded prefix with provider sort keys proves a skipped ASCII letter is absent.
-        guard letter != "#", !items.isEmpty,
-            items.allSatisfy({ $0.sortName?.isEmpty == false })
-        else { return nil }
-        return followingIndex(for: letter, in: items)
+        guard titles.contains(letter) else { return nil }
+        return items.firstIndex(where: { self.letter(for: $0) == letter })
+            ?? followingIndex(for: letter, in: items)
+            ?? items.indices.last
     }
 
     static func followingIndex(for letter: String, in items: [FoundationItem]) -> Int? {
-        if letter == "All" { return items.indices.first }
-        return items.firstIndex {
+        items.firstIndex {
             let group = self.letter(for: $0)
             return group != "#" && group >= letter
         }

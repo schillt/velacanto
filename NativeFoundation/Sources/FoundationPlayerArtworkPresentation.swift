@@ -99,8 +99,9 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
         @Published private(set) var hiddenArtworkIdentity: String?
         #if DEBUG && targetEnvironment(simulator)
             @Published private(set) var transitionSummary =
-                "morph 0; fade 0; cancelled 0; completed 0; glass 0"
+                "morph 0; fade 0; cancelled 0; completed 0; glass 0; intermediate 0"
             private var glassCount = 0
+            private var intermediateCount = 0
             private var morphCount = 0
             private var fadeCount = 0
             private var cancelledCount = 0
@@ -108,7 +109,17 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
 
             private func publishTransitionSummary() {
                 transitionSummary =
-                    "morph \(morphCount); fade \(fadeCount); cancelled \(cancelledCount); completed \(completedCount); glass \(glassCount)"
+                    "morph \(morphCount); fade \(fadeCount); cancelled \(cancelledCount); completed \(completedCount); glass \(glassCount); intermediate \(intermediateCount)"
+            }
+
+            fileprivate func recordIntermediateSurface(
+                _ frame: CGRect, compact: CGRect, expanded: CGRect
+            ) {
+                guard frame.height > compact.height + 1, frame.height < expanded.height - 1,
+                    frame.width >= compact.width, frame.width <= expanded.width + 1
+                else { return }
+                intermediateCount += 1
+                publishTransitionSummary()
             }
 
             fileprivate func recordCompletion(cancelled: Bool) {
@@ -480,20 +491,14 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
         }
         func makeCoordinator() -> Coordinator { Coordinator() }
         func makeUIView(context: Context) -> UIView {
-            let view = UIVisualEffectView()
+            // The tab accessory supplies the native glass. This view only measures
+            // its current placement; adding another effect doubles the material.
+            let view = UIView()
             view.isUserInteractionEnabled = false
             view.isAccessibilityElement = false
-            view.cornerConfiguration = .capsule()
             return view
         }
         func updateUIView(_ view: UIView, context: Context) {
-            if context.coordinator.reduceTransparency != reduceTransparency,
-                let glass = view as? UIVisualEffectView
-            {
-                context.coordinator.reduceTransparency = reduceTransparency
-                glass.effect = reduceTransparency ? nil : UIGlassEffect(style: .regular)
-                glass.backgroundColor = reduceTransparency ? .systemBackground : .clear
-            }
             context.coordinator.model?.unregisterSurface(token: context.coordinator.token)
             context.coordinator.model = model
             if let identity {
@@ -532,7 +537,7 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
                 )
                 .allowsHitTesting(false).accessibilityHidden(true)
             }
-            // Hide the owned source as its matching material takes over the presentation.
+            // Hide source controls while the transition carries artwork into the player.
             // Keep its geometry attached for interrupted and reverse transitions.
             .opacity(model.isSurfaceTransitioning ? 0 : 1)
             .allowsHitTesting(!model.isSurfaceTransitioning)
@@ -684,6 +689,10 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
                 if !self.requestedPresentation
                     || self.dismissalRequestGeneration == self.requestGeneration
                 {
+                    // Consume the interactive dismissal before the queued reconcile.
+                    // SwiftUI publishes the binding later; leaving this true can
+                    // immediately create a new player over the restored mini bar.
+                    self.requestedPresentation = false
                     self.onDismissed()
                 }
                 self.dismissalRequestGeneration = nil
@@ -959,9 +968,6 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
         private var snapshotIdentity: String?
         private var snapshotImageID: UUID?
         private var generation: UInt?
-        #if DEBUG && targetEnvironment(simulator)
-            private weak var fixtureResume: UIButton?
-        #endif
 
         init(model: FoundationPlayerArtworkPresentationModel, presenting: Bool) {
             self.model = model
@@ -976,7 +982,7 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
                     return 1.2
                 }
             #endif
-            return model?.reduceMotion == true ? 0.18 : 0.42
+            return model?.reduceMotion == true ? 0.18 : 0.5
         }
 
         func animateTransition(using context: any UIViewControllerContextTransitioning) {
@@ -1043,9 +1049,9 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
                 if nativeGlass == nil {
                     surface.layer.cornerRadius = presenting ? surfaceRect.height / 2 : 0
                 }
-                // Effect views keep alpha 1. Native material is absent at both endpoints.
-                if nativeGlass == nil { surface.alpha = 0 }
-                container.addSubview(surface)
+                // Keep the transition material present behind the revealed player.
+                // The system owns the resting accessory glass beneath this container.
+                container.insertSubview(surface, belowSubview: playerView)
                 glass = surface
                 reveal.frame =
                     presenting
@@ -1087,7 +1093,7 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
                 duration: transitionDuration(using: context),
                 dampingRatio: 0.9)
             animator.addAnimations { [presenting] in
-                if glass == nil { playerView.alpha = presenting ? 1 : 0 }
+                playerView.alpha = presenting ? 1 : 0
                 if let surfaceRect, let glass {
                     glass.frame = presenting ? container.bounds : surfaceRect
                     if nativeGlass == nil {
@@ -1108,39 +1114,6 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
                     imageView.layoutIfNeeded()
                 }
             }
-            if let glass {
-                // Share the interruptible animator's clock. At either endpoint, removing
-                // this surface cannot replace the native material in one visible frame.
-                // Animate native material through effect, not effect-view alpha.
-                let duration = animator.duration
-                animator.addAnimations { [presenting] in
-                    UIView.animateKeyframes(
-                        withDuration: duration, delay: 0,
-                        options: [.calculationModeLinear]
-                    ) {
-                        UIView.addKeyframe(
-                            withRelativeStartTime: presenting ? 0.35 : 0,
-                            relativeDuration: 0.65
-                        ) {
-                            playerView.alpha = presenting ? 1 : 0
-                        }
-                        UIView.addKeyframe(withRelativeStartTime: 0, relativeDuration: 0.15) {
-                            if let nativeGlass {
-                                nativeGlass.effect = UIGlassEffect(style: .regular)
-                            } else {
-                                glass.alpha = 1
-                            }
-                        }
-                        UIView.addKeyframe(withRelativeStartTime: 0.75, relativeDuration: 0.25) {
-                            if let nativeGlass {
-                                nativeGlass.effect = nil
-                            } else {
-                                glass.alpha = 0
-                            }
-                        }
-                    }
-                }
-            }
             animator.addCompletion { [presenting, weak self, weak imageView, weak glass] _ in
                 let success = !context.transitionWasCancelled
                 // Restore a retained player only. A successful dismissal must remain
@@ -1150,9 +1123,6 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
                     playerView.mask = originalMask
                 }
                 glass?.removeFromSuperview()
-                #if DEBUG && targetEnvironment(simulator)
-                    self?.fixtureResume?.removeFromSuperview()
-                #endif
                 if let self, let generation = self.generation {
                     #if DEBUG && targetEnvironment(simulator)
                         self.model?.recordCompletion(cancelled: !success)
@@ -1168,36 +1138,16 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
             }
             propertyAnimator = animator
             #if DEBUG && targetEnvironment(simulator)
-                if presenting, glass != nil,
-                    ProcessInfo.processInfo.arguments.contains("-fixtureHoldPlayerGlass")
-                {
-                    // Freeze real rendered geometry for one synthetic screenshot check.
-                    // Production transitions never expose this control or pause.
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) { [weak self] in
+                if let glass, let surfaceRect {
+                    // Observe rendered intermediate geometry without pausing UIKit's
+                    // animation clock (which prevents XCTest from becoming idle).
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
+                        [weak self, weak glass] in
                         guard let self, self.propertyAnimator === animator,
-                            animator.isRunning
+                            let frame = glass?.layer.presentation()?.frame
                         else { return }
-                        animator.pauseAnimation()
-                        let button = UIButton(type: .system)
-                        button.setTitle("Finish glass transition", for: .normal)
-                        button.backgroundColor = .systemBackground
-                        button.frame = CGRect(x: 16, y: 64, width: 220, height: 44)
-                        button.addAction(
-                            UIAction { [weak button] _ in
-                                button?.removeFromSuperview()
-                                animator.continueAnimation(
-                                    withTimingParameters: nil, durationFactor: 1)
-                            }, for: .touchUpInside)
-                        container.addSubview(button)
-                        self.fixtureResume = button
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
-                            guard self?.propertyAnimator === animator else { return }
-                            button.removeFromSuperview()
-                            if animator.state == .active, !animator.isRunning {
-                                animator.continueAnimation(
-                                    withTimingParameters: nil, durationFactor: 1)
-                            }
-                        }
+                        self.model?.recordIntermediateSurface(
+                            frame, compact: surfaceRect, expanded: container.bounds)
                     }
                 }
             #endif
@@ -1218,9 +1168,6 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
         }
 
         func invalidate() {
-            #if DEBUG && targetEnvironment(simulator)
-                fixtureResume?.removeFromSuperview()
-            #endif
             snapshot?.removeFromSuperview()
             snapshot = nil
             model = nil

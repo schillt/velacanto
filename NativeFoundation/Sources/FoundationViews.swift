@@ -62,7 +62,6 @@ struct FoundationLibraryView: View {
         @StateObject private var playerArtworkPresentation =
             FoundationPlayerArtworkPresentationModel()
         @AccessibilityFocusState private var miniPlayerFocused: Bool
-        @ScaledMetric(relativeTo: .callout) private var miniPlayerReservation = 62.0
     #endif
     @State private var showingPlayer = false
     @State private var showingSettings = false
@@ -251,17 +250,6 @@ struct FoundationLibraryView: View {
                     Tab(value: destination, role: destination == .search ? .search : nil) {
                         NavigationStack {
                             browsingContent(destination)
-                                .safeAreaPadding(
-                                    .bottom, displayedQueue.isEmpty ? 0 : miniPlayerReservation)
-                        }
-                        // Keep the owned surface above the native navigation view's
-                        // touch layer. An outer safe-area inset can draw above an album
-                        // while its taps still reach the underlying native list.
-                        .overlay(alignment: .bottom) {
-                            if selectedTab == destination, !displayedQueue.isEmpty {
-                                miniPlayer()
-                                    .padding(.horizontal, 12).padding(.bottom, 6)
-                            }
                         }
                         .id(library.catalogScopeID + String(destination.rawValue))
                     } label: {
@@ -272,6 +260,11 @@ struct FoundationLibraryView: View {
                                 .symbolVariant(selectedTab == destination ? .fill : .none)
                         }
                     }
+                }
+            }
+            .tabViewBottomAccessory(isEnabled: !displayedQueue.isEmpty) {
+                FoundationMiniPlayerPlacement { inline in
+                    miniPlayer(showNext: !inline)
                 }
             }
         }
@@ -571,6 +564,9 @@ struct FoundationLibraryView: View {
                 }.contentShape(Rectangle())
             }
             .buttonStyle(.plain).accessibilityLabel("Show Now Playing")
+            .accessibilityIdentifier(
+                showNext ? "foundation-mini-player-normal" : "foundation-mini-player-minimized"
+            )
             #if os(iOS)
                 .accessibilityFocused($miniPlayerFocused)
             #endif
@@ -599,18 +595,8 @@ struct FoundationLibraryView: View {
                 )
                 .accessibilityLabel("Next")
             }
-        }.padding(.horizontal, 10).padding(.vertical, 6)
+        }.padding(.horizontal, showNext ? 10 : 6).padding(.vertical, showNext ? 6 : 0)
             #if os(iOS)
-                .overlay {
-                    FoundationMiniPlayerTouchLayer(
-                        showsNext: showNext, allowsToggle: displayedEntryID != nil,
-                        allowsNext: displayedEntryID != nil
-                            && displayedEntryID != displayedQueue.last?.id,
-                        onOpen: { showingPlayer = true },
-                        onToggle: { player.togglePlayback() }, onNext: { player.next() }
-                    )
-                    .accessibilityHidden(true)
-                }
                 .foundationPlayerSurfaceRegistration(identity: item?.sharedArtworkIdentity)
             #endif
     }
@@ -2177,3 +2163,13 @@ struct FoundationCollectionTransitionReader<Content: View>: View {
     @ViewBuilder let content: (FoundationCollectionTransitionContext?) -> Content
     var body: some View { content(transition) }
 }
+
+#if os(iOS)
+    /// Let the system accessory own both normal and scroll-minimized placement.
+    private struct FoundationMiniPlayerPlacement<Content: View>: View {
+        @Environment(\.tabViewBottomAccessoryPlacement) private var placement
+        @ViewBuilder let content: (Bool) -> Content
+
+        var body: some View { content(placement == .inline) }
+    }
+#endif

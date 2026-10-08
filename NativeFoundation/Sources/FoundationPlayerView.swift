@@ -37,6 +37,14 @@ struct FoundationPlayerView: View {
         player.queue.first { $0.id == player.selectedEntryID }?.item
     }
 
+    // The first transition frame uses the same already-decoded cover as the bar.
+    // Palette sampling may publish later, without an initial uncolored background.
+    private var backgroundArtwork: Image? {
+        if let artworkFill { return artworkFill }
+        guard let current, let result = currentArtwork.result(for: current) else { return nil }
+        return Image(decorative: result.image, scale: 1)
+    }
+
     private var album: FoundationItem? { current?.relatedAlbum }
 
     private var artist: FoundationItem? { current?.relatedArtist }
@@ -196,8 +204,8 @@ struct FoundationPlayerView: View {
                     GeometryReader { background in
                         ZStack {
                             artworkTint
-                            if let artworkFill {
-                                artworkFill.resizable().scaledToFill().blur(radius: 28)
+                            if let backgroundArtwork {
+                                backgroundArtwork.resizable().scaledToFill().blur(radius: 28)
                                     .frame(
                                         width: background.size.width, height: background.size.height
                                     )

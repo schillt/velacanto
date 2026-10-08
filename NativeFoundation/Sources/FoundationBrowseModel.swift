@@ -12,6 +12,7 @@ final class FoundationBrowseModel: ObservableObject {
     private(set) var loaded = false
     private(set) var isRetainedSnapshot = false
     private var revision = UUID()
+    private var catalogRevision = UUID()
     private var writePermit = FoundationPageWritePermit()
     private var hasLiveLoad: Bool { isLoading && writePermit.isValid }
     private var pendingRequest = Request.initial
@@ -91,6 +92,7 @@ final class FoundationBrowseModel: ObservableObject {
     func installSnapshot(_ snapshot: [FoundationItem], complete: Bool = true) {
         writePermit.revoke()
         revision = UUID()
+        catalogRevision = UUID()
         cachedRawPrefix = []
         items = deduplicatesCatalogItems ? uniqueCatalogItems(snapshot) : snapshot
         nextStartIndex = nil
@@ -105,6 +107,7 @@ final class FoundationBrowseModel: ObservableObject {
     func clearRetainedData() {
         writePermit.revoke()
         revision = UUID()
+        catalogRevision = UUID()
         cachedRawPrefix = []
         items = []
         nextStartIndex = nil
@@ -121,6 +124,7 @@ final class FoundationBrowseModel: ObservableObject {
     func request(_ request: Request) {
         writePermit.revoke()
         revision = UUID()
+        catalogRevision = UUID()
         pendingRequest = request
         isLoading = false
     }
@@ -150,27 +154,25 @@ final class FoundationBrowseModel: ObservableObject {
         await load(request, using: loader)
     }
 
-    /// An explicit rail gesture appends ordinary pages until its anchor is loaded.
-    /// Earlier rows stay in the canonical list. The view owns cancellation/retargeting.
-    func loadThroughAlphabetAnchor(
-        _ letter: String,
-        using loader: (Int) async throws -> FoundationPage
-    ) async -> Int? {
-        if !loaded { await loadPending(using: loader) }
-        while !Task.isCancelled {
-            if let index = FoundationAlphabetAnchors.index(for: letter, in: items) { return index }
-            guard errorMessage == nil, let previousOffset = nextStartIndex else {
-                return errorMessage == nil
-                    ? (FoundationAlphabetAnchors.followingIndex(for: letter, in: items)
-                        ?? items.indices.last)
-                    : nil
-            }
-            await loadNextPage(using: loader)
-            guard !Task.isCancelled else { return nil }
-            // A cancelled/revoked or non-progressing load must not spin at the same cursor.
-            guard nextStartIndex != previousOffset || errorMessage != nil else { return nil }
+    /// Songs load their full metadata membership on activation, independently of rail gestures.
+    /// The view task owns cancellation; each page retains the normal cache and error policy.
+    func loadCompleteCatalog(using loader: (Int) async throws -> FoundationPage) async {
+        // Revisiting a failed catalog must not turn a cached snapshot into an implicit retry.
+        if case .initial = pendingRequest, errorMessage != nil { return }
+        if case .initial = pendingRequest, loaded, nextStartIndex == nil,
+            !isRetainedSnapshot
+        {
+            return
         }
-        return nil
+        if isRetainedSnapshot { request(.refresh) }
+        let owner = catalogRevision
+        await loadPending(using: loader)
+        while !Task.isCancelled, catalogRevision == owner,
+            errorMessage == nil, let offset = nextStartIndex
+        {
+            await loadNextPage(using: loader)
+            guard !Task.isCancelled, nextStartIndex != offset else { return }
+        }
     }
 
     /// The view owns this loop; disappearing/offline transitions cancel its network work.

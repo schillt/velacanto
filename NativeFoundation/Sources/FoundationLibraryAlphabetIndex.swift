@@ -159,8 +159,9 @@
             ) -> Int {
                 // UIKit invokes each real tap/scrub synchronously; membership never changes.
                 parent.onChooseLetter(title)
-                if title == "All" { return 0 }
-                return parent.sections.firstIndex { $0.title == title } ?? 0
+                return parent.sections.firstIndex { $0.title == title }
+                    ?? parent.sections.firstIndex { $0.title != "#" && $0.title >= title }
+                    ?? max(0, parent.sections.count - 1)
             }
 
             func scrollToAnchor(in table: UITableView) {
