@@ -448,6 +448,23 @@
         }
     }
 
+    struct FoundationDownloadUIQueueSnapshot: View {
+        @ObservedObject var player: FoundationPlayer
+        var body: some View {
+            let snapshot: [String: Any] = [
+                "queue": player.queue.map { $0.id.uuidString },
+                "history": player.history.map { $0.id.uuidString },
+                "upcoming": player.upcoming.map { $0.id.uuidString },
+                "selected": player.selectedEntryID?.uuidString ?? "none",
+                "shuffle": player.shuffleEnabled,
+                "repeat": player.repeatMode.rawValue,
+            ]
+            let data = try? JSONSerialization.data(withJSONObject: snapshot, options: [.sortedKeys])
+            Text(verbatim: data.flatMap { String(data: $0, encoding: .utf8) } ?? "invalid")
+                .accessibilityIdentifier("fixture-player-queue-snapshot")
+        }
+    }
+
     @MainActor
     private final class FoundationDownloadUIFixture: ObservableObject {
         @Published private(set) var canonicalReady = false
@@ -887,7 +904,11 @@
                 ? nil
                 : .init(id: "artist", title: "Fixture Artist", primaryImageTag: "synthetic"))
         private var orderedTracks: [FoundationItem] {
-            canonical ? [track, missing, track] : [track, track]
+            if canonical && ProcessInfo.processInfo.arguments.contains("-fixtureQueuePresentation")
+            {
+                return [track, missing, track, missing, track]
+            }
+            return canonical ? [track, missing, track] : [track, track]
         }
         func songs(startIndex: Int) async throws -> FoundationPage {
             if alphabetCatalog {

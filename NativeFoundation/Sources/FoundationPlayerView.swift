@@ -253,6 +253,11 @@ struct FoundationPlayerView: View {
                         if let artworkPresentation {
                             FoundationPlayerArtworkTransitionEvidence(model: artworkPresentation)
                         }
+                        if ProcessInfo.processInfo.arguments.contains("-fixtureQueuePresentation") {
+                            FoundationDownloadUIQueueSnapshot(player: player)
+                            .font(.system(size: 1)).frame(width: 1, height: 1).clipped()
+                            .opacity(0.05).allowsHitTesting(false)
+                        }
                         FoundationDownloadUIPlaybackIdentity(
                             player: player, identifier: "fixture-player-playback-identity"
                         )
@@ -612,6 +617,7 @@ private struct FoundationQueueView: View {
             .buttonStyle(.plain)
             .accessibilityValue(entry.id == player.selectedEntryID ? "Current track" : "")
             .accessibilityAddTraits(entry.id == player.selectedEntryID ? .isSelected : [])
+            .modifier(FoundationQueueFixtureIdentifier(kind: "select", entryID: entry.id))
             Menu {
                 menu(entry)
             } label: {
@@ -619,6 +625,7 @@ private struct FoundationQueueView: View {
             }
             .menuStyle(.borderlessButton)
             .accessibilityLabel("Queue actions for " + entry.item.title)
+            .modifier(FoundationQueueFixtureIdentifier(kind: "actions", entryID: entry.id))
         }
         .frame(minHeight: 44)
         .listRowInsets(EdgeInsets(top: 8, leading: 24, bottom: 8, trailing: 24))
@@ -634,6 +641,24 @@ private struct FoundationQueueView: View {
             Button("Remove from Up Next", role: .destructive) { player.removeUpcoming(entry.id) }
         }
         FoundationRelatedDestinations(item: entry.item, navigate: openItem)
+    }
+}
+
+private struct FoundationQueueFixtureIdentifier: ViewModifier {
+    let kind: String
+    let entryID: UUID
+    func body(content: Content) -> some View {
+        #if DEBUG && os(iOS) && targetEnvironment(simulator)
+            if FoundationDownloadsTestHarness.enabled,
+                ProcessInfo.processInfo.arguments.contains("-fixtureQueuePresentation")
+            {
+                content.accessibilityIdentifier("fixture-queue-" + kind + "-" + entryID.uuidString)
+            } else {
+                content
+            }
+        #else
+            content
+        #endif
     }
 }
 

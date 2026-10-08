@@ -15,13 +15,14 @@ final class FoundationDownloadsUITests: XCTestCase {
         librarySelection: Bool = false, alphabetCatalog: Bool = false,
         alphabetFailOnce: Bool = false, delayedAlphabetCapability: Bool = false,
         heldArtistAlbums: Bool = false, partialGridRow: Bool = false,
-        compactFixtureControls: Bool = false
+        compactFixtureControls: Bool = false, queuePresentation: Bool = false
     )
         -> XCUIApplication
     {
         let app = XCUIApplication(bundleIdentifier: "com.chameleonenterprise.velacanto.uitesting")
         app.launchArguments = ["-foundationDownloadsUITesting", "-foundationTesting"]
         if productionShell { app.launchArguments.append("-fixtureProductionShell") }
+        if queuePresentation { app.launchArguments.append("-fixtureQueuePresentation") }
         if compactFixtureControls { app.launchArguments.append("-fixtureCompactControls") }
         if heldArtistAlbums { app.launchArguments.append("-fixtureHoldArtistAlbums") }
         if partialGridRow { app.launchArguments.append("-fixtureGridPartialRow") }
@@ -84,6 +85,197 @@ final class FoundationDownloadsUITests: XCTestCase {
         }
         if compactFixtureControls { closeAlphabetFixtureControls(app) }
         return app
+    }
+
+    private func queueSnapshot(_ app: XCUIApplication) -> [String: Any] {
+        let element = app.staticTexts["fixture-player-queue-snapshot"]
+        XCTAssertTrue(element.waitForExistence(timeout: 5))
+        guard let data = element.label.data(using: .utf8),
+            let snapshot = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else {
+            XCTFail("Synthetic queue snapshot must contain JSON")
+            return [:]
+        }
+        return snapshot
+    }
+
+    func testNativeQueueAppearanceLightDarkAndReducedTransparency() {
+        continueAfterFailure = false
+        for (scheme, reduced) in [("light", false), ("dark", false), ("dark", true)] {
+            let app = launch(
+                productionShell: true, canonicalDownloadState: "full", longPlayback: true,
+                reducedAccessibilityEffects: reduced, colorScheme: scheme, queuePresentation: true)
+            selectTab("Library", in: app)
+            openCanonicalCollection("album", fromDownloads: false, in: app)
+            tapVisible(app.buttons["collection-track-0"], in: app)
+            let identity = app.staticTexts["fixture-playback-identity"]
+            let playing = expectation(
+                for: NSPredicate(format: "label CONTAINS %@", "state playing"),
+                evaluatedWith: identity)
+            wait(for: [playing], timeout: 10)
+            let baseline = identity.label
+            openNowPlaying(app)
+            app.buttons["Show queue"].tap()
+            XCTAssertEqual((queueSnapshot(app)["queue"] as? [String])?.count, 5)
+            XCTAssertEqual((queueSnapshot(app)["upcoming"] as? [String])?.count, 4)
+            XCTAssertEqual(app.staticTexts["fixture-player-playback-identity"].label, baseline)
+            capture(
+                "Native Queue appearance " + scheme + (reduced ? " reduced transparency" : ""),
+                in: app)
+            app.buttons["Show artwork"].tap()
+            XCTAssertTrue(app.buttons["Show queue"].waitForExistence(timeout: 5))
+            app.buttons["Show queue"].tap()
+            XCTAssertEqual(app.staticTexts["fixture-player-playback-identity"].label, baseline)
+            capture("Native Queue repeated appearance " + scheme, in: app)
+            app.terminate()
+        }
+    }
+
+    func testNativeQueuePresentationActionsReorderAndPlaybackContinuity() {
+        continueAfterFailure = false
+        let app = launch(
+            productionShell: true, canonicalDownloadState: "full", longPlayback: true,
+            colorScheme: "light", queuePresentation: true)
+        selectTab("Library", in: app)
+        openCanonicalCollection("album", fromDownloads: false, in: app)
+        tapVisible(app.buttons["collection-track-0"], in: app)
+        let rootIdentity = app.staticTexts["fixture-playback-identity"]
+        let playing = expectation(
+            for: NSPredicate(format: "label CONTAINS %@", "state playing"),
+            evaluatedWith: rootIdentity)
+        wait(for: [playing], timeout: 10)
+        let originalIdentity = rootIdentity.label
+        openNowPlaying(app)
+        let identity = app.staticTexts["fixture-player-playback-identity"]
+        app.buttons["Show queue"].tap()
+        let snapshot = queueSnapshot(app)
+        guard let queue = snapshot["queue"] as? [String],
+            let initial = snapshot["upcoming"] as? [String]
+        else {
+            XCTFail("Queue occurrence arrays are required")
+            return
+        }
+        XCTAssertEqual(queue.count, 5)
+        XCTAssertEqual(Set(queue).count, 5)
+        XCTAssertEqual(initial.count, 4)
+        XCTAssertEqual(snapshot["selected"] as? String, queue.first)
+        XCTAssertEqual(identity.label, originalIdentity)
+        let current = app.buttons["fixture-queue-select-" + queue[0]]
+        XCTAssertEqual(current.value as? String, "Current track")
+        XCTAssertTrue(current.isSelected)
+        XCTAssertEqual(snapshot["history"] as? [String], [])
+        capture("Native Queue baseline light", in: app)
+        func action(_ title: String, entry: String) {
+            let menu = app.buttons["fixture-queue-actions-" + entry]
+            XCTAssertTrue(menu.exists && menu.isHittable)
+            menu.tap()
+            let button = app.cells.buttons.matching(
+                NSPredicate(format: "label == %@", title))
+            XCTAssertEqual(button.count, 1)
+            XCTAssertTrue(button.element.isHittable)
+            button.element.tap()
+        }
+        action("Play Last", entry: initial[0])
+        XCTAssertEqual(
+            queueSnapshot(app)["upcoming"] as? [String],
+            Array(initial.dropFirst()) + [initial[0]])
+        action("Play Next", entry: initial[0])
+        XCTAssertEqual(queueSnapshot(app)["upcoming"] as? [String], initial)
+        XCTAssertEqual(identity.label, originalIdentity)
+        // Cancel a real native menu without selecting any queue action.
+        let menu = app.buttons["fixture-queue-actions-" + initial[1]]
+        menu.tap()
+        let lastAction = app.cells.buttons["Play Last"]
+        XCTAssertTrue(lastAction.waitForExistence(timeout: 5))
+        let artworkToggle = app.buttons["Show artwork"]
+        XCTAssertTrue(artworkToggle.frame.width > 0)
+        let outside = artworkToggle.coordinate(
+            withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        XCTAssertFalse(
+            lastAction.frame.contains(
+                CGPoint(x: artworkToggle.frame.midX, y: artworkToggle.frame.midY)))
+        outside.tap()
+        let gone = expectation(
+            for: NSPredicate(format: "exists == false"), evaluatedWith: lastAction)
+        wait(for: [gone], timeout: 5)
+        XCTAssertEqual(queueSnapshot(app)["upcoming"] as? [String], initial)
+        let cancellationOutcome = XCTAttachment(
+            string:
+                "Outside native menu tap: Show artwork exists \(app.buttons["Show artwork"].exists); Show queue exists \(app.buttons["Show queue"].exists)"
+        )
+        cancellationOutcome.name = "Synthetic Queue cancellation gesture consumption"
+        cancellationOutcome.lifetime = .keepAlways
+        add(cancellationOutcome)
+        XCTAssertTrue(
+            app.buttons["Show artwork"].exists,
+            "Native menu cancellation must retain the visible Queue")
+        XCTAssertFalse(app.buttons["Show queue"].exists)
+        let source = app.buttons["fixture-queue-select-" + initial[3]]
+        let destination = app.buttons["fixture-queue-select-" + initial[0]]
+        reveal(source, in: app)
+        XCTAssertTrue(source.isHittable && destination.isHittable)
+        source.press(
+            forDuration: 0.8, thenDragTo: destination, withVelocity: .slow,
+            thenHoldForDuration: 0.3)
+        let reordered = [initial[3]] + Array(initial.prefix(3))
+        XCTAssertEqual(queueSnapshot(app)["upcoming"] as? [String], reordered)
+        action("Remove from Up Next", entry: initial[2])
+        XCTAssertEqual(
+            queueSnapshot(app)["upcoming"] as? [String],
+            reordered.filter { $0 != initial[2] })
+        XCTAssertEqual(identity.label, originalIdentity)
+        app.buttons["Shuffle"].tap()
+        XCTAssertEqual(queueSnapshot(app)["shuffle"] as? Bool, true)
+        XCTAssertEqual(
+            Set(queueSnapshot(app)["upcoming"] as? [String] ?? []),
+            Set(reordered.filter { $0 != initial[2] }))
+        app.buttons["Shuffle"].tap()
+        XCTAssertEqual(queueSnapshot(app)["shuffle"] as? Bool, false)
+        app.buttons["Repeat"].tap()
+        app.cells.buttons["One"].tap()
+        XCTAssertEqual(queueSnapshot(app)["repeat"] as? String, "one")
+        app.buttons["Repeat"].tap()
+        app.cells.buttons["Off"].tap()
+        XCTAssertEqual(queueSnapshot(app)["repeat"] as? String, "off")
+        XCTAssertEqual(identity.label, originalIdentity)
+        capture(
+            "Native Queue edited upcoming occurrences preserve active playback", in: app)
+        for _ in 0..<2 {
+            app.buttons["Show artwork"].tap()
+            XCTAssertTrue(app.buttons["Show queue"].waitForExistence(timeout: 5))
+            app.buttons["Show queue"].tap()
+            XCTAssertEqual(identity.label, originalIdentity)
+        }
+        capture("Native Queue repeated presentation light", in: app)
+        let beforeSelection = queueSnapshot(app)
+        guard let beforeOrder = beforeSelection["queue"] as? [String],
+            let selectedIndex = beforeOrder.firstIndex(of: initial[0])
+        else {
+            XCTFail("The chosen duplicate occurrence must remain queued")
+            return
+        }
+        let selection = app.buttons["fixture-queue-select-" + initial[0]]
+        tapVisible(selection, in: app)
+        let selectedIdentity =
+            "Fixture identity: \(initial[0]); item missing-tone; intent true; state playing"
+        let selectedPlaying = expectation(
+            for: NSPredicate(format: "label == %@", selectedIdentity), evaluatedWith: identity)
+        wait(for: [selectedPlaying], timeout: 10)
+        XCTAssertNotEqual(identity.label, originalIdentity)
+        XCTAssertEqual(identity.label, selectedIdentity)
+        let afterSelection = queueSnapshot(app)
+        XCTAssertEqual(afterSelection["selected"] as? String, initial[0])
+        XCTAssertEqual(afterSelection["queue"] as? [String], beforeOrder)
+        XCTAssertEqual(
+            afterSelection["history"] as? [String], Array(beforeOrder.prefix(selectedIndex)))
+        XCTAssertEqual(
+            afterSelection["upcoming"] as? [String], Array(beforeOrder.dropFirst(selectedIndex + 1))
+        )
+        XCTAssertEqual(selection.value as? String, "Current track")
+        XCTAssertTrue(selection.isSelected)
+        XCTAssertFalse(current.isSelected)
+        capture("Native Queue selects the exact duplicate occurrence", in: app)
+        app.terminate()
     }
 
     func testSharedArtworkHomeToLibraryTrackAndOfflineNavigation() {
