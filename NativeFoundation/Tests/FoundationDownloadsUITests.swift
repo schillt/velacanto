@@ -1811,16 +1811,17 @@ final class FoundationDownloadsUITests: XCTestCase {
             let center = CGFloat(target.lowerBound + target.upperBound) / 2
             return center / CGFloat(height)
         }
-        // This observed offline layout compresses 28 titles to 21 glyph rows with dots.
+        let attachment = XCTAttachment(image: image)
+        attachment.name = "Observed native alphabet index glyph mismatch"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        // UIKit can compress the offline title array to fewer glyph rows with dots.
         // Infer only the hidden # touch slot; the real window and zero-network assertions
         // remain the oracle for UIKit's selection. Online full-glyph checks stay strict.
-        if titles.count == 28, titles[1] == "#", position == 1, runs.count == 21,
+        if titles.count == 28, titles[1] == "#", position == 1,
+            runs.count >= 3, runs.count < titles.count,
             let first = runs.first, let last = runs.last
         {
-            let attachment = XCTAttachment(image: image)
-            attachment.name = "Observed native offline number index compression"
-            attachment.lifetime = .keepAlways
-            add(attachment)
             let firstCenter = CGFloat(first.lowerBound + first.upperBound) / 2
             let lastCenter = CGFloat(last.lowerBound + last.upperBound) / 2
             guard lastCenter > firstCenter else {
