@@ -655,7 +655,9 @@ struct FoundationCatalogView: View {
 
     var body: some View {
         Group {
-            if showsCollectionGrid {
+            if isFavorites {
+                favoritesCatalog
+            } else if showsCollectionGrid {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
                         if let headerItem {
@@ -803,6 +805,63 @@ struct FoundationCatalogView: View {
         }
     }
 
+    /// Favorites uses the same collection cards, column sizing and song rows as Your Music.
+    /// Filtering here changes presentation only; the loaded model still owns queue membership.
+    private var favoritesCatalog: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 24) {
+                ForEach([FoundationItem.Kind.album, .artist, .track, .playlist], id: \.self) {
+                    kind in
+                    let entries = Array(model.items.enumerated()).filter { $0.element.kind == kind }
+                    if !entries.isEmpty {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text(favoriteSectionTitle(kind)).font(.title2.bold())
+                            if kind == .album || kind == .playlist {
+                                LazyVGrid(
+                                    columns: foundationCollectionColumns(for: dynamicTypeSize),
+                                    alignment: .leading, spacing: 22
+                                ) {
+                                    ForEach(entries, id: \.element.id) { entry in
+                                        collectionCard(entry.element)
+                                            .frame(
+                                                maxWidth: dynamicTypeSize.isAccessibilitySize
+                                                    ? 320 : 240,
+                                                alignment: .topLeading)
+                                    }
+                                }
+                            } else {
+                                LazyVStack(spacing: 0) {
+                                    ForEach(entries, id: \.element.id) { entry in
+                                        resultRow(entry.element, at: entry.offset)
+                                            .lineLimit(1)
+                                            .padding(.vertical, 8)
+                                        if entry.element.id != entries.last?.element.id {
+                                            Divider()
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        .accessibilityIdentifier("favorites-section-" + kind.rawValue)
+                    }
+                }
+                pageState
+            }
+            .padding(.horizontal, 16).padding(.vertical, 12)
+        }
+        .accessibilityIdentifier("favorites-catalog")
+    }
+
+    private func favoriteSectionTitle(_ kind: FoundationItem.Kind) -> String {
+        switch kind {
+        case .album: "Albums"
+        case .artist: "Artists"
+        case .track: "Songs"
+        case .playlist: "Playlists"
+        case .genre: "Genres"
+        }
+    }
+
     private var showsCollectionGrid: Bool {
         !isFavorites
             && (headerItem?.kind == .artist
@@ -854,30 +913,31 @@ struct FoundationCatalogView: View {
     }
 
     private var resultRows: some View {
-        ForEach(
-            Array(model.items.enumerated()),
-            id: \.offset
-        ) { index, item in
-            FoundationLibraryItemRow(
-                item: item, library: library, isActive: isActive,
-                open: { openedItem = item },
-                play: item.kind == .track
-                    ? {
-                        if let selection = model.trackQueue(selecting: index) {
-                            if connectivity.localOnly {
-                                guard downloads.isReady(item) else { return }
-                                let ready = selection.items.filter { downloads.isReady($0) }
-                                let selected = selection.items.prefix(selection.index).filter {
-                                    downloads.isReady($0)
-                                }.count
-                                player.setQueue(ready, selectedIndex: selected)
-                            } else {
-                                player.setQueue(selection.items, selectedIndex: selection.index)
-                            }
-                        }
-                    } : nil, player: player, showsTrackArtwork: showsTrackArtwork,
-                navigate: { openedItem = $0 }, currentPageKind: headerItem?.kind)
+        ForEach(Array(model.items.enumerated()), id: \.offset) { index, item in
+            resultRow(item, at: index)
         }
+    }
+
+    private func resultRow(_ item: FoundationItem, at index: Int) -> some View {
+        FoundationLibraryItemRow(
+            item: item, library: library, isActive: isActive && isVisible,
+            open: { openedItem = item },
+            play: item.kind == .track
+                ? {
+                    if let selection = model.trackQueue(selecting: index) {
+                        if connectivity.localOnly {
+                            guard downloads.isReady(item) else { return }
+                            let ready = selection.items.filter { downloads.isReady($0) }
+                            let selected = selection.items.prefix(selection.index).filter {
+                                downloads.isReady($0)
+                            }.count
+                            player.setQueue(ready, selectedIndex: selected)
+                        } else {
+                            player.setQueue(selection.items, selectedIndex: selection.index)
+                        }
+                    }
+                } : nil, player: player, showsTrackArtwork: showsTrackArtwork || isFavorites,
+            navigate: { openedItem = $0 }, currentPageKind: headerItem?.kind)
     }
 
     private func reload(_ request: FoundationBrowseModel.Request) {

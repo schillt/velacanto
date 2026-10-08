@@ -546,26 +546,33 @@ private struct FoundationQueueView: View {
             .buttonStyle(.plain)
             .padding(.horizontal, 24)
             .padding(.vertical, 12)
-            List {
-                if !player.history.isEmpty {
-                    Section("History") {
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 8) {
+                    if !player.history.isEmpty {
+                        queueHeading("History")
                         ForEach(player.history) { row($0) }
                     }
+                    if let current = player.queue.first(where: { $0.id == player.selectedEntryID })
+                    {
+                        queueHeading("Now Playing")
+                        row(current)
+                    }
+                    queueHeading("Up Next")
+                    ForEach(upcoming) { row($0, canReorder: true) }
+                        .reorderable()
                 }
-                if let current = player.queue.first(where: { $0.id == player.selectedEntryID }) {
-                    Section("Now Playing") { row(current) }
+                .reorderContainer(for: FoundationQueueEntry.self, isEnabled: isPresented) {
+                    difference in
+                    let boundary: UUID?
+                    switch difference.destination.position {
+                    case .before(let id): boundary = id
+                    case .end: boundary = nil
+                    }
+                    player.reorderUpcoming(difference.sources, before: boundary)
                 }
-                Section("Up Next") {
-                    ForEach(upcoming) { row($0) }
-                        .onMove { offsets, destination in
-                            moveUpcoming(from: offsets, to: destination, snapshot: upcoming)
-                        }
-                }
+                .padding(.horizontal, 16)
+                .padding(.bottom, 12)
             }
-            #if os(iOS)
-                .environment(\.editMode, .constant(.active))
-            #endif
-            .listStyle(.plain)
             .environment(\.colorScheme, .dark)
             .scrollContentBackground(.hidden)
             .modifier(FoundationQueueFixtureIdentifier(kind: "list", entryID: nil))
@@ -577,21 +584,13 @@ private struct FoundationQueueView: View {
         .accessibilityHidden(!isPresented)
     }
 
-    private func moveUpcoming(
-        from offsets: IndexSet, to destination: Int, snapshot upcoming: [FoundationQueueEntry]
-    ) {
-        guard isPresented else { return }
-        guard destination >= 0, destination <= upcoming.count,
-            offsets.allSatisfy({ upcoming.indices.contains($0) })
-        else { return }
-        let sources = offsets.map { upcoming[$0].id }
-        let boundary = upcoming.enumerated().dropFirst(destination).first {
-            !offsets.contains($0.offset)
-        }?.element.id
-        player.reorderUpcoming(sources, before: boundary)
+    private func queueHeading(_ title: String) -> some View {
+        Text(title).font(.headline).foregroundStyle(.secondary)
+            .padding(.top, 12).padding(.bottom, 4)
+            .accessibilityAddTraits(.isHeader)
     }
 
-    private func row(_ entry: FoundationQueueEntry) -> some View {
+    private func row(_ entry: FoundationQueueEntry, canReorder: Bool = false) -> some View {
         HStack {
             Button {
                 guard isPresented else { return }
@@ -612,11 +611,21 @@ private struct FoundationQueueView: View {
             .accessibilityValue(entry.id == player.selectedEntryID ? "Current track" : "")
             .accessibilityAddTraits(entry.id == player.selectedEntryID ? .isSelected : [])
             .modifier(FoundationQueueFixtureIdentifier(kind: "select", entryID: entry.id))
+            .contextMenu { menu(entry) }
+            if canReorder {
+                Image(systemName: "line.3.horizontal")
+                    .foregroundStyle(.secondary)
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+                    .accessibilityLabel("Reorder " + entry.item.title)
+            }
         }
         .frame(minHeight: 44)
-        .contextMenu { menu(entry) }
-        .listRowInsets(EdgeInsets(top: 8, leading: 24, bottom: 8, trailing: 24))
-        .listRowBackground(Color.clear)
+        .padding(.leading, 16).padding(.trailing, canReorder ? 4 : 16)
+        .padding(.vertical, 8)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .contentShape(.dragPreview, RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: 16, style: .continuous))
         .id(entry.id)
     }
 

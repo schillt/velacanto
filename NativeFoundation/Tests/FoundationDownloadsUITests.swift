@@ -17,13 +17,15 @@ final class FoundationDownloadsUITests: XCTestCase {
         heldArtistAlbums: Bool = false, partialGridRow: Bool = false,
         compactFixtureControls: Bool = false, queuePresentation: Bool = false,
         alphabetCapabilityFailOnce: Bool = false, detachedPlayerArtwork: Bool = false,
-        holdPlayerGlass: Bool = false, heldAlphabetPage: Bool = false
+        holdPlayerGlass: Bool = false, heldAlphabetPage: Bool = false,
+        favoritesCatalog: Bool = false
     )
         -> XCUIApplication
     {
         let app = XCUIApplication(bundleIdentifier: "com.chameleonenterprise.velacanto.uitesting")
         app.launchArguments = ["-foundationDownloadsUITesting", "-foundationTesting"]
         if productionShell { app.launchArguments.append("-fixtureProductionShell") }
+        if favoritesCatalog { app.launchArguments.append("-fixtureFavoritesCatalog") }
         if queuePresentation { app.launchArguments.append("-fixtureQueuePresentation") }
         if detachedPlayerArtwork { app.launchArguments.append("-fixtureDetachedPlayerArtwork") }
         if holdPlayerGlass { app.launchArguments.append("-fixtureHoldPlayerGlass") }
@@ -1694,6 +1696,55 @@ final class FoundationDownloadsUITests: XCTestCase {
         XCTAssertTrue(dismiss.waitForNonExistence(timeout: 3))
         XCTAssertEqual(field.value as? String, "Fixture")
         capture("Repeated Search split merge and tab reentry preserves query", in: app)
+    }
+
+    func testFavoritesUsesLibraryCardsAndRowsAndKeepsSongPlaybackIdentity() {
+        continueAfterFailure = false
+        let app = launch(
+            productionShell: true, canonicalDownloadState: "full", artworkCache: true,
+            longPlayback: true, favoritesCatalog: true)
+        selectTab("Library", in: app)
+        tapVisible(app.buttons["Favorites"], in: app)
+        let catalog = app.descendants(matching: .any)["favorites-catalog"].firstMatch
+        XCTAssertTrue(catalog.waitForExistence(timeout: 5))
+        for (kind, label) in [
+            ("album", "View Fixture Album"), ("artist", "Fixture Artist"),
+            ("track", "Fixture Tone"), ("playlist", "View Fixture Playlist"),
+        ] {
+            let content = app.buttons.matching(
+                NSPredicate(format: "label BEGINSWITH %@", label)
+            ).firstMatch
+            reveal(content, in: app)
+            XCTAssertTrue(content.isHittable)
+            XCTAssertTrue(
+                app.descendants(matching: .any)["favorites-section-" + kind].firstMatch.exists)
+        }
+        capture("Favorites uses canonical library sections cards and artwork rows", in: app)
+        let album = app.buttons["View Fixture Album"].firstMatch
+        for _ in 0..<6 {
+            if album.exists && album.isHittable { break }
+            app.swipeDown()
+        }
+        tapVisible(album, in: app)
+        XCTAssertTrue(
+            app.descendants(matching: .any)["collection-detail-album-album"]
+                .waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["Play"].exists)
+        XCTAssertTrue(app.buttons["Unfavorite"].exists)
+        app.navigationBars.buttons.firstMatch.tap()
+        XCTAssertTrue(catalog.waitForExistence(timeout: 5))
+        let song = app.buttons.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "Fixture Tone")
+        ).firstMatch
+        tapVisible(song, in: app)
+        let identity = app.staticTexts["fixture-playback-identity"]
+        let playing = expectation(
+            for: NSPredicate(
+                format: "label CONTAINS %@ AND label CONTAINS %@", "item tone;", "state playing"),
+            evaluatedWith: identity)
+        wait(for: [playing], timeout: 10)
+        XCTAssertTrue(app.buttons["Show Now Playing"].exists)
+        capture("Favorites grouped song row starts its original canonical track", in: app)
     }
 
     func testCompleteLoadedSongsAlphabetTapAndDragStayInTracks() {

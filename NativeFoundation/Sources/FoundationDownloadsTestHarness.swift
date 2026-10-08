@@ -1063,6 +1063,26 @@
         func recentlyPlayed(startIndex: Int) async throws -> FoundationPage {
             .init(items: [track], nextStartIndex: nil)
         }
+        func favorites(startIndex: Int) async throws -> FoundationPage {
+            guard ProcessInfo.processInfo.arguments.contains("-fixtureFavoritesCatalog") else {
+                throw FoundationLibraryError.unavailable
+            }
+            guard startIndex == 0 else { return .init(items: [], nextStartIndex: nil) }
+            let artist = FoundationItem(
+                id: "artist", title: "Fixture Artist", subtitle: "", kind: .artist,
+                duration: nil, primaryImageTag: "synthetic")
+            let playlist = FoundationItem(
+                id: "playlist", title: "Fixture Playlist", subtitle: "Synthetic",
+                kind: .playlist, duration: nil, primaryImageTag: "synthetic")
+            // Deliberately mixed server order verifies presentation grouping keeps song identity.
+            let items = [track, album, playlist, artist].map { item in
+                var favorite = item
+                favorite.isFavorite = true
+                return favorite
+            }
+            return .init(items: items, nextStartIndex: nil)
+        }
+
         func favoriteAlbums(startIndex: Int) async throws -> FoundationPage {
             .init(items: [], nextStartIndex: nil)
         }
