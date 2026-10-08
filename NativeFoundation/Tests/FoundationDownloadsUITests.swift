@@ -1879,7 +1879,7 @@ final class FoundationDownloadsUITests: XCTestCase {
         XCTAssertFalse(before.contains("track-all-100"))
         tapNativeAlphabet("F", in: app)
         XCTAssertTrue(app.buttons["Retry"].waitForExistence(timeout: 5))
-        tapVisible(app.buttons["Retry"], in: app)
+        tapNativeChrome(app.buttons["Retry"], in: app)
         let f = app.buttons.matching(
             NSPredicate(format: "label BEGINSWITH %@", "F Fixture track 100")
         ).firstMatch
@@ -2025,7 +2025,28 @@ final class FoundationDownloadsUITests: XCTestCase {
         capture("Songs unavailable alphabet capability retains sorted usable rows", in: app)
         let list = app.collectionViews.firstMatch
         XCTAssertTrue(list.exists)
+        // First reveal the native search drawer; this gesture is not refresh acceptance.
         list.swipeDown(velocity: .slow)
+        let drawer = app.searchFields["Search songs"]
+        XCTAssertTrue(drawer.waitForExistence(timeout: 5) && drawer.isHittable)
+        let viewport = uncoveredViewport(list, in: app)
+        XCTAssertGreaterThan(viewport.height, 100)
+        let pullStartY = max(viewport.minY + 20, drawer.frame.maxY + 12)
+        let pullEndY = viewport.minY + viewport.height * 0.75
+        XCTAssertLessThan(pullStartY, pullEndY)
+        let origin = app.coordinate(withNormalizedOffset: .zero)
+        let start = origin.withOffset(
+            CGVector(
+                dx: viewport.midX - app.frame.minX,
+                dy: pullStartY - app.frame.minY))
+        let end = origin.withOffset(
+            CGVector(
+                dx: viewport.midX - app.frame.minX,
+                dy: pullEndY - app.frame.minY))
+        // One bounded real pull after the drawer settles; counts and the rail prove recovery.
+        start.press(
+            forDuration: 0.1, thenDragTo: end, withVelocity: .slow,
+            thenHoldForDuration: 0.2)
         XCTAssertTrue(app.tables["library-index-track"].waitForExistence(timeout: 10))
         XCTAssertTrue(
             app.tables["library-index-track"].descendants(matching: .any)
