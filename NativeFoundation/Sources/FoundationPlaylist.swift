@@ -337,6 +337,14 @@ struct FoundationPlaylistIndex: View {
     @State private var refreshRevision = 0
     @State private var refreshPending = false
 
+    private var createPlacement: ToolbarItemPlacement {
+        #if os(macOS)
+            .primaryAction
+        #else
+            .automatic
+        #endif
+    }
+
     var body: some View {
         Group {
             if usesLibraryIndex {
@@ -360,8 +368,10 @@ struct FoundationPlaylistIndex: View {
             await model.load(.refresh, using: library.playlists)
         }
         .toolbar {
-            Button("Create Playlist", systemImage: "plus") { creating = true }
-                .disabled(connectivity.localOnly || !library.supportsPlaylistManagement)
+            ToolbarItem(placement: createPlacement) {
+                Button("Create Playlist", systemImage: "plus") { creating = true }
+                    .disabled(connectivity.localOnly || !library.supportsPlaylistManagement)
+            }
         }
         .sheet(
             isPresented: $creating,

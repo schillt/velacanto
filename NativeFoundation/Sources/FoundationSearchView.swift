@@ -30,10 +30,16 @@ struct FoundationSearchView<Profile: View>: View {
                 .id(term + (connectivity.localOnly ? "-local" : "-online"))
             }
         }
-        .foundationSearchHeader(profile: profile, search: searchField, keepsVisible: searchExpanded)
-        .onChange(of: activation, initial: true) { _, value in
-            if isActive, value > 0, cancelledActivation != value { beginSearchFocus() }
-        }
+        #if os(macOS)
+            .foundationHeader("Search", profile: profile)
+        #else
+            .foundationSearchHeader(
+                profile: profile, search: searchField, keepsVisible: searchExpanded
+            )
+            .onChange(of: activation, initial: true) { _, value in
+                if isActive, value > 0, cancelledActivation != value { beginSearchFocus() }
+            }
+        #endif
         .onChange(of: searchFocused) { _, focused in
             animateSearchExpansion(focused)
         }
@@ -168,17 +174,21 @@ struct FoundationGenreIndex: View {
             ? genres.items.filter { !downloads.browseTracks(for: $0).isEmpty } : genres.items
     }
 
+    private var genreColumns: [GridItem] {
+        #if os(macOS)
+            [GridItem(.adaptive(minimum: 128, maximum: 168), spacing: 12)]
+        #else
+            [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)]
+        #endif
+    }
+
     var body: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 16) {
                 if connectivity.hasConnectionIssue || genres.hasConnectionIssue {
                     FoundationOfflineNotice()
                 }
-                LazyVGrid(
-                    columns: [
-                        GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12),
-                    ], spacing: 12
-                ) {
+                LazyVGrid(columns: genreColumns, spacing: 12) {
                     ForEach(Array(visibleGenres.enumerated()), id: \.offset) { _, genre in
                         FoundationGenreCard(
                             genre: genre, library: library,

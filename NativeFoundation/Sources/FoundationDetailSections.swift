@@ -10,6 +10,20 @@ struct FoundationOverviewSection: View {
     let item: FoundationItem
     let library: any FoundationLibrary
     let isActive: Bool
+    var maximumLines = 3
+    var horizontalInset: CGFloat = 16
+    #if os(macOS)
+        @ScaledMetric(relativeTo: .body) private var overviewTextSize = 15.0
+    #endif
+
+    private var overviewFont: Font {
+        #if os(macOS)
+            .system(size: overviewTextSize)
+        #else
+            .subheadline
+        #endif
+    }
+
     @State private var overview: String?
     @State private var loaded = false
     @State private var showingOverview = false
@@ -21,21 +35,25 @@ struct FoundationOverviewSection: View {
                     showingOverview = true
                 } label: {
                     HStack(alignment: .bottom, spacing: 6) {
-                        Text(overview).lineLimit(3)
+                        Text(overview).lineLimit(maximumLines)
                             .frame(maxWidth: .infinity, alignment: .leading)
                         Text("… MORE").font(.caption.weight(.semibold))
                     }
-                    .font(.subheadline).multilineTextAlignment(.leading)
+                    .font(overviewFont).multilineTextAlignment(.leading)
                     .foregroundStyle(.secondary)
                     .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain).padding(.horizontal).padding(.bottom, 8)
+                .buttonStyle(.plain).padding(.horizontal, horizontalInset).padding(.bottom, 8)
                 .accessibilityLabel("Overview: " + overview)
                 .accessibilityHint("Opens the complete overview")
                 .sheet(isPresented: $showingOverview) {
                     NavigationStack {
                         ScrollView {
-                            Text(overview).frame(maxWidth: .infinity, alignment: .leading)
+                            Text(overview)
+                                #if os(macOS)
+                                    .font(overviewFont)
+                                #endif
+                                .frame(maxWidth: .infinity, alignment: .leading)
                                 .textSelection(.enabled).padding()
                         }
                         .navigationTitle("About " + item.title)
@@ -110,6 +128,7 @@ struct FoundationRelatedSection<Card: View>: View {
                         }
                     }.padding(.horizontal)
                 }.scrollIndicators(.hidden)
+                    .foundationMacShelfUnderlap()
             }
             if model.hasConnectionIssue {
                 FoundationOfflineNotice().padding(.horizontal)
@@ -189,6 +208,7 @@ struct FoundationArtistMostPlayed: View {
                         }
                     }.padding(.horizontal)
                 }.scrollIndicators(.hidden)
+                    .foundationMacShelfUnderlap()
             }
             if model.hasConnectionIssue {
                 FoundationOfflineNotice().padding(.horizontal)

@@ -69,6 +69,17 @@ struct VelacantoFoundationApp: App {
                     .frame(minWidth: 320, minHeight: 480)
             #endif
         }
+        #if os(macOS)
+            .defaultSize(width: 1100, height: 760)
+            .windowToolbarStyle(.unified)
+            .commands { FoundationMacCommands() }
+        #endif
+        #if os(macOS)
+            Settings {
+                FoundationMacSettingsRoot(model: model)
+            }
+            .defaultSize(width: 520, height: 640)
+        #endif
     }
 }
 
@@ -82,11 +93,25 @@ final class FoundationAppModel: ObservableObject {
     @Published private(set) var currentArtwork: FoundationCurrentArtwork?
     @Published private(set) var downloads: FoundationDownloads?
     @Published private(set) var connectivity: FoundationConnectivity?
+    #if os(macOS)
+        @Published var profileName = ""
+        @Published var profileImage: Image?
+    #endif
     let playbackPreferences = FoundationPlaybackPreferences()
     private var policySubscriptions: Set<AnyCancellable> = []
     private var currentRetainedArtworkIdentity: String?
     private var currentArtworkLocalOnly = false
     @Published private(set) var isCleaningDownloads = false
+    @Published private(set) var requiresSignIn = false
+    #if os(macOS)
+        @Published var settingsShowsSignIn = false
+
+        func requireMacSignIn() {
+            player?.stop()
+            requiresSignIn = true
+            settingsShowsSignIn = true
+        }
+    #endif
     @Published var credentialError: String?
     @Published var signOutNotice: String?
     private var playbackSessionSubscription: AnyCancellable?
@@ -218,6 +243,12 @@ final class FoundationAppModel: ObservableObject {
         playbackSessionSubscription = nil
         accountEpoch += 1
         signOutNotice = nil
+        requiresSignIn = false
+        #if os(macOS)
+            settingsShowsSignIn = false
+            profileName = ""
+            profileImage = nil
+        #endif
         nowPlaying?.invalidate()
         currentArtwork?.invalidate()
         currentArtwork = nil
@@ -503,7 +534,7 @@ struct FoundationRootView: View {
                     Text("Disposable caches could not be cleared.")
                     Button("Retry") { model.retryCachePreparation() }
                 }
-            } else if let library = model.library, let player = model.player,
+            } else if !model.requiresSignIn, let library = model.library, let player = model.player,
                 let actions = model.actions,
                 let artwork = model.currentArtwork, let downloads = model.downloads,
                 let connectivity = model.connectivity
@@ -512,6 +543,9 @@ struct FoundationRootView: View {
                     library: model.browseLibrary ?? library, accountLibrary: library,
                     player: player, signOut: model.signOut, librarySelection: model.librarySelection
                 )
+                #if os(macOS)
+                    .environmentObject(model)
+                #endif
                 .environmentObject(actions)
                 .environmentObject(artwork)
                 .environmentObject(downloads)
@@ -564,6 +598,9 @@ struct FoundationSignInView: View {
             }
             return { try model.accept(session) }
         }
+        #if os(macOS)
+            _address = State(initialValue: model.library?.session.serverURL.absoluteString ?? "")
+        #endif
     }
 
     init(authenticate: @escaping @MainActor (URL, String, String) async throws -> Acceptance) {
@@ -590,8 +627,12 @@ struct FoundationSignInView: View {
 
     var body: some View {
         NavigationStack {
-            signInForm
-                .navigationTitle("Velacanto")
+            signInContent
+                #if os(macOS)
+                    .navigationTitle("Sign In")
+                #else
+                    .navigationTitle("Velacanto")
+                #endif
                 #if os(iOS)
                     .navigationBarTitleDisplayMode(.inline)
                     .scrollContentBackground(.hidden)
@@ -639,6 +680,27 @@ struct FoundationSignInView: View {
                     }
                 }
         }
+    }
+
+    @ViewBuilder private var signInContent: some View {
+        #if os(macOS)
+            VStack(spacing: 20) {
+                VStack(spacing: 10) {
+                    Image(systemName: "music.note").font(.system(size: 36))
+                        .foregroundStyle(.tint)
+                    Text("Sign in to Velacanto").font(.largeTitle.bold())
+                    Text("Connect your Jellyfin account to listen to your music.")
+                        .foregroundStyle(.secondary).multilineTextAlignment(.center)
+                }
+                signInForm.formStyle(.grouped)
+                    .frame(maxWidth: 500, maxHeight: 440)
+            }
+            .padding(24)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(.background)
+        #else
+            signInForm
+        #endif
     }
 
     private var signInForm: some View {

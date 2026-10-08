@@ -385,6 +385,7 @@ struct FoundationPlayerView: View {
                     Image(systemName: "ellipsis").frame(width: 44, height: 44)
                 }
                 .menuStyle(.borderlessButton)
+                .foundationEllipsisMenuIndicator()
                 .accessibilityLabel("More playback options")
                 if let current {
                     let favorite = actions.favoriteState(for: current, initial: current.isFavorite)
@@ -601,7 +602,6 @@ private struct FoundationQueueView: View {
                     .padding(.horizontal, 16)
                     .padding(.bottom, 12)
                 }
-                .environment(\.colorScheme, .dark)
                 .scrollContentBackground(.hidden)
                 .modifier(FoundationQueueFixtureIdentifier(kind: "list", entryID: nil))
                 .clipped()
@@ -687,6 +687,14 @@ private struct FoundationQueueView: View {
         if player.upcoming.contains(where: { $0.id == entry.id }) {
             Button("Play Next") { player.moveQueuedEntry(entry.id, position: .next) }
             Button("Play Last") { player.moveQueuedEntry(entry.id, position: .last) }
+            #if os(macOS)
+                if let index = player.upcoming.firstIndex(where: { $0.id == entry.id }) {
+                    Button("Move Up") { moveAccessibleEntry(entry.id, offset: -1) }
+                        .disabled(index == 0)
+                    Button("Move Down") { moveAccessibleEntry(entry.id, offset: 1) }
+                        .disabled(index + 1 == player.upcoming.count)
+                }
+            #endif
             Button("Remove from Up Next", role: .destructive) { player.removeUpcoming(entry.id) }
         }
         FoundationRelatedDestinations(item: entry.item, navigate: openItem)
@@ -811,7 +819,7 @@ private struct FoundationPlayerPresentation<PlayerContent: View>: ViewModifier {
                 }
             }
         #else
-            content.sheet(isPresented: $isPresented) { playerContent() }
+            content  // macOS uses the library inspector and persistent transport bar.
         #endif
     }
 }
@@ -938,6 +946,66 @@ extension EnvironmentValues {
                 .accessibilityLabel(model.transitionSummary)
                 .accessibilityIdentifier("fixture-player-artwork-transition")
                 .allowsHitTesting(false)
+        }
+    }
+#endif
+
+#if os(macOS)
+    /// The existing queue and lyrics owners live only while their inspector is visible.
+    struct FoundationMacPlaybackPanel: View {
+        enum Mode: String, CaseIterable {
+            case lyrics = "Lyrics"
+            case queue = "Queue"
+        }
+        @ObservedObject var player: FoundationPlayer
+        let library: any FoundationLibrary
+        let mode: Mode
+        @Environment(\.foundationReduceTransparency) private var reduceTransparency
+        @EnvironmentObject private var connectivity: FoundationConnectivity
+        @State private var lyrics: FoundationLyricsPresentation?
+        @State private var relatedItem: FoundationItem?
+
+        var body: some View {
+            VStack(spacing: 0) {
+                if mode == .queue {
+                    FoundationQueueView(player: player, isPresented: .constant(true)) {
+                        relatedItem = $0
+                    }
+                } else if connectivity.localOnly {
+                    ContentUnavailableView(
+                        "Lyrics unavailable offline", systemImage: "quote.bubble")
+                } else if let lyrics {
+                    FoundationLyricsView(
+                        item: lyrics.entry.item, entryID: lyrics.entry.id,
+                        library: library, player: player, model: lyrics.model)
+                } else {
+                    ContentUnavailableView("Select a track for lyrics", systemImage: "quote.bubble")
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background {
+                if reduceTransparency { Rectangle().fill(.background) }
+            }
+            .glassEffect(reduceTransparency ? .identity : .regular, in: .rect)
+            .ignoresSafeArea(.container, edges: .top)
+            .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
+            .task(
+                id:
+                    "\(mode.rawValue)-\(player.selectedEntryID?.uuidString ?? "none")-\(connectivity.localOnly)"
+            ) {
+                lyrics?.model.cancel()
+                lyrics = nil
+                if mode == .lyrics, !connectivity.localOnly,
+                    let entry = player.queue.first(where: { $0.id == player.selectedEntryID })
+                {
+                    lyrics = FoundationLyricsPresentation(entry: entry)
+                }
+            }
+            .onDisappear { lyrics?.model.cancel() }
+            .sheet(item: $relatedItem) { item in
+                FoundationPlayerRelatedSheet(item: item, library: library, player: player)
+            }
+            .accessibilityIdentifier("mac-playback-sidebar")
         }
     }
 #endif

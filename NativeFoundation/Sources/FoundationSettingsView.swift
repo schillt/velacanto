@@ -15,6 +15,7 @@ struct FoundationSettingsView: View {
     let signOut: () -> Void
     var library: (any FoundationLibrary)? = nil
     var librarySelection: FoundationMusicLibrarySelection? = nil
+    var signInAgain: (() -> Void)? = nil
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var preferences: FoundationPlaybackPreferences
     #if DEBUG
@@ -32,29 +33,25 @@ struct FoundationSettingsView: View {
         NavigationStack {
             Form {
                 Section {
-                    NavigationLink {
-                        accountDetails
-                    } label: {
-                        HStack(spacing: 16) {
-                            ZStack {
-                                Circle().fill(.quaternary)
-                                if let image {
-                                    image.resizable().scaledToFill()
-                                } else {
-                                    Image(systemName: "person.fill").font(.title2)
-                                        .foregroundStyle(.secondary)
-                                }
-                            }.frame(width: 64, height: 64).clipShape(Circle())
-                                .accessibilityHidden(true)
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(name.isEmpty ? "Your profile" : name).font(.title3.bold())
-                                Text("Music library account").font(.subheadline).foregroundStyle(
-                                    .secondary)
-                            }
-                        }.padding(.vertical, 8)
-                    }
-                    .accessibilityIdentifier("FoundationSettingsAccount")
+                    #if os(macOS)
+                        profileRow.accessibilityIdentifier("FoundationSettingsAccount")
+                    #else
+                        NavigationLink {
+                            accountDetails
+                        } label: {
+                            profileRow
+                        }
+                        .accessibilityIdentifier("FoundationSettingsAccount")
+                    #endif
                 }
+                #if os(macOS)
+                    accountSections
+                    if let signInAgain {
+                        Section {
+                            Button("Sign In Again…", action: signInAgain)
+                        }
+                    }
+                #endif
                 Section("Storage") {
                     NavigationLink {
                         FoundationDownloadManagementView()
@@ -119,11 +116,13 @@ struct FoundationSettingsView: View {
             #if os(iOS)
                 .navigationBarTitleDisplayMode(.inline)
             #endif
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { dismiss() }
+            #if os(iOS)
+                .toolbar {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Done") { dismiss() }
+                    }
                 }
-            }
+            #endif
         }
         #if DEBUG
             .sheet(item: $diagnosticSnapshot) { snapshot in
@@ -133,43 +132,65 @@ struct FoundationSettingsView: View {
             }
         #endif
         #if os(macOS)
-            .frame(minWidth: 420, idealWidth: 480, minHeight: 520)
+            .frame(minWidth: 460, idealWidth: 520, minHeight: 520)
         #endif
     }
 
-    private var accountDetails: some View {
-        Form {
-            Section("Account") {
-                LabeledContent("Profile", value: name.isEmpty ? "Your profile" : name)
-                LabeledContent("Provider", value: "Jellyfin")
-            }
-            Section("Server") {
-                if let session = (library as? FoundationJellyfinLibrary)?.session {
-                    LabeledContent("Server", value: session.serverURL.host() ?? "Unavailable")
-                    LabeledContent(
-                        "Connection", value: session.serverURL.scheme == "https" ? "HTTPS" : "HTTP")
+    private var profileRow: some View {
+        HStack(spacing: 16) {
+            ZStack {
+                Circle().fill(.quaternary)
+                if let image {
+                    image.resizable().scaledToFill()
                 } else {
-                    Text("Server details are unavailable for this account.")
+                    Image(systemName: "person.fill").font(.title2)
                         .foregroundStyle(.secondary)
                 }
-                Text("Saved credentials are protected in Keychain and are not displayed here.")
+            }.frame(width: 64, height: 64).clipShape(Circle())
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(name.isEmpty ? "Your profile" : name).font(.title3.bold())
+                Text("Music library account").font(.subheadline).foregroundStyle(
+                    .secondary)
+            }
+        }.padding(.vertical, 8)
+    }
+
+    @ViewBuilder private var accountSections: some View {
+        Section("Account") {
+            LabeledContent("Profile", value: name.isEmpty ? "Your profile" : name)
+            LabeledContent("Provider", value: "Jellyfin")
+        }
+        Section("Server") {
+            if let session = (library as? FoundationJellyfinLibrary)?.session {
+                LabeledContent("Server", value: session.serverURL.host() ?? "Unavailable")
+                LabeledContent(
+                    "Connection", value: session.serverURL.scheme == "https" ? "HTTPS" : "HTTP")
+            } else {
+                Text("Server details are unavailable for this account.")
+                    .foregroundStyle(.secondary)
+            }
+            Text("Saved credentials are protected in Keychain and are not displayed here.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        Section("Music Libraries") {
+            if let librarySelection {
+                FoundationMusicLibrarySettingsRow(selection: librarySelection)
+            } else {
+                Text("All music available to this Jellyfin account")
+                Text("Library selection is unavailable for this connection.")
                     .font(.caption).foregroundStyle(.secondary)
             }
-            Section("Music Libraries") {
-                if let librarySelection {
-                    FoundationMusicLibrarySettingsRow(selection: librarySelection)
-                } else {
-                    Text("All music available to this Jellyfin account")
-                    Text("Library selection is unavailable for this connection.")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-            }
         }
-        .formStyle(.grouped)
-        .navigationTitle("Server & Account")
-        #if os(iOS)
-            .navigationBarTitleDisplayMode(.inline)
-        #endif
+    }
+
+    private var accountDetails: some View {
+        Form { accountSections }
+            .formStyle(.grouped)
+            .navigationTitle("Server & Account")
+            #if os(iOS)
+                .navigationBarTitleDisplayMode(.inline)
+            #endif
     }
 
 }
@@ -628,4 +649,39 @@ private struct FoundationLicensesView: View {
             }
         }
     #endif
+#endif
+
+#if os(macOS)
+    /// The app owns one native settings window, independent of catalog navigation.
+    struct FoundationMacSettingsRoot: View {
+        @ObservedObject var model: FoundationAppModel
+        @Environment(\.dismiss) private var dismiss
+
+        var body: some View {
+            Group {
+                if model.library == nil || model.requiresSignIn || model.settingsShowsSignIn {
+                    FoundationSignInView(model: model)
+                } else if let library = model.library, let downloads = model.downloads,
+                    let connectivity = model.connectivity
+                {
+                    FoundationSettingsView(
+                        name: model.profileName, image: model.profileImage,
+                        signOut: {
+                            // Close the settings window so account results appear in the main window.
+                            dismiss()
+                            model.signOut()
+                        },
+                        library: library, librarySelection: model.librarySelection,
+                        signInAgain: { model.settingsShowsSignIn = true }
+                    )
+                    .environmentObject(model.playbackPreferences)
+                    .environmentObject(downloads)
+                    .environmentObject(connectivity)
+                } else {
+                    ProgressView("Preparing account…")
+                }
+            }
+            .frame(minWidth: 520, idealWidth: 560, minHeight: 600, idealHeight: 680)
+        }
+    }
 #endif

@@ -138,6 +138,7 @@ struct FoundationNewView<Profile: View>: View {
                 }
                 .scrollTargetBehavior(.viewAligned)
                 .scrollIndicators(.hidden)
+                .foundationMacShelfUnderlap()
             }
             sectionState(albums) {
                 albums.request(albums.retryRequest)
@@ -202,6 +203,7 @@ struct FoundationNewView<Profile: View>: View {
                 }
                 .scrollTargetBehavior(.viewAligned)
                 .scrollIndicators(.hidden)
+                .foundationMacShelfUnderlap()
             }
         }
     }

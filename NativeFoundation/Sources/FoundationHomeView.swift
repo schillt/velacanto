@@ -317,6 +317,7 @@ private struct FoundationHomeShelf: View {
                     }
                     .scrollTargetBehavior(.viewAligned)
                     .scrollIndicators(.hidden)
+                    .foundationMacShelfUnderlap()
                     .accessibilityLabel("Recently Played carousel")
                 }
             } else if !model.items.isEmpty {
@@ -333,6 +334,7 @@ private struct FoundationHomeShelf: View {
                 }
                 .scrollTargetBehavior(.viewAligned)
                 .scrollIndicators(.hidden)
+                .foundationMacShelfUnderlap()
             }
             if model.hasConnectionIssue, !connectivity.hasConnectionIssue {
                 FoundationOfflineNotice()
@@ -432,6 +434,7 @@ private struct FoundationHomeShelf: View {
                             .frame(width: 44, height: 44)
                     }
                     .menuStyle(.borderlessButton)
+                    .foundationEllipsisMenuIndicator()
                     .accessibilityLabel("Actions for " + item.title)
                 }
                 if let error = actions.errorMessage(for: item) {

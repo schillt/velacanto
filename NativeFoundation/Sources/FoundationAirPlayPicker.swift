@@ -23,7 +23,11 @@ import SwiftUI
         func makeNSView(context: Context) -> AVRoutePickerView {
             let view = AVRoutePickerView()
             view.player = player.nativePlayer
-            view.setRoutePickerButtonColor(.white, for: .normal)
+            view.isRoutePickerButtonBordered = false
+            view.setRoutePickerButtonColor(.labelColor, for: .normal)
+            view.setRoutePickerButtonColor(.labelColor, for: .normalHighlighted)
+            view.setRoutePickerButtonColor(.controlAccentColor, for: .active)
+            view.setRoutePickerButtonColor(.controlAccentColor, for: .activeHighlighted)
             view.setAccessibilityLabel("AirPlay")
             return view
         }

@@ -110,10 +110,9 @@ struct FoundationLibraryIndexView: View {
                 text: $query, placement: .navigationBarDrawer(displayMode: .automatic),
                 prompt: "Search " + title.lowercased())
         #else
-            .searchable(text: $query, prompt: "Search " + title.lowercased())
             .toolbar {
                 if alphabetAvailable, openedItem == nil {
-                    ToolbarItem {
+                    ToolbarItem(placement: .navigation) {
                         Menu("Jump to letter", systemImage: "textformat.abc") {
                             Picker(
                                 "Jump to letter",
