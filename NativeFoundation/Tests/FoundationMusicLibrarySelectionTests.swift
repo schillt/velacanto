@@ -21,7 +21,9 @@ final class FoundationMusicLibrarySelectionTests: XCTestCase {
             session: session,
             load: { request in
                 await recorder.append(request)
-                return (Data("{\"Items\":[],\"TotalRecordCount\":0}".utf8), Self.response(request))
+                let startIndex = Int(Self.query(request, "startIndex") ?? "0") ?? 0
+                let body = "{\"Items\":[],\"TotalRecordCount\":0,\"StartIndex\":\(startIndex)}"
+                return (Data(body.utf8), Self.response(request))
             }
         ).scoped(to: first.id)
         _ = try await library.albums(startIndex: 0)

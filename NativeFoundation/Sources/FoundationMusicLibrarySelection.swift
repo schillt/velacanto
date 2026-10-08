@@ -121,15 +121,22 @@ struct FoundationMusicLibraryStore {
     }
 
     private static func rejectSymbolicLinks(_ url: URL) throws {
-        // Standard temporary directories on macOS resolve to /private before this check.
-        var candidate = url.standardizedFileURL
-        while candidate.path != "/" {
-            if let attributes = try? FileManager.default.attributesOfItem(atPath: candidate.path),
+        // Foundation canonicalizes /private/var and /private/tmp back to their system
+        // aliases even after resolvingSymlinksInPath(). Expand only these known aliases;
+        // retain and reject symbolic links anywhere in the application-owned path.
+        var candidate = url.path
+        if candidate == "/var" || candidate.hasPrefix("/var/")
+            || candidate == "/tmp" || candidate.hasPrefix("/tmp/")
+        {
+            candidate = "/private" + candidate
+        }
+        while candidate != "/" {
+            if let attributes = try? FileManager.default.attributesOfItem(atPath: candidate),
                 attributes[.type] as? FileAttributeType == .typeSymbolicLink
             {
                 throw StorageError.unsafePath
             }
-            candidate.deleteLastPathComponent()
+            candidate = (candidate as NSString).deletingLastPathComponent
         }
     }
 
