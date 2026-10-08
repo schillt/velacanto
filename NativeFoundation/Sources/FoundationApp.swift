@@ -98,6 +98,7 @@ final class FoundationAppModel: ObservableObject {
     private var mediaSession: MediaSession<FoundationNowPlaying>?
 
     isolated deinit {
+        FoundationAlphabetAccountLifecycle.retire(library)
         librarySelection?.invalidate()
         if let cache = library?.artworkCache {
             Task { _ = await cache.invalidate(removeDisk: false) }
@@ -213,6 +214,7 @@ final class FoundationAppModel: ObservableObject {
     }
 
     private func open(_ session: FoundationSession, sourceScope: String) {
+        FoundationAlphabetAccountLifecycle.retire(library)
         playbackSessionSubscription = nil
         accountEpoch += 1
         signOutNotice = nil
@@ -390,6 +392,7 @@ final class FoundationAppModel: ObservableObject {
                 + "Jellyfin may have ended the session."
             return
         }
+        FoundationAlphabetAccountLifecycle.retire(library)
         let retiringCache = library?.artworkCache
         let retiringPages = library?.catalogPageCache
         let retiringDownloads = downloads

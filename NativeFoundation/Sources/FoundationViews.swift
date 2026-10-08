@@ -1923,7 +1923,7 @@ struct FoundationDetailTitle: ViewModifier {
 }
 
 /// Transition state belongs to the page that owns its existing destination binding.
-private struct FoundationCollectionTransitionContext: Sendable {
+struct FoundationCollectionTransitionContext: Sendable {
     let namespace: Namespace.ID
     let select: @MainActor @Sendable (FoundationItem, String) -> Void
 }
@@ -1937,11 +1937,11 @@ private struct FoundationCollectionOccurrenceKey: EnvironmentKey {
 }
 
 extension EnvironmentValues {
-    fileprivate var foundationCollectionTransition: FoundationCollectionTransitionContext? {
+    var foundationCollectionTransition: FoundationCollectionTransitionContext? {
         get { self[FoundationCollectionTransitionKey.self] }
         set { self[FoundationCollectionTransitionKey.self] = newValue }
     }
-    fileprivate var foundationCollectionOccurrence: String? {
+    var foundationCollectionOccurrence: String? {
         get { self[FoundationCollectionOccurrenceKey.self] }
         set { self[FoundationCollectionOccurrenceKey.self] = newValue }
     }
@@ -1954,7 +1954,10 @@ private struct FoundationCollectionSourceButton<Label: View>: View {
     @State private var occurrence = UUID().uuidString
     @Environment(\.foundationCollectionTransition) private var transition
 
-    private var sourceID: String { item.sharedArtworkIdentity + "-" + occurrence }
+    @Environment(\.foundationCollectionOccurrence) private var hostedOccurrence
+    private var sourceID: String {
+        item.sharedArtworkIdentity + "-" + (hostedOccurrence ?? occurrence)
+    }
 
     var body: some View {
         Button {
@@ -2105,4 +2108,11 @@ extension View {
             }
         #endif
     }
+}
+
+/// Reads the destination modifier's existing namespace inside its content hierarchy.
+struct FoundationCollectionTransitionReader<Content: View>: View {
+    @Environment(\.foundationCollectionTransition) private var transition
+    @ViewBuilder let content: (FoundationCollectionTransitionContext?) -> Content
+    var body: some View { content(transition) }
 }

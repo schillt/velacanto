@@ -11,7 +11,8 @@ final class FoundationDownloadsUITests: XCTestCase {
         reducedAccessibilityEffects: Bool = false, signInFailure: String? = nil,
         colorScheme: String? = nil, pagedCatalog: Bool = false,
         catalogPageFailOnce: Bool = false, playlistPresentation: Bool = false,
-        librarySelection: Bool = false
+        librarySelection: Bool = false, alphabetCatalog: Bool = false,
+        alphabetFailOnce: Bool = false, delayedAlphabetCapability: Bool = false
     )
         -> XCUIApplication
     {
@@ -25,6 +26,13 @@ final class FoundationDownloadsUITests: XCTestCase {
         if catalogPageFailOnce { app.launchArguments.append("-fixtureCatalogPageFailOnce") }
         if playlistPresentation { app.launchArguments.append("-fixturePlaylistPresentation") }
         if librarySelection { app.launchArguments.append("-fixtureLibrarySelection") }
+        if alphabetCatalog {
+            app.launchArguments += ["-fixtureAlphabetCatalog", "-fixtureHoldAlphabetA"]
+        }
+        if alphabetFailOnce { app.launchArguments.append("-fixtureAlphabetFailOnce") }
+        if delayedAlphabetCapability {
+            app.launchArguments.append("-fixtureDelayedAlphabetCapability")
+        }
         if let canonicalDownloadState {
             app.launchArguments += [
                 "-fixtureCanonicalCollections", "-fixtureDownloadState", canonicalDownloadState,
@@ -1258,6 +1266,177 @@ final class FoundationDownloadsUITests: XCTestCase {
         }
         XCTAssertTrue(counts.contains("album-Paged album 10-0 1"), counts)
         capture("Bounded typed catalog requests after page end", in: app)
+    }
+
+    private func tapNativeAlphabet(_ letter: String, in app: XCUIApplication) {
+        if letter == "All" {
+            tapNativeChrome(app.buttons["library-alphabet-all-album"], in: app)
+            return
+        }
+        let table = app.tables["library-index-album"]
+        XCTAssertTrue(table.waitForExistence(timeout: 5))
+        // Use UIKit's actual index accessibility elements, not synthetic index buttons.
+        let entry = table.descendants(matching: .any).matching(
+            NSPredicate(format: "label == %@", letter)
+        ).firstMatch
+        if !entry.waitForExistence(timeout: 5) {
+            let hierarchy = XCTAttachment(string: app.debugDescription)
+            hierarchy.name = "Synthetic native alphabet index accessibility hierarchy"
+            hierarchy.lifetime = .keepAlways
+            add(hierarchy)
+        }
+        XCTAssertTrue(entry.exists && entry.isHittable)
+        entry.tap()
+    }
+
+    private func readAlphabetCounts(_ app: XCUIApplication) -> String {
+        tapNativeChrome(app.buttons["Read catalog counts"], in: app)
+        return app.staticTexts["fixture-catalog-counts"].label
+    }
+
+    func testNativeAlphabetServerWindowRelativePagingAllRestoreAndPlayback() {
+        continueAfterFailure = false
+        let app = launch(
+            productionShell: true, canonicalDownloadState: "full", longPlayback: true,
+            alphabetCatalog: true, alphabetFailOnce: true)
+        // Start a genuinely downloaded fixture occurrence through the unchanged Home row.
+        selectTab("Home", in: app)
+        let tone = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Fixture Tone"))
+            .firstMatch
+        tapVisible(tone, in: app)
+        let identity = app.staticTexts["fixture-playback-identity"]
+        let playing = expectation(
+            for: NSPredicate(format: "label CONTAINS %@", "state playing"), evaluatedWith: identity)
+        wait(for: [playing], timeout: 10)
+        let original = identity.label
+        selectTab("Library", in: app)
+        tapVisible(app.buttons["library-category-albums"], in: app)
+        XCTAssertTrue(app.tables["library-index-album"].waitForExistence(timeout: 5))
+        let a = app.buttons.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "A Fixture album 0")
+        ).firstMatch
+        XCTAssertTrue(a.waitForExistence(timeout: 5))
+        XCTAssertFalse(
+            app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "F Fixture album 50"))
+                .firstMatch.exists)
+        let before = readAlphabetCounts(app)
+        XCTAssertTrue(before.contains("album-all-0 1"))
+        XCTAssertFalse(before.contains("album-all-50"))
+        tapNativeAlphabet("F", in: app)
+        XCTAssertTrue(app.buttons["Retry"].waitForExistence(timeout: 5))
+        tapVisible(app.buttons["Retry"], in: app)
+        let f = app.buttons.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "F Fixture album 50")
+        ).firstMatch
+        XCTAssertTrue(f.waitForExistence(timeout: 10))
+        capture("Native alphabet F loads beyond initial server page", in: app)
+        let g = app.buttons.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "G Fixture album 119")
+        ).firstMatch
+        reveal(g, in: app)
+        XCTAssertTrue(g.exists)
+        XCTAssertEqual(identity.label, original)
+        let paged = readAlphabetCounts(app)
+        XCTAssertTrue(paged.contains("album-F-0 2"))
+        XCTAssertTrue(paged.contains("album-F-50 1"))
+        XCTAssertFalse(paged.contains("album-all-50"))
+        tapNativeAlphabet("All", in: app)
+        XCTAssertTrue(a.waitForExistence(timeout: 5))
+        XCTAssertEqual(
+            readAlphabetCounts(app), paged, "All restores retained browsing without a catalog fetch"
+        )
+        tapNativeAlphabet("A", in: app)
+        var startedCounts = ""
+        for _ in 0..<5 {
+            startedCounts = readAlphabetCounts(app)
+            if startedCounts.contains("album-A-0 1") { break }
+        }
+        XCTAssertTrue(
+            startedCounts.contains("album-A-0 1"),
+            "Cancellation coverage requires the held provider request to actually start")
+        tapNativeAlphabet("G", in: app)
+        XCTAssertTrue(
+            app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "G Fixture album 100"))
+                .firstMatch.waitForExistence(timeout: 10))
+        XCTAssertFalse(a.exists, "Cancelled letter response cannot replace the latest window")
+        XCTAssertTrue(
+            readAlphabetCounts(app).contains("cancelled 1"),
+            "Switching letters must actually cancel the held provider task")
+        XCTAssertEqual(identity.label, original)
+        capture("Rapid native alphabet selection retains latest server window", in: app)
+        tapNativeAlphabet("All", in: app)
+        tapVisible(a, in: app)
+        let detail = app.descendants(matching: .any)["collection-detail-album-alphabet-album-0"]
+        XCTAssertTrue(detail.waitForExistence(timeout: 5))
+        let edge = app.coordinate(withNormalizedOffset: CGVector(dx: 0.005, dy: 0.5))
+        edge.press(
+            forDuration: 0.1,
+            thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.07, dy: 0.5)),
+            withVelocity: .slow, thenHoldForDuration: 0.2)
+        XCTAssertTrue(detail.exists, "Cancelled native back keeps alphabet-source collection open")
+        XCTAssertEqual(identity.label, original)
+        app.navigationBars.buttons.firstMatch.tap()
+        XCTAssertTrue(app.tables["library-index-album"].waitForExistence(timeout: 5))
+        XCTAssertEqual(identity.label, original)
+        let field = app.searchFields["Search albums"]
+        for _ in 0..<12 {
+            if field.exists && field.isHittable { break }
+            scrollContent(in: app, upward: false)
+        }
+        tapNativeChrome(field, in: app)
+        field.typeText("G Fixture album 119")
+        XCTAssertTrue(g.waitForExistence(timeout: 10))
+        XCTAssertFalse(
+            app.tables["library-index-album"].descendants(matching: .any)
+                .matching(NSPredicate(format: "label == %@", "F")).firstMatch.exists,
+            "Typed search must hide the native alphabet index")
+        field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 19))
+        tapNativeChrome(app.navigationBars["Albums"].buttons["Close"], in: app)
+        XCTAssertTrue(a.waitForExistence(timeout: 5))
+        let beforeOffline = readAlphabetCounts(app)
+        app.switches["Simulate unavailable network"].switches.firstMatch.tap()
+        tapNativeAlphabet("#", in: app)
+        let numbered = app.buttons.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "# Fixture Album")
+        ).firstMatch
+        XCTAssertTrue(numbered.waitForExistence(timeout: 5))
+        XCTAssertEqual(
+            readAlphabetCounts(app), beforeOffline,
+            "Offline alphabet operates only on complete known downloaded membership")
+        capture("Native offline number index uses complete known collections", in: app)
+        app.switches["Simulate unavailable network"].switches.firstMatch.tap()
+        tapNativeAlphabet("F", in: app)
+        XCTAssertTrue(f.waitForExistence(timeout: 10))
+        XCTAssertEqual(identity.label, original)
+        capture("Reconnect reuses server alphabet without playback replacement", in: app)
+    }
+
+    func testDelayedAlphabetCapabilityKeepsOpenCollectionSourceUntilBack() {
+        continueAfterFailure = false
+        let app = launch(
+            productionShell: true, canonicalDownloadState: "full",
+            alphabetCatalog: true, delayedAlphabetCapability: true)
+        selectTab("Library", in: app)
+        tapVisible(app.buttons["library-category-albums"], in: app)
+        let row = app.buttons.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "A Fixture album 0")
+        ).firstMatch
+        XCTAssertTrue(row.waitForExistence(timeout: 10))
+        XCTAssertFalse(app.tables["library-index-album"].exists)
+        tapVisible(row, in: app)
+        let detail = app.descendants(matching: .any)["collection-detail-album-alphabet-album-0"]
+        XCTAssertTrue(detail.waitForExistence(timeout: 5))
+        tapNativeChrome(app.buttons["Release alphabet capability"], in: app)
+        XCTAssertTrue(detail.exists)
+        XCTAssertFalse(
+            app.tables["library-index-album"].exists,
+            "Capability completion must not replace the source renderer under an active destination"
+        )
+        capture("Delayed alphabet capability preserves canonical open collection", in: app)
+        app.navigationBars.buttons.firstMatch.tap()
+        XCTAssertTrue(app.tables["library-index-album"].waitForExistence(timeout: 10))
+        XCTAssertTrue(row.exists)
+        capture("Native alphabet renderer adopts capability only after Back", in: app)
     }
 
     private func openNowPlaying(_ app: XCUIApplication) {

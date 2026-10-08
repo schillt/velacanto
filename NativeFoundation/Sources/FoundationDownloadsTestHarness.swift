@@ -12,6 +12,11 @@
                     != nil
         }
 
+        // Bounded valid silence outlasts native Simulator animation-idle waits.
+        nonisolated static var generatedToneSeconds: UInt32 {
+            ProcessInfo.processInfo.arguments.contains("-fixtureLongPlayback") ? 3600 : 30
+        }
+
         nonisolated static var storageRoot: URL {
             let runID = ProcessInfo.processInfo.environment["FOUNDATION_UI_RUN_ID"]!
             return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[
@@ -119,10 +124,19 @@
         @State private var catalogCounts = ""
         private var fixtureControls: some View {
             VStack {
-                if ProcessInfo.processInfo.arguments.contains("-fixturePagedCatalog") {
+                if ProcessInfo.processInfo.arguments.contains("-fixturePagedCatalog")
+                    || ProcessInfo.processInfo.arguments.contains("-fixtureAlphabetCatalog")
+                {
                     if ProcessInfo.processInfo.arguments.contains("-fixtureHoldInitialCatalog") {
                         Button("Release initial catalog page") {
                             Task { await fixture.library.releaseInitialCatalogPage() }
+                        }
+                    }
+                    if ProcessInfo.processInfo.arguments.contains(
+                        "-fixtureDelayedAlphabetCapability")
+                    {
+                        Button("Release alphabet capability") {
+                            Task { await fixture.library.releaseAlphabetCapability() }
                         }
                     }
                     Button("Read catalog counts") {
@@ -486,13 +500,24 @@
                 } ?? "partial"
             let missing = FoundationItem(
                 id: "missing-tone", title: "Fixture Missing Tone", subtitle: "Generated silent PCM",
-                kind: .track, duration: 30)
+                kind: .track,
+                duration: TimeInterval(FoundationDownloadsTestHarness.generatedToneSeconds))
             if state != "full" { downloads.removeTrack(missing) }
             if state == "none" {
                 downloads.removeTrack(
                     FoundationItem(
                         id: "tone", title: "Fixture Tone", subtitle: "", kind: .track,
                         duration: 30))
+            }
+            if ProcessInfo.processInfo.arguments.contains("-fixtureAlphabetCatalog"),
+                let page = try? await library.tracks(albumID: "album", startIndex: 0)
+            {
+                downloads.rememberCollection(
+                    .init(
+                        id: "numbered-album", title: "# Fixture Album",
+                        subtitle: "Synthetic catalog",
+                        kind: .album, duration: 90, primaryImageTag: "synthetic"),
+                    tracks: page.items, complete: true)
             }
             canonicalReady = true
         }
@@ -546,6 +571,76 @@
     }
 
     private actor FoundationDownloadUILibrary: FoundationLibrary {
+        private var alphabetCapabilityReleased = false
+        func releaseAlphabetCapability() { alphabetCapabilityReleased = true }
+        private let alphabetCatalog = ProcessInfo.processInfo.arguments.contains(
+            "-fixtureAlphabetCatalog")
+        private var alphabetFailures: Set<String> = []
+
+        func alphabetCapability() async -> FoundationAlphabetCapability {
+            guard alphabetCatalog else { return .unavailable }
+            if ProcessInfo.processInfo.arguments.contains("-fixtureDelayedAlphabetCapability") {
+                while !alphabetCapabilityReleased {
+                    guard !Task.isCancelled else { return .unavailable }
+                    try? await Task.sleep(for: .milliseconds(50))
+                }
+            }
+            return Task.isCancelled ? .unavailable : .verified
+        }
+
+        private func alphabetItems(kind: FoundationItem.Kind) -> [FoundationItem] {
+            (0..<120).map { index in
+                let letter = index < 50 ? "A" : (index < 100 ? "F" : "G")
+                return .init(
+                    id: "alphabet-\(kind)-\(index)",
+                    title: "\(letter) Fixture \(kind) \(index)", subtitle: "Synthetic catalog",
+                    kind: kind, duration: kind == .track ? 30 : nil,
+                    primaryImageTag: "synthetic", isFavorite: false)
+            }
+        }
+
+        private func alphabetBrowse(kind: FoundationItem.Kind, startIndex: Int) async throws
+            -> FoundationPage
+        {
+            catalogRequests["\(kind)-all-\(startIndex)", default: 0] += 1
+            try Task.checkCancellation()
+            let items = alphabetItems(kind: kind)
+            let end = min(startIndex + 50, items.count)
+            guard startIndex < end else { return .init(items: [], nextStartIndex: nil) }
+            return .init(
+                items: Array(items[startIndex..<end]),
+                nextStartIndex: end < items.count ? end : nil)
+        }
+
+        func alphabetPage(kind: FoundationItem.Kind, letter: String, startIndex: Int) async throws
+            -> FoundationPage
+        {
+            guard alphabetCatalog, letter.count == 1, ("A"..."Z").contains(letter) else {
+                throw FoundationLibraryError.unavailable
+            }
+            let key = "\(kind)-\(letter)-\(startIndex)"
+            catalogRequests[key, default: 0] += 1
+            defer { if Task.isCancelled { catalogRequests["cancelled", default: 0] += 1 } }
+            if letter == "A", ProcessInfo.processInfo.arguments.contains("-fixtureHoldAlphabetA") {
+                while true {
+                    try Task.checkCancellation()
+                    try await Task.sleep(for: .milliseconds(50))
+                }
+            }
+            try await Task.sleep(for: .milliseconds(150))
+            try Task.checkCancellation()
+            if ProcessInfo.processInfo.arguments.contains("-fixtureAlphabetFailOnce"),
+                letter == "F", startIndex == 0, alphabetFailures.insert(key).inserted
+            {
+                throw FoundationLibraryError.invalidResponse
+            }
+            let items = alphabetItems(kind: kind).filter { String($0.title.prefix(1)) >= letter }
+            let end = min(startIndex + 50, items.count)
+            guard startIndex < end else { return .init(items: [], nextStartIndex: nil) }
+            return .init(
+                items: Array(items[startIndex..<end]),
+                nextStartIndex: end < items.count ? end : nil)
+        }
         private let selectionID: String?
         private let selectionAvailable: Bool
         nonisolated let catalogScopeID: String
@@ -674,6 +769,9 @@
             }.value
         }
         func artists(startIndex: Int) async throws -> FoundationPage {
+            if alphabetCatalog {
+                return try await alphabetBrowse(kind: .artist, startIndex: startIndex)
+            }
             if pagedCatalog { return try await catalogPage(kind: .artist, startIndex: startIndex) }
             return .init(
                 items: (usesCache || canonical
@@ -685,6 +783,9 @@
                     ] : [], nextStartIndex: nil)
         }
         func genres(startIndex: Int) async throws -> FoundationPage {
+            if alphabetCatalog {
+                return try await alphabetBrowse(kind: .genre, startIndex: startIndex)
+            }
             if pagedCatalog { return try await catalogPage(kind: .genre, startIndex: startIndex) }
             return .init(
                 items: usesCache
@@ -701,7 +802,9 @@
             || ProcessInfo.processInfo.arguments.contains("-fixtureSlowTransfer")
         private let missing = FoundationItem(
             id: "missing-tone", title: "Fixture Missing Tone", subtitle: "Generated silent PCM",
-            kind: .track, duration: 30, isFavorite: false,
+            kind: .track,
+            duration: TimeInterval(FoundationDownloadsTestHarness.generatedToneSeconds),
+            isFavorite: false,
             album: ProcessInfo.processInfo.arguments.contains("-fixtureUnknownRelatedItems")
                 ? nil
                 : .init(id: "album", title: "Fixture Album", primaryImageTag: "synthetic"),
@@ -712,12 +815,26 @@
             canonical ? [track, missing, track] : [track, track]
         }
         func songs(startIndex: Int) async throws -> FoundationPage {
+            if alphabetCatalog {
+                return try await alphabetBrowse(kind: .track, startIndex: startIndex)
+            }
             if pagedCatalog { return try await catalogPage(kind: .track, startIndex: startIndex) }
             return .init(items: canonical ? [track, missing] : [track], nextStartIndex: nil)
         }
         func search(query: String, kind: FoundationItem.Kind, startIndex: Int, limit: Int)
             async throws -> FoundationPage
         {
+            if alphabetCatalog {
+                catalogRequests["\(kind)-search-\(startIndex)", default: 0] += 1
+                let items = alphabetItems(kind: kind).filter {
+                    $0.title.localizedStandardContains(query)
+                }
+                let end = min(startIndex + limit, items.count)
+                guard startIndex < end else { return .init(items: [], nextStartIndex: nil) }
+                return .init(
+                    items: Array(items[startIndex..<end]),
+                    nextStartIndex: end < items.count ? end : nil)
+            }
             if pagedCatalog {
                 return try await catalogPage(kind: kind, startIndex: startIndex, query: query)
             }
@@ -744,6 +861,9 @@
                 nextStartIndex: nil)
         }
         func playlists(startIndex: Int) async throws -> FoundationPage {
+            if alphabetCatalog {
+                return try await alphabetBrowse(kind: .playlist, startIndex: startIndex)
+            }
             if pagedCatalog {
                 return try await catalogPage(kind: .playlist, startIndex: startIndex)
             }
@@ -761,7 +881,8 @@
 
         private let track = FoundationItem(
             id: "tone", title: "Fixture Tone", subtitle: "Generated silent PCM", kind: .track,
-            duration: 30, isFavorite: false,
+            duration: TimeInterval(FoundationDownloadsTestHarness.generatedToneSeconds),
+            isFavorite: false,
             album: ProcessInfo.processInfo.arguments.contains("-fixtureUnknownRelatedItems")
                 ? nil
                 : .init(id: "album", title: "Fixture Album", primaryImageTag: "synthetic"),
@@ -775,6 +896,9 @@
             genres: ProcessInfo.processInfo.arguments.contains("-fixtureArtworkCache")
                 ? [.init(id: "genre", title: "Fixture Genre", primaryImageTag: "synthetic")] : [])
         func albums(startIndex: Int) async throws -> FoundationPage {
+            if alphabetCatalog {
+                return try await alphabetBrowse(kind: .album, startIndex: startIndex)
+            }
             if let selected = try selectedAlbums() { return selected }
             if pagedCatalog { return try await catalogPage(kind: .album, startIndex: startIndex) }
             return .init(items: [album], nextStartIndex: nil)
@@ -864,9 +988,8 @@
                 failOnce = false
                 throw CocoaError(.fileWriteOutOfSpace)
             }
-            // Valid 30-second mono PCM silence; no external audio or account data.
-            let seconds: UInt32 =
-                ProcessInfo.processInfo.arguments.contains("-fixtureLongPlayback") ? 600 : 30
+            // Valid bounded mono PCM silence; no external audio or account data.
+            let seconds = FoundationDownloadsTestHarness.generatedToneSeconds
             let bytes: UInt32 = 22_050 * seconds * 2
             var data = Data()
             func append<T: FixedWidthInteger>(_ value: T) {

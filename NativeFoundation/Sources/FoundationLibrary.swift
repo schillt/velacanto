@@ -54,7 +54,59 @@ struct FoundationSession: Codable, Sendable {
     let deviceID: String
 }
 
+/// Only explicitly verified deployed versions advertise global SortName seeks.
+enum FoundationAlphabetCapability: Sendable, Equatable {
+    case verified, unavailable
+    static func forServerVersion(_ version: String?) -> Self {
+        version == "10.10.7" || version == "10.11.8" ? .verified : .unavailable
+    }
+}
+
+/// One capability request per account-owned adapter, shared by its scoped value copies.
+private actor FoundationAlphabetCapabilityMemo {
+    private var pending: Task<FoundationAlphabetCapability, Never>?
+    private var result: FoundationAlphabetCapability?
+    private var retired = false
+
+    func value(using load: @escaping @Sendable () async throws -> String?) async
+        -> FoundationAlphabetCapability
+    {
+        guard !retired else { return .unavailable }
+        if let result { return result }
+        let task: Task<FoundationAlphabetCapability, Never>
+        if let pending {
+            task = pending
+        } else {
+            task = Task {
+                do {
+                    let version = try await load()
+                    try Task.checkCancellation()
+                    return .forServerVersion(version)
+                } catch { return .unavailable }
+            }
+            pending = task
+        }
+        let value = await task.value
+        guard !retired else { return .unavailable }
+        result = value
+        pending = nil
+        return value
+    }
+
+    func retire() {
+        retired = true
+        pending?.cancel()
+        pending = nil
+        result = nil
+    }
+}
+
 protocol FoundationLibrary: Sendable {
+    func retireAlphabetCapability() async
+    func alphabetCapability() async -> FoundationAlphabetCapability
+    /// A relative cursor into the bounded SortName >= letter tail, never an absolute rank.
+    func alphabetPage(kind: FoundationItem.Kind, letter: String, startIndex: Int) async throws
+        -> FoundationPage
     var catalogPageCache: FoundationCatalogPageCache? { get }
     var catalogScopeID: String { get }
     func catalogCacheKey(_ key: String) -> String
@@ -109,6 +161,11 @@ protocol FoundationLibrary: Sendable {
 }
 
 extension FoundationLibrary {
+    func retireAlphabetCapability() async {}
+    func alphabetCapability() async -> FoundationAlphabetCapability { .unavailable }
+    func alphabetPage(kind: FoundationItem.Kind, letter: String, startIndex: Int) async throws
+        -> FoundationPage
+    { throw FoundationLibraryError.unavailable }
     var catalogPageCache: FoundationCatalogPageCache? { nil }
     var catalogScopeID: String { "all" }
     func catalogCacheKey(_ key: String) -> String { key }
@@ -279,6 +336,7 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
     typealias Load = @Sendable (URLRequest) async throws -> (Data, URLResponse)
     let session: FoundationSession
     private let load: Load
+    private let alphabetMemo = FoundationAlphabetCapabilityMemo()
     let artworkCache: FoundationArtworkCache?
     let catalogPageCache: FoundationCatalogPageCache?
     private(set) var musicLibraryID: String?
@@ -441,7 +499,42 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
     /// Jellyfin's session logout route reads the token from the Authorization header.
     /// Do not use SDK signOut(): SDK 3.1.0 puts the token in the request path.
     func endSession() async throws {
+        await retireAlphabetCapability()
         _ = try await responseData(Paths.reportSessionEnded)
+    }
+
+    func retireAlphabetCapability() async { await alphabetMemo.retire() }
+
+    func alphabetCapability() async -> FoundationAlphabetCapability {
+        await alphabetMemo.value {
+            let info: PublicSystemInfo = try await send(Paths.getPublicSystemInfo)
+            return info.version
+        }
+    }
+
+    func alphabetPage(kind: FoundationItem.Kind, letter: String, startIndex: Int) async throws
+        -> FoundationPage
+    {
+        guard startIndex >= 0, letter.utf8.count == 1,
+            let scalar = letter.unicodeScalars.first, (65...90).contains(scalar.value)
+        else { throw FoundationLibraryError.invalidResponse }
+        guard await alphabetCapability() == .verified else {
+            throw FoundationLibraryError.unavailable
+        }
+        try Task.checkCancellation()
+        let boundary = letter.lowercased()
+        switch kind {
+        case .artist:
+            return try await albumArtists(
+                startIndex: startIndex, limit: 50, sortNameBoundary: boundary)
+        case .genre:
+            return try await genrePage(
+                startIndex: startIndex, limit: 50, sortNameBoundary: boundary)
+        case .album, .track, .playlist:
+            return try await page(
+                kinds: [kind], parent: nil, startIndex: startIndex, limit: 50,
+                sortNameBoundary: boundary)
+        }
     }
 
     func search(
@@ -576,7 +669,10 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
     }
 
     /// Keep Library and Search on the provider's album-artist identity set.
-    private func albumArtists(startIndex: Int, limit: Int, query: String? = nil) async throws
+    private func albumArtists(
+        startIndex: Int, limit: Int, query: String? = nil,
+        sortNameBoundary: String? = nil
+    ) async throws
         -> FoundationPage
     {
         guard startIndex >= 0, (1...50).contains(limit) else {
@@ -589,6 +685,7 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
         parameters.startIndex = startIndex
         parameters.limit = limit
         parameters.searchTerm = query
+        parameters.nameStartsWithOrGreater = sortNameBoundary
         parameters.sortBy = [.sortName]
         parameters.sortOrder = [.ascending]
         parameters.enableTotalRecordCount = true
@@ -739,7 +836,10 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
         try await genrePage(startIndex: startIndex, limit: 50)
     }
 
-    private func genrePage(startIndex: Int, limit: Int, query: String? = nil) async throws
+    private func genrePage(
+        startIndex: Int, limit: Int, query: String? = nil,
+        sortNameBoundary: String? = nil
+    ) async throws
         -> FoundationPage
     {
         guard startIndex >= 0 else { throw FoundationLibraryError.invalidResponse }
@@ -750,6 +850,7 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
         parameters.startIndex = startIndex
         parameters.limit = limit
         parameters.searchTerm = query
+        parameters.nameStartsWithOrGreater = sortNameBoundary
         parameters.includeItemTypes = [.musicAlbum, .audio]
         parameters.sortBy = [.sortName]
         parameters.sortOrder = [.ascending]
@@ -942,7 +1043,7 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
         genreID: String? = nil, startIndex: Int,
         limit: Int, isFavorite: Bool? = nil, isPlayed: Bool? = nil, sortBy: [ItemSortBy]? = nil,
         sortOrder: JellyfinAPI.SortOrder = .ascending, query: String? = nil,
-        fields: [ItemFields]? = nil
+        fields: [ItemFields]? = nil, sortNameBoundary: String? = nil
     ) async throws -> FoundationPage {
         guard startIndex >= 0 else { throw FoundationLibraryError.invalidResponse }
         let accountWide = kinds == [.playlist]
@@ -963,6 +1064,7 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
         parameters.isFavorite = isFavorite
         parameters.isPlayed = isPlayed
         parameters.searchTerm = query
+        parameters.nameStartsWithOrGreater = sortNameBoundary
         parameters.sortBy =
             sortBy ?? (parent == nil ? [.sortName] : [.parentIndexNumber, .indexNumber, .sortName])
         parameters.sortOrder = [sortOrder]
@@ -1257,5 +1359,26 @@ private final class RejectRedirects: NSObject, URLSessionTaskDelegate, Sendable 
         completionHandler: @escaping @Sendable (URLRequest?) -> Void
     ) {
         completionHandler(nil)
+    }
+}
+
+/// Offline-only # and unsupported/unknown server windows always restore All on reconnect.
+enum FoundationAlphabetSelectionPolicy {
+    static func onlineSelection(_ letter: String?, capability: FoundationAlphabetCapability)
+        -> String?
+    {
+        guard capability == .verified, let letter, letter.utf8.count == 1,
+            let scalar = letter.unicodeScalars.first, (65...90).contains(scalar.value)
+        else { return nil }
+        return letter
+    }
+}
+
+/// Retire the actual departing account adapter, independently of logout's transport adapter.
+enum FoundationAlphabetAccountLifecycle {
+    @discardableResult
+    static func retire(_ library: (any FoundationLibrary)?) -> Task<Void, Never>? {
+        guard let library else { return nil }
+        return Task { await library.retireAlphabetCapability() }
     }
 }
