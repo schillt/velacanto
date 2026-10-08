@@ -728,15 +728,20 @@
             guard selectionAvailable else { throw FoundationLibraryError.unavailable }
             guard let selectionID else { return nil }
             let selectionName: String
+            let albumID: String
             switch selectionID {
-            case "000000000000000000000000000000c1": selectionName = "Cedar"
-            case "000000000000000000000000000000c2": selectionName = "Silver"
+            case "000000000000000000000000000000c1":
+                selectionName = "Cedar"
+                albumID = "album"
+            case "000000000000000000000000000000c2":
+                selectionName = "Silver"
+                albumID = "other-album"
             default: throw FoundationLibraryError.invalidResponse
             }
             return .init(
                 items: [
                     .init(
-                        id: selectionID + "-album",
+                        id: albumID,
                         title: "Fixture " + selectionName + " Album",
                         subtitle: "Synthetic catalog", kind: .album, duration: 30,
                         primaryImageTag: "synthetic")
