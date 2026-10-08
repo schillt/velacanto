@@ -1466,18 +1466,34 @@ final class FoundationDownloadsUITests: XCTestCase {
         }
         let table = app.tables["library-index-album"]
         XCTAssertTrue(table.waitForExistence(timeout: 5))
-        // Use UIKit's actual index accessibility elements, not synthetic index buttons.
-        let entry = table.descendants(matching: .any).matching(
-            NSPredicate(format: "label == %@", letter)
+        // UIKit exposes one native Section index AX control, rather than letter children.
+        let index = table.descendants(matching: .any).matching(
+            NSPredicate(format: "label == %@", "Section index")
         ).firstMatch
-        if !entry.waitForExistence(timeout: 5) {
+        if !index.waitForExistence(timeout: 5) {
             let hierarchy = XCTAttachment(string: app.debugDescription)
             hierarchy.name = "Synthetic native alphabet index accessibility hierarchy"
             hierarchy.lifetime = .keepAlways
             add(hierarchy)
         }
-        XCTAssertTrue(entry.exists && entry.isHittable)
-        entry.tap()
+        XCTAssertTrue(index.exists && index.isHittable)
+        XCTAssertGreaterThan(index.frame.width, 0)
+        XCTAssertGreaterThan(index.frame.height, 0)
+        let offline =
+            app.switches["Simulate unavailable network"].switches.firstMatch.value as? String == "1"
+        let titles =
+            ["All"] + (offline ? ["#"] : [])
+            + (65...90).map { String(UnicodeScalar($0)!) }
+        guard let position = titles.firstIndex(of: letter) else {
+            XCTFail("Requested letter must belong to the approved native index order")
+            return
+        }
+        // Gesture on the live native control, with item position derived from its title order.
+        // Retry/window/request assertions below prove the actual UIKit callback's chosen letter.
+        index.coordinate(
+            withNormalizedOffset: CGVector(
+                dx: 0.5, dy: (CGFloat(position) + 0.5) / CGFloat(titles.count))
+        ).tap()
     }
 
     private func readAlphabetCounts(_ app: XCUIApplication) -> String {
@@ -1518,7 +1534,18 @@ final class FoundationDownloadsUITests: XCTestCase {
         XCTAssertTrue(f.waitForExistence(timeout: 10))
         capture("Native alphabet F loads beyond initial server page", in: app)
         let g = app.buttons["View G Fixture album 119"]
-        reveal(g, in: app)
+        // This known later item is beyond the initial fifty-item server window.
+        for _ in 0..<80 {
+            if g.exists && g.frame.width > 0 && g.frame.height > 0
+                && g.isHittable && tapCenterIsVisible(g, in: app)
+            {
+                break
+            }
+            scrollContent(in: app, upward: true)
+        }
+        XCTAssertTrue(
+            g.exists && g.frame.width > 0 && g.frame.height > 0
+                && g.isHittable && tapCenterIsVisible(g, in: app))
         XCTAssertTrue(g.exists)
         XCTAssertEqual(identity.label, original)
         let paged = readAlphabetCounts(app)
@@ -1573,7 +1600,7 @@ final class FoundationDownloadsUITests: XCTestCase {
         XCTAssertTrue(g.waitForExistence(timeout: 10))
         XCTAssertFalse(
             app.tables["library-index-album"].descendants(matching: .any)
-                .matching(NSPredicate(format: "label == %@", "F")).firstMatch.exists,
+                .matching(NSPredicate(format: "label == %@", "Section index")).firstMatch.exists,
             "Typed search must hide the native alphabet index")
         field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 19))
         tapNativeChrome(app.navigationBars["Albums"].buttons["Close"], in: app)
@@ -1581,6 +1608,9 @@ final class FoundationDownloadsUITests: XCTestCase {
         let beforeOffline = readAlphabetCounts(app)
         app.switches["Simulate unavailable network"].switches.firstMatch.tap()
         tapNativeAlphabet("#", in: app)
+        XCTAssertTrue(
+            app.tables["library-index-album"].staticTexts["Other downloaded names"]
+                .waitForExistence(timeout: 5))
         let numbered = app.buttons.matching(
             NSPredicate(format: "label BEGINSWITH %@", "# Fixture Album")
         ).firstMatch
