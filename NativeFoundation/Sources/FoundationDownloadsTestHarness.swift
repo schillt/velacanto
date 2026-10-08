@@ -683,7 +683,9 @@
 
         private func alphabetItems(kind: FoundationItem.Kind) -> [FoundationItem] {
             let firstWindow = kind == .track ? 100 : 50
-            let count = kind == .track ? 180 : 120
+            let extendedSongs = ProcessInfo.processInfo.arguments.contains(
+                "-fixtureExtendedSongsCatalog")
+            let count = kind == .track ? (extendedSongs ? 280 : 180) : 120
             return (0..<count).map { index in
                 let letter = index < firstWindow ? "A" : (index < firstWindow + 50 ? "F" : "G")
                 return .init(

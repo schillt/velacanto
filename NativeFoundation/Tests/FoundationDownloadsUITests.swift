@@ -18,12 +18,13 @@ final class FoundationDownloadsUITests: XCTestCase {
         compactFixtureControls: Bool = false, queuePresentation: Bool = false,
         alphabetCapabilityFailOnce: Bool = false, detachedPlayerArtwork: Bool = false,
         holdPlayerGlass: Bool = false, heldAlphabetPage: Bool = false,
-        favoritesCatalog: Bool = false
+        favoritesCatalog: Bool = false, extendedSongsCatalog: Bool = false
     )
         -> XCUIApplication
     {
         let app = XCUIApplication(bundleIdentifier: "com.chameleonenterprise.velacanto.uitesting")
         app.launchArguments = ["-foundationDownloadsUITesting", "-foundationTesting"]
+        if extendedSongsCatalog { app.launchArguments.append("-fixtureExtendedSongsCatalog") }
         if productionShell { app.launchArguments.append("-fixtureProductionShell") }
         if favoritesCatalog { app.launchArguments.append("-fixtureFavoritesCatalog") }
         if queuePresentation { app.launchArguments.append("-fixtureQueuePresentation") }
@@ -2215,7 +2216,7 @@ final class FoundationDownloadsUITests: XCTestCase {
         continueAfterFailure = false
         let app = launch(
             productionShell: true, canonicalDownloadState: "full", longPlayback: true,
-            alphabetCatalog: true, compactFixtureControls: true)
+            alphabetCatalog: true, compactFixtureControls: true, extendedSongsCatalog: true)
         selectTab("Library", in: app)
         tapVisible(app.buttons["library-category-songs"], in: app)
         let table = app.tables["library-index-track"]
@@ -2238,11 +2239,16 @@ final class FoundationDownloadsUITests: XCTestCase {
                 evaluatedWith: identity)
             wait(for: [selected], timeout: 5)
         }
+        XCTAssertFalse(readAlphabetCounts(app).contains("track-all-100"))
         tapNativeAlphabet("Z", in: app)
+        XCTAssertFalse(
+            readAlphabetCounts(app).contains("track-all-100"),
+            "An anchor jump alone must not fetch")
         app.tables["library-index-track"].swipeUp()
         XCTAssertTrue(app.buttons["Actions for G Fixture track 150"].waitForExistence(timeout: 10))
         XCTAssertFalse(app.buttons["library-alphabet-all-track"].exists)
         let before = readAlphabetCounts(app)
+        XCTAssertFalse(before.contains("track-all-200"), "A third page remains available")
         tapNativeAlphabet("F", in: app)
         XCTAssertTrue(app.buttons["Actions for F Fixture track 100"].waitForExistence(timeout: 10))
         capture("F anchor within retained full Tracks list", in: app)
