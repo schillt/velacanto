@@ -468,10 +468,10 @@ struct FoundationLibraryView: View {
         .buttonStyle(.plain)
         .foundationHeader("Library", profile: profileButton(isActive: catalogIsActive(.library)))
         .navigationDestination(isPresented: $showingFavorites) {
-            FoundationCatalogView(
-                title: "Favorites", model: favorites, library: library, player: player,
-                isActive: catalogIsActive(.library), isFavorites: true
-            ) { try await library.favorites(startIndex: $0) }
+            FoundationFavoritesView(
+                library: library, player: player, isActive: catalogIsActive(.library)
+            )
+            .id(library.catalogScopeID)
             #if os(iOS)
                 .toolbar(.visible, for: .navigationBar)
             #endif
@@ -628,7 +628,160 @@ struct FoundationLibraryView: View {
     }
 }
 
-/// Albums and artists share one list, one page owner and explicit pagination.
+/// Each favorite type owns its cursor so a large album collection cannot hide favorite songs.
+private struct FoundationFavoritesView: View {
+    let library: any FoundationLibrary
+    let player: FoundationPlayer
+    let isActive: Bool
+
+    var body: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 28) {
+                ForEach([FoundationItem.Kind.track, .album, .artist], id: \.self) { kind in
+                    FoundationFavoriteShelf(
+                        kind: kind, library: library, player: player, isActive: isActive)
+                }
+            }.padding(.vertical, 12)
+        }
+        .foundationCatalogHeader("Favorites")
+        .accessibilityIdentifier("favorites-catalog")
+    }
+}
+
+private struct FoundationFavoriteShelf: View {
+    let kind: FoundationItem.Kind
+    let library: any FoundationLibrary
+    let player: FoundationPlayer
+    let isActive: Bool
+    @StateObject private var model = FoundationBrowseModel()
+    @EnvironmentObject private var actions: FoundationLibraryActions
+    @EnvironmentObject private var connectivity: FoundationConnectivity
+    @EnvironmentObject private var downloads: FoundationDownloads
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @ScaledMetric(relativeTo: .body) private var songRowHeight = 76.0
+    @State private var isVisible = false
+    @State private var revision = 0
+    @State private var needsRefresh = false
+    @State private var openedItem: FoundationItem?
+    private var title: String { kind == .album ? "Albums" : kind == .artist ? "Artists" : "Songs" }
+    private var hasMore: Bool { model.nextStartIndex != nil || model.items.count > 6 }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            NavigationLink {
+                FoundationCatalogView(
+                    title: "Favorite " + title, model: model, library: library, player: player,
+                    isActive: isActive, isFavorites: true, showsTrackArtwork: true
+                ) { try await library.favorites(kind: kind, startIndex: $0) }
+            } label: {
+                HStack {
+                    Text(title).font(.title2.bold())
+                    if hasMore {
+                        Image(systemName: "chevron.right").font(.subheadline.weight(.semibold))
+                    }
+                }.foregroundStyle(.primary)
+            }
+            .buttonStyle(.plain)
+            .disabled(!hasMore)
+            .accessibilityIdentifier("favorites-see-all-" + kind.rawValue)
+            .padding(.horizontal, 16)
+            if !model.items.isEmpty {
+                ScrollView(.horizontal) {
+                    if kind == .track {
+                        LazyHGrid(
+                            rows: Array(repeating: GridItem(.fixed(songRowHeight)), count: 3),
+                            spacing: 16
+                        ) {
+                            ForEach(Array(model.items.prefix(6).enumerated()), id: \.element.id) {
+                                index, item in
+                                FoundationLibraryItemRow(
+                                    item: item, library: library, isActive: isActive && isVisible,
+                                    open: { openedItem = item }, play: { play(index) },
+                                    player: player,
+                                    showsTrackArtwork: true, navigate: { openedItem = $0 }
+                                )
+                                .lineLimit(1).frame(
+                                    width: dynamicTypeSize.isAccessibilitySize ? 360 : 300)
+                            }
+                        }.padding(.horizontal, 16)
+                    } else {
+                        LazyHStack(alignment: .top, spacing: 18) {
+                            ForEach(model.items.prefix(6)) { item in
+                                FoundationCollectionCard(
+                                    item: item, library: library, player: player,
+                                    isActive: isActive && isVisible, open: { openedItem = item },
+                                    navigate: { openedItem = $0 }
+                                )
+                                .frame(width: dynamicTypeSize.isAccessibilitySize ? 240 : 160)
+                            }
+                        }.padding(.horizontal, 16)
+                    }
+                }.scrollIndicators(.hidden)
+            } else if model.isLoading {
+                FoundationLoadingPlaceholder(layout: kind == .track ? .rows : .albumGrid)
+                    .padding(.horizontal, 16)
+            } else if model.loaded {
+                Text("No favorite " + title.lowercased() + " yet.")
+                    .foregroundStyle(.secondary).padding(.horizontal, 16)
+            }
+            if let error = model.errorMessage {
+                VStack(alignment: .leading) {
+                    Text(error).foregroundStyle(.secondary)
+                    Button("Retry") {
+                        model.request(model.retryRequest)
+                        revision += 1
+                    }.disabled(connectivity.localOnly)
+                }.padding(.horizontal, 16)
+            }
+        }
+        .accessibilityIdentifier("favorites-section-" + kind.rawValue)
+        .foundationCollectionDestination(
+            item: $openedItem, library: library, player: player, isActive: isActive
+        )
+        .onAppear {
+            isVisible = true
+            model.configureCatalogPagination()
+            if needsRefresh {
+                needsRefresh = false
+                model.request(.refresh)
+                revision += 1
+            }
+        }
+        .onDisappear { isVisible = false }
+        .onChange(of: model.items, initial: true) { _, items in
+            if !model.isRetainedSnapshot {
+                actions.observeFavorites(in: items, knownFavorites: true)
+            }
+        }
+        .onChange(of: actions.favoriteRevision) { _, _ in
+            // The full destination shares this model and owns its visible refresh.
+            guard isVisible else {
+                needsRefresh = true
+                return
+            }
+            model.request(.refresh)
+            revision += 1
+        }
+        .task(id: "\(isActive && isVisible)-\(connectivity.localOnly)-\(revision)") {
+            guard isActive, isVisible, !connectivity.localOnly else { return }
+            await model.loadPending { try await library.favorites(kind: kind, startIndex: $0) }
+        }
+    }
+
+    private func play(_ index: Int) {
+        guard let selection = model.trackQueue(selecting: index) else { return }
+        if connectivity.localOnly {
+            guard downloads.isReady(selection.items[selection.index]) else { return }
+            let ready = selection.items.filter { downloads.isReady($0) }
+            let selected = selection.items.prefix(selection.index).filter { downloads.isReady($0) }
+                .count
+            player.setQueue(ready, selectedIndex: selected)
+        } else {
+            player.setQueue(selection.items, selectedIndex: selection.index)
+        }
+    }
+}
+
 struct FoundationCatalogView: View {
     #if DEBUG
         @Environment(\.foundationTraceOrigin) private var traceOrigin
@@ -655,9 +808,7 @@ struct FoundationCatalogView: View {
 
     var body: some View {
         Group {
-            if isFavorites {
-                favoritesCatalog
-            } else if showsCollectionGrid {
+            if showsCollectionGrid {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
                         if let headerItem {
@@ -743,9 +894,10 @@ struct FoundationCatalogView: View {
         .onAppear { isVisible = true }
         .onDisappear { isVisible = false }
         .onChange(of: actions.favoriteRevision) { _, _ in
-            // Root owns invalidation; this visible consumer only schedules the load.
-            // Main-actor change callbacks finish before the asynchronous task begins.
-            if isFavorites, isActive, isVisible { revision += 1 }
+            if isFavorites, isActive, isVisible {
+                model.request(.refresh)
+                revision += 1
+            }
         }
         .onChange(of: model.items, initial: true) { _, items in
             if !model.isRetainedSnapshot {
@@ -805,68 +957,10 @@ struct FoundationCatalogView: View {
         }
     }
 
-    /// Favorites uses the same collection cards, column sizing and song rows as Your Music.
-    /// Filtering here changes presentation only; the loaded model still owns queue membership.
-    private var favoritesCatalog: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 24) {
-                ForEach([FoundationItem.Kind.album, .artist, .track, .playlist], id: \.self) {
-                    kind in
-                    let entries = Array(model.items.enumerated()).filter { $0.element.kind == kind }
-                    if !entries.isEmpty {
-                        VStack(alignment: .leading, spacing: 12) {
-                            Text(favoriteSectionTitle(kind)).font(.title2.bold())
-                            if kind == .album || kind == .playlist {
-                                LazyVGrid(
-                                    columns: foundationCollectionColumns(for: dynamicTypeSize),
-                                    alignment: .leading, spacing: 22
-                                ) {
-                                    ForEach(entries, id: \.element.id) { entry in
-                                        collectionCard(entry.element)
-                                            .frame(
-                                                maxWidth: dynamicTypeSize.isAccessibilitySize
-                                                    ? 320 : 240,
-                                                alignment: .topLeading)
-                                    }
-                                }
-                            } else {
-                                LazyVStack(spacing: 0) {
-                                    ForEach(entries, id: \.element.id) { entry in
-                                        resultRow(entry.element, at: entry.offset)
-                                            .lineLimit(1)
-                                            .padding(.vertical, 8)
-                                        if entry.element.id != entries.last?.element.id {
-                                            Divider()
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        .accessibilityIdentifier("favorites-section-" + kind.rawValue)
-                    }
-                }
-                pageState
-            }
-            .padding(.horizontal, 16).padding(.vertical, 12)
-        }
-        .accessibilityIdentifier("favorites-catalog")
-    }
-
-    private func favoriteSectionTitle(_ kind: FoundationItem.Kind) -> String {
-        switch kind {
-        case .album: "Albums"
-        case .artist: "Artists"
-        case .track: "Songs"
-        case .playlist: "Playlists"
-        case .genre: "Genres"
-        }
-    }
-
     private var showsCollectionGrid: Bool {
-        !isFavorites
-            && (headerItem?.kind == .artist
-                || (!model.items.isEmpty
-                    && model.items.allSatisfy { $0.kind == .album || $0.kind == .playlist }))
+        headerItem?.kind == .artist
+            || (!model.items.isEmpty
+                && model.items.allSatisfy { $0.kind == .album || $0.kind == .playlist })
     }
 
     private func identityHeader(_ item: FoundationItem) -> some View {

@@ -1179,3 +1179,254 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
         }
     }
 #endif
+
+#if os(iOS)
+    /// Native movement is restricted to the queue handle; rows keep their own actions.
+    struct FoundationQueueReorderList<Row: View>: UIViewRepresentable {
+        let history: [FoundationQueueEntry]
+        let current: FoundationQueueEntry?
+        let upcoming: [FoundationQueueEntry]
+        let move: (UUID, UUID?) -> Void
+        let row: (FoundationQueueEntry, Bool) -> Row
+
+        func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
+
+        func makeUIView(context: Context) -> UICollectionView {
+            let coordinator = context.coordinator
+            let layout = UICollectionViewCompositionalLayout {
+                [weak coordinator] section, environment in
+                var configuration = UICollectionLayoutListConfiguration(appearance: .plain)
+                configuration.backgroundColor = .clear
+                configuration.showsSeparators = true
+                configuration.separatorConfiguration.color = .white.withAlphaComponent(0.12)
+                configuration.headerMode =
+                    section == 2 || coordinator?.sections[section].isEmpty == false
+                    ? .supplementary : .none
+                let listSection = NSCollectionLayoutSection.list(
+                    using: configuration, layoutEnvironment: environment)
+                // Section insets reduce each row's width; scroll-view horizontal
+                // content insets would add overflow beyond the visible viewport.
+                listSection.contentInsets.leading = 16
+                listSection.contentInsets.trailing = 16
+                return listSection
+            }
+            let view = UICollectionView(frame: .zero, collectionViewLayout: layout)
+            view.backgroundColor = .clear
+            view.overrideUserInterfaceStyle = .dark
+            view.alwaysBounceVertical = true
+            view.alwaysBounceHorizontal = false
+            view.isDirectionalLockEnabled = true
+            view.contentInset = UIEdgeInsets(top: 0, left: 0, bottom: 12, right: 0)
+            view.register(UICollectionViewListCell.self, forCellWithReuseIdentifier: "queue-row")
+            view.register(
+                QueueHeader.self,
+                forSupplementaryViewOfKind: UICollectionView.elementKindSectionHeader,
+                withReuseIdentifier: "queue-header")
+            view.dataSource = coordinator
+            view.delegate = coordinator
+            let gesture = UILongPressGestureRecognizer(
+                target: coordinator, action: #selector(Coordinator.handleMovement(_:)))
+            gesture.minimumPressDuration = 0.25
+            gesture.delegate = coordinator
+            view.addGestureRecognizer(gesture)
+            coordinator.collectionView = view
+            return view
+        }
+
+        func updateUIView(_ view: UICollectionView, context: Context) {
+            let coordinator = context.coordinator
+            let incoming = [history, current.map { [$0] } ?? [], upcoming]
+            coordinator.parent = self
+            guard incoming != coordinator.sections else { return }
+            // A playback advance, removal, or shuffle invalidates this drag's boundaries.
+            coordinator.cancelMovement()
+            coordinator.sections = incoming
+            view.reloadData()
+            view.collectionViewLayout.invalidateLayout()
+        }
+
+        static func dismantleUIView(_ view: UICollectionView, coordinator: Coordinator) {
+            coordinator.cancelMovement()
+            view.delegate = nil
+            view.dataSource = nil
+        }
+
+        final class Coordinator: NSObject, UICollectionViewDataSource, UICollectionViewDelegate,
+            UIGestureRecognizerDelegate
+        {
+            var parent: FoundationQueueReorderList
+            var sections: [[FoundationQueueEntry]]
+            weak var collectionView: UICollectionView?
+            private var movingID: UUID?
+            private var dragMembership: [[UUID]]?
+            private var fingerOffset = CGPoint.zero
+            private weak var movingCell: UICollectionViewCell?
+
+            init(parent: FoundationQueueReorderList) {
+                self.parent = parent
+                sections = [parent.history, parent.current.map { [$0] } ?? [], parent.upcoming]
+            }
+
+            func numberOfSections(in collectionView: UICollectionView) -> Int { 3 }
+
+            func collectionView(
+                _ collectionView: UICollectionView, numberOfItemsInSection section: Int
+            )
+                -> Int
+            {
+                sections[section].count
+            }
+
+            func collectionView(
+                _ collectionView: UICollectionView, cellForItemAt indexPath: IndexPath
+            )
+                -> UICollectionViewCell
+            {
+                let cell = collectionView.dequeueReusableCell(
+                    withReuseIdentifier: "queue-row", for: indexPath)
+                cell.backgroundConfiguration = .clear()
+                cell.backgroundView = nil
+                cell.contentConfiguration = UIHostingConfiguration {
+                    parent.row(sections[indexPath.section][indexPath.item], indexPath.section == 2)
+                        .environment(\.colorScheme, .dark)
+                        .foregroundStyle(.white)
+                        .tint(.white)
+                }.margins(.all, 0)
+                return cell
+            }
+
+            func collectionView(
+                _ collectionView: UICollectionView,
+                viewForSupplementaryElementOfKind kind: String, at indexPath: IndexPath
+            ) -> UICollectionReusableView {
+                let header = collectionView.dequeueReusableSupplementaryView(
+                    ofKind: kind, withReuseIdentifier: "queue-header", for: indexPath)
+                if let header = header as? QueueHeader {
+                    header.label.text = ["History", "Now Playing", "Up Next"][indexPath.section]
+                }
+                return header
+            }
+
+            func collectionView(
+                _ collectionView: UICollectionView, canMoveItemAt indexPath: IndexPath
+            )
+                -> Bool
+            {
+                indexPath.section == 2
+            }
+
+            func collectionView(
+                _ collectionView: UICollectionView,
+                targetIndexPathForMoveOfItemFromOriginalIndexPath originalIndexPath: IndexPath,
+                atCurrentIndexPath currentIndexPath: IndexPath,
+                toProposedIndexPath proposedIndexPath: IndexPath
+            ) -> IndexPath {
+                guard proposedIndexPath.section == 2 else { return currentIndexPath }
+                return proposedIndexPath
+            }
+
+            func collectionView(
+                _ collectionView: UICollectionView, moveItemAt sourceIndexPath: IndexPath,
+                to destinationIndexPath: IndexPath
+            ) {
+                guard sourceIndexPath.section == 2, destinationIndexPath.section == 2,
+                    sections.map({ $0.map(\.id) }) == dragMembership,
+                    sections[2].indices.contains(sourceIndexPath.item),
+                    sections[2].indices.contains(destinationIndexPath.item),
+                    sections[2][sourceIndexPath.item].id == movingID
+                else { return }
+                let entry = sections[2].remove(at: sourceIndexPath.item)
+                sections[2].insert(entry, at: destinationIndexPath.item)
+                let next = destinationIndexPath.item + 1
+                let boundary = next < sections[2].count ? sections[2][next].id : nil
+                clearMovementAppearance()
+                parent.move(entry.id, boundary)
+            }
+
+            func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+                guard let collectionView else { return false }
+                let point = gestureRecognizer.location(in: collectionView)
+                guard let path = collectionView.indexPathForItem(at: point), path.section == 2,
+                    let frame = collectionView.layoutAttributesForItem(at: path)?.frame
+                else { return false }
+                return point.x >= frame.maxX - 56 && frame.contains(point)
+            }
+
+            @objc func handleMovement(_ gesture: UILongPressGestureRecognizer) {
+                guard let collectionView else { return }
+                let point = gesture.location(in: collectionView)
+                switch gesture.state {
+                case .began:
+                    guard let path = collectionView.indexPathForItem(at: point), path.section == 2,
+                        let cell = collectionView.cellForItem(at: path)
+                    else { return }
+                    movingID = sections[2][path.item].id
+                    dragMembership = sections.map { $0.map(\.id) }
+                    fingerOffset = CGPoint(x: cell.center.x - point.x, y: cell.center.y - point.y)
+                    movingCell = cell
+                    let glass = UIVisualEffectView(
+                        effect: UIBlurEffect(style: .systemUltraThinMaterialDark))
+                    glass.layer.cornerRadius = 16
+                    glass.clipsToBounds = true
+                    cell.backgroundConfiguration = nil
+                    cell.backgroundView = glass
+                    cell.layoutIfNeeded()
+                    guard collectionView.beginInteractiveMovementForItem(at: path) else {
+                        clearMovementAppearance()
+                        return
+                    }
+                case .changed:
+                    guard movingID != nil else { return }
+                    collectionView.updateInteractiveMovementTargetPosition(
+                        CGPoint(x: point.x + fingerOffset.x, y: point.y + fingerOffset.y))
+                case .ended:
+                    guard movingID != nil else { return }
+                    collectionView.endInteractiveMovement()
+                    clearMovementAppearance(clearIdentity: false)
+                case .cancelled, .failed:
+                    cancelMovement()
+                default:
+                    break
+                }
+            }
+
+            func cancelMovement() {
+                guard movingID != nil else { return }
+                collectionView?.cancelInteractiveMovement()
+                clearMovementAppearance()
+            }
+
+            private func clearMovementAppearance(clearIdentity: Bool = true) {
+                movingCell?.backgroundView = nil
+                movingCell?.backgroundConfiguration = .clear()
+                movingCell = nil
+                if clearIdentity {
+                    movingID = nil
+                    dragMembership = nil
+                }
+            }
+        }
+
+        final class QueueHeader: UICollectionReusableView {
+            let label = UILabel()
+
+            override init(frame: CGRect) {
+                super.init(frame: frame)
+                label.font = .preferredFont(forTextStyle: .headline)
+                label.adjustsFontForContentSizeCategory = true
+                label.textColor = .secondaryLabel
+                label.accessibilityTraits.insert(.header)
+                label.translatesAutoresizingMaskIntoConstraints = false
+                addSubview(label)
+                NSLayoutConstraint.activate([
+                    label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+                    label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
+                    label.topAnchor.constraint(equalTo: topAnchor, constant: 12),
+                    label.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -4),
+                ])
+            }
+
+            required init?(coder: NSCoder) { nil }
+        }
+    }
+#endif

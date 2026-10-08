@@ -1708,8 +1708,8 @@ final class FoundationDownloadsUITests: XCTestCase {
         let catalog = app.descendants(matching: .any)["favorites-catalog"].firstMatch
         XCTAssertTrue(catalog.waitForExistence(timeout: 5))
         for (kind, label) in [
-            ("album", "View Fixture Album"), ("artist", "Fixture Artist"),
-            ("track", "Fixture Tone"), ("playlist", "View Fixture Playlist"),
+            ("track", "Fixture Tone"), ("album", "View Fixture Album"),
+            ("artist", "Fixture Artist"),
         ] {
             let content = app.buttons.matching(
                 NSPredicate(format: "label BEGINSWITH %@", label)
@@ -1719,7 +1719,19 @@ final class FoundationDownloadsUITests: XCTestCase {
             XCTAssertTrue(
                 app.descendants(matching: .any)["favorites-section-" + kind].firstMatch.exists)
         }
-        capture("Favorites uses canonical library sections cards and artwork rows", in: app)
+        XCTAssertFalse(app.descendants(matching: .any)["favorites-section-playlist"].exists)
+        tapVisible(app.buttons["favorites-section-track"], in: app)
+        XCTAssertTrue(app.navigationBars["Favorite Songs"].waitForExistence(timeout: 5))
+        tapVisible(app.buttons["Load more"], in: app)
+        let finalSong = app.buttons.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "Fixture Tone 7")
+        ).firstMatch
+        reveal(finalSong, in: app)
+        XCTAssertTrue(finalSong.isHittable)
+        app.navigationBars.buttons.firstMatch.tap()
+        XCTAssertTrue(catalog.waitForExistence(timeout: 5))
+        capture(
+            "Three independently paged favorite shelves and complete Songs destination", in: app)
         let album = app.buttons["View Fixture Album"].firstMatch
         for _ in 0..<6 {
             if album.exists && album.isHittable { break }

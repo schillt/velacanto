@@ -157,6 +157,7 @@ protocol FoundationLibrary: Sendable {
     func playlists(startIndex: Int) async throws -> FoundationPage
     func playlistTracks(playlistID: String, startIndex: Int) async throws -> FoundationPage
     func favorites(startIndex: Int) async throws -> FoundationPage
+    func favorites(kind: FoundationItem.Kind, startIndex: Int) async throws -> FoundationPage
     func genres(startIndex: Int) async throws -> FoundationPage
     func albums(genreID: String, startIndex: Int) async throws -> FoundationPage
     func setFavorite(for item: FoundationItem, isFavorite: Bool) async throws
@@ -282,6 +283,10 @@ extension FoundationLibrary {
     func playlistTracks(playlistID: String, startIndex: Int) async throws -> FoundationPage {
         throw FoundationLibraryError.unavailable
     }
+    func favorites(kind: FoundationItem.Kind, startIndex: Int) async throws -> FoundationPage {
+        throw FoundationLibraryError.unavailable
+    }
+
     func favorites(startIndex: Int) async throws -> FoundationPage {
         throw FoundationLibraryError.unavailable
     }
@@ -801,6 +806,14 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
 
     func playlists(startIndex: Int = 0) async throws -> FoundationPage {
         try await page(kinds: [.playlist], parent: nil, startIndex: startIndex, limit: 50)
+    }
+
+    func favorites(kind: FoundationItem.Kind, startIndex: Int) async throws -> FoundationPage {
+        guard [.album, .artist, .track].contains(kind) else {
+            throw FoundationLibraryError.unavailable
+        }
+        return try await page(
+            kinds: [kind], parent: nil, startIndex: startIndex, limit: 50, isFavorite: true)
     }
 
     func favorites(startIndex: Int = 0) async throws -> FoundationPage {

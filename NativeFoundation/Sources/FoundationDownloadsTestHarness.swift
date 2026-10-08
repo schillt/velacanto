@@ -1063,6 +1063,38 @@
         func recentlyPlayed(startIndex: Int) async throws -> FoundationPage {
             .init(items: [track], nextStartIndex: nil)
         }
+        func favorites(kind: FoundationItem.Kind, startIndex: Int) async throws -> FoundationPage {
+            guard ProcessInfo.processInfo.arguments.contains("-fixtureFavoritesCatalog"),
+                [.album, .artist, .track].contains(kind)
+            else { throw FoundationLibraryError.unavailable }
+            let base: FoundationItem
+            switch kind {
+            case .album: base = album
+            case .track: base = track
+            default:
+                base = FoundationItem(
+                    id: "artist", title: "Fixture Artist", subtitle: "", kind: .artist,
+                    duration: nil, primaryImageTag: "synthetic")
+            }
+            let items = (0..<8).map { index in
+                var item =
+                    index == 0
+                    ? base
+                    : FoundationItem(
+                        id: base.id + "-favorite-" + String(index),
+                        title: base.title + " " + String(index),
+                        subtitle: base.subtitle, kind: kind, duration: base.duration,
+                        primaryImageTag: base.primaryImageTag)
+                item.isFavorite = true
+                return item
+            }
+            guard startIndex < items.count else { return .init(items: [], nextStartIndex: nil) }
+            let end = min(startIndex + 6, items.count)
+            return .init(
+                items: Array(items[startIndex..<end]), nextStartIndex: end < items.count ? end : nil
+            )
+        }
+
         func favorites(startIndex: Int) async throws -> FoundationPage {
             guard ProcessInfo.processInfo.arguments.contains("-fixtureFavoritesCatalog") else {
                 throw FoundationLibraryError.unavailable

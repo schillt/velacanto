@@ -516,6 +516,10 @@ private struct FoundationQueueView: View {
     @Binding var isPresented: Bool
     let openItem: (FoundationItem) -> Void
 
+    @EnvironmentObject private var connectivity: FoundationConnectivity
+    @EnvironmentObject private var downloads: FoundationDownloads
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
     var body: some View {
         let upcoming = player.upcoming
         VStack(spacing: 0) {
@@ -546,38 +550,63 @@ private struct FoundationQueueView: View {
             .buttonStyle(.plain)
             .padding(.horizontal, 24)
             .padding(.vertical, 12)
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 8) {
-                    if !player.history.isEmpty {
-                        queueHeading("History")
-                        ForEach(player.history) { row($0) }
+            #if os(iOS)
+                FoundationQueueReorderList(
+                    history: player.history,
+                    current: player.queue.first(where: { $0.id == player.selectedEntryID }),
+                    upcoming: upcoming,
+                    move: { id, boundary in
+                        guard isPresented else { return }
+                        player.reorderUpcoming([id], before: boundary)
+                    },
+                    row: { entry, canReorder in
+                        row(entry, canReorder: canReorder)
+                            .environmentObject(connectivity)
+                            .environmentObject(downloads)
+                            .environment(\.dynamicTypeSize, dynamicTypeSize)
+                            .environment(\.colorScheme, .dark)
+                            .foregroundStyle(.white).tint(.white)
                     }
-                    if let current = player.queue.first(where: { $0.id == player.selectedEntryID })
-                    {
-                        queueHeading("Now Playing")
-                        row(current)
+                )
+                .id(dynamicTypeSize)
+                .modifier(FoundationQueueFixtureIdentifier(kind: "list", entryID: nil))
+                .clipped()
+                .mask { FoundationPlayerContentFade() }
+            #else
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 8) {
+                        if !player.history.isEmpty {
+                            queueHeading("History")
+                            ForEach(player.history) { row($0) }
+                        }
+                        if let current = player.queue.first(where: {
+                            $0.id == player.selectedEntryID
+                        }) {
+                            queueHeading("Now Playing")
+                            row(current)
+                        }
+                        queueHeading("Up Next")
+                        ForEach(upcoming) { row($0, canReorder: true) }
+                            .reorderable()
                     }
-                    queueHeading("Up Next")
-                    ForEach(upcoming) { row($0, canReorder: true) }
-                        .reorderable()
+                    .reorderContainer(for: FoundationQueueEntry.self, isEnabled: isPresented) {
+                        difference in
+                        let boundary: UUID?
+                        switch difference.destination.position {
+                        case .before(let id): boundary = id
+                        case .end: boundary = nil
+                        }
+                        player.reorderUpcoming(difference.sources, before: boundary)
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 12)
                 }
-                .reorderContainer(for: FoundationQueueEntry.self, isEnabled: isPresented) {
-                    difference in
-                    let boundary: UUID?
-                    switch difference.destination.position {
-                    case .before(let id): boundary = id
-                    case .end: boundary = nil
-                    }
-                    player.reorderUpcoming(difference.sources, before: boundary)
-                }
-                .padding(.horizontal, 16)
-                .padding(.bottom, 12)
-            }
-            .environment(\.colorScheme, .dark)
-            .scrollContentBackground(.hidden)
-            .modifier(FoundationQueueFixtureIdentifier(kind: "list", entryID: nil))
-            .clipped()
-            .mask { FoundationPlayerContentFade() }
+                .environment(\.colorScheme, .dark)
+                .scrollContentBackground(.hidden)
+                .modifier(FoundationQueueFixtureIdentifier(kind: "list", entryID: nil))
+                .clipped()
+                .mask { FoundationPlayerContentFade() }
+            #endif
         }
         .disabled(!isPresented)
         .allowsHitTesting(isPresented)
@@ -618,15 +647,37 @@ private struct FoundationQueueView: View {
                     .frame(width: 44, height: 44)
                     .contentShape(Rectangle())
                     .accessibilityLabel("Reorder " + entry.item.title)
+                    .accessibilityActions {
+                        if let index = player.upcoming.firstIndex(where: { $0.id == entry.id }) {
+                            if index > 0 {
+                                Button("Move Up") {
+                                    moveAccessibleEntry(entry.id, offset: -1)
+                                }
+                            }
+                            if index + 1 < player.upcoming.count {
+                                Button("Move Down") {
+                                    moveAccessibleEntry(entry.id, offset: 1)
+                                }
+                            }
+                        }
+                    }
             }
         }
         .frame(minHeight: 44)
         .padding(.leading, 16).padding(.trailing, canReorder ? 4 : 16)
         .padding(.vertical, 8)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         .contentShape(.dragPreview, RoundedRectangle(cornerRadius: 16, style: .continuous))
         .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: 16, style: .continuous))
         .id(entry.id)
+    }
+
+    private func moveAccessibleEntry(_ id: UUID, offset: Int) {
+        let entries = player.upcoming
+        guard isPresented, let index = entries.firstIndex(where: { $0.id == id }),
+            entries.indices.contains(index + offset)
+        else { return }
+        let boundary = offset < 0 ? index - 1 : index + 2
+        player.reorderUpcoming([id], before: boundary < entries.count ? entries[boundary].id : nil)
     }
 
     @ViewBuilder private func menu(_ entry: FoundationQueueEntry) -> some View {

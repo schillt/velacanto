@@ -10,6 +10,31 @@ import XCTest
 
 final class FoundationLibraryTests: XCTestCase {
 
+    func testTypedFavoritesQueriesEachKindIndependentlyWithFavoriteFilterAndCursor() async throws {
+        for (kind, type) in [
+            (FoundationItem.Kind.album, "MusicAlbum"), (.artist, "MusicArtist"), (.track, "Audio"),
+        ] {
+            let library = FoundationJellyfinLibrary(session: session) { request in
+                let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!
+                    .queryItems!
+                XCTAssertEqual(query.first { $0.name == "includeItemTypes" }?.value, type)
+                XCTAssertEqual(query.first { $0.name == "isFavorite" }?.value, "true")
+                XCTAssertEqual(query.first { $0.name == "startIndex" }?.value, "50")
+                XCTAssertEqual(query.first { $0.name == "limit" }?.value, "50")
+                XCTAssertEqual(query.first { $0.name == "enableUserData" }?.value, "true")
+                let payload =
+                    "{\"Items\":[{\"Id\":\"00000000000000000000000000000001\",\"Type\":\"" + type
+                    + "\",\"Name\":\"Favorite\",\"UserData\":{\"Key\":\"synthetic-key\",\"IsFavorite\":true}}],\"StartIndex\":50,\"TotalRecordCount\":51}"
+                return (Data(payload.utf8), Self.response(request))
+            }
+            let page = try await library.favorites(kind: kind, startIndex: 50)
+            XCTAssertEqual(page.items.count, 1)
+            XCTAssertEqual(page.items.first?.kind, kind)
+            XCTAssertEqual(page.items.first?.isFavorite, true)
+            XCTAssertNil(page.nextStartIndex)
+        }
+    }
+
     @MainActor
     func testSongsActivationLoadsCompleteMembershipBeforeAnyLetterSelection() async {
         let model = FoundationBrowseModel()
