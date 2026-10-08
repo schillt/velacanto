@@ -2238,6 +2238,8 @@ final class FoundationDownloadsUITests: XCTestCase {
                 evaluatedWith: identity)
             wait(for: [selected], timeout: 5)
         }
+        tapNativeAlphabet("Z", in: app)
+        app.tables["library-index-track"].swipeUp()
         XCTAssertTrue(app.buttons["Actions for G Fixture track 150"].waitForExistence(timeout: 10))
         XCTAssertFalse(app.buttons["library-alphabet-all-track"].exists)
         let before = readAlphabetCounts(app)
@@ -2265,8 +2267,11 @@ final class FoundationDownloadsUITests: XCTestCase {
         tapNativeAlphabet("A", in: app)
         touchFirstRenderedRow()
         expectSelection(0)
+        app.navigationBars.buttons.firstMatch.tap()
+        tapVisible(app.buttons["library-category-songs"], in: app)
+        XCTAssertTrue(app.buttons["Actions for A Fixture track 0"].isHittable)
         let counts = readAlphabetCounts(app)
-        XCTAssertEqual(counts, before, "Rail gestures must not request pages")
+        XCTAssertEqual(counts, before, "Completed scroll demand must not replay on revisit")
         XCTAssertFalse(app.progressIndicators["Jumping to F…"].exists)
         XCTAssertTrue(counts.contains("track-all-0 1"))
         XCTAssertTrue(counts.contains("track-all-100 1"))
@@ -2324,7 +2329,8 @@ final class FoundationDownloadsUITests: XCTestCase {
             alphabetFailOnce: true, compactFixtureControls: true)
         selectTab("Library", in: app)
         tapVisible(app.buttons["library-category-songs"], in: app)
-        tapNativeAlphabet("F", in: app)
+        tapNativeAlphabet("Z", in: app)
+        app.tables["library-index-track"].swipeUp()
         XCTAssertTrue(app.buttons["Retry"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.tables["library-index-track"].exists)
         XCTAssertTrue(app.buttons["Actions for A Fixture track 0"].exists)
@@ -2344,7 +2350,7 @@ final class FoundationDownloadsUITests: XCTestCase {
         capture("Ordinary page retry preserves prior rows and loaded anchors", in: app)
     }
 
-    func testTracksActivationLoadCancelsOnExitAndRailDoesNotRetargetLoading() {
+    func testTracksScrollDemandCancelsOnExitAndRailDoesNotRetargetLoading() {
         continueAfterFailure = false
         let app = launch(
             productionShell: true, canonicalDownloadState: "full", alphabetCatalog: true,
@@ -2352,7 +2358,12 @@ final class FoundationDownloadsUITests: XCTestCase {
         selectTab("Library", in: app)
         tapVisible(app.buttons["library-category-songs"], in: app)
         XCTAssertTrue(app.buttons["Actions for A Fixture track 0"].waitForExistence(timeout: 5))
+        let initial = readAlphabetCounts(app)
+        XCTAssertFalse(initial.contains("track-all-100"), "Activation loads only the first page")
+        tapNativeAlphabet("Z", in: app)
+        app.tables["library-index-track"].swipeUp()
         let before = readAlphabetCounts(app)
+        XCTAssertTrue(before.contains("track-all-100 1"))
         tapNativeAlphabet("F", in: app)
         tapNativeAlphabet("G", in: app)
         tapNativeAlphabet("A", in: app)
@@ -2362,6 +2373,8 @@ final class FoundationDownloadsUITests: XCTestCase {
         XCTAssertTrue(app.buttons["Actions for A Fixture track 0"].isHittable)
         app.navigationBars.buttons.firstMatch.tap()
         tapVisible(app.buttons["library-category-songs"], in: app)
+        tapNativeAlphabet("Z", in: app)
+        app.tables["library-index-track"].swipeUp()
         XCTAssertTrue(app.buttons["Actions for G Fixture track 150"].waitForExistence(timeout: 10))
         tapNativeAlphabet("G", in: app)
         XCTAssertTrue(app.buttons["Actions for G Fixture track 150"].isHittable)
@@ -2369,7 +2382,7 @@ final class FoundationDownloadsUITests: XCTestCase {
         XCTAssertTrue(app.buttons["Actions for A Fixture track 0"].isHittable)
         XCTAssertTrue(readAlphabetCounts(app).contains("cancelled 1"))
         capture(
-            "Activation load resumes after exit; rail never starts or retargets requests", in: app)
+            "Scroll demand resumes after exit; rail never starts or retargets requests", in: app)
     }
 
     private func openNowPlaying(_ app: XCUIApplication) {

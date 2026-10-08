@@ -36,14 +36,120 @@ final class FoundationLibraryTests: XCTestCase {
     }
 
     @MainActor
-    func testSongsActivationLoadsCompleteMembershipBeforeAnyLetterSelection() async {
+    func testSongsActivationLoadsOnePageThenScrollDemandLoadsMoreWithoutAButton() async {
+        let model = FoundationBrowseModel()
+        model.configureCatalogPagination(sortByTitle: true)
+        var offsets: [Int] = []
+        let loader: (Int) async throws -> FoundationPage = { offset in
+            offsets.append(offset)
+            return .init(
+                items: [
+                    .init(
+                        id: "\(offset)", title: "Song \(offset)",
+                        subtitle: "", kind: .track, duration: nil)
+                ], nextStartIndex: offset + 1)
+        }
+        await model.loadCatalogPage(using: loader)
+        XCTAssertEqual(offsets, [0])
+        await model.loadCatalogPage(using: loader)
+        XCTAssertEqual(offsets, [0], "Revisiting must not drain the catalog")
+        await model.loadNextPage(using: loader)
+        XCTAssertEqual(offsets, [0, 1])
+        XCTAssertEqual(model.items.count, 2)
+        XCTAssertNil(model.errorMessage)
+    }
+
+    @MainActor
+    func testAdvancingPagesStopAtLifetimeSafetyLimitAndRetryCannotResetIt() async {
+        let model = FoundationBrowseModel(catalogLimits: .init(maximumPages: 3))
+        model.configureCatalogPagination()
+        var requests = 0
+        let loader: (Int) async throws -> FoundationPage = { offset in
+            requests += 1
+            return .init(
+                items: [
+                    .init(
+                        id: "\(offset)", title: "Song", subtitle: "",
+                        kind: .track, duration: nil)
+                ], nextStartIndex: offset + 1)
+        }
+        await model.drainDemandedPagesForTesting(using: loader)
+        XCTAssertEqual(requests, 3)
+        XCTAssertEqual(model.items.count, 3)
+        XCTAssertEqual(model.nextStartIndex, 3)
+        XCTAssertEqual(model.errorCategory, .invalidResponse)
+        model.request(.more)
+        await model.loadPending(using: loader)
+        XCTAssertEqual(requests, 3)
+        XCTAssertEqual(model.items.count, 3)
+    }
+
+    @MainActor
+    func testDuplicatePagesConsumeRawItemBudgetBeforeDeduplication() async {
+        let model = FoundationBrowseModel(catalogLimits: .init(maximumItems: 400))
+        model.configureCatalogPagination()
+        let item = FoundationItem(
+            id: "same", title: "Song", subtitle: "",
+            kind: .track, duration: nil)
+        var requests = 0
+        await model.drainDemandedPagesForTesting { offset in
+            requests += 1
+            return .init(items: Array(repeating: item, count: 200), nextStartIndex: offset + 200)
+        }
+        XCTAssertEqual(requests, 2)
+        XCTAssertEqual(model.items, [item])
+        XCTAssertEqual(model.nextStartIndex, 400)
+        XCTAssertEqual(model.errorCategory, .invalidResponse)
+    }
+
+    @MainActor
+    func testMetadataBudgetRejectsOversizedPageBeforePublishingAndRefreshRetainsRowsOnError() async
+    {
+        let model = FoundationBrowseModel(catalogLimits: .init(maximumBytes: 2_048))
+        model.configureCatalogPagination()
+        let earlier = FoundationItem(
+            id: "earlier", title: "Earlier", subtitle: "",
+            kind: .track, duration: nil)
+        let huge = FoundationItem(
+            id: "huge", title: String(repeating: "x", count: 2_048),
+            subtitle: "", kind: .track, duration: nil)
+        await model.drainDemandedPagesForTesting { offset in
+            offset == 0
+                ? .init(items: [earlier], nextStartIndex: 50)
+                : .init(items: [huge], nextStartIndex: 100)
+        }
+        XCTAssertEqual(model.items, [earlier])
+        XCTAssertEqual(model.nextStartIndex, 50)
+        XCTAssertEqual(model.errorCategory, .invalidResponse)
+        model.request(.refresh)
+        await model.loadCatalogPage { _ in throw FoundationLibraryError.network }
+        XCTAssertEqual(model.items, [earlier])
+        model.request(.refresh)
+        await model.loadCatalogPage { _ in .init(items: [earlier], nextStartIndex: nil) }
+        XCTAssertNil(model.errorMessage)
+        XCTAssertNil(model.nextStartIndex)
+        model.clearRetainedData()
+        await model.loadCatalogPage { _ in .init(items: [earlier], nextStartIndex: 50) }
+        XCTAssertNil(model.errorMessage)
+    }
+
+    func testMetadataCostIncludesEmptyNestedReferences() {
+        var item = FoundationItem(id: "", title: "", subtitle: "", kind: .track, duration: nil)
+        item.genres = Array(repeating: .init(id: "", title: ""), count: 100)
+        XCTAssertNil(
+            FoundationCatalogBudget(maximumBytes: 2_048).cost(
+                of: .init(items: [item], nextStartIndex: nil)))
+    }
+
+    @MainActor
+    func testDemandedSongsPagesRetainMembershipForLetterSelection() async {
         let model = FoundationBrowseModel()
         model.configureCatalogPagination()
         let a = FoundationItem(id: "a", title: "Alpha", subtitle: "", kind: .track, duration: nil)
         let c = FoundationItem(id: "c", title: "Charlie", subtitle: "", kind: .track, duration: nil)
         let f = FoundationItem(id: "f", title: "Foxtrot", subtitle: "", kind: .track, duration: nil)
         var offsets: [Int] = []
-        await model.loadCompleteCatalog { offset in
+        await model.drainDemandedPagesForTesting { offset in
             offsets.append(offset)
             switch offset {
             case 0: return .init(items: [a], nextStartIndex: 50)
@@ -59,7 +165,7 @@ final class FoundationLibraryTests: XCTestCase {
         }
         XCTAssertEqual(model.items, [a, c, f])
         XCTAssertEqual(offsets, [0, 50, 100])
-        await model.loadCompleteCatalog { _ in
+        await model.drainDemandedPagesForTesting { _ in
             XCTFail("Reactivation retains the complete catalog without a cache refresh")
             return .init(items: [], nextStartIndex: nil)
         }
@@ -74,7 +180,7 @@ final class FoundationLibraryTests: XCTestCase {
         await model.loadPending { _ in .init(items: [a], nextStartIndex: 50) }
         let gate = FoundationAlphabetTestGate()
         let old = Task {
-            await model.loadCompleteCatalog { offset in
+            await model.drainDemandedPagesForTesting { offset in
                 XCTAssertEqual(offset, 50)
                 await gate.suspend()
                 return .init(items: [f], nextStartIndex: nil)
@@ -87,7 +193,7 @@ final class FoundationLibraryTests: XCTestCase {
         XCTAssertEqual(model.items, [a])
         XCTAssertEqual(model.nextStartIndex, 50)
         XCTAssertFalse(model.isLoading)
-        await model.loadCompleteCatalog { offset in
+        await model.drainDemandedPagesForTesting { offset in
             XCTAssertEqual(offset, 50)
             return .init(items: [f], nextStartIndex: nil)
         }
@@ -101,7 +207,7 @@ final class FoundationLibraryTests: XCTestCase {
         model.configureCatalogPagination()
         let a = FoundationItem(id: "a", title: "Alpha", subtitle: "", kind: .track, duration: nil)
         var requests = 0
-        await model.loadCompleteCatalog { offset in
+        await model.drainDemandedPagesForTesting { offset in
             requests += 1
             if offset == 0 { return .init(items: [a], nextStartIndex: 50) }
             throw FoundationLibraryError.network
@@ -109,7 +215,7 @@ final class FoundationLibraryTests: XCTestCase {
         XCTAssertEqual(requests, 2)
         XCTAssertEqual(model.items, [a])
         XCTAssertNotNil(model.errorMessage)
-        await model.loadCompleteCatalog { _ in
+        await model.drainDemandedPagesForTesting { _ in
             XCTFail("A failed catalog requires explicit retry")
             return .init(items: [], nextStartIndex: nil)
         }
@@ -130,7 +236,7 @@ final class FoundationLibraryTests: XCTestCase {
             let model = FoundationBrowseModel(refreshInterval: 0)
             model.configureCatalogPagination()
             model.configureCache(cache, key: key)
-            await model.loadCompleteCatalog { offset in
+            await model.drainDemandedPagesForTesting { offset in
                 if !failRefresh, offset == 0 {
                     return .init(items: [a], nextStartIndex: 50)
                 }
@@ -139,14 +245,14 @@ final class FoundationLibraryTests: XCTestCase {
             XCTAssertEqual(model.items, [a])
             XCTAssertEqual(model.isRetainedSnapshot, failRefresh)
             XCTAssertEqual(model.errorCategory, .network)
-            await model.loadCompleteCatalog { _ in
+            await model.drainDemandedPagesForTesting { _ in
                 XCTFail("Revisiting a failed cached catalog must not retry any page")
                 return .init(items: [], nextStartIndex: nil)
             }
             XCTAssertEqual(model.items, [a])
             XCTAssertEqual(model.errorCategory, .network)
             model.request(model.retryRequest)
-            await model.loadCompleteCatalog { offset in
+            await model.drainDemandedPagesForTesting { offset in
                 offset == 0
                     ? .init(items: [a], nextStartIndex: 50)
                     : .init(items: [f], nextStartIndex: nil)
@@ -165,7 +271,7 @@ final class FoundationLibraryTests: XCTestCase {
         let gate = FoundationAlphabetTestGate()
         var requests = 0
         let loading = Task {
-            await model.loadCompleteCatalog { _ in
+            await model.drainDemandedPagesForTesting { _ in
                 requests += 1
                 await gate.suspend()
                 return .init(items: [a], nextStartIndex: 50)
@@ -187,7 +293,7 @@ final class FoundationLibraryTests: XCTestCase {
         model.configureCatalogPagination()
         let a = FoundationItem(id: "a", title: "Alpha", subtitle: "", kind: .track, duration: nil)
         var requests = 0
-        await model.loadCompleteCatalog { offset in
+        await model.drainDemandedPagesForTesting { offset in
             requests += 1
             return .init(items: [a], nextStartIndex: offset)
         }
@@ -245,7 +351,7 @@ final class FoundationLibraryTests: XCTestCase {
         let accented = FoundationItem(
             id: "e", title: "Écho", subtitle: "", kind: .track, duration: nil, sortName: "0")
         var offsets: [Int] = []
-        await model.loadCompleteCatalog { offset in
+        await model.drainDemandedPagesForTesting { offset in
             offsets.append(offset)
             return offset == 0
                 ? .init(items: [z, accented], nextStartIndex: 2)
@@ -1882,6 +1988,22 @@ private actor FoundationAlphabetTestGate {
                 onDemandNextPage: {}, onRefresh: {}, row: { Text($0.item.title) })
         }
 
+        func testAccessibilityScrollCreatesDemandAndRailLandingClearsIt() throws {
+            let initial = view([section("A", count: 30)])
+            let coordinator = initial.makeCoordinator()
+            let table = initial.makeTable(coordinator: coordinator)
+            initial.updateTable(table, coordinator: coordinator)
+            XCTAssertFalse(coordinator.hasScrollDemand)
+            let accessible = try XCTUnwrap(table as? FoundationDemandTableView)
+            _ = accessible.accessibilityScroll(.down)
+            XCTAssertTrue(coordinator.hasScrollDemand)
+            var jump = initial
+            jump.anchorRowID = "A-29"
+            jump.anchorRevision = 1
+            jump.updateTable(table, coordinator: coordinator)
+            XCTAssertFalse(coordinator.hasScrollDemand)
+        }
+
         func testDistantRailLandingSurvivesHostedLayoutAndSortedPageReload() async throws {
             let initial = view([
                 section("A", count: 30), section("M", count: 30), section("Z", count: 30),
@@ -1939,3 +2061,17 @@ private actor FoundationAlphabetTestGate {
         }
     }
 #endif
+
+// Model tests explicitly supply each scroll demand; production activation never owns this loop.
+extension FoundationBrowseModel {
+    func drainDemandedPagesForTesting(using loader: (Int) async throws -> FoundationPage) async {
+        await loadCatalogPage(using: loader)
+        for _ in 0..<2_001 {
+            guard !Task.isCancelled, errorMessage == nil, let offset = nextStartIndex else {
+                return
+            }
+            await loadNextPage(using: loader)
+            guard nextStartIndex != offset else { return }
+        }
+    }
+}

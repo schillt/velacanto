@@ -40,7 +40,10 @@
         }
 
         func makeTable(coordinator: Coordinator) -> UITableView {
-            let table = UITableView(frame: .zero, style: .plain)
+            let table = FoundationDemandTableView(frame: .zero, style: .plain)
+            table.onAccessibilityScroll = { [weak coordinator] in
+                coordinator?.hasScrollDemand = true
+            }
             table.dataSource = coordinator
             table.delegate = coordinator
             table.rowHeight = isCoverGrid ? UITableView.automaticDimension : rowHeight
@@ -76,6 +79,7 @@
             if contextChanged || (!coordinator.parent.allowsDemand && allowsDemand) {
                 coordinator.lastDemandIdentity = nil
             }
+            if contextChanged { coordinator.hasScrollDemand = false }
             let visibleAnchor = contextChanged ? nil : coordinator.visibleAnchor(in: table)
             coordinator.parent = self
             // Snapshot changes are explicit; the table never discovers/fetches another letter.
@@ -95,6 +99,7 @@
                 }
             }
             if coordinator.appliedAnchorRevision != anchorRevision {
+                coordinator.hasScrollDemand = false
                 coordinator.appliedAnchorRevision = anchorRevision
                 coordinator.scrollToAnchor(in: table)
             }
@@ -113,6 +118,7 @@
             var parent: FoundationLibraryAlphabetIndex
             var snapshot: [FoundationAlphabetSection] = []
             var lastDemandIdentity: String?
+            var hasScrollDemand = false
             var geometryRevision = 0
             var appliedAnchorRevision = 0
 
@@ -240,6 +246,10 @@
                 checkDemandAfterLayout(in: tableView, cell: cell, indexPath: indexPath)
             }
 
+            func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+                hasScrollDemand = true
+            }
+
             func scrollViewDidScroll(_ scrollView: UIScrollView) {
                 guard let table = scrollView as? UITableView else { return }
                 checkVisibleDemandAfterLayout(in: table)
@@ -256,7 +266,10 @@
             private func checkDemandAfterLayout(
                 in table: UITableView, cell: UITableViewCell, indexPath: IndexPath
             ) {
-                guard parent.allowsDemand, let identity = parent.nextPageIdentity,
+                // Rail jumps reposition retained rows; user scrolling (or a short initial
+                // viewport) supplies demand. Snapshot reloads alone cannot drain a catalog.
+                guard hasScrollDemand || table.contentSize.height <= table.bounds.height,
+                    parent.allowsDemand, let identity = parent.nextPageIdentity,
                     lastDemandIdentity != identity,
                     let finalSection = parent.sections.lastIndex(where: { !$0.rows.isEmpty }),
                     indexPath.section == finalSection,
@@ -270,6 +283,7 @@
                     guard let self, let table, let cell,
                         self.parent.contextID == contextID, self.geometryRevision == revision,
                         self.parent.allowsDemand, self.parent.nextPageIdentity == identity,
+                        self.hasScrollDemand || table.contentSize.height <= table.bounds.height,
                         self.lastDemandIdentity != identity,
                         table.delegate === self,
                         let window = table.window, !window.isHidden, cell.window === window,
@@ -300,4 +314,13 @@
         }
     }
 
+    /// Accessibility paging is scroll intent even when UIKit does not start a touch drag.
+    final class FoundationDemandTableView: UITableView {
+        var onAccessibilityScroll: (() -> Void)?
+
+        override func accessibilityScroll(_ direction: UIAccessibilityScrollDirection) -> Bool {
+            if direction == .up || direction == .down { onAccessibilityScroll?() }
+            return super.accessibilityScroll(direction)
+        }
+    }
 #endif

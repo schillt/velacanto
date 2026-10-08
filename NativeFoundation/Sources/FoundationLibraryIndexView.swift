@@ -25,6 +25,8 @@ struct FoundationLibraryIndexView: View {
     @State private var selectedLetter: String?
     @State private var anchorRowID: String?
     @State private var anchorRevision = 0
+    @State private var demandRevision = 0
+    @State private var consumedDemandRevision = 0
     @State private var usesNativeAlphabet = false
     @StateObject private var searchModel = FoundationBrowseModel()
     @State private var query = ""
@@ -184,6 +186,8 @@ struct FoundationLibraryIndexView: View {
             if connectivity.localOnly { revision += 1 }
         }
         .onChange(of: library.catalogScopeID) { _, _ in
+            demandRevision = 0
+            consumedDemandRevision = 0
             selectedLetter = nil
             searchModel.clearRetainedData()
             revision += 1
@@ -203,7 +207,7 @@ struct FoundationLibraryIndexView: View {
                 displayed.installSnapshot(
                     items.sorted { offlineSortKey($0) < offlineSortKey($1) })
             } else if alphabetAvailable {
-                await model.loadCompleteCatalog(using: loadPage)
+                await model.loadCatalogPage(using: loadPage)
             } else {
                 if !term.isEmpty {
                     do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
@@ -257,7 +261,7 @@ struct FoundationLibraryIndexView: View {
                         }.disabled(connectivity.localOnly)
                     }
                 }
-                if displayed.nextStartIndex != nil, !connectivity.localOnly, !alphabetAvailable {
+                if displayed.nextStartIndex != nil, !connectivity.localOnly {
                     VStack(spacing: 0) {
                         if displayed.isLoading {
                             ProgressView("Loading more…")
@@ -352,7 +356,7 @@ struct FoundationLibraryIndexView: View {
                         }.disabled(connectivity.localOnly)
                     }
                 }
-                if displayed.nextStartIndex != nil, !connectivity.localOnly, !alphabetAvailable {
+                if displayed.nextStartIndex != nil, !connectivity.localOnly {
                     VStack(spacing: 0) {
                         if displayed.isLoading {
                             ProgressView("Loading more…")
@@ -451,12 +455,13 @@ struct FoundationLibraryIndexView: View {
                         ? gridColumnCount(width: viewport.width, nativeIndex: true) : 1,
                     isCoverGrid: isCoverGrid,
                     rowHeight: rowHeight,
-                    allowsDemand: false,
+                    allowsDemand: isActive && isVisible && !connectivity.localOnly
+                        && displayed.errorMessage == nil,
                     isRefreshing: displayed.isLoading,
                     nextPageIdentity: displayed.nextStartIndex.map { "\($0):\(revision)" },
                     anchorRowID: anchorRowID,
                     anchorRevision: anchorRevision,
-                    onDemandNextPage: {},
+                    onDemandNextPage: { demandRevision += 1 },
                     onRefresh: {
                         guard isActive, isVisible, !connectivity.localOnly else { return }
                         selectedLetter = nil
@@ -517,6 +522,19 @@ struct FoundationLibraryIndexView: View {
                         )
                         .padding(.horizontal, 16).padding(.trailing, 24)
                         .allowsHitTesting(false)
+                    }
+                }
+                .task(
+                    id:
+                        "\(demandRevision)-\(isActive)-\(isVisible)-\(connectivity.localOnly)-\(library.catalogScopeID)"
+                ) {
+                    let demand = demandRevision
+                    guard demand > consumedDemandRevision else { return }
+                    await loadDemandedPage(
+                        displayed, active: isActive && isVisible,
+                        allowsNetwork: !connectivity.localOnly)
+                    if !Task.isCancelled, isActive, isVisible, !connectivity.localOnly {
+                        consumedDemandRevision = max(consumedDemandRevision, demand)
                     }
                 }
                 .accessibilityIdentifier("library-index-\(kind)")

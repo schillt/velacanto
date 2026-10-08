@@ -12,7 +12,6 @@ final class FoundationBrowseModel: ObservableObject {
     private(set) var loaded = false
     private(set) var isRetainedSnapshot = false
     private var revision = UUID()
-    private var catalogRevision = UUID()
     private var writePermit = FoundationPageWritePermit()
     private var hasLiveLoad: Bool { isLoading && writePermit.isValid }
     private var pendingRequest = Request.initial
@@ -23,12 +22,19 @@ final class FoundationBrowseModel: ObservableObject {
     private var restoredCache = false
     private var deduplicatesCatalogItems = false
     private var sortsCatalogByTitle = false
+    private var catalogBudget: FoundationCatalogBudget
+    private let catalogLimits: FoundationCatalogBudget
     private var cachedRawPrefix: [FoundationItem] = []
     private var lastRefreshAttempt: Date?
     private let now: () -> Date
     private let refreshInterval: TimeInterval
 
-    init(refreshInterval: TimeInterval = 60, now: @escaping () -> Date = { Date() }) {
+    init(
+        refreshInterval: TimeInterval = 60, now: @escaping () -> Date = { Date() },
+        catalogLimits: FoundationCatalogBudget = FoundationCatalogBudget()
+    ) {
+        self.catalogLimits = catalogLimits
+        self.catalogBudget = catalogLimits
         self.refreshInterval = refreshInterval
         self.now = now
     }
@@ -73,6 +79,13 @@ final class FoundationBrowseModel: ObservableObject {
         guard !Task.isCancelled, revision == owner else { return }
         restoredCache = true
         guard !loaded, let record else { return }
+        if deduplicatesCatalogItems {
+            guard let cost = catalogBudget.cost(of: record.page),
+                catalogBudget.canRetain(cost)
+            else { return }
+            catalogBudget.retainedItems += cost.items
+            catalogBudget.retainedBytes += cost.bytes
+        }
         cachedRawPrefix = Array(record.page.items.prefix(200))
         items = deduplicatesCatalogItems ? uniqueCatalogItems(record.page.items) : record.page.items
         nextStartIndex = record.page.nextStartIndex
@@ -95,7 +108,6 @@ final class FoundationBrowseModel: ObservableObject {
     func installSnapshot(_ snapshot: [FoundationItem], complete: Bool = true) {
         writePermit.revoke()
         revision = UUID()
-        catalogRevision = UUID()
         cachedRawPrefix = []
         items = deduplicatesCatalogItems ? uniqueCatalogItems(snapshot) : snapshot
         nextStartIndex = nil
@@ -105,12 +117,12 @@ final class FoundationBrowseModel: ObservableObject {
         errorMessage = nil
         errorCategory = nil
         pendingRequest = .initial
+        resetCatalogBudget()
     }
 
     func clearRetainedData() {
         writePermit.revoke()
         revision = UUID()
-        catalogRevision = UUID()
         cachedRawPrefix = []
         items = []
         nextStartIndex = nil
@@ -122,14 +134,18 @@ final class FoundationBrowseModel: ObservableObject {
         pendingRequest = .initial
         restoredCache = false
         lastRefreshAttempt = nil
+        resetCatalogBudget()
     }
 
     func request(_ request: Request) {
         writePermit.revoke()
         revision = UUID()
-        catalogRevision = UUID()
         pendingRequest = request
         isLoading = false
+    }
+
+    private func resetCatalogBudget() {
+        catalogBudget = catalogLimits
     }
 
     func loadPending(
@@ -157,25 +173,11 @@ final class FoundationBrowseModel: ObservableObject {
         await load(request, using: loader)
     }
 
-    /// Songs load their full metadata membership on activation, independently of rail gestures.
-    /// The view task owns cancellation; each page retains the normal cache and error policy.
-    func loadCompleteCatalog(using loader: (Int) async throws -> FoundationPage) async {
-        // Revisiting a failed catalog must not turn a cached snapshot into an implicit retry.
+    /// Activation loads one page; further membership comes only from visible demand.
+    func loadCatalogPage(using loader: (Int) async throws -> FoundationPage) async {
         if case .initial = pendingRequest, errorMessage != nil { return }
-        if case .initial = pendingRequest, loaded, nextStartIndex == nil,
-            !isRetainedSnapshot
-        {
-            return
-        }
         if isRetainedSnapshot { request(.refresh) }
-        let owner = catalogRevision
         await loadPending(using: loader)
-        while !Task.isCancelled, catalogRevision == owner,
-            errorMessage == nil, let offset = nextStartIndex
-        {
-            await loadNextPage(using: loader)
-            guard !Task.isCancelled, nextStartIndex != offset else { return }
-        }
     }
 
     /// The view owns this loop; disappearing/offline transitions cancel its network work.
@@ -237,6 +239,14 @@ final class FoundationBrowseModel: ObservableObject {
                 "browse disposition=\(String(describing: request)) \(FoundationTrace.fields)")
         #endif
         do {
+            if deduplicatesCatalogItems {
+                if case .more = request {
+                    guard catalogBudget.canRequestPage else {
+                        throw FoundationLibraryError.invalidResponse
+                    }
+                    catalogBudget.requestedPages += 1
+                }
+            }
             let page = try await withTaskCancellationHandler {
                 try await loader(offset)
             } onCancel: {
@@ -259,6 +269,25 @@ final class FoundationBrowseModel: ObservableObject {
                 guard next > offset, !page.items.isEmpty else {
                     throw FoundationLibraryError.invalidResponse
                 }
+            }
+            if deduplicatesCatalogItems {
+                var budget: FoundationCatalogBudget
+                if case .more = request {
+                    budget = catalogBudget
+                } else {
+                    budget = catalogLimits
+                    budget.requestedPages = 1
+                }
+                // Count raw entries, including duplicates, before concatenation or title sorting.
+                guard let cost = budget.cost(of: page) else {
+                    throw FoundationLibraryError.invalidResponse
+                }
+                guard budget.canRetain(cost) else {
+                    throw FoundationLibraryError.invalidResponse
+                }
+                budget.retainedItems += cost.items
+                budget.retainedBytes += cost.bytes
+                catalogBudget = budget
             }
             if case .more = request {
                 if cachedRawPrefix.count < 200 {
@@ -313,5 +342,51 @@ final class FoundationBrowseModel: ObservableObject {
                     "browse disposition=failure \(FoundationTrace.fields)")
             #endif
         }
+    }
+}
+
+/// A lifetime ceiling for one catalog membership, reset only by replacement or scope reset.
+struct FoundationCatalogBudget {
+    var maximumPages: Int = 2_000
+    var maximumItems: Int = 100_000
+    var maximumBytes: Int = 128 * 1_024 * 1_024
+    var requestedPages = 0
+    var retainedItems = 0
+    var retainedBytes = 0
+
+    var canRequestPage: Bool {
+        requestedPages < maximumPages && retainedItems < maximumItems
+            && retainedBytes < maximumBytes
+    }
+
+    func canRetain(_ cost: (items: Int, bytes: Int)) -> Bool {
+        cost.items <= maximumItems - retainedItems
+            && cost.bytes <= maximumBytes - retainedBytes
+    }
+
+    func cost(of page: FoundationPage) -> (items: Int, bytes: Int)? {
+        guard page.items.count <= 200 else { return nil }
+        var bytes = 0
+        func addBytes(_ count: Int) -> Bool {
+            guard count <= maximumBytes - bytes else { return false }
+            bytes += count
+            return true
+        }
+        func add(_ text: String?) -> Bool {
+            addBytes(text?.utf8.count ?? 0)
+        }
+        func reference(_ value: FoundationItemReference?) -> Bool {
+            guard let value else { return true }
+            return addBytes(MemoryLayout<FoundationItemReference>.stride)
+                && add(value.id) && add(value.title) && add(value.primaryImageTag)
+        }
+        for item in page.items {
+            guard addBytes(MemoryLayout<FoundationItem>.stride),
+                add(item.id), add(item.title), add(item.subtitle), add(item.primaryImageTag),
+                add(item.sortName), reference(item.album), reference(item.artist)
+            else { return nil }
+            for genre in item.genres { guard reference(genre) else { return nil } }
+        }
+        return (page.items.count, bytes)
     }
 }
