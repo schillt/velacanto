@@ -537,9 +537,8 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
                 )
                 .allowsHitTesting(false).accessibilityHidden(true)
             }
-            // Hide source controls while the transition carries artwork into the player.
-            // Keep its geometry attached for interrupted and reverse transitions.
-            .opacity(model.isSurfaceTransitioning ? 0 : 1)
+            // Keep compact chrome underneath the transitioning surface so it emerges
+            // continuously on collapse. The artwork has its own shared-image handoff.
             .allowsHitTesting(!model.isSurfaceTransitioning)
             .accessibilityHidden(model.isSurfaceTransitioning)
         }
@@ -707,8 +706,8 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
                     host?.dismiss(animated: false)
                     return
                 }
-                // Refresh the first root once after UIKit establishes fullscreen layout.
-                // Later playback updates are observed in place rather than rehosting it.
+                // Refresh inherited accessibility context once UIKit attaches the full-screen
+                // host. Without this refresh visible controls remain absent from VoiceOver.
                 host?.rootView = self.playerContent
                 UIAccessibility.post(notification: .screenChanged, argument: nil)
                 // Close requests received during presentation must be applied now.
@@ -777,6 +776,7 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
         override func viewDidLoad() {
             super.viewDidLoad()
             addChild(contentHost)
+            contentHost.view.backgroundColor = .clear
             contentHost.view.translatesAutoresizingMaskIntoConstraints = false
             view.addSubview(contentHost.view)
             NSLayoutConstraint.activate([
@@ -1094,6 +1094,9 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
                 dampingRatio: 0.9)
             animator.addAnimations { [presenting] in
                 playerView.alpha = presenting ? 1 : 0
+                // Hand material back to the resting native surfaces before completion,
+                // rather than removing an opaque glass layer on the final frame.
+                glass?.alpha = 0
                 if let surfaceRect, let glass {
                     glass.frame = presenting ? container.bounds : surfaceRect
                     if nativeGlass == nil {

@@ -15,7 +15,6 @@ struct FoundationPlayerView: View {
     @Environment(\.foundationReduceMotion) private var reduceMotion
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var artworkFill: Image?
-    @State private var artworkUpperEdgeColors: [Color]?
     @State private var artworkTint = Color(white: 0.12)
     @State private var isVisible = false
     @State private var scrubbing = false
@@ -60,7 +59,7 @@ struct FoundationPlayerView: View {
                                 height: artworkGeometry.size.width
                                     + max(
                                         0, artworkGeometry.size.height - artworkGeometry.size.width)
-                                    * 0.75
+                                    * 0.75 + geometry.safeAreaInsets.top
                             )
                             #if DEBUG && os(iOS) && targetEnvironment(simulator)
                                 .modifier(FoundationPlayerArtworkFixtureTarget())
@@ -80,40 +79,8 @@ struct FoundationPlayerView: View {
                                     ], startPoint: .top, endPoint: .bottom)
                             }
                             .frame(width: artworkGeometry.size.width, alignment: .top)
-                            .overlay(alignment: .top) {
-                                if let artworkUpperEdgeColors, geometry.safeAreaInsets.top > 0 {
-                                    // Broad edge colors preserve the cover palette without
-                                    // reflecting objects. Retain the wider feather at the join.
-                                    LinearGradient(
-                                        colors: artworkUpperEdgeColors,
-                                        startPoint: .leading, endPoint: .trailing
-                                    )
-                                    .frame(
-                                        width: artworkGeometry.size.width,
-                                        height: geometry.safeAreaInsets.top + 28
-                                    )
-                                    .mask {
-                                        VStack(spacing: 0) {
-                                            Rectangle().fill(.white)
-                                                .frame(height: geometry.safeAreaInsets.top)
-                                            LinearGradient(
-                                                stops: [
-                                                    .init(color: .white, location: 0),
-                                                    .init(
-                                                        color: .white.opacity(0.65),
-                                                        location: 0.25),
-                                                    .init(
-                                                        color: .white.opacity(0.2),
-                                                        location: 0.6),
-                                                    .init(color: .clear, location: 1),
-                                                ], startPoint: .top, endPoint: .bottom
-                                            ).frame(height: 28)
-                                        }
-                                    }
-                                    .offset(y: -geometry.safeAreaInsets.top)
-                                }
-                            }
                             .compositingGroup()
+                            .offset(y: -geometry.safeAreaInsets.top)
                             .opacity(contentMode == .artwork ? 1 : 0)
                             .accessibilityHidden(lyricsPresentation != nil || showingQueue)
                             .allowsHitTesting(lyricsPresentation == nil && !showingQueue)
@@ -319,7 +286,6 @@ struct FoundationPlayerView: View {
         .onChange(of: album?.id) { _, _ in
             artworkTint = Color(white: 0.12)
             artworkFill = nil
-            artworkUpperEdgeColors = nil
         }
         .onChange(of: player.selectedEntryID) { _, _ in
             scrubbing = false
@@ -355,8 +321,7 @@ struct FoundationPlayerView: View {
                 isActive: isVisible, size: size,
                 displayHeight: height,
                 sampledColor: $artworkTint, isHero: true,
-                loadedImage: $artworkFill,
-                upperEdgeColors: $artworkUpperEdgeColors
+                loadedImage: $artworkFill
             ).id(album.sharedArtworkIdentity)
         } else {
             Image(systemName: "music.note").font(.system(size: 80)).foregroundStyle(.secondary)

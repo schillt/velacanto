@@ -1702,10 +1702,12 @@ final class FoundationDownloadsUITests: XCTestCase {
         tapVisible(app.buttons["library-category-songs"], in: app)
         let table = app.tables["library-index-track"]
         XCTAssertTrue(table.waitForExistence(timeout: 5))
-        let index = table.descendants(matching: .any).matching(
-            NSPredicate(format: "label == %@", "Section index")
-        ).firstMatch
+        let index = app.descendants(matching: .any)["library-alphabet-rail"]
         XCTAssertTrue(index.waitForExistence(timeout: 5) && index.isHittable)
+        XCTAssertGreaterThan(index.frame.height, 400)
+        XCTAssertTrue(app.descendants(matching: .any)["library-alphabet-letter-#"].exists)
+        XCTAssertTrue(table.descendants(matching: .any)["library-letter-section-F"].exists)
+        tapNativeAlphabet("#", in: app)
         let first = app.buttons.matching(
             NSPredicate(format: "label BEGINSWITH %@", "Fixture Tone")
         ).firstMatch
@@ -2071,10 +2073,8 @@ final class FoundationDownloadsUITests: XCTestCase {
     private func tapNativeAlphabet(_ letter: String, in app: XCUIApplication) {
         let table = app.tables["library-index-track"]
         XCTAssertTrue(table.waitForExistence(timeout: 5))
-        // UIKit exposes one native Section index AX control, rather than letter children.
-        let index = table.descendants(matching: .any).matching(
-            NSPredicate(format: "label == %@", "Section index")
-        ).firstMatch
+        // Use the complete rail frame so tap coordinates match its equal letter regions.
+        let index = app.descendants(matching: .any)["library-alphabet-rail"]
         if !index.waitForExistence(timeout: 5) {
             let hierarchy = XCTAttachment(string: app.debugDescription)
             hierarchy.name = "Synthetic native alphabet index accessibility hierarchy"
@@ -2084,94 +2084,13 @@ final class FoundationDownloadsUITests: XCTestCase {
         XCTAssertTrue(index.exists && index.isHittable)
         XCTAssertGreaterThan(index.frame.width, 0)
         XCTAssertGreaterThan(index.frame.height, 0)
-        let titles = (65...90).map { String(UnicodeScalar($0)!) }
+        let titles = ["#"] + (65...90).map { String(UnicodeScalar($0)!) }
         guard let position = titles.firstIndex(of: letter) else {
             XCTFail("Requested letter must belong to the approved native index order")
             return
         }
-        guard
-            let fraction = nativeAlphabetGlyphPosition(
-                position, titles: titles, image: index.screenshot().image)
-        else { return }
-        // UIKit receives the actual gesture; window/retry/count assertions prove its selection.
+        let fraction = (CGFloat(position) + 0.5) / CGFloat(titles.count)
         index.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: fraction)).tap()
-    }
-
-    private func nativeAlphabetGlyphPosition(
-        _ position: Int, titles: [String], image: UIImage
-    ) -> CGFloat? {
-        guard let pixels = image.cgImage, pixels.width > 0, pixels.height > 0 else {
-            XCTFail("Native index screenshot must contain pixels")
-            return nil
-        }
-        let width = pixels.width
-        let height = pixels.height
-        var rgba = Data(count: width * height * 4)
-        let rendered = rgba.withUnsafeMutableBytes { buffer -> Bool in
-            guard
-                let context = CGContext(
-                    data: buffer.baseAddress, width: width, height: height, bitsPerComponent: 8,
-                    bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
-                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
-            else { return false }
-            context.draw(
-                pixels, in: CGRect(x: 0, y: 0, width: CGFloat(width), height: CGFloat(height)))
-            return true
-        }
-        guard rendered else {
-            XCTFail("Native index screenshot must normalize to RGBA")
-            return nil
-        }
-        func isBlue(_ x: Int, _ y: Int) -> Bool {
-            let offset = (y * width + x) * 4
-            let red = Int(rgba[offset])
-            let green = Int(rgba[offset + 1])
-            let blue = Int(rgba[offset + 2])
-            return blue > 180 && blue - red > 100 && blue - green > 40
-        }
-        var runs: [ClosedRange<Int>] = []
-        for y in 0..<height where (0..<width).contains(where: { isBlue($0, y) }) {
-            if let last = runs.last, last.upperBound + 1 == y {
-                runs[runs.count - 1] = last.lowerBound...y
-            } else {
-                runs.append(y...y)
-            }
-        }
-        guard titles.indices.contains(position) else {
-            XCTFail("Requested title must belong to the native index")
-            return nil
-        }
-        if runs.count == titles.count {
-            let target = runs[position]
-            let center = CGFloat(target.lowerBound + target.upperBound) / 2
-            return center / CGFloat(height)
-        }
-        let attachment = XCTAttachment(image: image)
-        attachment.name = "Observed native alphabet index glyph mismatch"
-        attachment.lifetime = .keepAlways
-        add(attachment)
-        // UIKit can compress the offline title array to fewer glyph rows with dots.
-        // Infer only the hidden # touch slot; the real window and zero-network assertions
-        // remain the oracle for UIKit's selection. Online full-glyph checks stay strict.
-        if titles.count == 28, titles[1] == "#", position == 1,
-            runs.count >= 3, runs.count < titles.count,
-            let first = runs.first, let last = runs.last
-        {
-            let firstCenter = CGFloat(first.lowerBound + first.upperBound) / 2
-            let lastCenter = CGFloat(last.lowerBound + last.upperBound) / 2
-            guard lastCenter > firstCenter else {
-                XCTFail("Compressed native index must have distinct endpoint glyphs")
-                return nil
-            }
-            let center =
-                firstCenter + (lastCenter - firstCenter)
-                * CGFloat(position) / CGFloat(titles.count - 1)
-            return center / CGFloat(height)
-        }
-        XCTFail(
-            "Native index must render the full approved title order or observed offline # compression: "
-                + "expected \(titles.count), observed \(runs.count)")
-        return nil
     }
 
     private func openAlphabetFixtureControls(_ app: XCUIApplication) {
@@ -2510,6 +2429,41 @@ final class FoundationDownloadsUITests: XCTestCase {
 
     func testNowPlayingPartialOfflineAlbumAndArtistPreserveKnownTracksAndPlayback() {
         verifyNowPlayingCanonicalRoutes(state: "partial", offlineOnly: true)
+    }
+
+    func testRelatedSheetRefinedControlsRemainUsable() {
+        continueAfterFailure = false
+        let app = launch(
+            productionShell: true, canonicalDownloadState: "full", artworkCache: true,
+            longPlayback: true)
+        selectTab("Library", in: app)
+        openCanonicalCollection("album", fromDownloads: false, in: app)
+        tapVisible(app.buttons["collection-track-0"], in: app)
+        openNowPlaying(app)
+        app.buttons["Pause"].tap()
+        app.buttons["More playback options"].tap()
+        app.buttons["View Artist"].tap()
+        let pin = relatedSheet(app).buttons["related-artist-pin"]
+        XCTAssertTrue(pin.waitForExistence(timeout: 5) && pin.isHittable)
+        let initialLabel = pin.label
+        XCTAssertGreaterThanOrEqual(pin.frame.width, 44)
+        XCTAssertGreaterThanOrEqual(pin.frame.height, 44)
+        pin.tap()
+        XCTAssertNotEqual(pin.label, initialLabel)
+        pin.tap()
+        XCTAssertEqual(pin.label, initialLabel)
+        XCTAssertFalse(relatedSheet(app).buttons["More actions"].exists)
+        capture("Artist sheet direct pin and contrast", in: app)
+        closeRelatedSheet(app)
+        app.buttons["More playback options"].tap()
+        app.buttons["View Album"].tap()
+        let more = relatedSheet(app).buttons["More actions"]
+        XCTAssertTrue(more.waitForExistence(timeout: 5) && more.isHittable)
+        XCTAssertGreaterThanOrEqual(more.frame.width, 44)
+        XCTAssertGreaterThanOrEqual(more.frame.height, 44)
+        capture("Album sheet larger glass controls and contrast", in: app)
+        closeRelatedSheet(app)
+        XCTAssertTrue(app.buttons["Play"].exists)
     }
 
     func testRelatedSheetCanonicalActionPresentersStayInPlayer() {

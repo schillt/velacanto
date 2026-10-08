@@ -441,7 +441,6 @@ struct FoundationLibraryIndexView: View {
                 FoundationLibraryAlphabetIndex(
                     contextID: library.catalogScopeID,
                     sections: sections,
-                    indexTitles: alphabetTitles,
                     columnCount: isCoverGrid
                         ? gridColumnCount(width: viewport.width, nativeIndex: true) : 1,
                     isCoverGrid: isCoverGrid,
@@ -451,7 +450,6 @@ struct FoundationLibraryIndexView: View {
                     nextPageIdentity: displayed.nextStartIndex.map { "\($0):\(revision)" },
                     anchorRowID: anchorRowID,
                     anchorRevision: anchorRevision,
-                    onChooseLetter: chooseLetter,
                     onDemandNextPage: {},
                     onRefresh: {
                         guard isActive, isVisible, !connectivity.localOnly else { return }
@@ -516,6 +514,11 @@ struct FoundationLibraryIndexView: View {
                     }
                 }
                 .accessibilityIdentifier("library-index-\(kind)")
+                .padding(.trailing, 36)
+                .overlay(alignment: .trailing) {
+                    FoundationAlphabetRail(onChooseLetter: chooseLetter)
+                        .frame(width: 36)
+                }
                 if connectivity.hasConnectionIssue || displayed.hasConnectionIssue {
                     FoundationOfflineNotice()
                 }
@@ -609,7 +612,7 @@ enum FoundationAlphabetAnchors {
         return String(scalar).uppercased()
     }
 
-    static let titles = (65...90).compactMap { UnicodeScalar($0).map { String($0) } }
+    static let titles = ["#"] + (65...90).compactMap { UnicodeScalar($0).map { String($0) } }
 
     static func index(for letter: String, in items: [FoundationItem]) -> Int? {
         guard titles.contains(letter) else { return nil }
@@ -625,3 +628,59 @@ enum FoundationAlphabetAnchors {
         }
     }
 }
+
+/// Rail geometry is independent of table scrolling and uses one equal hit region per letter.
+enum FoundationAlphabetRailGeometry {
+    static func index(y: Double, height: Double, count: Int) -> Int? {
+        guard count > 0, height.isFinite, height > 0, y.isFinite else { return nil }
+        let fraction = min(1, max(0, y / height))
+        return min(count - 1, Int(fraction * Double(count)))
+    }
+}
+
+#if os(iOS)
+    private struct FoundationAlphabetRail: View {
+        let onChooseLetter: (String) -> Void
+        @State private var scrubbedLetter: String?
+
+        var body: some View {
+            GeometryReader { geometry in
+                let height = min(594, max(1, geometry.size.height - 16))
+                let titles = FoundationAlphabetAnchors.titles
+                VStack(spacing: 0) {
+                    ForEach(titles, id: \.self) { letter in
+                        Text(letter)
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.tint)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: height / Double(titles.count))
+                            .accessibilityLabel(letter == "#" ? "Numbers and symbols" : letter)
+                            .accessibilityAddTraits(.isButton)
+                            .accessibilityIdentifier("library-alphabet-letter-" + letter)
+                            .accessibilityAction { onChooseLetter(letter) }
+                    }
+                }
+                .frame(width: geometry.size.width, height: height)
+                .contentShape(Rectangle())
+                .gesture(
+                    DragGesture(minimumDistance: 0)
+                        .onChanged { value in
+                            guard
+                                let index = FoundationAlphabetRailGeometry.index(
+                                    y: value.location.y, height: height, count: titles.count)
+                            else { return }
+                            let letter = titles[index]
+                            guard scrubbedLetter != letter else { return }
+                            scrubbedLetter = letter
+                            onChooseLetter(letter)
+                        }
+                        .onEnded { _ in scrubbedLetter = nil }
+                )
+                .accessibilityElement(children: .contain)
+                .accessibilityLabel("Section index")
+                .accessibilityIdentifier("library-alphabet-rail")
+                .frame(maxHeight: .infinity)
+            }
+        }
+    }
+#endif

@@ -2,7 +2,7 @@
     import SwiftUI
     import UIKit
 
-    /// A real native index selection can request an unloaded section. The caller owns its data.
+    /// Loaded sections share the full catalog membership and its scroll anchors.
     struct FoundationAlphabetSection: Identifiable, Equatable {
         enum Availability: Equatable { case notLoaded, loading, loaded, unavailableOffline }
         let id: String
@@ -17,11 +17,10 @@
         let item: FoundationItem
     }
 
-    /// Opt-in prototype: it does not replace the current SwiftUI index or its navigation owner.
+    /// Native rows retain normal scrolling while the adjacent rail selects loaded anchors.
     struct FoundationLibraryAlphabetIndex<Row: View>: UIViewRepresentable {
         let contextID: String
         let sections: [FoundationAlphabetSection]
-        let indexTitles: [String]
         var columnCount = 1
         var isCoverGrid = false
         var rowHeight: CGFloat = 72
@@ -30,7 +29,6 @@
         var nextPageIdentity: String?
         var anchorRowID: String?
         var anchorRevision = 0
-        let onChooseLetter: (String) -> Void
         let onDemandNextPage: () -> Void
         let onRefresh: () -> Void
         @ViewBuilder let row: (FoundationAlphabetRow) -> Row
@@ -43,9 +41,9 @@
             table.delegate = context.coordinator
             table.rowHeight = isCoverGrid ? UITableView.automaticDimension : rowHeight
             table.estimatedRowHeight = rowHeight
-            table.sectionHeaderHeight = UITableView.automaticDimension
-            table.estimatedSectionHeaderHeight = 0
-            table.sectionIndexMinimumDisplayRowCount = 0
+            table.sectionHeaderHeight = 28
+            table.estimatedSectionHeaderHeight = 28
+            table.sectionHeaderTopPadding = 0
             table.separatorStyle = isCoverGrid ? .none : .singleLine
             table.register(UITableViewCell.self, forCellReuseIdentifier: "catalog-row")
             let refresh = UIRefreshControl()
@@ -71,11 +69,8 @@
             table.separatorStyle = isCoverGrid ? .none : .singleLine
             table.rowHeight = isCoverGrid ? UITableView.automaticDimension : rowHeight
             table.estimatedRowHeight = rowHeight
-            if contextChanged || layoutChanged || coordinator.snapshot != sections
-                || coordinator.indexSnapshot != indexTitles
-            {
+            if contextChanged || layoutChanged || coordinator.snapshot != sections {
                 coordinator.snapshot = sections
-                coordinator.indexSnapshot = indexTitles
                 coordinator.geometryRevision += 1
                 table.reloadData()
             }
@@ -97,7 +92,6 @@
         final class Coordinator: NSObject, UITableViewDataSource, UITableViewDelegate {
             var parent: FoundationLibraryAlphabetIndex
             var snapshot: [FoundationAlphabetSection] = []
-            var indexSnapshot: [String] = []
             var lastDemandIdentity: String?
             var geometryRevision = 0
             var appliedAnchorRevision = 0
@@ -138,37 +132,24 @@
                 return cell
             }
 
-            func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int)
-                -> String?
+            func tableView(_ tableView: UITableView, viewForHeaderInSection section: Int) -> UIView?
             {
-                let value = parent.sections[section]
-                switch value.availability {
-                case .notLoaded: return value.title + " — Not loaded"
-                case .loading: return value.title + " — Loading"
-                case .loaded: return value.title
-                case .unavailableOffline: return value.title + " — Unavailable offline"
-                }
-            }
-
-            func sectionIndexTitles(for tableView: UITableView) -> [String]? {
-                parent.sections.isEmpty || parent.indexTitles.isEmpty ? nil : parent.indexTitles
-            }
-
-            func tableView(
-                _ tableView: UITableView, sectionForSectionIndexTitle title: String, at index: Int
-            ) -> Int {
-                // UIKit invokes each real tap/scrub synchronously; membership never changes.
-                parent.onChooseLetter(title)
-                return parent.sections.firstIndex { $0.title == title }
-                    ?? parent.sections.firstIndex { $0.title != "#" && $0.title >= title }
-                    ?? max(0, parent.sections.count - 1)
+                let header = UITableViewHeaderFooterView()
+                var content = header.defaultContentConfiguration()
+                content.text = parent.sections[section].title
+                content.textProperties.font = .preferredFont(forTextStyle: .caption1)
+                content.textProperties.color = .secondaryLabel
+                header.contentConfiguration = content
+                header.accessibilityIdentifier =
+                    "library-letter-section-" + parent.sections[section].title
+                return header
             }
 
             func scrollToAnchor(in table: UITableView) {
                 guard let target = parent.anchorRowID else { return }
                 let contextID = parent.contextID
                 let request = parent.anchorRevision
-                // Apply after UIKit's synchronous index callback; a newer scrub revokes this scroll.
+                // Coalesce layout work; a newer scrub revokes this scroll.
                 DispatchQueue.main.async { [weak self, weak table] in
                     guard let self, let table, table.delegate === self,
                         self.parent.contextID == contextID, self.parent.anchorRevision == request,
@@ -178,7 +159,8 @@
                         if let row = value.rows.firstIndex(where: { $0.id == target }) {
                             table.layoutIfNeeded()
                             table.scrollToRow(
-                                at: IndexPath(row: row, section: section),
+                                at: IndexPath(
+                                    row: row / max(1, self.parent.columnCount), section: section),
                                 at: .top, animated: false)
                             return
                         }

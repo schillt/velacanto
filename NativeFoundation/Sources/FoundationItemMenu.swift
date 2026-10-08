@@ -149,6 +149,7 @@ struct FoundationDownloadActionButton: View {
     @Environment(\.foundationRequestDownloadRemoval) private var requestRemoval
     let item: FoundationItem
     var showsTitle = false
+    var iconFont: Font = .caption
     @State private var confirmingRemoval = false
 
     private var hasDownload: Bool { downloads.hasDownloadedData(for: item) }
@@ -174,11 +175,12 @@ struct FoundationDownloadActionButton: View {
         } label: {
             if showsTitle {
                 HStack {
-                    FoundationDownloadIndicator(item: item, showsUnavailable: true)
+                    FoundationDownloadIndicator(
+                        item: item, showsUnavailable: true, iconFont: iconFont)
                     Text(title)
                 }
             } else {
-                FoundationDownloadIndicator(item: item, showsUnavailable: true)
+                FoundationDownloadIndicator(item: item, showsUnavailable: true, iconFont: iconFont)
             }
         }
         .disabled(

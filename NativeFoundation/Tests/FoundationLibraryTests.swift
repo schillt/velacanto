@@ -165,17 +165,39 @@ final class FoundationLibraryTests: XCTestCase {
         XCTAssertEqual(model.errorCategory, .invalidResponse)
     }
 
-    func testAlphabetRailOnlyOffersAZAndMissingLettersUseFollowingOrFinalAnchor() {
+    func testAlphabetRailOffersNumbersThenAZAndMissingLettersUseFollowingOrFinalAnchor() {
         let a = FoundationItem(id: "a", title: "Alpha", subtitle: "", kind: .track, duration: nil)
         let g = FoundationItem(id: "g", title: "Golf", subtitle: "", kind: .track, duration: nil)
-        XCTAssertEqual(FoundationAlphabetAnchors.titles.count, 26)
-        XCTAssertEqual(FoundationAlphabetAnchors.titles.first, "A")
+        XCTAssertEqual(FoundationAlphabetAnchors.titles.count, 27)
+        XCTAssertEqual(FoundationAlphabetAnchors.titles.first, "#")
         XCTAssertEqual(FoundationAlphabetAnchors.titles.last, "Z")
         XCTAssertNil(FoundationAlphabetAnchors.index(for: "All", in: [a, g]))
-        XCTAssertNil(FoundationAlphabetAnchors.index(for: "#", in: [a, g]))
+        XCTAssertEqual(FoundationAlphabetAnchors.index(for: "#", in: [a, g]), 0)
         XCTAssertEqual(FoundationAlphabetAnchors.index(for: "F", in: [a, g]), 1)
         XCTAssertEqual(FoundationAlphabetAnchors.index(for: "Z", in: [a, g]), 1)
         XCTAssertNil(FoundationAlphabetAnchors.index(for: "A", in: []))
+    }
+
+    func testAlphabetNumberAndSymbolAnchorsAndRailDragGeometry() {
+        let number = FoundationItem(
+            id: "number", title: "2 Songs", subtitle: "", kind: .track, duration: nil)
+        let symbol = FoundationItem(
+            id: "symbol", title: "! Song", subtitle: "", kind: .track, duration: nil)
+        let alpha = FoundationItem(
+            id: "alpha", title: "Alpha", subtitle: "", kind: .track, duration: nil)
+        XCTAssertEqual(FoundationAlphabetAnchors.letter(for: number), "#")
+        XCTAssertEqual(FoundationAlphabetAnchors.letter(for: symbol), "#")
+        XCTAssertEqual(FoundationAlphabetAnchors.index(for: "#", in: [number, symbol, alpha]), 0)
+        XCTAssertEqual(FoundationAlphabetAnchors.index(for: "A", in: [number, symbol, alpha]), 2)
+        // Every equal-height hit region maps consistently while dragging down and back up.
+        for index in 0..<27 {
+            XCTAssertEqual(
+                FoundationAlphabetRailGeometry.index(
+                    y: Double(index) * 22 + 11, height: 594, count: 27), index)
+        }
+        XCTAssertEqual(FoundationAlphabetRailGeometry.index(y: -50, height: 594, count: 27), 0)
+        XCTAssertEqual(FoundationAlphabetRailGeometry.index(y: 650, height: 594, count: 27), 26)
+        XCTAssertNil(FoundationAlphabetRailGeometry.index(y: 0, height: 0, count: 27))
     }
 
     func testAlphabetAnchorUsesOptionalProviderSortNameAndDecodesOlderCaches() throws {

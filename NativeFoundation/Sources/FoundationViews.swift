@@ -752,16 +752,23 @@ struct FoundationCatalogView: View {
 
     @ViewBuilder private var catalogActions: some View {
         if let headerItem {
-            Menu {
-                FoundationItemMenu(
-                    item: headerItem, actions: actions, initialFavorite: headerItem.isFavorite,
-                    library: library, player: player)
-            } label: {
-                Image(systemName: "ellipsis")
-                    .frame(
-                        width: relatedItemSheet ? 44 : nil,
-                        height: relatedItemSheet ? 44 : nil)
-            }.accessibilityLabel("More actions")
+            if relatedItemSheet, headerItem.kind == .artist {
+                Button {
+                    actions.togglePin(headerItem)
+                } label: {
+                    Image(systemName: actions.isPinned(headerItem) ? "pin.fill" : "pin")
+                }
+                .accessibilityLabel(actions.isPinned(headerItem) ? "Unpin artist" : "Pin artist")
+                .accessibilityIdentifier("related-artist-pin")
+            } else {
+                Menu {
+                    FoundationItemMenu(
+                        item: headerItem, actions: actions, initialFavorite: headerItem.isFavorite,
+                        library: library, player: player)
+                } label: {
+                    Image(systemName: "ellipsis")
+                }.accessibilityLabel("More actions")
+            }
         }
     }
 
@@ -1339,7 +1346,8 @@ struct FoundationTrackList: View {
 
     @ViewBuilder private var collectionActions: some View {
         if let collection {
-            FoundationDownloadActionButton(item: collection)
+            FoundationDownloadActionButton(
+                item: collection, iconFont: relatedItemSheet ? .title3 : .caption)
             Menu {
                 if let managePlaylist {
                     Button("Edit Playlist", systemImage: "pencil", action: managePlaylist)
@@ -1358,8 +1366,8 @@ struct FoundationTrackList: View {
             } label: {
                 Image(systemName: "ellipsis")
                     .frame(
-                        width: relatedItemSheet ? 44 : nil,
-                        height: relatedItemSheet ? 44 : nil)
+                        width: relatedItemSheet ? 48 : nil,
+                        height: relatedItemSheet ? 48 : nil)
             }.accessibilityLabel("More actions")
         }
     }
@@ -1752,16 +1760,28 @@ private struct FoundationImmersiveCollectionActions<Controls: View>: View {
     @ViewBuilder let controls: () -> Controls
 
     var body: some View {
-        HStack(spacing: 12) { controls() }
-            .frame(minHeight: 44)
-            .padding(.horizontal, 8)
+        HStack(spacing: 4) { controls() }
+            .font(.title3.weight(.semibold))
+            .buttonStyle(FoundationImmersiveActionStyle())
+            .padding(4)
             .background {
                 if reduceTransparency { Capsule().fill(.background) }
             }
-            .glassEffect(reduceTransparency ? .identity : .regular, in: Capsule())
+            .glassEffect(
+                reduceTransparency ? .identity : .regular.tint(.black.opacity(0.22)), in: Capsule()
+            )
             .environment(\.colorScheme, .dark)
             .tint(.white)
             .padding(.top, 24).padding(.trailing, 16)
+    }
+}
+
+private struct FoundationImmersiveActionStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .frame(width: 48, height: 48)
+            .contentShape(Rectangle())
+            .opacity(configuration.isPressed ? 0.6 : 1)
     }
 }
 
@@ -1824,6 +1844,13 @@ struct FoundationDetailHero<Controls: View>: View {
                                 location: item.kind == .artist ? 0.4 : 0.3),
                             .init(color: tint.opacity(0.95), location: 0.65),
                             .init(color: tint, location: 0.9),
+                        ], startPoint: .top, endPoint: .bottom)
+                    // Keep title and controls legible even over white album/artist artwork.
+                    LinearGradient(
+                        stops: [
+                            .init(color: .clear, location: 0.2),
+                            .init(color: .black.opacity(0.4), location: 0.55),
+                            .init(color: .black.opacity(0.2), location: 1),
                         ], startPoint: .top, endPoint: .bottom)
                 }.clipped()
             }
@@ -2127,8 +2154,9 @@ private struct FoundationDetailPresentation: ViewModifier {
         if immersive {
             content.navigationTitle("")
                 .scrollContentBackground(.hidden)
-                .background { tint.ignoresSafeArea() }
+                .background { tint.overlay(.black.opacity(0.2)).ignoresSafeArea() }
                 .environment(\.colorScheme, .dark)
+                .tint(.white)
                 #if os(iOS)
                     .ignoresSafeArea(.container, edges: .top)
                     .contentMargins(.top, 0, for: .scrollContent)

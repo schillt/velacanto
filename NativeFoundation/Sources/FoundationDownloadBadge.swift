@@ -19,6 +19,7 @@ struct FoundationDownloadIndicator: View {
     let item: FoundationItem
     var showsTransferStatus = true
     var showsUnavailable = false
+    var iconFont: Font = .caption
 
     private var transfer: FoundationDownloadOwner? {
         guard showsTransferStatus else { return nil }
@@ -33,7 +34,7 @@ struct FoundationDownloadIndicator: View {
                 availabilityIndicator
             }
         }
-        .font(.caption)
+        .font(iconFont)
         .foregroundStyle(.primary)
     }
 
