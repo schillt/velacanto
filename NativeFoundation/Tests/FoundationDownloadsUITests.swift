@@ -1,5 +1,4 @@
 import UIKit
-import Vision
 import XCTest
 
 @MainActor
@@ -15,13 +14,15 @@ final class FoundationDownloadsUITests: XCTestCase {
         catalogPageFailOnce: Bool = false, playlistPresentation: Bool = false,
         librarySelection: Bool = false, alphabetCatalog: Bool = false,
         alphabetFailOnce: Bool = false, delayedAlphabetCapability: Bool = false,
-        heldArtistAlbums: Bool = false, partialGridRow: Bool = false
+        heldArtistAlbums: Bool = false, partialGridRow: Bool = false,
+        compactFixtureControls: Bool = false
     )
         -> XCUIApplication
     {
         let app = XCUIApplication(bundleIdentifier: "com.chameleonenterprise.velacanto.uitesting")
         app.launchArguments = ["-foundationDownloadsUITesting", "-foundationTesting"]
         if productionShell { app.launchArguments.append("-fixtureProductionShell") }
+        if compactFixtureControls { app.launchArguments.append("-fixtureCompactControls") }
         if heldArtistAlbums { app.launchArguments.append("-fixtureHoldArtistAlbums") }
         if partialGridRow { app.launchArguments.append("-fixtureGridPartialRow") }
         if artworkCache { app.launchArguments.append("-fixtureArtworkCache") }
@@ -1544,115 +1545,15 @@ final class FoundationDownloadsUITests: XCTestCase {
                 runs.append(y...y)
             }
         }
-        guard (3...64).contains(runs.count) else {
-            XCTFail("Native index must have a bounded set of distinct rendered glyph rows")
+        guard runs.count == titles.count, titles.indices.contains(position) else {
+            XCTFail(
+                "Native index must render exactly one glyph row for every approved title: "
+                    + "expected \(titles.count), observed \(runs.count)")
             return nil
         }
-        var anchors: [Int?] = []
-        for run in runs {
-            let bluePoints = run.flatMap { y in
-                (0..<width).filter { isBlue($0, y) }.map { CGPoint(x: CGFloat($0), y: CGFloat(y)) }
-            }
-            guard let minX = bluePoints.map(\.x).min(),
-                let maxX = bluePoints.map(\.x).max()
-            else { return nil }
-            let glyphWidth = maxX - minX + 1
-            let glyphHeight = CGFloat(run.count)
-            let aspect = glyphWidth / glyphHeight
-            let fill = CGFloat(bluePoints.count) / (glyphWidth * glyphHeight)
-            // A filled circular bullet represents omitted ordered titles, never a letter anchor.
-            if (0.85...1.15).contains(aspect), fill > 0.65 {
-                anchors.append(nil)
-                continue
-            }
-            let cropRect = CGRect(
-                x: 0, y: CGFloat(max(0, run.lowerBound - 6)), width: CGFloat(width),
-                height: CGFloat(min(height - max(0, run.lowerBound - 6), run.count + 12)))
-            guard let crop = pixels.cropping(to: cropRect) else { return nil }
-            let ocrWidth = crop.width * 4 + 64
-            let ocrHeight = crop.height * 4 + 64
-            guard ocrWidth <= 2048, ocrHeight <= 2048,
-                let ocrContext = CGContext(
-                    data: nil, width: ocrWidth, height: ocrHeight, bitsPerComponent: 8,
-                    bytesPerRow: ocrWidth * 4, space: CGColorSpaceCreateDeviceRGB(),
-                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
-            else {
-                XCTFail("Native glyph OCR preprocessing must fit its bounded pixel budget")
-                return nil
-            }
-            ocrContext.setFillColor(CGColor(gray: 1, alpha: 1))
-            ocrContext.fill(
-                CGRect(x: 0, y: 0, width: CGFloat(ocrWidth), height: CGFloat(ocrHeight)))
-            ocrContext.interpolationQuality = .high
-            ocrContext.draw(
-                crop,
-                in: CGRect(
-                    x: 32, y: 32, width: CGFloat(crop.width * 4), height: CGFloat(crop.height * 4)))
-            guard let ocrImage = ocrContext.makeImage() else { return nil }
-            let request = VNRecognizeTextRequest()
-            request.recognitionLevel = anchors.isEmpty ? .accurate : .fast
-            request.usesLanguageCorrection = false
-            request.recognitionLanguages = ["en-US"]
-            do {
-                try VNImageRequestHandler(cgImage: ocrImage, options: [:]).perform([request])
-            } catch {
-                XCTFail("Public native index glyph recognition failed: \(error)")
-                return nil
-            }
-            let recognized =
-                request.results?.compactMap { $0.topCandidates(1).first?.string }
-                ?? []
-            let firstGlyphAll =
-                anchors.isEmpty && recognized.count == 1
-                && recognized[0].uppercased().range(of: "^A[IL][IL]$", options: .regularExpression)
-                    != nil
-            guard recognized.count == 1,
-                let title = firstGlyphAll ? "All" : recognized.first,
-                let anchor = titles.firstIndex(where: {
-                    $0.caseInsensitiveCompare(title) == .orderedSame
-                })
-            else {
-                XCTFail(
-                    "Native index glyph must unambiguously match an approved title: \(recognized)")
-                return nil
-            }
-            anchors.append(anchor)
-        }
-        guard anchors.first! == 0, anchors.last! == titles.count - 1 else {
-            XCTFail("Rendered native index must expose its complete All-to-Z range")
-            return nil
-        }
-        var covered: [Int] = []
-        var targetY: CGFloat?
-        for row in runs.indices {
-            let center = CGFloat(runs[row].lowerBound + runs[row].upperBound) / 2
-            if let anchor = anchors[row] {
-                covered.append(anchor)
-                if anchor == position { targetY = center }
-            } else {
-                guard row > 0, row + 1 < runs.count,
-                    let before = anchors[row - 1], let after = anchors[row + 1],
-                    after > before + 1
-                else {
-                    XCTFail("Native compressed bullet must have ordered recognized neighbors")
-                    return nil
-                }
-                let hidden = Array((before + 1)..<after)
-                covered.append(contentsOf: hidden)
-                if let offset = hidden.firstIndex(of: position) {
-                    let previous = CGFloat(runs[row - 1].lowerBound + runs[row - 1].upperBound) / 2
-                    let next = CGFloat(runs[row + 1].lowerBound + runs[row + 1].upperBound) / 2
-                    let top = (previous + center) / 2
-                    let bottom = (center + next) / 2
-                    targetY = top + (CGFloat(offset) + 0.5) / CGFloat(hidden.count) * (bottom - top)
-                }
-            }
-        }
-        guard covered == Array(titles.indices), let targetY else {
-            XCTFail("Native rendered glyphs must account for each approved title exactly once")
-            return nil
-        }
-        return targetY / CGFloat(height)
+        let target = runs[position]
+        let center = CGFloat(target.lowerBound + target.upperBound) / 2
+        return center / CGFloat(height)
     }
 
     private func readAlphabetCounts(_ app: XCUIApplication) -> String {
@@ -1664,7 +1565,7 @@ final class FoundationDownloadsUITests: XCTestCase {
         continueAfterFailure = false
         let app = launch(
             productionShell: true, canonicalDownloadState: "full", longPlayback: true,
-            alphabetCatalog: true, alphabetFailOnce: true)
+            alphabetCatalog: true, alphabetFailOnce: true, compactFixtureControls: true)
         // Start a genuinely downloaded fixture occurrence through the unchanged Home row.
         selectTab("Home", in: app)
         let tone = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Fixture Tone"))

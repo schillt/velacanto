@@ -31,6 +31,7 @@
         var onSignedOut: (() -> Void)?
         @State private var cleaningAccount = false
         @Environment(\.dynamicTypeSize) private var systemDynamicTypeSize
+        @Environment(\.verticalSizeClass) private var systemVerticalSizeClass
 
         private var usesAccessibilitySizedText: Bool {
             ProcessInfo.processInfo.environment["FOUNDATION_UI_LARGE_TEXT"] == "1"
@@ -38,6 +39,10 @@
 
         private var productionShell: Bool {
             ProcessInfo.processInfo.arguments.contains("-fixtureProductionShell")
+        }
+
+        private var compactFixtureControls: Bool {
+            ProcessInfo.processInfo.arguments.contains("-fixtureCompactControls")
         }
 
         var body: some View {
@@ -147,7 +152,12 @@
                     Button("Read catalog counts") {
                         Task { catalogCounts = await fixture.library.catalogCounts() }
                     }
-                    Text(catalogCounts).accessibilityIdentifier("fixture-catalog-counts")
+                    if compactFixtureControls {
+                        Text(catalogCounts).lineLimit(1).accessibilityLabel(catalogCounts)
+                            .accessibilityIdentifier("fixture-catalog-counts")
+                    } else {
+                        Text(catalogCounts).accessibilityIdentifier("fixture-catalog-counts")
+                    }
                 }
                 if ProcessInfo.processInfo.arguments.contains("-fixtureArtworkCache") {
                     Button("Read artwork counts") {
@@ -163,11 +173,16 @@
                 }
                 FoundationDownloadUIControls(
                     downloads: fixture.downloads, connectivity: fixture.connectivity,
-                    playlist: fixture.playlist, productionShell: productionShell)
+                    playlist: fixture.playlist, productionShell: productionShell
+                )
+                .environment(
+                    \.verticalSizeClass,
+                    compactFixtureControls ? .compact : systemVerticalSizeClass)
                 if ProcessInfo.processInfo.arguments.contains("-fixtureLongPlayback") {
                     FoundationDownloadUIPlaybackIdentity(player: fixture.player)
                 }
             }
+            .font(compactFixtureControls ? .caption2 : nil)
         }
     }
 
