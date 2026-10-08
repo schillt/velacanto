@@ -12,13 +12,16 @@ final class FoundationDownloadsUITests: XCTestCase {
         colorScheme: String? = nil, pagedCatalog: Bool = false,
         catalogPageFailOnce: Bool = false, playlistPresentation: Bool = false,
         librarySelection: Bool = false, alphabetCatalog: Bool = false,
-        alphabetFailOnce: Bool = false, delayedAlphabetCapability: Bool = false
+        alphabetFailOnce: Bool = false, delayedAlphabetCapability: Bool = false,
+        heldArtistAlbums: Bool = false, partialGridRow: Bool = false
     )
         -> XCUIApplication
     {
         let app = XCUIApplication(bundleIdentifier: "com.chameleonenterprise.velacanto.uitesting")
         app.launchArguments = ["-foundationDownloadsUITesting", "-foundationTesting"]
         if productionShell { app.launchArguments.append("-fixtureProductionShell") }
+        if heldArtistAlbums { app.launchArguments.append("-fixtureHoldArtistAlbums") }
+        if partialGridRow { app.launchArguments.append("-fixtureGridPartialRow") }
         if artworkCache { app.launchArguments.append("-fixtureArtworkCache") }
         if pagedCatalog {
             app.launchArguments += ["-fixturePagedCatalog", "-fixtureHoldInitialCatalog"]
@@ -1153,6 +1156,78 @@ final class FoundationDownloadsUITests: XCTestCase {
         XCTAssertTrue(app.buttons["library-category-albums"].waitForExistence(timeout: 5))
     }
 
+    func testArtistLoadingShimmerKeepsGridGeometryUntilCanonicalCardsLoad() {
+        continueAfterFailure = false
+        let app = launch(
+            productionShell: true, canonicalDownloadState: "full", heldArtistAlbums: true)
+        selectTab("Library", in: app)
+        tapVisible(app.buttons["library-category-artists"], in: app)
+        let artist = app.buttons.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "Fixture Artist")
+        ).firstMatch
+        tapVisible(artist, in: app)
+        let skeleton = app.descendants(matching: .any)["loading-placeholder-albumGrid"]
+        XCTAssertTrue(skeleton.waitForExistence(timeout: 5))
+        let scroll = app.scrollViews.firstMatch
+        XCTAssertTrue(scroll.exists)
+        for _ in 0..<12 {
+            if skeleton.frame.intersection(uncoveredViewport(scroll, in: app)).height > 100 {
+                break
+            }
+            scrollContent(in: app)
+        }
+        XCTAssertGreaterThan(
+            skeleton.frame.intersection(uncoveredViewport(scroll, in: app)).height, 100)
+        let frame = skeleton.frame
+        XCTAssertGreaterThan(frame.width, 140)
+        XCTAssertGreaterThan(frame.height, 140)
+        capture("Artist initial fixed album grid shimmer", in: app)
+        let phaseStart = Date()
+        let oneCycle = expectation(
+            for: NSPredicate { _, _ in Date().timeIntervalSince(phaseStart) >= 1.5 },
+            evaluatedWith: nil)
+        wait(for: [oneCycle], timeout: 3)
+        XCTAssertEqual(skeleton.frame.minY, frame.minY, accuracy: 1)
+        XCTAssertEqual(skeleton.frame.width, frame.width, accuracy: 1)
+        XCTAssertEqual(skeleton.frame.height, frame.height, accuracy: 1)
+        capture("Artist shimmer second phase same reserved geometry", in: app)
+        tapNativeChrome(app.buttons["Release artist albums"], in: app)
+        let gone = expectation(
+            for: NSPredicate(format: "exists == false"), evaluatedWith: skeleton)
+        wait(for: [gone], timeout: 5)
+        XCTAssertTrue(app.buttons["View Fixture Album"].waitForExistence(timeout: 5))
+        capture("Artist loaded canonical grid replaces shimmer", in: app)
+    }
+
+    func testSearchLiquidGlassReducedEffectsLargeTextKeepsQueryAndFocus() {
+        continueAfterFailure = false
+        let app = launch(
+            productionShell: true, largeText: true, canonicalDownloadState: "full",
+            reducedAccessibilityEffects: true)
+        selectTab("Search", in: app)
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+        let field = app.textFields["Search music"]
+        field.typeText("Fixture")
+        let dismiss = app.buttons["search-dismiss-keyboard"]
+        XCTAssertTrue(dismiss.exists && dismiss.isHittable)
+        XCTAssertGreaterThanOrEqual(dismiss.frame.width, 44)
+        XCTAssertGreaterThanOrEqual(dismiss.frame.height, 44)
+        XCTAssertEqual(
+            app.staticTexts["fixture-accessibility-effects"].label,
+            "Synthetic accessibility: reduced motion, reduced transparency")
+        capture("Accessible opaque Search bubble active with large text", in: app)
+        dismiss.tap()
+        let hidden = expectation(
+            for: NSPredicate(format: "exists == false"), evaluatedWith: app.keyboards.firstMatch)
+        wait(for: [hidden], timeout: 5)
+        XCTAssertEqual(field.value as? String, "Fixture")
+        XCTAssertFalse(dismiss.exists)
+        capture("Accessible Search dismissal preserves query without glass morph", in: app)
+        field.tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+        XCTAssertEqual(field.value as? String, "Fixture")
+    }
+
     func testSearchKeyboardAutofocusCancelManualFocusAndReentryPreserveQuery() {
         continueAfterFailure = false
         let app = launch(productionShell: true, canonicalDownloadState: "full")
@@ -1161,12 +1236,18 @@ final class FoundationDownloadsUITests: XCTestCase {
         let field = app.textFields["Search music"]
         XCTAssertTrue(field.exists)
         field.typeText("Fixture")
-        app.buttons["search-dismiss-keyboard"].tap()
+        let dismiss = app.buttons["search-dismiss-keyboard"]
+        XCTAssertTrue(dismiss.exists && dismiss.isHittable)
+        XCTAssertGreaterThanOrEqual(dismiss.frame.width, 44)
+        XCTAssertGreaterThanOrEqual(dismiss.frame.height, 44)
+        capture("Active Search bar and separate 44 point Liquid Glass bubble", in: app)
+        dismiss.tap()
         let hidden = expectation(
             for: NSPredicate(format: "exists == false"), evaluatedWith: app.keyboards.firstMatch)
         wait(for: [hidden], timeout: 5)
         XCTAssertEqual(field.value as? String, "Fixture")
         XCTAssertFalse(app.buttons["search-dismiss-keyboard"].exists)
+        capture("Inactive Search bar after bubble merges query preserved", in: app)
         scrollContent(in: app)
         XCTAssertFalse(
             app.keyboards.firstMatch.exists, "Cancelled visit must not refocus on redraw")
@@ -1184,6 +1265,60 @@ final class FoundationDownloadsUITests: XCTestCase {
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
         XCTAssertEqual(field.value as? String, "Fixture")
         capture("Search native focus reentry keeps query", in: app)
+    }
+
+    func testLibraryCoverGridsCanonicalArtworkColumnsAndPartialLastRow() {
+        continueAfterFailure = false
+        for largeText in [false, true] {
+            let app = launch(
+                productionShell: true, largeText: largeText, canonicalDownloadState: "full",
+                artworkCache: true, pagedCatalog: true, partialGridRow: true)
+            selectTab("Library", in: app)
+            for kind in ["album", "playlist"] {
+                tapVisible(app.buttons["library-category-" + kind + "s"], in: app)
+                XCTAssertTrue(
+                    app.descendants(matching: .any)["library-index-" + kind]
+                        .waitForExistence(timeout: 5))
+                tapNativeChrome(app.buttons["Release initial catalog page"], in: app)
+                let first = app.buttons["View Paged " + kind + " 0"]
+                XCTAssertTrue(first.waitForExistence(timeout: 10))
+                let firstFrame = first.frame
+                if largeText {
+                    XCTAssertGreaterThanOrEqual(firstFrame.width, 240)
+                } else {
+                    let second = app.buttons["View Paged " + kind + " 1"]
+                    XCTAssertTrue(second.exists)
+                    XCTAssertEqual(firstFrame.minY, second.frame.minY, accuracy: 2)
+                    XCTAssertLessThan(firstFrame.maxX, second.frame.minX)
+                }
+                capture(
+                    "Canonical Library cover grid " + kind
+                        + (largeText ? " large text" : " two columns"), in: app)
+                let last = app.buttons["View Paged " + kind + " 6"]
+                reveal(last, in: app)
+                XCTAssertEqual(last.frame.minX, firstFrame.minX, accuracy: 2)
+                XCTAssertFalse(app.buttons["View Paged " + kind + " 7"].exists)
+                capture("Partial last cover grid row " + kind, in: app)
+                tapVisible(first, in: app)
+                let detail = app.descendants(matching: .any)[
+                    "collection-detail-" + kind + "-paged-" + kind + "-0"]
+                XCTAssertTrue(detail.waitForExistence(timeout: 5))
+                capture("Library cover opens canonical " + kind + " destination", in: app)
+                app.navigationBars.buttons.firstMatch.tap()
+                XCTAssertTrue(first.waitForExistence(timeout: 5))
+                tapVisible(first, in: app)
+                XCTAssertTrue(detail.waitForExistence(timeout: 5))
+                app.navigationBars.buttons.firstMatch.tap()
+                app.navigationBars.buttons.firstMatch.tap()
+            }
+            tapNativeChrome(app.buttons["Read catalog counts"], in: app)
+            let counts = app.staticTexts["fixture-catalog-counts"].label
+            for kind in ["album", "playlist"] {
+                XCTAssertTrue(counts.contains(kind + "-browse-0 1"), counts)
+                XCTAssertTrue(counts.contains(kind + "-browse-6 1"), counts)
+                XCTAssertFalse(counts.contains(kind + "-browse-12"), counts)
+            }
+        }
     }
 
     func testLibraryTypedListsPagedDedupRetryEndAndScopedSearch() {
@@ -1312,9 +1447,7 @@ final class FoundationDownloadsUITests: XCTestCase {
         selectTab("Library", in: app)
         tapVisible(app.buttons["library-category-albums"], in: app)
         XCTAssertTrue(app.tables["library-index-album"].waitForExistence(timeout: 5))
-        let a = app.buttons.matching(
-            NSPredicate(format: "label BEGINSWITH %@", "A Fixture album 0")
-        ).firstMatch
+        let a = app.buttons["View A Fixture album 0"]
         XCTAssertTrue(a.waitForExistence(timeout: 5))
         XCTAssertFalse(
             app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "F Fixture album 50"))
@@ -1325,14 +1458,10 @@ final class FoundationDownloadsUITests: XCTestCase {
         tapNativeAlphabet("F", in: app)
         XCTAssertTrue(app.buttons["Retry"].waitForExistence(timeout: 5))
         tapVisible(app.buttons["Retry"], in: app)
-        let f = app.buttons.matching(
-            NSPredicate(format: "label BEGINSWITH %@", "F Fixture album 50")
-        ).firstMatch
+        let f = app.buttons["View F Fixture album 50"]
         XCTAssertTrue(f.waitForExistence(timeout: 10))
         capture("Native alphabet F loads beyond initial server page", in: app)
-        let g = app.buttons.matching(
-            NSPredicate(format: "label BEGINSWITH %@", "G Fixture album 119")
-        ).firstMatch
+        let g = app.buttons["View G Fixture album 119"]
         reveal(g, in: app)
         XCTAssertTrue(g.exists)
         XCTAssertEqual(identity.label, original)
@@ -1418,9 +1547,7 @@ final class FoundationDownloadsUITests: XCTestCase {
             alphabetCatalog: true, delayedAlphabetCapability: true)
         selectTab("Library", in: app)
         tapVisible(app.buttons["library-category-albums"], in: app)
-        let row = app.buttons.matching(
-            NSPredicate(format: "label BEGINSWITH %@", "A Fixture album 0")
-        ).firstMatch
+        let row = app.buttons["View A Fixture album 0"]
         XCTAssertTrue(row.waitForExistence(timeout: 10))
         XCTAssertFalse(app.tables["library-index-album"].exists)
         tapVisible(row, in: app)
@@ -1466,7 +1593,9 @@ final class FoundationDownloadsUITests: XCTestCase {
             CGVector(
                 dx: sheet.frame.midX - app.frame.minX,
                 dy: sheet.frame.minY + 12 - app.frame.minY))
-        let end = start.withOffset(CGVector(dx: 0, dy: verticalDistance))
+        let startY = sheet.frame.minY + 12
+        let endY = min(app.frame.maxY - 12, max(app.frame.minY + 12, startY + verticalDistance))
+        let end = start.withOffset(CGVector(dx: 0, dy: endY - startY))
         start.press(
             forDuration: 0.1, thenDragTo: end, withVelocity: .slow,
             thenHoldForDuration: 0.2)
@@ -1478,9 +1607,8 @@ final class FoundationDownloadsUITests: XCTestCase {
     }
 
     private func closeRelatedSheet(_ app: XCUIApplication) {
-        let close = app.buttons["now-playing-related-close"]
-        XCTAssertTrue(close.waitForExistence(timeout: 5) && close.isHittable)
-        close.tap()
+        XCTAssertFalse(relatedSheet(app).buttons["now-playing-related-close"].exists)
+        dragRelatedSheet(app, verticalDistance: app.frame.height * 0.85)
         let gone = expectation(
             for: NSPredicate(format: "exists == false"), evaluatedWith: relatedSheet(app))
         wait(for: [gone], timeout: 5)
@@ -1521,7 +1649,7 @@ final class FoundationDownloadsUITests: XCTestCase {
         return count
     }
 
-    func testMiniPlayerArtworkOnlyMorphReverseAndCancelledDismissalKeepsPlayback() {
+    func testMiniPlayerCohesiveGlassMorphReverseAndCancelledDismissalKeepsPlayback() {
         continueAfterFailure = false
         let app = launch(
             productionShell: true, canonicalDownloadState: "full", artworkCache: true,
@@ -1544,7 +1672,8 @@ final class FoundationDownloadsUITests: XCTestCase {
         let expandedFrame = artwork.frame
         XCTAssertGreaterThanOrEqual(artworkTransitionCount("morph", in: app), 1)
         XCTAssertEqual(artworkTransitionCount("fade", in: app), 0)
-        capture("Artwork only morph expanded controls stay fixed", in: app)
+        XCTAssertGreaterThanOrEqual(artworkTransitionCount("glass", in: app), 1)
+        capture("Cohesive glass mini bar expands into player surface", in: app)
         dragExpandedPlayerArtwork(app, distance: 28)
         XCTAssertTrue(app.buttons["More playback options"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["Pause"].exists)
@@ -1563,6 +1692,7 @@ final class FoundationDownloadsUITests: XCTestCase {
         openNowPlaying(app)
         XCTAssertTrue(app.buttons["Pause"].exists)
         XCTAssertGreaterThanOrEqual(artworkTransitionCount("morph", in: app), 4)
+        XCTAssertGreaterThanOrEqual(artworkTransitionCount("glass", in: app), 4)
         XCTAssertGreaterThanOrEqual(artworkTransitionCount("completed", in: app), 3)
         XCTAssertEqual(artworkTransitionCount("fade", in: app), 0)
         dismissNowPlaying(app)
@@ -1737,14 +1867,10 @@ final class FoundationDownloadsUITests: XCTestCase {
             assertRelatedDetent("medium", in: app)
             capture("Related sheet cancelled native dismissal", in: app)
             expandRelatedSheet(app)
-            capture("Related sheet native large hides grabber", in: app)
-            let close = relatedSheet(app).buttons["now-playing-related-close"]
-            let more = relatedSheet(app).buttons["More actions"]
-            XCTAssertTrue(close.exists && close.isHittable)
-            XCTAssertTrue(more.exists && more.isHittable)
-            XCTAssertFalse(
-                close.frame.intersects(more.frame),
-                "Native Close and canonical action toolbar controls must not overlap")
+            capture("Immersive related sheet large retains native grabber", in: app)
+            XCTAssertFalse(relatedSheet(app).buttons["now-playing-related-close"].exists)
+            XCTAssertFalse(relatedSheet(app).navigationBars.firstMatch.exists)
+            XCTAssertTrue(relatedSheet(app).staticTexts["Fixture Album"].firstMatch.exists)
             let row = relatedSheet(app).buttons["collection-track-2"]
             reveal(row, in: app, context: relatedSheet(app))
             XCTAssertTrue(row.exists)

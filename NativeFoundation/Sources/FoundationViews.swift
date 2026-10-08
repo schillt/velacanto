@@ -596,6 +596,9 @@ struct FoundationLibraryView: View {
                 .accessibilityLabel("Next")
             }
         }.padding(.horizontal, 10).padding(.vertical, 6)
+            #if os(iOS)
+                .foundationPlayerSurfaceRegistration(identity: item?.sharedArtworkIdentity)
+            #endif
     }
 }
 
@@ -606,6 +609,7 @@ struct FoundationCatalogView: View {
     #endif
     @EnvironmentObject private var connectivity: FoundationConnectivity
     @EnvironmentObject private var downloads: FoundationDownloads
+    @Environment(\.foundationRelatedItemSheet) private var relatedItemSheet
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @EnvironmentObject private var actions: FoundationLibraryActions
     let title: String
@@ -642,14 +646,18 @@ struct FoundationCatalogView: View {
                                 maxWidth: .infinity, alignment: .leading
                             ).padding()
                         }
-                        LazyVGrid(
-                            columns: foundationCollectionColumns(for: dynamicTypeSize),
-                            alignment: .leading, spacing: 22
-                        ) {
-                            ForEach(Array(model.items.enumerated()), id: \.offset) { _, item in
-                                collectionCard(item)
-                            }
-                        }.padding()
+                        if model.items.isEmpty, model.isLoading, !connectivity.localOnly {
+                            FoundationLoadingPlaceholder(layout: .albumGrid).padding()
+                        } else {
+                            LazyVGrid(
+                                columns: foundationCollectionColumns(for: dynamicTypeSize),
+                                alignment: .leading, spacing: 22
+                            ) {
+                                ForEach(Array(model.items.enumerated()), id: \.offset) { _, item in
+                                    collectionCard(item)
+                                }
+                            }.padding()
+                        }
                         VStack(alignment: .leading, spacing: 12) { pageState }
                             .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal)
                         if let headerItem, headerItem.kind == .artist {
@@ -697,14 +705,11 @@ struct FoundationCatalogView: View {
         )
         .modifier(FoundationDetailTitle(item: headerItem))
         .toolbar {
-            if let headerItem {
-                Menu {
-                    FoundationItemMenu(
-                        item: headerItem, actions: actions, initialFavorite: headerItem.isFavorite,
-                        library: library, player: player)
-                } label: {
-                    Image(systemName: "ellipsis")
-                }.accessibilityLabel("More actions")
+            if !relatedItemSheet { catalogActions }
+        }
+        .overlay(alignment: .topTrailing) {
+            if relatedItemSheet, headerItem != nil {
+                FoundationImmersiveCollectionActions { catalogActions }
             }
         }
         .onAppear { isVisible = true }
@@ -745,6 +750,21 @@ struct FoundationCatalogView: View {
         }
     }
 
+    @ViewBuilder private var catalogActions: some View {
+        if let headerItem {
+            Menu {
+                FoundationItemMenu(
+                    item: headerItem, actions: actions, initialFavorite: headerItem.isFavorite,
+                    library: library, player: player)
+            } label: {
+                Image(systemName: "ellipsis")
+                    .frame(
+                        width: relatedItemSheet ? 44 : nil,
+                        height: relatedItemSheet ? 44 : nil)
+            }.accessibilityLabel("More actions")
+        }
+    }
+
     private var showsCollectionGrid: Bool {
         !isFavorites
             && (headerItem?.kind == .artist
@@ -777,7 +797,9 @@ struct FoundationCatalogView: View {
             Text(error).foregroundStyle(.red)
             Button("Retry") { reload(model.retryRequest) }.disabled(connectivity.localOnly)
         }
-        if !connectivity.localOnly, model.isLoading {
+        if !connectivity.localOnly, model.isLoading,
+            !showsCollectionGrid || !model.items.isEmpty
+        {
             FoundationLoadingPlaceholder(layout: showsCollectionGrid ? .albumGrid : .rows)
         }
         if model.nextStartIndex != nil {
@@ -1126,6 +1148,7 @@ struct FoundationTrackList: View {
     #if DEBUG
         @Environment(\.foundationTraceOrigin) private var traceOrigin
     #endif
+    @Environment(\.foundationRelatedItemSheet) private var relatedItemSheet
     @EnvironmentObject private var connectivity: FoundationConnectivity
     @EnvironmentObject private var downloads: FoundationDownloads
     @EnvironmentObject private var actions: FoundationLibraryActions
@@ -1275,26 +1298,11 @@ struct FoundationTrackList: View {
             collection.map { "collection-detail-\($0.kind)-\($0.id)" } ?? "track-list"
         )
         .toolbar {
-            if let collection {
-                FoundationDownloadActionButton(item: collection)
-                Menu {
-                    if let managePlaylist {
-                        Button("Edit Playlist", systemImage: "pencil", action: managePlaylist)
-                            .disabled(!library.supportsPlaylistManagement || connectivity.localOnly)
-                        Divider()
-                    }
-                    if collection.kind == .album {
-                        FoundationRelatedDestinations(
-                            item: collection, navigate: { openedCollection = $0 },
-                            currentPageKind: .album)
-                        Divider()
-                    }
-                    FoundationItemMenu(
-                        item: collection, actions: actions, initialFavorite: collection.isFavorite,
-                        library: library, player: player)
-                } label: {
-                    Image(systemName: "ellipsis")
-                }.accessibilityLabel("More actions")
+            if !relatedItemSheet { collectionActions }
+        }
+        .overlay(alignment: .topTrailing) {
+            if relatedItemSheet, collection != nil {
+                FoundationImmersiveCollectionActions { collectionActions }
             }
         }
         .onAppear { isVisible = true }
@@ -1327,6 +1335,33 @@ struct FoundationTrackList: View {
         }
         .foundationCollectionDestination(
             item: $openedCollection, library: library, player: player, isActive: isActive)
+    }
+
+    @ViewBuilder private var collectionActions: some View {
+        if let collection {
+            FoundationDownloadActionButton(item: collection)
+            Menu {
+                if let managePlaylist {
+                    Button("Edit Playlist", systemImage: "pencil", action: managePlaylist)
+                        .disabled(!library.supportsPlaylistManagement || connectivity.localOnly)
+                    Divider()
+                }
+                if collection.kind == .album {
+                    FoundationRelatedDestinations(
+                        item: collection, navigate: { openedCollection = $0 },
+                        currentPageKind: .album)
+                    Divider()
+                }
+                FoundationItemMenu(
+                    item: collection, actions: actions, initialFavorite: collection.isFavorite,
+                    library: library, player: player)
+            } label: {
+                Image(systemName: "ellipsis")
+                    .frame(
+                        width: relatedItemSheet ? 44 : nil,
+                        height: relatedItemSheet ? 44 : nil)
+            }.accessibilityLabel("More actions")
+        }
     }
 
     private func loadTracks() async {
@@ -1584,14 +1619,30 @@ struct FoundationLoadingPlaceholder: View {
     var body: some View {
         shapes
             .foregroundStyle(.quaternary)
-            .opacity(reduceMotion || bright ? 1 : 0.55)
-            .animation(
-                reduceMotion ? nil : .easeInOut(duration: 1.1).repeatForever(autoreverses: true),
-                value: bright
-            )
+            .transaction { $0.animation = nil }
+            .overlay {
+                if !reduceMotion {
+                    GeometryReader { geometry in
+                        LinearGradient(
+                            colors: [.clear, .primary.opacity(0.16), .clear],
+                            startPoint: .leading, endPoint: .trailing
+                        )
+                        .frame(width: geometry.size.width * 0.55)
+                        .animation(
+                            .linear(duration: 1.4).repeatForever(autoreverses: false)
+                        ) { content in
+                            content.offset(
+                                x: bright ? geometry.size.width : -geometry.size.width * 0.55)
+                        }
+                    }
+                    .mask(shapes.transaction { $0.animation = nil })
+                }
+            }
             .onAppear { bright = true }
+            .onDisappear { bright = false }
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("Loading")
+            .accessibilityIdentifier("loading-placeholder-\(layout)")
             .allowsHitTesting(false)
     }
 
@@ -1629,11 +1680,12 @@ struct FoundationLoadingPlaceholder: View {
             }.frame(height: 180)
         case .albumGrid:
             LazyVGrid(
-                columns: [GridItem(.adaptive(minimum: 140, maximum: 240), spacing: 18)],
+                columns: foundationCollectionColumns(for: dynamicTypeSize),
                 alignment: .leading, spacing: 22
             ) {
-                ForEach(0..<4) { index in
-                    album.opacity(1 - Double(index) * 0.23)
+                ForEach(0..<rowCount, id: \.self) { index in
+                    album.opacity(
+                        max(0.3, 1 - Double(index) / Double(max(1, rowCount)) * 0.7))
                 }
             }
         }
@@ -1703,6 +1755,25 @@ struct FoundationAlbumShelfCard: View {
             }
 
         }
+    }
+}
+
+/// The same canonical actions stay available without adding a sheet title bar.
+private struct FoundationImmersiveCollectionActions<Controls: View>: View {
+    @Environment(\.foundationReduceTransparency) private var reduceTransparency
+    @ViewBuilder let controls: () -> Controls
+
+    var body: some View {
+        HStack(spacing: 12) { controls() }
+            .frame(minHeight: 44)
+            .padding(.horizontal, 8)
+            .background {
+                if reduceTransparency { Capsule().fill(.background) }
+            }
+            .glassEffect(reduceTransparency ? .identity : .regular, in: Capsule())
+            .environment(\.colorScheme, .dark)
+            .tint(.white)
+            .padding(.top, 24).padding(.trailing, 16)
     }
 }
 
@@ -2028,7 +2099,9 @@ private struct FoundationCollectionDestination: ViewModifier {
 
     @ViewBuilder private func destination(_ item: FoundationItem) -> some View {
         let page = FoundationItemDestination(
-            item: item, library: library, player: player, isActive: isActive)
+            item: item, library: library, player: player, isActive: isActive
+        )
+        .environment(\.foundationRelatedItemSheet, false)
         #if os(iOS)
             if !reduceMotion, sourceIdentity == item.sharedArtworkIdentity,
                 let sourceOccurrence, item.kind == .album || item.kind == .playlist
@@ -2062,34 +2135,20 @@ private struct FoundationDetailPresentation: ViewModifier {
     let title: String
     let immersive: Bool
     let tint: Color
-    @Environment(\.foundationRelatedItemSheet) private var relatedItemSheet
-
     @ViewBuilder func body(content: Content) -> some View {
         if immersive {
-            if relatedItemSheet {
-                content.navigationTitle("")
-                    .scrollContentBackground(.hidden)
-                    .environment(\.colorScheme, .dark)
-                    #if os(iOS)
-                        .navigationBarTitleDisplayMode(.inline)
-                        .toolbarBackground(.hidden, for: .navigationBar)
-                        .toolbarColorScheme(.dark, for: .navigationBar)
-                        .toolbar(.visible, for: .navigationBar)
-                    #endif
-            } else {
-                content.navigationTitle("")
-                    .scrollContentBackground(.hidden)
-                    .background { tint.ignoresSafeArea() }
-                    .environment(\.colorScheme, .dark)
-                    #if os(iOS)
-                        .ignoresSafeArea(.container, edges: .top)
-                        .contentMargins(.top, 0, for: .scrollContent)
-                        .navigationBarTitleDisplayMode(.inline)
-                        .toolbarBackground(.hidden, for: .navigationBar)
-                        .toolbarColorScheme(.dark, for: .navigationBar)
-                        .toolbar(.visible, for: .navigationBar)
-                    #endif
-            }
+            content.navigationTitle("")
+                .scrollContentBackground(.hidden)
+                .background { tint.ignoresSafeArea() }
+                .environment(\.colorScheme, .dark)
+                #if os(iOS)
+                    .ignoresSafeArea(.container, edges: .top)
+                    .contentMargins(.top, 0, for: .scrollContent)
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbarBackground(.hidden, for: .navigationBar)
+                    .toolbarColorScheme(.dark, for: .navigationBar)
+                    .toolbar(.visible, for: .navigationBar)
+                #endif
         } else {
             content.foundationCatalogHeader(title)
         }

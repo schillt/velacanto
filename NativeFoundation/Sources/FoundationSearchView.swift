@@ -4,6 +4,9 @@ import SwiftUI
 struct FoundationSearchView<Profile: View>: View {
     @EnvironmentObject private var connectivity: FoundationConnectivity
     let profile: Profile
+    @Environment(\.foundationReduceMotion) private var reduceMotion
+    @Environment(\.foundationReduceTransparency) private var reduceTransparency
+    @Namespace private var searchGlass
     @FocusState private var searchFocused: Bool
     @State private var cancelledActivation: Int?
     let library: any FoundationLibrary
@@ -77,28 +80,44 @@ struct FoundationSearchView<Profile: View>: View {
     }
 
     private var searchField: some View {
-        HStack(spacing: 8) {
-            Group {
-                if #available(iOS 26.0, macOS 26.0, *) {
-                    searchInput.glassEffect(.regular, in: Capsule())
-                } else {
-                    searchInput.background(.regularMaterial, in: Capsule())
+        GlassEffectContainer(spacing: 12) {
+            HStack(spacing: 8) {
+                Group {
+                    if reduceTransparency {
+                        searchInput.background(.background, in: Capsule())
+                    } else {
+                        searchInput.glassEffect(.regular, in: Capsule())
+                            .glassEffectID("search-input", in: searchGlass)
+                    }
+                }
+                if searchFocused {
+                    dismissKeyboardButton
+                        .glassEffectID("search-dismiss", in: searchGlass)
+                        .glassEffectTransition(reduceMotion ? .identity : .matchedGeometry)
+                        .transition(.opacity)
                 }
             }
-            if searchFocused {
-                Button("Dismiss search keyboard", systemImage: "xmark") {
-                    cancelSearchFocus()
-                }
-                .labelStyle(.iconOnly)
-                .buttonStyle(.glass)
-                .buttonBorderShape(.circle)
-                .frame(minWidth: 44, minHeight: 44)
-                .keyboardShortcut(.cancelAction)
-                .accessibilityIdentifier("search-dismiss-keyboard")
-                .accessibilityHint("Keeps your search. Tap the search field to type again.")
-            }
+            .animation(reduceMotion ? nil : .smooth(duration: 0.25), value: searchFocused)
         }
         .padding(.horizontal, 16).padding(.bottom, 8)
+    }
+
+    private var dismissKeyboardButton: some View {
+        Button(action: cancelSearchFocus) {
+            Image(systemName: "xmark")
+                .font(.body.weight(.semibold))
+                .frame(width: 44, height: 44)
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .background {
+            if reduceTransparency { Circle().fill(.background) }
+        }
+        .glassEffect(reduceTransparency ? .identity : .regular.interactive(), in: Circle())
+        .keyboardShortcut(.cancelAction)
+        .accessibilityLabel("Dismiss search keyboard")
+        .accessibilityIdentifier("search-dismiss-keyboard")
+        .accessibilityHint("Keeps your search. Tap the search field to type again.")
     }
 
     private var genreGrid: some View {

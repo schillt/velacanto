@@ -32,6 +32,24 @@ enum FoundationPlayerArtworkTransitionDecision: Equatable {
     }
 }
 
+// The glass surface uses measured bar geometry; artwork resolution is independent.
+enum FoundationPlayerSurfaceTransitionDecision: Equatable {
+    case expand(compact: CGRect, expanded: CGRect)
+    case fade
+
+    static func resolve(compact: CGRect?, expanded: CGRect, reduceMotion: Bool) -> Self {
+        guard !reduceMotion, let compact,
+            [
+                compact.minX, compact.minY, compact.width, compact.height,
+                expanded.minX, expanded.minY, expanded.width, expanded.height,
+            ].allSatisfy(\.isFinite),
+            compact.width > 0, compact.height > 0, expanded.width > 0, expanded.height > 0,
+            expanded.contains(compact)
+        else { return .fade }
+        return .expand(compact: compact, expanded: expanded)
+    }
+}
+
 #if os(iOS)
     import Combine
     import SwiftUI
@@ -81,7 +99,8 @@ enum FoundationPlayerArtworkTransitionDecision: Equatable {
         @Published private(set) var hiddenArtworkIdentity: String?
         #if DEBUG && targetEnvironment(simulator)
             @Published private(set) var transitionSummary =
-                "morph 0; fade 0; cancelled 0; completed 0"
+                "morph 0; fade 0; cancelled 0; completed 0; glass 0"
+            private var glassCount = 0
             private var morphCount = 0
             private var fadeCount = 0
             private var cancelledCount = 0
@@ -89,7 +108,7 @@ enum FoundationPlayerArtworkTransitionDecision: Equatable {
 
             private func publishTransitionSummary() {
                 transitionSummary =
-                    "morph \(morphCount); fade \(fadeCount); cancelled \(cancelledCount); completed \(completedCount)"
+                    "morph \(morphCount); fade \(fadeCount); cancelled \(cancelledCount); completed \(completedCount); glass \(glassCount)"
             }
 
             fileprivate func recordCompletion(cancelled: Bool) {
@@ -100,6 +119,10 @@ enum FoundationPlayerArtworkTransitionDecision: Equatable {
         @Published fileprivate(set) var isPlayerPresented = false
         var artwork: () -> Artwork? = { nil }
         var reduceMotion = false
+        var reduceTransparency = false
+        private weak var compactSurface: UIView?
+        private var surfaceToken: UUID?
+        private var surfaceIdentity: String?
         var allowsInteractiveDismissal = true
         private var compact: Anchor?
         private var expanded: Anchor?
@@ -127,6 +150,31 @@ enum FoundationPlayerArtworkTransitionDecision: Equatable {
             case .compact: if compact?.token == token { compact = nil }
             case .expanded: if expanded?.token == token { expanded = nil }
             }
+        }
+
+        fileprivate func registerSurface(_ view: UIView, token: UUID, identity: String) {
+            compactSurface = view
+            surfaceToken = token
+            surfaceIdentity = identity
+        }
+
+        fileprivate func unregisterSurface(token: UUID) {
+            guard surfaceToken == token else { return }
+            compactSurface = nil
+            surfaceToken = nil
+            surfaceIdentity = nil
+        }
+
+        fileprivate func surfaceRect(in container: UIView) -> CGRect? {
+            guard let source = compactSurface, let window = container.window,
+                source.window === window, surfaceIdentity == expanded?.identity
+            else { return nil }
+            let rect = source.convert(source.bounds, to: container)
+            guard
+                case .expand = FoundationPlayerSurfaceTransitionDecision.resolve(
+                    compact: rect, expanded: container.bounds, reduceMotion: reduceMotion)
+            else { return nil }
+            return rect
         }
 
         fileprivate struct Endpoints {
@@ -172,13 +220,14 @@ enum FoundationPlayerArtworkTransitionDecision: Equatable {
 
         fileprivate func beginAnimation(
             _ animator: FoundationPlayerArtworkAnimator,
-            identity: String?
+            identity: String?, glass: Bool
         ) -> UInt {
             generation &+= 1
             activeAnimator = animator
             hiddenArtworkIdentity = identity
             #if DEBUG && targetEnvironment(simulator)
                 if identity != nil { morphCount &+= 1 } else { fadeCount &+= 1 }
+                if glass { glassCount &+= 1 }
                 publishTransitionSummary()
             #endif
             return generation
@@ -219,6 +268,9 @@ enum FoundationPlayerArtworkTransitionDecision: Equatable {
             isPlayerPresented = false
             compact = nil
             expanded = nil
+            compactSurface = nil
+            surfaceToken = nil
+            surfaceIdentity = nil
             artwork = { nil }
             host = nil
         }
@@ -318,6 +370,52 @@ enum FoundationPlayerArtworkTransitionDecision: Equatable {
         }
     }
 
+    struct FoundationPlayerSurfaceAnchor: UIViewRepresentable {
+        let model: FoundationPlayerArtworkPresentationModel
+        let identity: String?
+        @MainActor final class Coordinator {
+            let token = UUID()
+            weak var model: FoundationPlayerArtworkPresentationModel?
+        }
+        func makeCoordinator() -> Coordinator { Coordinator() }
+        func makeUIView(context: Context) -> UIView {
+            let view = UIView()
+            view.isUserInteractionEnabled = false
+            view.isAccessibilityElement = false
+            view.backgroundColor = .clear
+            return view
+        }
+        func updateUIView(_ view: UIView, context: Context) {
+            context.coordinator.model?.unregisterSurface(token: context.coordinator.token)
+            context.coordinator.model = model
+            if let identity {
+                model.registerSurface(view, token: context.coordinator.token, identity: identity)
+            }
+        }
+        static func dismantleUIView(_ view: UIView, coordinator: Coordinator) {
+            coordinator.model?.unregisterSurface(token: coordinator.token)
+        }
+    }
+
+    private struct FoundationPlayerSurfaceRegistration: ViewModifier {
+        let identity: String?
+        @Environment(\.foundationPlayerArtworkPresentation) private var model
+        func body(content: Content) -> some View {
+            content.overlay {
+                if let model {
+                    FoundationPlayerSurfaceAnchor(model: model, identity: identity)
+                        .allowsHitTesting(false).accessibilityHidden(true)
+                }
+            }
+        }
+    }
+
+    extension View {
+        func foundationPlayerSurfaceRegistration(identity: String?) -> some View {
+            modifier(FoundationPlayerSurfaceRegistration(identity: identity))
+        }
+    }
+
     // Caller's content MUST already contain explicit environment forwarding.
     // This controller boundary cannot inherit EnvironmentObjects by closure capture.
     struct FoundationPlayerArtworkFullscreen: UIViewControllerRepresentable {
@@ -327,6 +425,7 @@ enum FoundationPlayerArtworkTransitionDecision: Equatable {
         let inheritedEnvironment: EnvironmentValues
         let artwork: () -> FoundationPlayerArtworkPresentationModel.Artwork?
         let reduceMotion: Bool
+        let reduceTransparency: Bool
 
         func makeUIViewController(context: Context) -> FoundationPlayerArtworkPresenter {
             FoundationPlayerArtworkPresenter(model: model)
@@ -338,6 +437,7 @@ enum FoundationPlayerArtworkTransitionDecision: Equatable {
             let binding = $isPresented
             model.artwork = artwork
             model.reduceMotion = reduceMotion
+            model.reduceTransparency = reduceTransparency
             controller.requestedPresentation = isPresented
             // Apply inherited custom context and player overrides in ONE value.
             // A nested environment(\.self, oldValue) must not erase the new close action.
@@ -697,6 +797,40 @@ enum FoundationPlayerArtworkTransitionDecision: Equatable {
             playerView.layoutIfNeeded()
             container.layoutIfNeeded()
             let endpoints = model?.endpoints(in: container)
+            let surfaceRect = model?.surfaceRect(in: container)
+            let originalMask = playerView.mask
+            let reveal = UIView()
+            reveal.backgroundColor = .white
+            reveal.isUserInteractionEnabled = false
+            reveal.isAccessibilityElement = false
+            let glass: UIView?
+            if let surfaceRect {
+                let surface: UIView
+                if model?.reduceTransparency == true {
+                    surface = UIView()
+                    surface.backgroundColor = UIColor.systemBackground.resolvedColor(
+                        with: UITraitCollection(userInterfaceStyle: .dark))
+                } else {
+                    surface = UIVisualEffectView(effect: UIGlassEffect(style: .regular))
+                }
+                surface.isUserInteractionEnabled = false
+                surface.isAccessibilityElement = false
+                surface.clipsToBounds = true
+                surface.layer.cornerCurve = .continuous
+                surface.frame = presenting ? surfaceRect : container.bounds
+                surface.layer.cornerRadius = presenting ? surfaceRect.height / 2 : 0
+                surface.alpha = presenting ? 1 : 0
+                container.addSubview(surface)
+                glass = surface
+                reveal.frame =
+                    presenting
+                    ? container.convert(surfaceRect, to: playerView) : playerView.bounds
+                reveal.layer.cornerRadius = presenting ? surfaceRect.height / 2 : 0
+                reveal.layer.cornerCurve = .continuous
+                playerView.mask = reveal
+            } else {
+                glass = nil
+            }
             let imageView: FoundationPlayerArtworkSnapshot?
             if let endpoints {
                 let image = FoundationPlayerArtworkSnapshot(
@@ -718,14 +852,25 @@ enum FoundationPlayerArtworkTransitionDecision: Equatable {
             } else {
                 imageView = nil
             }
-            generation = model?.beginAnimation(self, identity: endpoints?.artwork.identity)
+            generation = model?.beginAnimation(
+                self, identity: endpoints?.artwork.identity, glass: surfaceRect != nil)
             playerView.alpha = presenting ? 0 : 1
-            // Deliberately never change playerView.transform/bounds/center.
+            // Reveal the existing final layout through the expanding bar surface.
+            // One interruptible UIKit animator coordinates glass, chrome and artwork.
             let animator = UIViewPropertyAnimator(
                 duration: transitionDuration(using: context),
                 dampingRatio: 0.9)
             animator.addAnimations { [presenting] in
                 playerView.alpha = presenting ? 1 : 0
+                if let surfaceRect, let glass {
+                    glass.frame = presenting ? container.bounds : surfaceRect
+                    glass.layer.cornerRadius = presenting ? 0 : surfaceRect.height / 2
+                    glass.alpha = presenting ? 0 : 1
+                    reveal.frame =
+                        presenting
+                        ? playerView.bounds : container.convert(surfaceRect, to: playerView)
+                    reveal.layer.cornerRadius = presenting ? 0 : surfaceRect.height / 2
+                }
                 if let endpoints, let imageView {
                     imageView.frame = presenting ? endpoints.expandedRect : endpoints.compactRect
                     imageView.layer.cornerRadius =
@@ -736,9 +881,11 @@ enum FoundationPlayerArtworkTransitionDecision: Equatable {
                     imageView.layoutIfNeeded()
                 }
             }
-            animator.addCompletion { [weak self, weak imageView] _ in
+            animator.addCompletion { [weak self, weak imageView, weak glass] _ in
                 let success = !context.transitionWasCancelled
                 playerView.alpha = 1
+                playerView.mask = originalMask
+                glass?.removeFromSuperview()
                 if let self, let generation = self.generation {
                     #if DEBUG && targetEnvironment(simulator)
                         self.model?.recordCompletion(cancelled: !success)

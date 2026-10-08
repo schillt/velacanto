@@ -4,6 +4,37 @@ import XCTest
 
 @MainActor
 final class FoundationPresentationTests: XCTestCase {
+    func testPlayerSurfaceExpandsOnlyMeasuredVisibleBarIntoFinalPlayerBounds() {
+        let bounds = CGRect(x: 0, y: 0, width: 390, height: 844)
+        let bar = CGRect(x: 12, y: 720, width: 366, height: 56)
+        XCTAssertEqual(
+            FoundationPlayerSurfaceTransitionDecision.resolve(
+                compact: bar, expanded: bounds, reduceMotion: false),
+            .expand(compact: bar, expanded: bounds))
+        for invalid in [
+            CGRect.zero, CGRect(x: 12, y: 830, width: 366, height: 56),
+            CGRect(x: 12, y: 720, width: CGFloat.infinity, height: 56),
+        ] {
+            XCTAssertEqual(
+                FoundationPlayerSurfaceTransitionDecision.resolve(
+                    compact: invalid, expanded: bounds, reduceMotion: false), .fade)
+        }
+    }
+
+    func testPlayerSurfaceHonorsReducedMotionAndDoesNotInventMissingBarGeometry() {
+        let bounds = CGRect(x: 0, y: 0, width: 390, height: 844)
+        let bar = CGRect(x: 12, y: 720, width: 366, height: 56)
+        XCTAssertEqual(
+            FoundationPlayerSurfaceTransitionDecision.resolve(
+                compact: bar, expanded: bounds, reduceMotion: true), .fade)
+        XCTAssertEqual(
+            FoundationPlayerSurfaceTransitionDecision.resolve(
+                compact: nil, expanded: bounds, reduceMotion: false), .fade)
+        XCTAssertEqual(
+            FoundationPlayerSurfaceTransitionDecision.resolve(
+                compact: bar, expanded: .zero, reduceMotion: false), .fade)
+    }
+
     func testArtworkMorphUsesCanonicalIdentityAndExactArtworkRectangles() {
         let compact = CGRect(x: 18, y: 730, width: 34, height: 34)
         let expanded = CGRect(x: 0, y: 60, width: 390, height: 430)
@@ -27,7 +58,8 @@ final class FoundationPresentationTests: XCTestCase {
             .fade(.offscreenSource))
         XCTAssertEqual(
             artworkTransition(
-                compact: CGRect(x: 18, y: 730, width: CGFloat.infinity, height: 34), expanded: expanded),
+                compact: CGRect(x: 18, y: 730, width: CGFloat.infinity, height: 34),
+                expanded: expanded),
             .fade(.unavailableGeometry))
     }
 

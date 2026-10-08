@@ -124,6 +124,11 @@
         @State private var catalogCounts = ""
         private var fixtureControls: some View {
             VStack {
+                if ProcessInfo.processInfo.arguments.contains("-fixtureHoldArtistAlbums") {
+                    Button("Release artist albums") {
+                        Task { await fixture.library.releaseArtistAlbums() }
+                    }
+                }
                 if ProcessInfo.processInfo.arguments.contains("-fixturePagedCatalog")
                     || ProcessInfo.processInfo.arguments.contains("-fixtureAlphabetCatalog")
                 {
@@ -729,7 +734,9 @@
             {
                 throw FoundationLibraryError.invalidResponse
             }
-            let all = (0..<12).map { index in
+            let count =
+                ProcessInfo.processInfo.arguments.contains("-fixtureGridPartialRow") ? 7 : 12
+            let all = (0..<count).map { index in
                 FoundationItem(
                     id: "paged-\(kind)-\(index)", title: "Paged \(kind) \(index)",
                     subtitle: "Synthetic catalog", kind: kind, duration: kind == .track ? 30 : nil,
@@ -903,8 +910,17 @@
             if pagedCatalog { return try await catalogPage(kind: .album, startIndex: startIndex) }
             return .init(items: [album], nextStartIndex: nil)
         }
+        private var artistAlbumsReleased = false
+        func releaseArtistAlbums() { artistAlbumsReleased = true }
+
         func albums(artistID: String, startIndex: Int) async throws -> FoundationPage {
-            .init(items: [album], nextStartIndex: nil)
+            if ProcessInfo.processInfo.arguments.contains("-fixtureHoldArtistAlbums") {
+                while !artistAlbumsReleased {
+                    try Task.checkCancellation()
+                    try await Task.sleep(for: .milliseconds(50))
+                }
+            }
+            return .init(items: [album], nextStartIndex: nil)
         }
         func tracks(artistID: String, startIndex: Int) async throws -> FoundationPage {
             .init(items: canonical ? [track, missing] : [track], nextStartIndex: nil)

@@ -352,6 +352,57 @@ final class FoundationLibraryTests: XCTestCase {
         XCTAssertTrue(requests[0].url!.path.hasSuffix("/System/Info/Public"))
     }
 
+    func testLibraryCoverGridGeometryMatchesCompactWideAndAccessibilityViewports() {
+        XCTAssertEqual(FoundationLibraryGridLayout.columnCount(width: 375, accessibility: false), 2)
+        XCTAssertEqual(
+            FoundationLibraryGridLayout.columnCount(width: 1024, accessibility: false), 6)
+        XCTAssertEqual(FoundationLibraryGridLayout.columnCount(width: 375, accessibility: true), 1)
+        XCTAssertEqual(FoundationLibraryGridLayout.columnCount(width: 1024, accessibility: true), 3)
+        XCTAssertEqual(
+            FoundationLibraryGridLayout.columnCount(
+                width: 375, accessibility: false,
+                nativeIndex: true), 2)
+        XCTAssertEqual(
+            FoundationLibraryGridLayout.placeholderCount(
+                width: 375, height: 800,
+                accessibility: false, textHeight: 72), 8)
+        XCTAssertEqual(
+            FoundationLibraryGridLayout.placeholderCount(
+                width: 1024, height: 1000,
+                accessibility: false, textHeight: 72), 30)
+    }
+
+    func testLibraryCoverGridGroupingPreservesEveryCanonicalItemAndPartialFinalRow() {
+        let items = Array(0..<5)
+        let rows = (0..<FoundationLibraryGridLayout.rowCount(itemCount: items.count, columns: 2))
+            .map { row in
+                Array(
+                    items[
+                        FoundationLibraryGridLayout.itemRange(
+                            row: row, itemCount: items.count, columns: 2)])
+            }
+        XCTAssertEqual(rows, [[0, 1], [2, 3], [4]])
+        XCTAssertEqual(rows.flatMap { $0 }, items)
+        XCTAssertEqual(FoundationLibraryGridLayout.rowCount(itemCount: 0, columns: 2), 0)
+        XCTAssertTrue(
+            FoundationLibraryGridLayout.itemRange(row: 3, itemCount: 5, columns: 2).isEmpty)
+    }
+
+    func testLibraryCoverGridInvalidGeometryRemainsBounded() {
+        XCTAssertEqual(
+            FoundationLibraryGridLayout.columnCount(width: .nan, accessibility: false), 1)
+        XCTAssertEqual(
+            FoundationLibraryGridLayout.columnCount(width: .infinity, accessibility: false), 1)
+        XCTAssertEqual(
+            FoundationLibraryGridLayout.columnCount(
+                width: .greatestFiniteMagnitude,
+                accessibility: false), 100)
+        XCTAssertEqual(
+            FoundationLibraryGridLayout.placeholderCount(
+                width: 375,
+                height: .greatestFiniteMagnitude, accessibility: false, textHeight: 72), 200)
+    }
+
     private let itemID = "00000000000000000000000000000001"
     private var session: FoundationSession {
         FoundationSession(

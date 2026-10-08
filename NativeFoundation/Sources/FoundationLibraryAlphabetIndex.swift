@@ -22,6 +22,8 @@
         let contextID: String
         let sections: [FoundationAlphabetSection]
         let indexTitles: [String]
+        var columnCount = 1
+        var isCoverGrid = false
         var allowsDemand = false
         var isRefreshing = false
         var nextPageIdentity: String?
@@ -41,6 +43,7 @@
             table.sectionHeaderHeight = UITableView.automaticDimension
             table.estimatedSectionHeaderHeight = 32
             table.sectionIndexMinimumDisplayRowCount = 0
+            table.separatorStyle = isCoverGrid ? .none : .singleLine
             table.register(UITableViewCell.self, forCellReuseIdentifier: "catalog-row")
             let refresh = UIRefreshControl()
             refresh.addTarget(
@@ -53,10 +56,16 @@
         func updateUIView(_ table: UITableView, context: Context) {
             let coordinator = context.coordinator
             let contextChanged = coordinator.parent.contextID != contextID
-            if contextChanged { coordinator.lastDemandIdentity = nil }
+            let layoutChanged =
+                coordinator.parent.columnCount != columnCount
+                || coordinator.parent.isCoverGrid != isCoverGrid
+            if contextChanged || (!coordinator.parent.allowsDemand && allowsDemand) {
+                coordinator.lastDemandIdentity = nil
+            }
             coordinator.parent = self
             // Snapshot changes are explicit; the table never discovers/fetches another letter.
-            if contextChanged || coordinator.snapshot != sections
+            table.separatorStyle = isCoverGrid ? .none : .singleLine
+            if contextChanged || layoutChanged || coordinator.snapshot != sections
                 || coordinator.indexSnapshot != indexTitles
             {
                 coordinator.snapshot = sections
@@ -84,20 +93,33 @@
             func numberOfSections(in tableView: UITableView) -> Int { parent.sections.count }
 
             func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
-                parent.sections[section].rows.count
+                FoundationLibraryGridLayout.rowCount(
+                    itemCount: parent.sections[section].rows.count, columns: parent.columnCount)
             }
 
             func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath)
                 -> UITableViewCell
             {
-                let entry = parent.sections[indexPath.section].rows[indexPath.row]
+                let columns = max(1, parent.columnCount)
+                let sectionRows = parent.sections[indexPath.section].rows
+                let range = FoundationLibraryGridLayout.itemRange(
+                    row: indexPath.row, itemCount: sectionRows.count, columns: columns)
+                let entries = Array(sectionRows[range])
                 let cell = tableView.dequeueReusableCell(
                     withIdentifier: "catalog-row", for: indexPath)
                 // The caller injects existing account-owned environments, source namespace,
                 // and canonical row callbacks; this adapter creates no second transition owner.
                 cell.contentConfiguration = UIHostingConfiguration {
-                    self.parent.row(entry).id(entry.id)
-                }.margins(.vertical, 4)
+                    HStack(alignment: .top, spacing: self.parent.isCoverGrid ? 18 : 0) {
+                        ForEach(entries) { entry in
+                            self.parent.row(entry).id(entry.id)
+                                .frame(maxWidth: .infinity, alignment: .topLeading)
+                        }
+                        ForEach(entries.count..<columns, id: \.self) { _ in
+                            Color.clear.frame(maxWidth: .infinity).accessibilityHidden(true)
+                        }
+                    }
+                }.margins(.vertical, parent.isCoverGrid ? 11 : 4)
                 cell.selectionStyle = .none
                 return cell
             }
@@ -135,7 +157,10 @@
                     lastDemandIdentity != identity,
                     let finalSection = parent.sections.lastIndex(where: { !$0.rows.isEmpty }),
                     indexPath.section == finalSection,
-                    indexPath.row >= max(0, parent.sections[finalSection].rows.count - 3)
+                    indexPath.row
+                        >= max(
+                            0,
+                            tableView.numberOfRows(inSection: finalSection) - 3)
                 else { return }
                 lastDemandIdentity = identity
                 // The caller still applies active/offline/loading/error/end cursor guards.

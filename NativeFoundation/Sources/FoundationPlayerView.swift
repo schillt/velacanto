@@ -710,7 +710,7 @@ private struct FoundationPlayerPresentation<PlayerContent: View>: ViewModifier {
                             let result = artwork.result(for: item)
                         else { return nil }
                         return .init(identity: item.sharedArtworkIdentity, result: result)
-                    }, reduceMotion: reduceMotion
+                    }, reduceMotion: reduceMotion, reduceTransparency: reduceTransparency
                 ).frame(width: 0, height: 0)
             }
         #else
@@ -747,13 +747,9 @@ private struct FoundationPlayerRelatedSheet: View {
             FoundationItemDestination(
                 item: item, library: library, player: player, isActive: scenePhase == .active
             )
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Close", systemImage: "xmark") { dismiss() }
-                        .labelStyle(.iconOnly)
-                        .accessibilityIdentifier("now-playing-related-close")
-                }
-            }
+            #if os(iOS)
+                .toolbar(.hidden, for: .navigationBar)
+            #endif
         }
         .environment(\.foundationRelatedItemSheet, true)
         .foundationDownloadRemovalPresentation()
@@ -794,7 +790,7 @@ private struct FoundationPlayerRelatedSheet: View {
             .accessibilityAction(named: "Expand details") { detent = .large }
             .accessibilityAction(named: "Collapse details") { detent = .medium }
             .presentationDetents([.medium, .large], selection: $detent)
-            .presentationDragIndicator(detent == .large ? .hidden : .visible)
+            .presentationDragIndicator(.visible)
             .presentationContentInteraction(.resizes)
             .preferredColorScheme(.dark)
             #if os(macOS)

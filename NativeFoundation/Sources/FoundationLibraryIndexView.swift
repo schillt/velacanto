@@ -50,6 +50,8 @@ struct FoundationLibraryIndexView: View {
         guard let selectedLetter else { return "All" }
         return selectedLetter == "#" ? "Other downloaded names" : selectedLetter + " and following"
     }
+    private var isCoverGrid: Bool { kind == .album || kind == .playlist }
+
     private var title: String {
         switch kind {
         case .album: "Albums"
@@ -83,18 +85,24 @@ struct FoundationLibraryIndexView: View {
                 #if os(iOS)
                     if usesNativeAlphabet {
                         alphabetList(
-                            transition: transition,
+                            transition: transition, viewport: geometry.size,
                             placeholderRows: min(
                                 30, max(1, Int(ceil(geometry.size.height / rowHeight)))))
+                    } else if isCoverGrid {
+                        collectionGrid(viewport: geometry.size)
                     } else {
                         indexList(
                             placeholderRows: min(
                                 30, max(1, Int(ceil(geometry.size.height / rowHeight)))))
                     }
                 #else
-                    indexList(
-                        placeholderRows: min(
-                            30, max(1, Int(ceil(geometry.size.height / rowHeight)))))
+                    if isCoverGrid {
+                        collectionGrid(viewport: geometry.size)
+                    } else {
+                        indexList(
+                            placeholderRows: min(
+                                30, max(1, Int(ceil(geometry.size.height / rowHeight)))))
+                    }
                 #endif
             }
         }
@@ -310,6 +318,107 @@ struct FoundationLibraryIndexView: View {
         }
     }
 
+    private func gridColumnCount(width: CGFloat, nativeIndex: Bool = false) -> Int {
+        FoundationLibraryGridLayout.columnCount(
+            width: width, accessibility: dynamicTypeSize.isAccessibilitySize,
+            nativeIndex: nativeIndex)
+    }
+
+    private func gridPlaceholderCount(viewport: CGSize, nativeIndex: Bool = false) -> Int {
+        FoundationLibraryGridLayout.placeholderCount(
+            width: viewport.width, height: viewport.height,
+            accessibility: dynamicTypeSize.isAccessibilitySize,
+            textHeight: rowHeight, nativeIndex: nativeIndex)
+    }
+
+    private func collectionTile(_ item: FoundationItem) -> some View {
+        FoundationCollectionCard(
+            item: item, library: library, player: player,
+            isActive: isActive && isVisible, open: { openedItem = item },
+            navigate: { openedItem = $0 }
+        )
+        .frame(maxWidth: dynamicTypeSize.isAccessibilitySize ? 320 : 240, alignment: .topLeading)
+        .environment(
+            \.foundationCollectionOccurrence,
+            library.catalogScopeID + ":" + (selectedLetter ?? "All") + ":" + term + ":"
+                + kind.rawValue + ":" + item.id)
+    }
+
+    private func collectionGrid(viewport: CGSize) -> some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 20) {
+                if selectedLetter != nil {
+                    HStack {
+                        Text(windowDescription)
+                        Spacer()
+                        Button("All") { chooseLetter("All") }
+                            .accessibilityIdentifier("library-alphabet-all-\(kind)")
+                    }
+                    Text(
+                        connectivity.localOnly
+                            ? "Downloaded display names"
+                            : "Server sort names; All restores browsing"
+                    )
+                    .font(.caption).foregroundStyle(.secondary)
+                }
+                if connectivity.hasConnectionIssue || displayed.hasConnectionIssue {
+                    FoundationOfflineNotice()
+                }
+                if displayed.items.isEmpty, !displayed.loaded, displayed.errorMessage == nil,
+                    !connectivity.localOnly
+                {
+                    FoundationLoadingPlaceholder(
+                        layout: .albumGrid,
+                        rowCount: gridPlaceholderCount(viewport: viewport))
+                } else {
+                    LazyVGrid(
+                        columns: foundationCollectionColumns(for: dynamicTypeSize),
+                        alignment: .leading, spacing: 22
+                    ) {
+                        ForEach(displayed.items) { item in collectionTile(item) }
+                    }
+                    .accessibilityIdentifier("library-cover-grid-\(kind)")
+                }
+                if displayed.loaded, displayed.items.isEmpty {
+                    Text(term.isEmpty ? "No \(title.lowercased()) found." : "No results found.")
+                        .foregroundStyle(.secondary)
+                }
+                if let error = displayed.errorMessage, !displayed.hasConnectionIssue {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(error).foregroundStyle(.red)
+                        Button("Retry") {
+                            displayed.request(displayed.retryRequest)
+                            revision += 1
+                        }.disabled(connectivity.localOnly)
+                    }
+                }
+                if displayed.nextStartIndex != nil, !connectivity.localOnly {
+                    Group {
+                        if displayed.isLoading {
+                            ProgressView("Loading more…")
+                        } else {
+                            Color.clear.frame(height: 1).accessibilityHidden(true)
+                        }
+                    }
+                    .task(
+                        id:
+                            "\(isActive && isVisible)-\(term)-\(selectedLetter ?? "All")-\(displayed.nextStartIndex ?? -1)-\(revision)"
+                    ) {
+                        await displayed.loadNextPage(
+                            ifActive: isActive && isVisible,
+                            allowsNetwork: !connectivity.localOnly, using: loadPage)
+                    }
+                }
+            }.padding(.horizontal, 16).padding(.vertical, 12)
+        }
+        .accessibilityIdentifier("library-index-\(kind)")
+        .refreshable {
+            guard isActive, isVisible, !connectivity.localOnly else { return }
+            displayed.request(.refresh)
+            revision += 1
+        }
+    }
+
     private func loadPage(_ offset: Int) async throws -> FoundationPage {
         if !term.isEmpty {
             return try await library.search(query: term, kind: kind, startIndex: offset, limit: 50)
@@ -367,11 +476,12 @@ struct FoundationLibraryIndexView: View {
 
     #if os(iOS)
         private func alphabetList(
-            transition: FoundationCollectionTransitionContext?, placeholderRows: Int
+            transition: FoundationCollectionTransitionContext?, viewport: CGSize,
+            placeholderRows: Int
         ) -> some View {
             let window = selectedLetter ?? "All"
-            let rows = displayed.items.enumerated().map { index, item in
-                FoundationAlphabetRow(id: "\(kind):\(item.id):\(index)", item: item)
+            let rows = displayed.items.map { item in
+                FoundationAlphabetRow(id: "\(kind):\(item.id)", item: item)
             }
             let sectionTitle =
                 selectedLetter.map {
@@ -397,6 +507,9 @@ struct FoundationLibraryIndexView: View {
                             rows: rows)
                     ],
                     indexTitles: alphabetTitles,
+                    columnCount: isCoverGrid
+                        ? gridColumnCount(width: viewport.width, nativeIndex: true) : 1,
+                    isCoverGrid: isCoverGrid,
                     allowsDemand: isActive && isVisible && !connectivity.localOnly
                         && !displayed.isLoading && displayed.errorMessage == nil,
                     isRefreshing: displayed.isLoading,
@@ -411,20 +524,26 @@ struct FoundationLibraryIndexView: View {
                         revision += 1
                     }
                 ) { entry in
-                    FoundationLibraryItemRow(
-                        item: entry.item, library: library, isActive: isActive && isVisible,
-                        open: { openedItem = entry.item },
-                        play: kind == .track
-                            ? {
-                                if let index = displayed.items.firstIndex(where: {
-                                    $0.id == entry.item.id
-                                }) {
-                                    play(index)
-                                }
-                            } : nil,
-                        player: player, showsTrackArtwork: true,
-                        navigate: { openedItem = $0 }
-                    )
+                    Group {
+                        if isCoverGrid {
+                            collectionTile(entry.item)
+                        } else {
+                            FoundationLibraryItemRow(
+                                item: entry.item, library: library, isActive: isActive && isVisible,
+                                open: { openedItem = entry.item },
+                                play: kind == .track
+                                    ? {
+                                        if let index = displayed.items.firstIndex(where: {
+                                            $0.id == entry.item.id
+                                        }) {
+                                            play(index)
+                                        }
+                                    } : nil,
+                                player: player, showsTrackArtwork: true,
+                                navigate: { openedItem = $0 }
+                            )
+                        }
+                    }
                     .environmentObject(downloads)
                     .environmentObject(connectivity)
                     .environmentObject(actions)
@@ -448,9 +567,15 @@ struct FoundationLibraryIndexView: View {
                     if displayed.items.isEmpty, !displayed.loaded, displayed.errorMessage == nil,
                         !connectivity.localOnly
                     {
-                        FoundationLoadingPlaceholder(rowCount: placeholderRows, rowSpacing: 24)
-                            .padding(.horizontal, 16).padding(.trailing, 24)
-                            .allowsHitTesting(false)
+                        FoundationLoadingPlaceholder(
+                            layout: isCoverGrid ? .albumGrid : .rows,
+                            rowCount: isCoverGrid
+                                ? gridPlaceholderCount(viewport: viewport, nativeIndex: true)
+                                : placeholderRows,
+                            rowSpacing: 24
+                        )
+                        .padding(.horizontal, 16).padding(.trailing, 24)
+                        .allowsHitTesting(false)
                     }
                 }
                 .accessibilityIdentifier("library-index-\(kind)")
@@ -483,5 +608,48 @@ struct FoundationLibraryIndexView: View {
         } else {
             player.setQueue(selection.items, selectedIndex: selection.index)
         }
+    }
+}
+
+/// Geometry policy shared by native hosted rows and viewport-sized cover placeholders.
+enum FoundationLibraryGridLayout {
+    static func rowCount(itemCount: Int, columns: Int) -> Int {
+        guard itemCount > 0 else { return 0 }
+        let count = max(1, columns)
+        return itemCount / count + (itemCount % count == 0 ? 0 : 1)
+    }
+
+    static func itemRange(row: Int, itemCount: Int, columns: Int) -> Range<Int> {
+        guard row >= 0, row < rowCount(itemCount: itemCount, columns: columns) else {
+            return 0..<0
+        }
+        let count = max(1, columns)
+        let start = row * count
+        return start..<(start + min(count, itemCount - start))
+    }
+
+    static func columnCount(width: Double, accessibility: Bool, nativeIndex: Bool = false) -> Int {
+        guard width.isFinite, width > 0 else { return 1 }
+        let usable = max(1, width - 32 - (nativeIndex ? 22 : 0))
+        let minimum = accessibility ? 240.0 : 140.0
+        return max(1, Int(min(100, (usable + 18) / (minimum + 18))))
+    }
+
+    static func placeholderCount(
+        width: Double, height: Double, accessibility: Bool,
+        textHeight: Double, nativeIndex: Bool = false
+    ) -> Int {
+        guard width.isFinite, width > 0, height.isFinite, height > 0, textHeight.isFinite else {
+            return columnCount(width: width, accessibility: accessibility, nativeIndex: nativeIndex)
+        }
+        let columns = columnCount(
+            width: width, accessibility: accessibility, nativeIndex: nativeIndex)
+        let usable = max(1, width - 32 - (nativeIndex ? 22 : 0))
+        let cover = min(
+            accessibility ? 320 : 240, max(1, (usable - Double(columns - 1) * 18) / Double(columns))
+        )
+        let rowHeight = cover + max(1, textHeight) + 22
+        let rows = max(1, Int(min(100, ceil(height / rowHeight))))
+        return min(200, columns * rows)
     }
 }
