@@ -182,7 +182,8 @@ final class FoundationLibraryTests: XCTestCase {
             if index == 1 {
                 XCTAssertNil(itemTypes)
             } else if index == 4 {
-                XCTAssertEqual(itemTypes, "MusicAlbum,Audio")
+                let genreTypes = query.filter { $0.name == "includeItemTypes" }.compactMap(\.value)
+                XCTAssertEqual(genreTypes, ["MusicAlbum", "Audio"])
             } else {
                 XCTAssertEqual(itemTypes, types[index].1)
             }
