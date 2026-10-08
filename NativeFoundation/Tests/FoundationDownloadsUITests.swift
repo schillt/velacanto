@@ -1409,6 +1409,13 @@ final class FoundationDownloadsUITests: XCTestCase {
         let toolbar = app.buttons["More actions"]
         let detailFrame = detail.frame
         let toolbarFrame = toolbar.frame
+        let toolbarDownload = app.navigationBars.buttons.matching(
+            identifier: "download-state-complete"
+        ).firstMatch
+        XCTAssertTrue(toolbarDownload.exists && toolbarDownload.isHittable)
+        let downloadFrame = toolbarDownload.frame
+        let downloadLabel = toolbarDownload.label
+        let downloadEnabled = toolbarDownload.isEnabled
         XCTAssertGreaterThan(detailFrame.width, 0)
         XCTAssertGreaterThan(detailFrame.height, 0)
         XCTAssertGreaterThan(toolbarFrame.width, 0)
@@ -1419,23 +1426,42 @@ final class FoundationDownloadsUITests: XCTestCase {
         XCTAssertTrue(baselineAdd.isEnabled)
         let baselineAddEnabled = baselineAdd.isEnabled
         let menuRemoval = app.buttons["Remove Downloads"]
+        XCTAssertTrue(menuRemoval.exists)
+        let menuRemovalFrame = menuRemoval.frame
+        XCTAssertFalse(
+            menuRemovalFrame.intersects(downloadFrame),
+            "The native menu row and canonical download toolbar have distinct geometry")
         let point = CGPoint(
             x: detailFrame.minX + detailFrame.width * 0.06,
             y: toolbarFrame.maxY + 32)
         XCTAssertTrue(app.frame.contains(point) && detailFrame.contains(point))
         XCTAssertFalse(toolbarFrame.insetBy(dx: -12, dy: -12).contains(point))
         XCTAssertFalse(baselineAdd.frame.insetBy(dx: -12, dy: -12).contains(point))
-        if menuRemoval.exists {
-            XCTAssertFalse(menuRemoval.frame.insetBy(dx: -12, dy: -12).contains(point))
-        }
+        XCTAssertFalse(menuRemovalFrame.insetBy(dx: -12, dy: -12).contains(point))
+        XCTAssertFalse(downloadFrame.insetBy(dx: -12, dy: -12).contains(point))
         app.coordinate(withNormalizedOffset: .zero).withOffset(
             CGVector(dx: point.x - app.frame.minX, dy: point.y - app.frame.minY)
         ).tap()
-        for overlay in [baselineAdd, menuRemoval, app.buttons["Remove"]] {
+        for overlay in [baselineAdd, app.buttons["Remove"]] {
             let closed = expectation(
                 for: NSPredicate(format: "exists == false"), evaluatedWith: overlay)
             wait(for: [closed], timeout: 5)
         }
+        // The menu and toolbar share this download identifier. Query the native bar anew:
+        // global Remove Downloads legitimately resolves to the restored canonical control.
+        let restoredMore = app.buttons["More actions"]
+        XCTAssertTrue(restoredMore.exists && restoredMore.isHittable)
+        let restoredDownload = app.navigationBars.buttons.matching(
+            identifier: "download-state-complete"
+        ).firstMatch
+        XCTAssertTrue(restoredDownload.exists && restoredDownload.isHittable)
+        XCTAssertEqual(restoredDownload.label, downloadLabel)
+        XCTAssertEqual(restoredDownload.isEnabled, downloadEnabled)
+        XCTAssertEqual(restoredDownload.frame.minX, downloadFrame.minX, accuracy: 2)
+        XCTAssertEqual(restoredDownload.frame.minY, downloadFrame.minY, accuracy: 2)
+        XCTAssertEqual(restoredDownload.frame.width, downloadFrame.width, accuracy: 2)
+        XCTAssertEqual(restoredDownload.frame.height, downloadFrame.height, accuracy: 2)
+        XCTAssertFalse(restoredDownload.frame.intersects(menuRemovalFrame))
         XCTAssertFalse(app.staticTexts["Remove downloads?"].exists)
         let baseline = canonicalPresentation(
             app, state: "full", offline: false,
