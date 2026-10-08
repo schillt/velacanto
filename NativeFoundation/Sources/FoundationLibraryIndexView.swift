@@ -26,6 +26,7 @@ struct FoundationLibraryIndexView: View {
     @State private var selectedLetter: String?
     @State private var usesNativeAlphabet = false
     @State private var capability: FoundationAlphabetCapability = .unavailable
+    @State private var capabilityResolved = false
     @State private var capabilityRefreshRevision = 0
     @StateObject private var searchModel = FoundationBrowseModel()
     @State private var query = ""
@@ -38,20 +39,35 @@ struct FoundationLibraryIndexView: View {
     private var displayed: FoundationBrowseModel {
         !term.isEmpty ? searchModel : (selectedLetter == nil ? model : seekModel)
     }
+    // An unsupported server can still index complete known membership without issuing seeks.
+    private var usesLoadedAlphabet: Bool {
+        !connectivity.localOnly && capabilityResolved && capability == .unavailable
+            && model.loaded && model.nextStartIndex == nil && model.errorMessage == nil
+    }
+    private var indexesDisplayNames: Bool { connectivity.localOnly || usesLoadedAlphabet }
+    private var alphabetDescription: String {
+        connectivity.localOnly
+            ? "Downloaded display names"
+            : (usesLoadedAlphabet
+                ? "Loaded display names; All restores browsing"
+                : "Server sort names; All restores browsing")
+    }
     private var alphabetAvailable: Bool {
         kind == .track && term.isEmpty
-            && (connectivity.localOnly || capability == .verified)
+            && (connectivity.localOnly || capability == .verified || usesLoadedAlphabet)
     }
     private var wantsNativeAlphabet: Bool {
         alphabetAvailable && (selectedLetter != nil || displayed.loaded || !displayed.items.isEmpty)
     }
     private var alphabetTitles: [String] {
-        ["All"] + (connectivity.localOnly ? ["#"] : [])
+        ["All"] + (indexesDisplayNames ? ["#"] : [])
             + (65...90).compactMap { UnicodeScalar($0).map { String($0) } }
     }
     private var windowDescription: String {
         guard let selectedLetter else { return "All" }
-        return selectedLetter == "#" ? "Other downloaded names" : selectedLetter + " and following"
+        return selectedLetter == "#"
+            ? (connectivity.localOnly ? "Other downloaded names" : "Other display names")
+            : selectedLetter + " and following"
     }
     private var isCoverGrid: Bool { kind == .album || kind == .playlist }
 
@@ -170,6 +186,7 @@ struct FoundationLibraryIndexView: View {
             seekModel.clearRetainedData()
         }
         .onChange(of: refreshToken) { _, _ in
+            if usesLoadedAlphabet, selectedLetter != nil { chooseLetter("All") }
             model.request(.refresh)
             if !term.isEmpty { searchModel.request(.refresh) }
             if selectedLetter != nil { seekModel.request(.refresh) }
@@ -192,6 +209,7 @@ struct FoundationLibraryIndexView: View {
             seekModel.clearRetainedData()
             searchModel.clearRetainedData()
             capability = .unavailable
+            capabilityResolved = false
             revision += 1
         }
         .task(
@@ -202,17 +220,19 @@ struct FoundationLibraryIndexView: View {
             let value = await library.alphabetCapability()
             guard !Task.isCancelled else { return }
             capability = value
+            capabilityResolved = true
         }
         .task(
             id:
-                "\(active)-\(!allowsNetwork)-\(library.catalogScopeID)-\(term)-\(selectedLetter ?? "All")-\(revision)"
+                "\(active)-\(!allowsNetwork)-\(library.catalogScopeID)-\(term)-\(selectedLetter ?? "All")-\(usesLoadedAlphabet)-\(revision)"
         ) {
             guard active, !Task.isCancelled else { return }
-            if !allowsNetwork {
+            if !allowsNetwork || (usesLoadedAlphabet && selectedLetter != nil) {
+                let source = allowsNetwork ? model.items : localItems
                 let items =
                     term.isEmpty
-                    ? localItems
-                    : localItems.filter {
+                    ? source
+                    : source.filter {
                         [$0.title, $0.subtitle, $0.album?.title ?? "", $0.artist?.title ?? ""]
                             .contains { $0.localizedStandardContains(term) }
                     }
@@ -228,7 +248,7 @@ struct FoundationLibraryIndexView: View {
                 displayed.installSnapshot(window)
                 return
             }
-            if selectedLetter != nil,
+            if selectedLetter != nil, !usesLoadedAlphabet,
                 selectedLetter
                     != FoundationAlphabetSelectionPolicy.onlineSelection(
                         selectedLetter, capability: capability)
@@ -494,6 +514,7 @@ struct FoundationLibraryIndexView: View {
     }
 
     private func restoreValidOnlineSelection() {
+        if usesLoadedAlphabet { return }
         let normalized = FoundationAlphabetSelectionPolicy.onlineSelection(
             selectedLetter, capability: capability)
         if selectedLetter != normalized { chooseLetter(normalized ?? "All") }
@@ -519,12 +540,14 @@ struct FoundationLibraryIndexView: View {
             }
             let sectionTitle =
                 selectedLetter.map {
-                    $0 == "#" ? "Other downloaded names" : $0 + " and following"
+                    $0 == "#"
+                        ? (connectivity.localOnly
+                            ? "Other downloaded names" : "Other display names")
+                        : $0 + " and following"
                 } ?? title
             return VStack(spacing: 0) {
                 Text(
-                    connectivity.localOnly
-                        ? "Downloaded display names" : "Server sort names; All restores browsing"
+                    alphabetDescription
                 )
                 .font(.caption).foregroundStyle(.secondary)
                 .padding(.horizontal).padding(.vertical, 4)
@@ -555,6 +578,8 @@ struct FoundationLibraryIndexView: View {
                     onRefresh: {
                         guard isActive, isVisible, !connectivity.localOnly else { return }
                         retryAlphabetCapabilityIfNeeded()
+                        // Refresh complete source membership before applying another local window.
+                        if usesLoadedAlphabet, selectedLetter != nil { chooseLetter("All") }
                         displayed.request(.refresh)
                         revision += 1
                     }

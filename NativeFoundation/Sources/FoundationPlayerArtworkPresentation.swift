@@ -124,6 +124,7 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
         private var surfaceToken: UUID?
         private var surfaceIdentity: String?
         var allowsInteractiveDismissal = true
+        var interactiveDismissalHeaderOnly = false
         private var compact: Anchor?
         private var expanded: Anchor?
         private var generation: UInt = 0
@@ -167,7 +168,7 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
 
         fileprivate func surfaceRect(in container: UIView) -> CGRect? {
             guard let source = compactSurface, let window = container.window,
-                source.window === window, surfaceIdentity == expanded?.identity
+                source.window === window
             else { return nil }
             let rect = source.convert(source.bounds, to: container)
             guard
@@ -215,7 +216,9 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
             else { return false }
             // Lyrics, queue, scrub, nested sheet state is supplied by PlayerView.
             // Only the artwork region starts this app-owned gesture; controls stay native.
-            return artView.convert(artView.bounds, to: view).contains(location)
+            return location.y <= view.safeAreaInsets.top + 64
+                || (!interactiveDismissalHeaderOnly
+                    && artView.convert(artView.bounds, to: view).contains(location))
         }
 
         fileprivate func beginAnimation(
@@ -660,6 +663,9 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
             _ gestureRecognizer: UIGestureRecognizer,
             shouldReceive touch: UITouch
         ) -> Bool {
+            // The grabber is also a button. Let a downward pan begin on that
+            // header while keeping queue rows, sliders and other controls native.
+            if touch.location(in: view).y <= view.safeAreaInsets.top + 64 { return true }
             var touched = touch.view
             while let candidate = touched, candidate !== view {
                 if candidate is UIControl || candidate is UIScrollView { return false }
@@ -838,25 +844,26 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
             let glass: UIView?
             let nativeGlass: UIVisualEffectView?
             if let surfaceRect {
-                // UIKit-owned clipping geometry moves with the artwork and player reveal.
-                // Keep the effect's backing geometry fixed while its material changes.
-                let surface = UIView()
+                // The native effect itself changes bounds and corner geometry. A fixed
+                // full-screen effect clipped by a moving wrapper only moves its colors.
+                let surface: UIView
                 if model?.reduceTransparency == true {
                     nativeGlass = nil
+                    surface = UIView()
                     surface.backgroundColor = UIColor.systemBackground.resolvedColor(
                         with: UITraitCollection(userInterfaceStyle: .dark))
                 } else {
-                    let effect = UIVisualEffectView(effect: nil)
-                    effect.frame = CGRect(origin: .zero, size: container.bounds.size)
-                    effect.cornerConfiguration = .uniformCorners(radius: .fixed(0))
+                    let effect = UIVisualEffectView(effect: UIGlassEffect(style: .regular))
+                    effect.cornerConfiguration = .uniformCorners(
+                        radius: .fixed(presenting ? surfaceRect.height / 2 : 0))
                     effect.isUserInteractionEnabled = false
                     effect.isAccessibilityElement = false
-                    surface.addSubview(effect)
+                    surface = effect
                     nativeGlass = effect
                 }
                 surface.isUserInteractionEnabled = false
                 surface.isAccessibilityElement = false
-                surface.clipsToBounds = true
+                surface.clipsToBounds = nativeGlass == nil
                 surface.layer.cornerCurve = .continuous
                 surface.frame = presenting ? surfaceRect : container.bounds
                 surface.layer.cornerRadius = presenting ? surfaceRect.height / 2 : 0
@@ -908,6 +915,8 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
                 if let surfaceRect, let glass {
                     glass.frame = presenting ? container.bounds : surfaceRect
                     glass.layer.cornerRadius = presenting ? 0 : surfaceRect.height / 2
+                    nativeGlass?.cornerConfiguration = .uniformCorners(
+                        radius: .fixed(presenting ? 0 : surfaceRect.height / 2))
                     reveal.frame =
                         presenting
                         ? playerView.bounds : container.convert(surfaceRect, to: playerView)

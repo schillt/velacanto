@@ -5,14 +5,93 @@ import XCTest
 
 final class FoundationLibraryTests: XCTestCase {
 
-    func testAlphabetCompatibilityRejectsUnknownAndKnownBrokenVersions() {
-        for version in ["10.10.7", "10.11.8"] {
-            XCTAssertEqual(FoundationAlphabetCapability.forServerVersion(version), .verified)
+    func testFunctionalAlphabetProbeUsesSortNameNotDisplayTitleAndHasNoVersionGate() async {
+        let recorder = Recorder()
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            await recorder.append(request)
+            return (Self.alphabetProbeData(request)!, Self.response(request))
         }
-        for version in [String?]([nil, "", "10.11.0", "10.11.7", "10.11.9", "10.11.8.0", "11.0.0"])
-        {
-            XCTAssertEqual(FoundationAlphabetCapability.forServerVersion(version), .unavailable)
+        let result = await library.alphabetCapability()
+        XCTAssertEqual(result, .verified)
+        let requests = await recorder.requests
+        XCTAssertEqual(requests.count, 2)
+        for request in requests {
+            XCTAssertTrue(request.url!.path.hasSuffix("/Items"))
+            let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!
+                .queryItems!
+            func value(_ name: String) -> String? { query.first { $0.name == name }?.value }
+            XCTAssertEqual(value("limit"), "1")
+            XCTAssertEqual(value("fields"), "SortName")
+            XCTAssertEqual(value("includeItemTypes"), "Audio")
+            XCTAssertEqual(value("sortBy"), "SortName")
+            XCTAssertEqual(value("enableImages"), "false")
+            XCTAssertNil(value("parentId"))
         }
+        let boundary = URLComponents(url: requests[1].url!, resolvingAgainstBaseURL: false)!
+            .queryItems!.first { $0.name == "nameStartsWithOrGreater" }?.value
+        XCTAssertEqual(boundary, "b")
+    }
+
+    func testFunctionalAlphabetProbeRejectsMissingSortNameEmptyCatalogAndIncoherentCount() async {
+        let initial =
+            #"{"Items":[{"Id":"00000000000000000000000000000001","Type":"Audio","Name":"The Zebra","SortName":"alpha"}],"StartIndex":0,"TotalRecordCount":2}"#
+        let cases = [
+            (#"{"Items":[],"StartIndex":0,"TotalRecordCount":0}"#, initial, 2),
+            (initial.replacingOccurrences(of: #","SortName":"alpha""#, with: ""), initial, 2),
+            (initial.replacingOccurrences(of: "alpha", with: "zebra"), initial, 2),
+            (initial, initial, 2),
+            (
+                initial,
+                #"{"Items":[{"Id":"00000000000000000000000000000002","Type":"Audio","SortName":"bravo"}],"StartIndex":0,"TotalRecordCount":2}"#,
+                4
+            ),
+            (
+                initial,
+                #"{"Items":[{"Id":"00000000000000000000000000000002","Type":"Audio"}],"StartIndex":0,"TotalRecordCount":1}"#,
+                4
+            ),
+            (initial, #"{"Items":[],"StartIndex":0,"TotalRecordCount":1}"#, 4),
+            (
+                initial,
+                #"{"Items":[{"Id":"00000000000000000000000000000002","Type":"Audio","SortName":"bravo"}],"StartIndex":0,"TotalRecordCount":3}"#,
+                4
+            ),
+        ]
+        for (first, filtered, count) in cases {
+            let recorder = Recorder()
+            let library = FoundationJellyfinLibrary(session: session) { request in
+                await recorder.append(request)
+                let hasBoundary = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!
+                    .queryItems!.contains { $0.name == "nameStartsWithOrGreater" }
+                return (Data((hasBoundary ? filtered : first).utf8), Self.response(request))
+            }
+            let result = await library.alphabetCapability()
+            XCTAssertEqual(result, .unavailable)
+            let cached = await library.alphabetCapability()
+            XCTAssertEqual(cached, .unavailable)
+            let requests = await recorder.requests
+            XCTAssertEqual(requests.count, count)
+        }
+    }
+
+    func testInconclusiveAlphabetProbeRetriesWhenCatalogFills() async {
+        let recorder = Recorder()
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            await recorder.append(request)
+            if await recorder.requests.count == 1 {
+                return (
+                    Data(#"{"Items":[],"StartIndex":0,"TotalRecordCount":0}"#.utf8),
+                    Self.response(request)
+                )
+            }
+            return (Self.alphabetProbeData(request)!, Self.response(request))
+        }
+        let empty = await library.alphabetCapability()
+        XCTAssertEqual(empty, .unavailable)
+        let filled = await library.alphabetCapability()
+        XCTAssertEqual(filled, .verified)
+        let requests = await recorder.requests
+        XCTAssertEqual(requests.count, 3)
     }
 
     func testAlphabetWindowsAreBoundedScopedRelativeAndShareOneCapabilityRequest() async throws {
@@ -20,8 +99,8 @@ final class FoundationLibraryTests: XCTestCase {
         let scope = "00000000000000000000000000000009"
         let library = FoundationJellyfinLibrary(session: session) { request in
             await recorder.append(request)
-            if request.url?.path.hasSuffix("/System/Info/Public") == true {
-                return (Data(#"{"Version":"10.11.8"}"#.utf8), Self.response(request))
+            if let data = Self.alphabetProbeData(request) {
+                return (data, Self.response(request))
             }
             let query =
                 URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
@@ -44,8 +123,8 @@ final class FoundationLibraryTests: XCTestCase {
         }
         let requests = await recorder.requests
         XCTAssertEqual(
-            requests.filter { $0.url?.path.hasSuffix("/System/Info/Public") == true }.count, 1)
-        let pages = requests.filter { $0.url?.path.hasSuffix("/System/Info/Public") != true }
+            requests.filter { Self.alphabetProbeData($0) != nil }.count, 2)
+        let pages = requests.filter { Self.alphabetProbeData($0) == nil }
         XCTAssertEqual(pages.count, 10)
         for (index, request) in pages.enumerated() {
             let query =
@@ -72,11 +151,11 @@ final class FoundationLibraryTests: XCTestCase {
         }
     }
 
-    func testUnknownServerAlphabetDoesNotIssueCatalogSeek() async throws {
+    func testIgnoredAlphabetBoundaryDoesNotIssueUserCatalogSeek() async throws {
         let recorder = Recorder()
         let library = FoundationJellyfinLibrary(session: session) { request in
             await recorder.append(request)
-            return (Data(#"{"Version":"10.11.0"}"#.utf8), Self.response(request))
+            return (Self.alphabetProbeData(request, ignoresBoundary: true)!, Self.response(request))
         }
         for _ in 0..<2 {
             do {
@@ -85,8 +164,8 @@ final class FoundationLibraryTests: XCTestCase {
             } catch { XCTAssertEqual(error as? FoundationLibraryError, .unavailable) }
         }
         let requests = await recorder.requests
-        XCTAssertEqual(requests.count, 1)
-        XCTAssertTrue(requests[0].url!.path.hasSuffix("/System/Info/Public"))
+        XCTAssertEqual(requests.count, 2)
+        XCTAssertNotNil(Self.alphabetProbeData(requests[0]))
     }
 
     func testFailedAlphabetProbeCanExplicitlyRetryWithOneCoalescedAccountRequest() async {
@@ -96,8 +175,8 @@ final class FoundationLibraryTests: XCTestCase {
             await recorder.append(request)
             let count = await recorder.requests.count
             if count == 1 { throw URLError(.notConnectedToInternet) }
-            await gate.suspend()
-            return (Data(#"{"Version":"10.11.8"}"#.utf8), Self.response(request))
+            if count == 2 { await gate.suspend() }
+            return (Self.alphabetProbeData(request)!, Self.response(request))
         }
         let failed = await library.alphabetCapability()
         XCTAssertEqual(failed, .unavailable)
@@ -115,32 +194,32 @@ final class FoundationLibraryTests: XCTestCase {
         let cached = await library.alphabetCapability()
         XCTAssertEqual(cached, .verified)
         let requests = await recorder.requests
-        XCTAssertEqual(requests.count, 2)
-        XCTAssertTrue(requests.allSatisfy { $0.url!.path.hasSuffix("/System/Info/Public") })
+        XCTAssertEqual(requests.count, 3)
+        XCTAssertTrue(requests.allSatisfy { Self.alphabetProbeData($0) != nil })
     }
 
-    func testFailedAlphabetProbeCachesResolvedUnsupportedVersionAfterExplicitRetry() async {
+    func testFailedAlphabetProbeCachesResolvedUnsupportedFilterAfterExplicitRetry() async {
         let recorder = Recorder()
         let library = FoundationJellyfinLibrary(session: session) { request in
             await recorder.append(request)
             if await recorder.requests.count == 1 { throw URLError(.timedOut) }
-            return (Data(#"{"Version":"10.11.9"}"#.utf8), Self.response(request))
+            return (Self.alphabetProbeData(request, ignoresBoundary: true)!, Self.response(request))
         }
         for _ in 0..<3 {
             let value = await library.alphabetCapability()
             XCTAssertEqual(value, .unavailable)
         }
         let requests = await recorder.requests
-        XCTAssertEqual(requests.count, 2)
-        XCTAssertTrue(requests.allSatisfy { $0.url!.path.hasSuffix("/System/Info/Public") })
+        XCTAssertEqual(requests.count, 3)
+        XCTAssertTrue(requests.allSatisfy { Self.alphabetProbeData($0) != nil })
     }
 
     func testAlphabetMemoIsRetiredAtAccountEnd() async throws {
         let recorder = Recorder()
         let library = FoundationJellyfinLibrary(session: session) { request in
             await recorder.append(request)
-            if request.url!.path.hasSuffix("/System/Info/Public") {
-                return (Data(#"{"Version":"10.10.7"}"#.utf8), Self.response(request))
+            if let data = Self.alphabetProbeData(request) {
+                return (data, Self.response(request))
             }
             return (Data(), Self.response(request, status: 204))
         }
@@ -150,7 +229,7 @@ final class FoundationLibraryTests: XCTestCase {
         let ended = await library.scoped(to: itemID).alphabetCapability()
         XCTAssertEqual(ended, .unavailable)
         let requests = await recorder.requests
-        XCTAssertEqual(requests.count, 2)
+        XCTAssertEqual(requests.count, 3)
     }
 
     func testCancellingOneCapabilityWaiterKeepsAccountSingleflightAvailable() async {
@@ -158,8 +237,8 @@ final class FoundationLibraryTests: XCTestCase {
         let gate = FoundationAlphabetTestGate()
         let library = FoundationJellyfinLibrary(session: session) { request in
             await recorder.append(request)
-            await gate.suspend()
-            return (Data(#"{"Version":"10.11.8"}"#.utf8), Self.response(request))
+            if await recorder.requests.count == 1 { await gate.suspend() }
+            return (Self.alphabetProbeData(request)!, Self.response(request))
         }
         let first = Task { await library.alphabetCapability() }
         await gate.entered()
@@ -171,7 +250,7 @@ final class FoundationLibraryTests: XCTestCase {
         XCTAssertEqual(result, .verified)
         _ = await first.value
         let requests = await recorder.requests
-        XCTAssertEqual(requests.count, 1)
+        XCTAssertEqual(requests.count, 2)
     }
 
     func testLogoutWhileCapabilityInflightRejectsLateCompletionAndNewReads() async throws {
@@ -179,9 +258,9 @@ final class FoundationLibraryTests: XCTestCase {
         let gate = FoundationAlphabetTestGate()
         let library = FoundationJellyfinLibrary(session: session) { request in
             await recorder.append(request)
-            if request.url!.path.hasSuffix("/System/Info/Public") {
-                await gate.suspend()
-                return (Data(#"{"Version":"10.11.8"}"#.utf8), Self.response(request))
+            if let data = Self.alphabetProbeData(request) {
+                if await recorder.requests.count == 1 { await gate.suspend() }
+                return (data, Self.response(request))
             }
             return (Data(), Self.response(request, status: 204))
         }
@@ -206,8 +285,8 @@ final class FoundationLibraryTests: XCTestCase {
         for (kind, type) in types {
             let library = FoundationJellyfinLibrary(session: session) { request in
                 await recorder.append(request)
-                if request.url!.path.hasSuffix("/System/Info/Public") {
-                    return (Data(#"{"Version":"10.11.8"}"#.utf8), Self.response(request))
+                if let data = Self.alphabetProbeData(request) {
+                    return (data, Self.response(request))
                 }
                 let body =
                     #"{"Items":[{"Id":"00000000000000000000000000000001","Type":"TYPE","Name":"Synthetic F"}],"StartIndex":0,"TotalRecordCount":1}"#
@@ -220,7 +299,7 @@ final class FoundationLibraryTests: XCTestCase {
             XCTAssertNil(page.nextStartIndex)
         }
         let requests = await recorder.requests
-        let pages = requests.filter { !$0.url!.path.hasSuffix("/System/Info/Public") }
+        let pages = requests.filter { Self.alphabetProbeData($0) == nil }
         for (index, request) in pages.enumerated() {
             let query =
                 URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
@@ -239,8 +318,8 @@ final class FoundationLibraryTests: XCTestCase {
     func testAlphabetEmptyTailIsCompleteButEmptyPositiveCountIsRejected() async throws {
         for (offset, total, valid) in [(0, 0, true), (50, 50, true), (0, 2, false)] {
             let library = FoundationJellyfinLibrary(session: session) { request in
-                if request.url!.path.hasSuffix("/System/Info/Public") {
-                    return (Data(#"{"Version":"10.10.7"}"#.utf8), Self.response(request))
+                if let data = Self.alphabetProbeData(request) {
+                    return (data, Self.response(request))
                 }
                 let body = "{\"Items\":[],\"StartIndex\":OFFSET,\"TotalRecordCount\":TOTAL}"
                     .replacingOccurrences(of: "OFFSET", with: String(offset))
@@ -288,18 +367,18 @@ final class FoundationLibraryTests: XCTestCase {
             userID: "00000000000000000000000000000004", deviceID: session.deviceID)
         let first = FoundationJellyfinLibrary(session: session) { request in
             await recorder.append(request)
-            return (Data(#"{"Version":"10.11.8"}"#.utf8), Self.response(request))
+            return (Self.alphabetProbeData(request)!, Self.response(request))
         }
         let second = FoundationJellyfinLibrary(session: otherSession) { request in
             await recorder.append(request)
-            return (Data(#"{"Version":"10.11.0"}"#.utf8), Self.response(request))
+            return (Self.alphabetProbeData(request, ignoresBoundary: true)!, Self.response(request))
         }
         let supported = await first.alphabetCapability()
         let unsupported = await second.alphabetCapability()
         XCTAssertEqual(supported, .verified)
         XCTAssertEqual(unsupported, .unavailable)
         let requests = await recorder.requests
-        XCTAssertEqual(requests.count, 2)
+        XCTAssertEqual(requests.count, 4)
     }
 
     @MainActor
@@ -379,8 +458,8 @@ final class FoundationLibraryTests: XCTestCase {
         let gate = FoundationAlphabetTestGate()
         let library = FoundationJellyfinLibrary(session: session) { request in
             await recorder.append(request)
-            await gate.suspend()
-            return (Data(#"{"Version":"10.11.8"}"#.utf8), Self.response(request))
+            if await recorder.requests.count == 1 { await gate.suspend() }
+            return (Self.alphabetProbeData(request)!, Self.response(request))
         }
         let scopeID = itemID
         let pending = Task { await library.scoped(to: scopeID).alphabetCapability() }
@@ -395,7 +474,7 @@ final class FoundationLibraryTests: XCTestCase {
         XCTAssertEqual(ended, .unavailable)
         let requests = await recorder.requests
         XCTAssertEqual(requests.count, 1)
-        XCTAssertTrue(requests[0].url!.path.hasSuffix("/System/Info/Public"))
+        XCTAssertNotNil(Self.alphabetProbeData(requests[0]))
     }
 
     func testLibraryCoverGridGeometryMatchesCompactWideAndAccessibilityViewports() {
@@ -1282,6 +1361,23 @@ final class FoundationLibraryTests: XCTestCase {
         XCTAssertNil(empty.nextStartIndex)
         let finalCount = await recorder.requests.count
         XCTAssertEqual(finalCount, 2)
+    }
+
+    /// SortName deliberately differs from display title to cover article-aware provider sorting.
+    private static func alphabetProbeData(_ request: URLRequest, ignoresBoundary: Bool = false)
+        -> Data?
+    {
+        let query =
+            URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        guard query.contains(where: { $0.name == "limit" && $0.value == "1" }),
+            query.contains(where: { $0.name == "fields" && $0.value == "SortName" })
+        else { return nil }
+        let filtered = !ignoresBoundary && query.contains { $0.name == "nameStartsWithOrGreater" }
+        let body =
+            filtered
+            ? #"{"Items":[{"Id":"00000000000000000000000000000002","Type":"Audio","Name":"The Apple","SortName":"bravo"}],"StartIndex":0,"TotalRecordCount":1}"#
+            : #"{"Items":[{"Id":"00000000000000000000000000000001","Type":"Audio","Name":"The Zebra","SortName":"alpha"}],"StartIndex":0,"TotalRecordCount":2}"#
+        return Data(body.utf8)
     }
 
     private static func response(_ request: URLRequest, status: Int = 200) -> HTTPURLResponse {

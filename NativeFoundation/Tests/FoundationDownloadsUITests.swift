@@ -178,6 +178,51 @@ final class FoundationDownloadsUITests: XCTestCase {
         }
     }
 
+    private func dragQueueEntry(
+        _ source: XCUIElement, to target: XCUIElement, in app: XCUIApplication
+    ) {
+        let list = app.descendants(matching: .any)["fixture-queue-list"]
+        let origin = app.coordinate(withNormalizedOffset: .zero)
+        let x = list.frame.maxX - app.frame.minX - 24
+        let handle = origin.withOffset(CGVector(dx: x, dy: source.frame.midY - app.frame.minY))
+        let destination = origin.withOffset(CGVector(dx: x, dy: target.frame.midY - app.frame.minY))
+        handle.press(
+            forDuration: 0.8, thenDragTo: destination, withVelocity: .slow, thenHoldForDuration: 0.3
+        )
+    }
+
+    func testQueueRepeatedDragReordersOccurrencesAndKeepsCurrentPlayback() {
+        continueAfterFailure = false
+        let app = launch(
+            productionShell: true, canonicalDownloadState: "full", longPlayback: true,
+            queuePresentation: true)
+        selectTab("Library", in: app)
+        openCanonicalCollection("album", fromDownloads: false, in: app)
+        tapVisible(app.buttons["collection-track-0"], in: app)
+        openNowPlaying(app)
+        app.buttons["Show queue"].tap()
+        let selected = queueSnapshot(app)["selected"] as? String
+        capture("Native Queue reorder handles preserve row styling", in: app)
+        for _ in 0..<3 {
+            let before = queueSnapshot(app)["upcoming"] as? [String] ?? []
+            XCTAssertGreaterThanOrEqual(before.count, 2)
+            guard before.count >= 2 else { return }
+            let source = app.buttons["fixture-queue-select-" + before[1]]
+            let target = app.buttons["fixture-queue-select-" + before[0]]
+            XCTAssertTrue(source.isHittable && target.isHittable)
+            dragQueueEntry(source, to: target, in: app)
+            let after = queueSnapshot(app)
+            XCTAssertEqual(
+                after["upcoming"] as? [String], [before[1], before[0]] + Array(before.dropFirst(2)))
+            XCTAssertEqual(after["selected"] as? String, selected)
+            XCTAssertEqual(after["history"] as? [String], [])
+            XCTAssertTrue(app.buttons["Pause"].exists)
+        }
+        app.buttons["Collapse Now Playing"].tap()
+        XCTAssertTrue(app.buttons["Show Now Playing"].waitForExistence(timeout: 5))
+        capture("Repeated occurrence drag keeps current playback and dismissal", in: app)
+    }
+
     func testNativeQueuePresentationActionsReorderAndPlaybackContinuity() {
         continueAfterFailure = false
         let app = launch(
@@ -262,9 +307,7 @@ final class FoundationDownloadsUITests: XCTestCase {
         let destination = app.buttons["fixture-queue-select-" + initial[0]]
         reveal(source, in: app)
         XCTAssertTrue(source.isHittable && destination.isHittable)
-        source.press(
-            forDuration: 0.8, thenDragTo: destination, withVelocity: .slow,
-            thenHoldForDuration: 0.3)
+        dragQueueEntry(source, to: destination, in: app)
         let reordered = [initial[3]] + Array(initial.prefix(3))
         XCTAssertEqual(queueSnapshot(app)["upcoming"] as? [String], reordered)
         action("Remove from Up Next", entry: initial[2])
@@ -1536,6 +1579,123 @@ final class FoundationDownloadsUITests: XCTestCase {
         field.tap()
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
         XCTAssertEqual(field.value as? String, "Fixture")
+    }
+
+    func testSearchRepeatedOpeningAndFocusReentryKeepsDismissalResponsive() {
+        continueAfterFailure = false
+        let app = launch(productionShell: true, canonicalDownloadState: "full")
+        selectTab("Search", in: app)
+        let field = app.textFields["Search music"]
+        let dismiss = app.buttons["search-dismiss-keyboard"]
+        XCTAssertTrue(dismiss.waitForExistence(timeout: 5))
+        field.typeText("Fixture")
+        for _ in 0..<5 {
+            dismiss.tap()
+            XCTAssertTrue(dismiss.waitForNonExistence(timeout: 3))
+            field.tap()
+            XCTAssertTrue(dismiss.waitForExistence(timeout: 1))
+            XCTAssertTrue(dismiss.isHittable)
+            XCTAssertEqual(field.value as? String, "Fixture")
+        }
+        dismiss.tap()
+        field.tap()
+        dismiss.tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForNonExistence(timeout: 3))
+        selectTab("Library", in: app)
+        selectTab("Search", in: app)
+        XCTAssertTrue(dismiss.waitForExistence(timeout: 1) && dismiss.isHittable)
+        dismiss.tap()
+        XCTAssertTrue(dismiss.waitForNonExistence(timeout: 3))
+        XCTAssertEqual(field.value as? String, "Fixture")
+        capture("Repeated Search split merge and tab reentry preserves query", in: app)
+    }
+
+    func testCompleteLoadedSongsAlphabetFallbackDragAndAllStayInTracks() {
+        continueAfterFailure = false
+        // This fixture has no server alphabet capability and complete two-song membership.
+        let app = launch(productionShell: true, canonicalDownloadState: "full")
+        selectTab("Library", in: app)
+        for category in ["albums", "artists"] {
+            tapVisible(app.buttons["library-category-" + category], in: app)
+            XCTAssertFalse(
+                app.descendants(matching: .any).matching(
+                    NSPredicate(format: "label == %@", "Section index")
+                ).firstMatch.exists)
+            app.navigationBars.buttons.firstMatch.tap()
+        }
+        tapVisible(app.buttons["library-category-songs"], in: app)
+        let table = app.tables["library-index-track"]
+        XCTAssertTrue(table.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Loaded display names; All restores browsing"].exists)
+        let index = table.descendants(matching: .any).matching(
+            NSPredicate(format: "label == %@", "Section index")
+        ).firstMatch
+        XCTAssertTrue(index.waitForExistence(timeout: 5) && index.isHittable)
+        let first = app.buttons.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "Fixture Tone")
+        ).firstMatch
+        XCTAssertTrue(first.exists)
+        index.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.98)).tap()
+        XCTAssertTrue(app.staticTexts["Z and following"].waitForExistence(timeout: 5))
+        XCTAssertFalse(first.exists)
+        tapNativeAlphabet("All", in: app)
+        XCTAssertTrue(first.waitForExistence(timeout: 5))
+        let start = index.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.05))
+        let end = index.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.98))
+        start.press(
+            forDuration: 0.1, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0.2)
+        XCTAssertTrue(app.staticTexts["Z and following"].waitForExistence(timeout: 5))
+        tapNativeAlphabet("All", in: app)
+        XCTAssertTrue(first.waitForExistence(timeout: 5))
+        capture("Complete loaded Songs alphabet tap drag and All without server seek", in: app)
+    }
+
+    func testQueueSkipPauseCollapseAndReopenRepeatedly() {
+        continueAfterFailure = false
+        let app = launch(
+            productionShell: true, canonicalDownloadState: "full", longPlayback: true,
+            queuePresentation: true)
+        selectTab("Library", in: app)
+        openCanonicalCollection("album", fromDownloads: false, in: app)
+        tapVisible(app.buttons["collection-track-0"], in: app)
+        openNowPlaying(app)
+        for iteration in 0..<3 {
+            if app.buttons["Show queue"].exists { app.buttons["Show queue"].tap() }
+            XCTAssertTrue(app.descendants(matching: .any)["fixture-queue-list"].exists)
+            app.buttons["Next"].tap()
+            let pause = app.buttons["Pause"]
+            XCTAssertTrue(pause.waitForExistence(timeout: 5))
+            pause.tap()
+            app.buttons["Play"].tap()
+            let collapse = app.buttons["Collapse Now Playing"]
+            XCTAssertTrue(collapse.exists && collapse.isHittable)
+            let grabber = collapse.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+            grabber.press(
+                forDuration: 0.1, thenDragTo: grabber.withOffset(CGVector(dx: 0, dy: 15)),
+                withVelocity: .slow, thenHoldForDuration: 0.2)
+            XCTAssertTrue(collapse.exists && collapse.isHittable)
+            XCTAssertTrue(app.buttons["Show artwork"].exists)
+            if iteration == 1 {
+                grabber.press(
+                    forDuration: 0.1,
+                    thenDragTo: grabber.withOffset(CGVector(dx: 0, dy: app.frame.height * 0.5)),
+                    withVelocity: .slow, thenHoldForDuration: 0.2)
+            } else {
+                collapse.tap()
+            }
+            XCTAssertTrue(app.buttons["Show Now Playing"].waitForExistence(timeout: 5))
+            XCTAssertTrue(app.buttons["Show Now Playing"].isHittable)
+            openNowPlaying(app)
+            // Previous may first restart a track after three seconds. Two taps guarantee
+            // return to the first occurrence, including when the controls took time to settle.
+            app.buttons["Previous"].tap()
+            app.buttons["Previous"].tap()
+        }
+        app.buttons["Collapse Now Playing"].tap()
+        selectTab("Search", in: app)
+        XCTAssertTrue(app.textFields["Search music"].waitForExistence(timeout: 5))
+        capture(
+            "Repeated queue skips and playback controls retain collapse and navigation", in: app)
     }
 
     func testSearchKeyboardAutofocusCancelManualFocusAndReentryPreserveQuery() {

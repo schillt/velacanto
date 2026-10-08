@@ -8,6 +8,7 @@ struct FoundationSearchView<Profile: View>: View {
     @Environment(\.foundationReduceTransparency) private var reduceTransparency
     @Namespace private var searchGlass
     @FocusState private var searchFocused: Bool
+    @State private var searchExpanded = false
     @State private var cancelledActivation: Int?
     let library: any FoundationLibrary
     @ObservedObject var player: FoundationPlayer
@@ -29,9 +30,12 @@ struct FoundationSearchView<Profile: View>: View {
                 .id(term + (connectivity.localOnly ? "-local" : "-online"))
             }
         }
-        .foundationSearchHeader(profile: profile, search: searchField, keepsVisible: searchFocused)
+        .foundationSearchHeader(profile: profile, search: searchField, keepsVisible: searchExpanded)
         .onChange(of: activation, initial: true) { _, value in
-            if isActive, value > 0, cancelledActivation != value { searchFocused = true }
+            if isActive, value > 0, cancelledActivation != value { beginSearchFocus() }
+        }
+        .onChange(of: searchFocused) { _, focused in
+            animateSearchExpansion(focused)
         }
         .onChange(of: isActive) { _, active in
             if !active { searchFocused = false }
@@ -59,6 +63,7 @@ struct FoundationSearchView<Profile: View>: View {
             #if os(iOS)
                 .textInputAutocapitalization(.never)
             #endif
+            .simultaneousGesture(TapGesture().onEnded { beginSearchFocus() })
             .accessibilityLabel("Search music")
             if !query.isEmpty {
                 Button {
@@ -74,8 +79,21 @@ struct FoundationSearchView<Profile: View>: View {
         .frame(minHeight: 44)
     }
 
+    private func beginSearchFocus() {
+        // Start splitting the glass on touch, before keyboard focus/layout completes.
+        animateSearchExpansion(true)
+        searchFocused = true
+    }
+
+    private func animateSearchExpansion(_ expanded: Bool) {
+        withAnimation(reduceMotion ? nil : .smooth(duration: 0.25)) {
+            searchExpanded = expanded
+        }
+    }
+
     private func cancelSearchFocus() {
         cancelledActivation = activation
+        animateSearchExpansion(false)
         searchFocused = false
     }
 
@@ -90,14 +108,14 @@ struct FoundationSearchView<Profile: View>: View {
                             .glassEffectID("search-input", in: searchGlass)
                     }
                 }
-                if searchFocused {
+                if searchExpanded {
                     dismissKeyboardButton
                         .glassEffectID("search-dismiss", in: searchGlass)
                         .glassEffectTransition(reduceMotion ? .identity : .matchedGeometry)
                         .transition(.identity)
                 }
             }
-            .animation(reduceMotion ? nil : .smooth(duration: 0.25), value: searchFocused)
+            .animation(reduceMotion ? nil : .smooth(duration: 0.25), value: searchExpanded)
         }
         .padding(.horizontal, 16).padding(.bottom, 8)
     }

@@ -54,12 +54,9 @@ struct FoundationSession: Codable, Sendable {
     let deviceID: String
 }
 
-/// Only explicitly verified deployed versions advertise global SortName seeks.
+/// A bounded account-owned probe verifies SortName filtering independently of release versions.
 enum FoundationAlphabetCapability: Sendable, Equatable {
     case verified, unavailable
-    static func forServerVersion(_ version: String?) -> Self {
-        version == "10.10.7" || version == "10.11.8" ? .verified : .unavailable
-    }
 }
 
 /// Share resolved capability across account-scoped copies; failed probes remain retryable.
@@ -72,7 +69,8 @@ private actor FoundationAlphabetCapabilityMemo {
     private var result: FoundationAlphabetCapability?
     private var retired = false
 
-    func value(using load: @escaping @Sendable () async throws -> String?) async
+    func value(using load: @escaping @Sendable () async throws -> FoundationAlphabetCapability)
+        async
         -> FoundationAlphabetCapability
     {
         guard !retired else { return .unavailable }
@@ -83,9 +81,9 @@ private actor FoundationAlphabetCapabilityMemo {
         } else {
             let task: Task<FoundationAlphabetCapability?, Never> = Task {
                 do {
-                    let version = try await load()
+                    let capability = try await load()
                     try Task.checkCancellation()
-                    return .forServerVersion(version)
+                    return capability
                 } catch { return nil }
             }
             work = Pending(id: UUID(), task: task)
@@ -98,7 +96,7 @@ private actor FoundationAlphabetCapabilityMemo {
             result = value
             pending = nil
         }
-        // A resolved unsupported version is cached; transport failures remain retryable.
+        // A resolved unsupported filter is cached; transport failures remain retryable.
         return value ?? .unavailable
     }
 
@@ -515,10 +513,64 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
     func retireAlphabetCapability() async { await alphabetMemo.retire() }
 
     func alphabetCapability() async -> FoundationAlphabetCapability {
-        await alphabetMemo.value {
-            let info: PublicSystemInfo = try await send(Paths.getPublicSystemInfo)
-            return info.version
+        await alphabetMemo.value { try await probeAlphabetCapability() }
+    }
+
+    /// Two one-row queries establish that a boundary excludes known lower SortName membership.
+    /// Probe account-wide so an empty selected library does not disable another library's rail.
+    private func probeAlphabetCapability() async throws -> FoundationAlphabetCapability {
+        var parameters = Paths.GetItemsParameters()
+        parameters.userID = session.userID
+        parameters.includeItemTypes = [.audio]
+        parameters.isRecursive = true
+        parameters.startIndex = 0
+        parameters.limit = 1
+        parameters.fields = [.sortName]
+        parameters.sortBy = [.sortName]
+        parameters.sortOrder = [.ascending]
+        parameters.enableTotalRecordCount = true
+        parameters.enableImages = false
+        parameters.enableUserData = false
+        let initial: BaseItemDtoQueryResult = try await send(Paths.getItems(parameters: parameters))
+        guard let initialItems = initial.items, initialItems.count == 1,
+            initial.startIndex == 0, let initialCount = initial.totalRecordCount,
+            initialCount >= 1, let first = initialItems.first,
+            first.type == .audio, let firstID = first.id, Self.validID(firstID),
+            let sortName = first.sortName?.lowercased(), !sortName.isEmpty,
+            let scalar = sortName.unicodeScalars.first
+        else { throw FoundationLibraryError.unavailable }
+        // A next ASCII boundary gives a known exclusion, rather than trusting an accepted query.
+        let boundary: String
+        if scalar.value < 97 {
+            boundary = "a"
+        } else if (97..<122).contains(scalar.value),
+            let next = UnicodeScalar(scalar.value + 1)
+        {
+            boundary = String(next)
+        } else {
+            // No stronger A-Z boundary can prove exclusion for a Z/non-ASCII first sort name.
+            throw FoundationLibraryError.unavailable
         }
+        try Task.checkCancellation()
+        parameters.nameStartsWithOrGreater = boundary
+        let filtered: BaseItemDtoQueryResult = try await send(
+            Paths.getItems(parameters: parameters))
+        guard let filteredItems = filtered.items, filteredItems.count <= 1,
+            filtered.startIndex == 0, let filteredCount = filtered.totalRecordCount,
+            filteredCount >= filteredItems.count
+        else { throw FoundationLibraryError.invalidResponse }
+        if filteredItems.isEmpty {
+            guard filteredCount == 0 else { throw FoundationLibraryError.invalidResponse }
+            return .verified
+        }
+        guard let item = filteredItems.first, item.type == .audio,
+            let id = item.id, Self.validID(id),
+            let filteredSortName = item.sortName?.lowercased(), !filteredSortName.isEmpty
+        else { throw FoundationLibraryError.invalidResponse }
+        // A repeated lower item proves the boundary was ignored. Counts can race catalog edits.
+        guard id != firstID, filteredSortName >= boundary else { return .unavailable }
+        guard filteredCount < initialCount else { throw FoundationLibraryError.invalidResponse }
+        return .verified
     }
 
     func alphabetPage(kind: FoundationItem.Kind, letter: String, startIndex: Int) async throws

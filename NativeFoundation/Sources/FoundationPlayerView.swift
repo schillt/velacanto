@@ -21,7 +21,6 @@ struct FoundationPlayerView: View {
     @State private var scrubbing = false
     @State private var scrubPosition = 0.0
     @State private var scrubEntryID: UUID?
-    @State private var showingGrabber = true
     @State private var showingQueue = false
     @State private var lyricsPresentation: FoundationLyricsPresentation?
     @State private var showsDelayedLoading = false
@@ -236,10 +235,15 @@ struct FoundationPlayerView: View {
         }
         .overlay(alignment: .top) {
             #if os(iOS)
-                Capsule().fill(.white.opacity(0.65))
-                    .frame(width: 36, height: 5).padding(.top, 8)
-                    .opacity(showingGrabber ? 1 : 0)
-                    .allowsHitTesting(false).accessibilityHidden(true)
+                Button(action: dismissPlayer) {
+                    Capsule().fill(.white.opacity(0.65))
+                        .frame(width: 36, height: 5)
+                        .frame(width: 80, height: 32, alignment: .top)
+                        .padding(.top, 8)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Collapse Now Playing")
             #endif
         }
         .sheet(item: $relatedItem) { item in
@@ -272,17 +276,13 @@ struct FoundationPlayerView: View {
         .accessibilityAction(.escape) { dismissPlayer() }
         #if os(iOS)
             .onAppear { updateArtworkDismissalAvailability() }
+            .onDisappear { artworkPresentation?.interactiveDismissalHeaderOnly = false }
             .onChange(of: scrubbing) { _, _ in updateArtworkDismissalAvailability() }
             .onChange(of: showingQueue) { _, _ in updateArtworkDismissalAvailability() }
             .onChange(of: lyricsPresentation != nil) { _, _ in updateArtworkDismissalAvailability()
             }
             .onChange(of: relatedItem != nil) { _, _ in updateArtworkDismissalAvailability() }
         #endif
-        .task {
-            showingGrabber = true
-            do { try await Task.sleep(for: .seconds(2)) } catch { return }
-            withAnimation(.easeOut(duration: 0.5)) { showingGrabber = false }
-        }
         .task(id: LoadingCueKey(entryID: player.selectedEntryID, waiting: isWaitingForAudio)) {
             showsDelayedLoading = false
             guard isWaitingForAudio else { return }
@@ -333,8 +333,9 @@ struct FoundationPlayerView: View {
 
     #if os(iOS)
         private func updateArtworkDismissalAvailability() {
+            artworkPresentation?.interactiveDismissalHeaderOnly = showingQueue
             artworkPresentation?.allowsInteractiveDismissal =
-                !scrubbing && !showingQueue
+                !scrubbing
                 && lyricsPresentation == nil && relatedItem == nil
         }
     #endif
@@ -536,6 +537,7 @@ private struct FoundationQueueView: View {
     let openItem: (FoundationItem) -> Void
 
     var body: some View {
+        let upcoming = player.upcoming
         VStack(spacing: 0) {
             HStack {
                 Text("Queue").font(.headline)
@@ -574,18 +576,15 @@ private struct FoundationQueueView: View {
                     Section("Now Playing") { row(current) }
                 }
                 Section("Up Next") {
-                    ForEach(player.upcoming) { row($0) }
-                        .reorderable()
-                        .listRowBackground(Color.clear)
+                    ForEach(upcoming) { row($0) }
+                        .onMove { offsets, destination in
+                            moveUpcoming(from: offsets, to: destination, snapshot: upcoming)
+                        }
                 }
             }
-            .reorderContainer(for: FoundationQueueEntry.self, isEnabled: isPresented) {
-                difference in
-                switch difference.destination.position {
-                case .before(let id): player.reorderUpcoming(difference.sources, before: id)
-                case .end: player.reorderUpcoming(difference.sources, before: nil)
-                }
-            }
+            #if os(iOS)
+                .environment(\.editMode, .constant(.active))
+            #endif
             .listStyle(.plain)
             .scrollContentBackground(.hidden)
             .modifier(FoundationQueueFixtureIdentifier(kind: "list", entryID: nil))
@@ -595,6 +594,20 @@ private struct FoundationQueueView: View {
         .disabled(!isPresented)
         .allowsHitTesting(isPresented)
         .accessibilityHidden(!isPresented)
+    }
+
+    private func moveUpcoming(
+        from offsets: IndexSet, to destination: Int, snapshot upcoming: [FoundationQueueEntry]
+    ) {
+        guard isPresented else { return }
+        guard destination >= 0, destination <= upcoming.count,
+            offsets.allSatisfy({ upcoming.indices.contains($0) })
+        else { return }
+        let sources = offsets.map { upcoming[$0].id }
+        let boundary = upcoming.enumerated().dropFirst(destination).first {
+            !offsets.contains($0.offset)
+        }?.element.id
+        player.reorderUpcoming(sources, before: boundary)
     }
 
     private func row(_ entry: FoundationQueueEntry) -> some View {
