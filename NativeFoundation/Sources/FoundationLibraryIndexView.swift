@@ -80,7 +80,11 @@ struct FoundationLibraryIndexView: View {
     }
 
     var body: some View {
-        GeometryReader { geometry in
+        // The task key and its closure must describe the same rendered activation.
+        // Reading live @State after onAppear could start work under a superseded key.
+        let active = isActive && isVisible
+        let allowsNetwork = !connectivity.localOnly
+        return GeometryReader { geometry in
             FoundationCollectionTransitionReader { transition in
                 #if os(iOS)
                     if usesNativeAlphabet {
@@ -189,19 +193,19 @@ struct FoundationLibraryIndexView: View {
         }
         .task(
             id:
-                "capability-\(isActive && isVisible)-\(connectivity.localOnly)-\(library.catalogScopeID)"
+                "capability-\(active)-\(!allowsNetwork)-\(library.catalogScopeID)"
         ) {
-            guard isActive, isVisible, !connectivity.localOnly else { return }
+            guard active, allowsNetwork, !Task.isCancelled else { return }
             let value = await library.alphabetCapability()
             guard !Task.isCancelled else { return }
             capability = value
         }
         .task(
             id:
-                "\(isActive && isVisible)-\(connectivity.localOnly)-\(library.catalogScopeID)-\(term)-\(selectedLetter ?? "All")-\(revision)"
+                "\(active)-\(!allowsNetwork)-\(library.catalogScopeID)-\(term)-\(selectedLetter ?? "All")-\(revision)"
         ) {
-            guard isActive, isVisible else { return }
-            if connectivity.localOnly {
+            guard active, !Task.isCancelled else { return }
+            if !allowsNetwork {
                 let items =
                     term.isEmpty
                     ? localItems
@@ -233,12 +237,15 @@ struct FoundationLibraryIndexView: View {
                 do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
             }
             if displayed.isRetainedSnapshot { displayed.request(.refresh) }
-            await displayed.loadPending(using: loadPage)
+            await displayed.loadPending(
+                ifActive: active, allowsNetwork: allowsNetwork, using: loadPage)
         }
     }
 
     private func indexList(placeholderRows: Int) -> some View {
-        List {
+        let active = isActive && isVisible
+        let allowsNetwork = !connectivity.localOnly
+        return List {
             if selectedLetter != nil, term.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
                     HStack {
@@ -291,7 +298,7 @@ struct FoundationLibraryIndexView: View {
                 }
             }
             if displayed.nextStartIndex != nil, !connectivity.localOnly {
-                Group {
+                VStack(spacing: 0) {
                     if displayed.isLoading {
                         ProgressView("Loading more…")
                     } else {
@@ -301,11 +308,11 @@ struct FoundationLibraryIndexView: View {
                 .listRowSeparator(.hidden)
                 .task(
                     id:
-                        "\(isActive && isVisible)-\(term)-\(displayed.nextStartIndex ?? -1)-\(revision)"
+                        "\(active)-\(allowsNetwork)-\(term)-\(displayed.nextStartIndex ?? -1)-\(revision)"
                 ) {
                     await displayed.loadNextPage(
-                        ifActive: isActive && isVisible,
-                        allowsNetwork: !connectivity.localOnly, using: loadPage)
+                        ifActive: active,
+                        allowsNetwork: allowsNetwork, using: loadPage)
                 }
             }
         }
@@ -345,7 +352,9 @@ struct FoundationLibraryIndexView: View {
     }
 
     private func collectionGrid(viewport: CGSize) -> some View {
-        ScrollView {
+        let active = isActive && isVisible
+        let allowsNetwork = !connectivity.localOnly
+        return ScrollView {
             LazyVStack(alignment: .leading, spacing: 20) {
                 if selectedLetter != nil {
                     HStack {
@@ -393,7 +402,7 @@ struct FoundationLibraryIndexView: View {
                     }
                 }
                 if displayed.nextStartIndex != nil, !connectivity.localOnly {
-                    Group {
+                    VStack(spacing: 0) {
                         if displayed.isLoading {
                             ProgressView("Loading more…")
                         } else {
@@ -402,11 +411,11 @@ struct FoundationLibraryIndexView: View {
                     }
                     .task(
                         id:
-                            "\(isActive && isVisible)-\(term)-\(selectedLetter ?? "All")-\(displayed.nextStartIndex ?? -1)-\(revision)"
+                            "\(active)-\(allowsNetwork)-\(term)-\(selectedLetter ?? "All")-\(displayed.nextStartIndex ?? -1)-\(revision)"
                     ) {
                         await displayed.loadNextPage(
-                            ifActive: isActive && isVisible,
-                            allowsNetwork: !connectivity.localOnly, using: loadPage)
+                            ifActive: active,
+                            allowsNetwork: allowsNetwork, using: loadPage)
                     }
                 }
             }.padding(.horizontal, 16).padding(.vertical, 12)
