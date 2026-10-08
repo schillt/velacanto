@@ -129,7 +129,8 @@
             HStack {
                 Button("Fixture controls") { showingFixtureControls = true }
                     .frame(minWidth: 44, minHeight: 44)
-                    .accessibilityValue(fixture.connectivity.localOnly ? "offline" : "online")
+                    .modifier(
+                        FoundationFixtureConnectivityValue(connectivity: fixture.connectivity))
                 Button("Read catalog counts") {
                     Task { catalogCounts = await fixture.library.catalogCounts() }
                 }
@@ -217,6 +218,15 @@
                     FoundationDownloadUIPlaybackIdentity(player: fixture.player)
                 }
             }
+        }
+    }
+
+    /// The compact band's accessibility status observes the actual child owner directly.
+    private struct FoundationFixtureConnectivityValue: ViewModifier {
+        @ObservedObject var connectivity: FoundationConnectivity
+
+        func body(content: Content) -> some View {
+            content.accessibilityValue(connectivity.localOnly ? "offline" : "online")
         }
     }
 
