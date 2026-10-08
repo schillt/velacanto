@@ -209,7 +209,7 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
 
         fileprivate func mayBeginPan(at location: CGPoint, in view: UIView) -> Bool {
             guard allowsInteractiveDismissal, let host,
-                host.presentedViewController == nil, !host.isBeingPresented,
+                !host.hasPresentedContent, !host.isBeingPresented,
                 !host.isBeingDismissed, let anchor = expanded, let artView = anchor.view,
                 artView.window === view.window
             else { return false }
@@ -246,7 +246,7 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
         }
 
         func dismiss() {
-            guard let host, host.presentedViewController == nil else { return }
+            guard let host, !host.hasPresentedContent else { return }
             host.requestProgrammaticDismissal()
         }
 
@@ -508,7 +508,7 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
             if let host = playerHost {
                 host.rootView = playerContent
                 if !requestedPresentation, !host.isBeingDismissed,
-                    !host.isBeingPresented, host.presentedViewController == nil
+                    !host.isBeingPresented, !host.hasPresentedContent
                 {
                     host.dismissPlayer(animated: !model.reduceMotion)
                 }
@@ -576,10 +576,20 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
     }
 
     @MainActor
-    final class FoundationPlayerArtworkHost: UIHostingController<AnyView>,
+    final class FoundationPlayerArtworkHost: UIViewController,
         UIViewControllerTransitioningDelegate, UIGestureRecognizerDelegate
     {
         let model: FoundationPlayerArtworkPresentationModel
+        private let contentHost: UIHostingController<AnyView>
+        var rootView: AnyView {
+            get { contentHost.rootView }
+            set { contentHost.rootView = newValue }
+        }
+        var hasPresentedContent: Bool {
+            presentedViewController != nil || contentHost.presentedViewController != nil
+        }
+        override var childForStatusBarStyle: UIViewController? { contentHost }
+        override var childForStatusBarHidden: UIViewController? { contentHost }
         var didCompleteDismissal: () -> Void = {}
         var willBeginDismissal: () -> Void = {}
         var requestProgrammaticDismissal: () -> Void = {}
@@ -590,14 +600,31 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
 
         init(rootView: AnyView, model: FoundationPlayerArtworkPresentationModel) {
             self.model = model
-            super.init(rootView: rootView)
+            contentHost = UIHostingController(rootView: rootView)
+            super.init(nibName: nil, bundle: nil)
             modalPresentationStyle = .fullScreen
             transitioningDelegate = self
         }
-        @MainActor required dynamic init?(coder: NSCoder) { fatalError("Not implemented") }
+        required init?(coder: NSCoder) { fatalError("Not implemented") }
+
+        override func loadView() {
+            // UIKit owns the transition mask; the hosting root stays SwiftUI-owned.
+            view = UIView()
+            view.backgroundColor = .clear
+        }
 
         override func viewDidLoad() {
             super.viewDidLoad()
+            addChild(contentHost)
+            contentHost.view.translatesAutoresizingMaskIntoConstraints = false
+            view.addSubview(contentHost.view)
+            NSLayoutConstraint.activate([
+                contentHost.view.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+                contentHost.view.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+                contentHost.view.topAnchor.constraint(equalTo: view.topAnchor),
+                contentHost.view.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            ])
+            contentHost.didMove(toParent: self)
             view.accessibilityViewIsModal = true
             pan.delegate = self
             pan.maximumNumberOfTouches = 1
@@ -642,12 +669,17 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
         }
 
         func dismissPlayer(animated: Bool) {
-            guard !isBeingDismissed else { return }
+            guard !isBeingDismissed, !hasPresentedContent else { return }
             willBeginDismissal()
             dismiss(animated: animated)
         }
 
         @objc private func handlePan(_ gesture: UIPanGestureRecognizer) {
+            guard !hasPresentedContent else {
+                interaction?.cancel()
+                interaction = nil
+                return
+            }
             let distance = max(1, view.bounds.height * 0.55)
             let progress = min(1, max(0, gesture.translation(in: view).y / distance))
             switch gesture.state {
@@ -811,7 +843,7 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
                     surface.backgroundColor = UIColor.systemBackground.resolvedColor(
                         with: UITraitCollection(userInterfaceStyle: .dark))
                 } else {
-                    surface = UIVisualEffectView(effect: UIGlassEffect(style: .regular))
+                    surface = UIVisualEffectView(effect: nil)
                 }
                 surface.isUserInteractionEnabled = false
                 surface.isAccessibilityElement = false
@@ -819,7 +851,8 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
                 surface.layer.cornerCurve = .continuous
                 surface.frame = presenting ? surfaceRect : container.bounds
                 surface.layer.cornerRadius = presenting ? surfaceRect.height / 2 : 0
-                surface.alpha = presenting ? 1 : 0
+                // Effect views keep alpha 1. Native material is absent at both endpoints.
+                if !(surface is UIVisualEffectView) { surface.alpha = 0 }
                 container.addSubview(surface)
                 glass = surface
                 reveal.frame =
@@ -865,7 +898,6 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
                 if let surfaceRect, let glass {
                     glass.frame = presenting ? container.bounds : surfaceRect
                     glass.layer.cornerRadius = presenting ? 0 : surfaceRect.height / 2
-                    glass.alpha = presenting ? 0 : 1
                     reveal.frame =
                         presenting
                         ? playerView.bounds : container.convert(surfaceRect, to: playerView)
@@ -879,6 +911,33 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
                     imageView.expandedMask.blend.alpha = presenting ? 0 : 1
                     // Includes UIView-backed mask geometry in the same scrub-able animator.
                     imageView.layoutIfNeeded()
+                }
+            }
+            if let glass {
+                // Share the interruptible animator's clock. At either endpoint, removing
+                // this surface cannot replace the native material in one visible frame.
+                // Animate native material through effect, not effect-view alpha.
+                let duration = animator.duration
+                animator.addAnimations {
+                    UIView.animateKeyframes(
+                        withDuration: duration, delay: 0,
+                        options: [.calculationModeLinear]
+                    ) {
+                        UIView.addKeyframe(withRelativeStartTime: 0, relativeDuration: 0.2) {
+                            if let effectView = glass as? UIVisualEffectView {
+                                effectView.effect = UIGlassEffect(style: .regular)
+                            } else {
+                                glass.alpha = 1
+                            }
+                        }
+                        UIView.addKeyframe(withRelativeStartTime: 0.8, relativeDuration: 0.2) {
+                            if let effectView = glass as? UIVisualEffectView {
+                                effectView.effect = nil
+                            } else {
+                                glass.alpha = 0
+                            }
+                        }
+                    }
                 }
             }
             animator.addCompletion { [weak self, weak imageView, weak glass] _ in

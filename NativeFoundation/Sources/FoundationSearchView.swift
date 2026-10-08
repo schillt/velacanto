@@ -94,7 +94,7 @@ struct FoundationSearchView<Profile: View>: View {
                     dismissKeyboardButton
                         .glassEffectID("search-dismiss", in: searchGlass)
                         .glassEffectTransition(reduceMotion ? .identity : .matchedGeometry)
-                        .transition(.opacity)
+                        .transition(.identity)
                 }
             }
             .animation(reduceMotion ? nil : .smooth(duration: 0.25), value: searchFocused)
