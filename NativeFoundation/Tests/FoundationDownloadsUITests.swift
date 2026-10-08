@@ -1,4 +1,5 @@
 import UIKit
+import Vision
 import XCTest
 
 @MainActor
@@ -1488,12 +1489,163 @@ final class FoundationDownloadsUITests: XCTestCase {
             XCTFail("Requested letter must belong to the approved native index order")
             return
         }
-        // Gesture on the live native control, with item position derived from its title order.
-        // Retry/window/request assertions below prove the actual UIKit callback's chosen letter.
-        index.coordinate(
-            withNormalizedOffset: CGVector(
-                dx: 0.5, dy: (CGFloat(position) + 0.5) / CGFloat(titles.count))
-        ).tap()
+        guard
+            let fraction = nativeAlphabetGlyphPosition(
+                position, titles: titles, image: index.screenshot().image)
+        else { return }
+        // UIKit receives the actual gesture; window/retry/count assertions prove its selection.
+        index.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: fraction)).tap()
+    }
+
+    private func nativeAlphabetGlyphPosition(
+        _ position: Int, titles: [String], image: UIImage
+    ) -> CGFloat? {
+        guard let pixels = image.cgImage, pixels.width > 0, pixels.height > 0 else {
+            XCTFail("Native index screenshot must contain pixels")
+            return nil
+        }
+        let width = pixels.width
+        let height = pixels.height
+        var rgba = Data(count: width * height * 4)
+        let rendered = rgba.withUnsafeMutableBytes { buffer -> Bool in
+            guard
+                let context = CGContext(
+                    data: buffer.baseAddress, width: width, height: height, bitsPerComponent: 8,
+                    bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+            else { return false }
+            context.draw(
+                pixels, in: CGRect(x: 0, y: 0, width: CGFloat(width), height: CGFloat(height)))
+            return true
+        }
+        guard rendered else {
+            XCTFail("Native index screenshot must normalize to RGBA")
+            return nil
+        }
+        func isBlue(_ x: Int, _ y: Int) -> Bool {
+            let offset = (y * width + x) * 4
+            let red = Int(rgba[offset])
+            let green = Int(rgba[offset + 1])
+            let blue = Int(rgba[offset + 2])
+            return blue > 180 && blue - red > 100 && blue - green > 40
+        }
+        var runs: [ClosedRange<Int>] = []
+        for y in 0..<height where (0..<width).contains(where: { isBlue($0, y) }) {
+            if let last = runs.last, last.upperBound + 1 == y {
+                runs[runs.count - 1] = last.lowerBound...y
+            } else {
+                runs.append(y...y)
+            }
+        }
+        guard (3...64).contains(runs.count) else {
+            XCTFail("Native index must have a bounded set of distinct rendered glyph rows")
+            return nil
+        }
+        var anchors: [Int?] = []
+        for run in runs {
+            let bluePoints = run.flatMap { y in
+                (0..<width).filter { isBlue($0, y) }.map { CGPoint(x: CGFloat($0), y: CGFloat(y)) }
+            }
+            guard let minX = bluePoints.map(\.x).min(),
+                let maxX = bluePoints.map(\.x).max()
+            else { return nil }
+            let glyphWidth = maxX - minX + 1
+            let glyphHeight = CGFloat(run.count)
+            let aspect = glyphWidth / glyphHeight
+            let fill = CGFloat(bluePoints.count) / (glyphWidth * glyphHeight)
+            // A filled circular bullet represents omitted ordered titles, never a letter anchor.
+            if (0.85...1.15).contains(aspect), fill > 0.65 {
+                anchors.append(nil)
+                continue
+            }
+            let cropRect = CGRect(
+                x: 0, y: CGFloat(max(0, run.lowerBound - 6)), width: CGFloat(width),
+                height: CGFloat(min(height - max(0, run.lowerBound - 6), run.count + 12)))
+            guard let crop = pixels.cropping(to: cropRect) else { return nil }
+            let ocrWidth = crop.width * 4 + 64
+            let ocrHeight = crop.height * 4 + 64
+            guard ocrWidth <= 2048, ocrHeight <= 2048,
+                let ocrContext = CGContext(
+                    data: nil, width: ocrWidth, height: ocrHeight, bitsPerComponent: 8,
+                    bytesPerRow: ocrWidth * 4, space: CGColorSpaceCreateDeviceRGB(),
+                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+            else {
+                XCTFail("Native glyph OCR preprocessing must fit its bounded pixel budget")
+                return nil
+            }
+            ocrContext.setFillColor(CGColor(gray: 1, alpha: 1))
+            ocrContext.fill(
+                CGRect(x: 0, y: 0, width: CGFloat(ocrWidth), height: CGFloat(ocrHeight)))
+            ocrContext.interpolationQuality = .high
+            ocrContext.draw(
+                crop,
+                in: CGRect(
+                    x: 32, y: 32, width: CGFloat(crop.width * 4), height: CGFloat(crop.height * 4)))
+            guard let ocrImage = ocrContext.makeImage() else { return nil }
+            let request = VNRecognizeTextRequest()
+            request.recognitionLevel = anchors.isEmpty ? .accurate : .fast
+            request.usesLanguageCorrection = false
+            request.recognitionLanguages = ["en-US"]
+            do {
+                try VNImageRequestHandler(cgImage: ocrImage, options: [:]).perform([request])
+            } catch {
+                XCTFail("Public native index glyph recognition failed: \(error)")
+                return nil
+            }
+            let recognized =
+                request.results?.compactMap { $0.topCandidates(1).first?.string }
+                ?? []
+            let firstGlyphAll =
+                anchors.isEmpty && recognized.count == 1
+                && recognized[0].uppercased().range(of: "^A[IL][IL]$", options: .regularExpression)
+                    != nil
+            guard recognized.count == 1,
+                let title = firstGlyphAll ? "All" : recognized.first,
+                let anchor = titles.firstIndex(where: {
+                    $0.caseInsensitiveCompare(title) == .orderedSame
+                })
+            else {
+                XCTFail(
+                    "Native index glyph must unambiguously match an approved title: \(recognized)")
+                return nil
+            }
+            anchors.append(anchor)
+        }
+        guard anchors.first! == 0, anchors.last! == titles.count - 1 else {
+            XCTFail("Rendered native index must expose its complete All-to-Z range")
+            return nil
+        }
+        var covered: [Int] = []
+        var targetY: CGFloat?
+        for row in runs.indices {
+            let center = CGFloat(runs[row].lowerBound + runs[row].upperBound) / 2
+            if let anchor = anchors[row] {
+                covered.append(anchor)
+                if anchor == position { targetY = center }
+            } else {
+                guard row > 0, row + 1 < runs.count,
+                    let before = anchors[row - 1], let after = anchors[row + 1],
+                    after > before + 1
+                else {
+                    XCTFail("Native compressed bullet must have ordered recognized neighbors")
+                    return nil
+                }
+                let hidden = Array((before + 1)..<after)
+                covered.append(contentsOf: hidden)
+                if let offset = hidden.firstIndex(of: position) {
+                    let previous = CGFloat(runs[row - 1].lowerBound + runs[row - 1].upperBound) / 2
+                    let next = CGFloat(runs[row + 1].lowerBound + runs[row + 1].upperBound) / 2
+                    let top = (previous + center) / 2
+                    let bottom = (center + next) / 2
+                    targetY = top + (CGFloat(offset) + 0.5) / CGFloat(hidden.count) * (bottom - top)
+                }
+            }
+        }
+        guard covered == Array(titles.indices), let targetY else {
+            XCTFail("Native rendered glyphs must account for each approved title exactly once")
+            return nil
+        }
+        return targetY / CGFloat(height)
     }
 
     private func readAlphabetCounts(_ app: XCUIApplication) -> String {
@@ -1889,6 +2041,29 @@ final class FoundationDownloadsUITests: XCTestCase {
         XCTAssertEqual(app.staticTexts["fixture-related-playback-identity"].label, originalIdentity)
         tapNativeChrome(more, in: app)
         let remove = app.buttons["Remove Downloads"]
+        let removalHierarchy = XCTAttachment(string: String(app.debugDescription.prefix(120_000)))
+        removalHierarchy.name = "Synthetic related removal menu hierarchy (120000 character cap)"
+        removalHierarchy.lifetime = .keepAlways
+        add(removalHierarchy)
+        capture("Synthetic related removal menu before unchanged hit assertion", in: app)
+        let removalCandidates = app.buttons.matching(
+            NSPredicate(format: "label == %@", "Remove Downloads"))
+        let removalCandidateCount = removalCandidates.count
+        var removalDiagnostics = [
+            "Synthetic Remove Downloads candidates: \(removalCandidateCount)",
+            "Candidate cap: 16; overflow: \(max(0, removalCandidateCount - 16))",
+        ]
+        for candidateIndex in 0..<min(16, removalCandidateCount) {
+            let candidate = removalCandidates.element(boundBy: candidateIndex)
+            removalDiagnostics.append(
+                "index \(candidateIndex); identifier \(candidate.identifier); "
+                    + "frame \(NSStringFromCGRect(candidate.frame)); enabled \(candidate.isEnabled); "
+                    + "hittable \(candidate.isHittable)")
+        }
+        let removalEvidence = XCTAttachment(string: removalDiagnostics.joined(separator: "\n"))
+        removalEvidence.name = "Synthetic related removal menu matching controls (16 candidate cap)"
+        removalEvidence.lifetime = .keepAlways
+        add(removalEvidence)
         XCTAssertTrue(remove.waitForExistence(timeout: 5) && remove.isHittable)
         remove.tap()
         let destructive = app.buttons["Remove"]
