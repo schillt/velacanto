@@ -70,8 +70,10 @@
             {
                 coordinator.snapshot = sections
                 coordinator.indexSnapshot = indexTitles
+                coordinator.geometryRevision += 1
                 table.reloadData()
             }
+            coordinator.checkVisibleDemandAfterLayout(in: table)
             if !isRefreshing { table.refreshControl?.endRefreshing() }
         }
 
@@ -87,6 +89,7 @@
             var snapshot: [FoundationAlphabetSection] = []
             var indexSnapshot: [String] = []
             var lastDemandIdentity: String?
+            var geometryRevision = 0
 
             init(parent: FoundationLibraryAlphabetIndex) { self.parent = parent }
 
@@ -153,18 +156,63 @@
                 _ tableView: UITableView, willDisplay cell: UITableViewCell,
                 forRowAt indexPath: IndexPath
             ) {
+                checkDemandAfterLayout(in: tableView, cell: cell, indexPath: indexPath)
+            }
+
+            func scrollViewDidScroll(_ scrollView: UIScrollView) {
+                guard let table = scrollView as? UITableView else { return }
+                checkVisibleDemandAfterLayout(in: table)
+            }
+
+            func checkVisibleDemandAfterLayout(in table: UITableView) {
+                for indexPath in table.indexPathsForVisibleRows ?? [] {
+                    if let cell = table.cellForRow(at: indexPath) {
+                        checkDemandAfterLayout(in: table, cell: cell, indexPath: indexPath)
+                    }
+                }
+            }
+
+            private func checkDemandAfterLayout(
+                in table: UITableView, cell: UITableViewCell, indexPath: IndexPath
+            ) {
                 guard parent.allowsDemand, let identity = parent.nextPageIdentity,
                     lastDemandIdentity != identity,
                     let finalSection = parent.sections.lastIndex(where: { !$0.rows.isEmpty }),
                     indexPath.section == finalSection,
-                    indexPath.row
-                        >= max(
-                            0,
-                            tableView.numberOfRows(inSection: finalSection) - 3)
+                    indexPath.row >= max(0, table.numberOfRows(inSection: finalSection) - 3)
                 else { return }
-                lastDemandIdentity = identity
-                // The caller still applies active/offline/loading/error/end cursor guards.
-                parent.onDemandNextPage()
+                let contextID = parent.contextID
+                let revision = geometryRevision
+                // willDisplay can describe estimated/offscreen hosted cells during reload or AX
+                // enumeration. One main turn lets self-sizing settle; no callback owns a fetch.
+                DispatchQueue.main.async { [weak self, weak table, weak cell] in
+                    guard let self, let table, let cell,
+                        self.parent.contextID == contextID, self.geometryRevision == revision,
+                        self.parent.allowsDemand, self.parent.nextPageIdentity == identity,
+                        self.lastDemandIdentity != identity,
+                        table.delegate === self,
+                        let window = table.window, !window.isHidden, cell.window === window,
+                        table.bounds.width > 0, table.bounds.height > 0,
+                        table.cellForRow(at: indexPath) === cell,
+                        table.indexPathsForVisibleRows?.contains(indexPath) == true,
+                        let finalSection = self.parent.sections.lastIndex(where: {
+                            !$0.rows.isEmpty
+                        }),
+                        indexPath.section == finalSection,
+                        indexPath.row >= max(0, table.numberOfRows(inSection: finalSection) - 3)
+                    else { return }
+                    let viewport = table.bounds.inset(by: table.adjustedContentInset)
+                    let rowFrame = table.rectForRow(at: indexPath)
+                    let cellFrame = cell.convert(cell.bounds, to: table)
+                    guard !viewport.isEmpty, !rowFrame.isEmpty, !cellFrame.isEmpty,
+                        rowFrame.intersection(viewport).height > 1,
+                        cellFrame.intersection(viewport).height > 1,
+                        cellFrame.intersection(viewport).width > 1
+                    else { return }
+                    self.lastDemandIdentity = identity
+                    // The caller retains active/offline/loading/error/end and cancellation guards.
+                    self.parent.onDemandNextPage()
+                }
             }
 
             @objc func refreshRequested() { parent.onRefresh() }
