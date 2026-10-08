@@ -26,6 +26,7 @@ struct FoundationLibraryIndexView: View {
     @State private var selectedLetter: String?
     @State private var usesNativeAlphabet = false
     @State private var capability: FoundationAlphabetCapability = .unavailable
+    @State private var capabilityRefreshRevision = 0
     @StateObject private var searchModel = FoundationBrowseModel()
     @State private var query = ""
     @State private var isVisible = false
@@ -38,7 +39,8 @@ struct FoundationLibraryIndexView: View {
         !term.isEmpty ? searchModel : (selectedLetter == nil ? model : seekModel)
     }
     private var alphabetAvailable: Bool {
-        term.isEmpty && (connectivity.localOnly || capability == .verified)
+        kind == .track && term.isEmpty
+            && (connectivity.localOnly || capability == .verified)
     }
     private var wantsNativeAlphabet: Bool {
         alphabetAvailable && (selectedLetter != nil || displayed.loaded || !displayed.items.isEmpty)
@@ -194,9 +196,9 @@ struct FoundationLibraryIndexView: View {
         }
         .task(
             id:
-                "capability-\(active)-\(!allowsNetwork)-\(library.catalogScopeID)"
+                "capability-\(active)-\(!allowsNetwork)-\(library.catalogScopeID)-\(connectivity.successfulRetryRevision)-\(capabilityRefreshRevision)"
         ) {
-            guard active, allowsNetwork, !Task.isCancelled else { return }
+            guard kind == .track, active, allowsNetwork, !Task.isCancelled else { return }
             let value = await library.alphabetCapability()
             guard !Task.isCancelled else { return }
             capability = value
@@ -321,6 +323,7 @@ struct FoundationLibraryIndexView: View {
         .accessibilityIdentifier("library-index-\(kind)")
         .refreshable {
             guard isActive, isVisible, !connectivity.localOnly else { return }
+            retryAlphabetCapabilityIfNeeded()
             displayed.request(.refresh)
             revision += 1
         }
@@ -424,6 +427,7 @@ struct FoundationLibraryIndexView: View {
         .accessibilityIdentifier("library-index-\(kind)")
         .refreshable {
             guard isActive, isVisible, !connectivity.localOnly else { return }
+            retryAlphabetCapabilityIfNeeded()
             displayed.request(.refresh)
             revision += 1
         }
@@ -473,6 +477,11 @@ struct FoundationLibraryIndexView: View {
             character.unicodeScalars.count == 1
         else { return false }
         return (97...122).contains(scalar.value)
+    }
+
+    /// Only explicit pull-to-refresh retries a failed probe; paging never does.
+    private func retryAlphabetCapabilityIfNeeded() {
+        if kind == .track, capability == .unavailable { capabilityRefreshRevision += 1 }
     }
 
     private func requestNextPage() {
@@ -545,6 +554,7 @@ struct FoundationLibraryIndexView: View {
                     onDemandNextPage: requestNextPage,
                     onRefresh: {
                         guard isActive, isVisible, !connectivity.localOnly else { return }
+                        retryAlphabetCapabilityIfNeeded()
                         displayed.request(.refresh)
                         revision += 1
                     }

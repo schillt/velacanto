@@ -62,9 +62,13 @@ enum FoundationAlphabetCapability: Sendable, Equatable {
     }
 }
 
-/// One capability request per account-owned adapter, shared by its scoped value copies.
+/// Share resolved capability across account-scoped copies; failed probes remain retryable.
 private actor FoundationAlphabetCapabilityMemo {
-    private var pending: Task<FoundationAlphabetCapability, Never>?
+    private struct Pending {
+        let id: UUID
+        let task: Task<FoundationAlphabetCapability?, Never>
+    }
+    private var pending: Pending?
     private var result: FoundationAlphabetCapability?
     private var retired = false
 
@@ -73,29 +77,34 @@ private actor FoundationAlphabetCapabilityMemo {
     {
         guard !retired else { return .unavailable }
         if let result { return result }
-        let task: Task<FoundationAlphabetCapability, Never>
+        let work: Pending
         if let pending {
-            task = pending
+            work = pending
         } else {
-            task = Task {
+            let task: Task<FoundationAlphabetCapability?, Never> = Task {
                 do {
                     let version = try await load()
                     try Task.checkCancellation()
                     return .forServerVersion(version)
-                } catch { return .unavailable }
+                } catch { return nil }
             }
-            pending = task
+            work = Pending(id: UUID(), task: task)
+            pending = work
         }
-        let value = await task.value
+        let value = await work.task.value
         guard !retired else { return .unavailable }
-        result = value
-        pending = nil
-        return value
+        // Late waiters from a failed probe must not clear a newer retry owner.
+        if pending?.id == work.id {
+            result = value
+            pending = nil
+        }
+        // A resolved unsupported version is cached; transport failures remain retryable.
+        return value ?? .unavailable
     }
 
     func retire() {
         retired = true
-        pending?.cancel()
+        pending?.task.cancel()
         pending = nil
         result = nil
     }

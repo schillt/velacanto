@@ -89,6 +89,52 @@ final class FoundationLibraryTests: XCTestCase {
         XCTAssertTrue(requests[0].url!.path.hasSuffix("/System/Info/Public"))
     }
 
+    func testFailedAlphabetProbeCanExplicitlyRetryWithOneCoalescedAccountRequest() async {
+        let recorder = Recorder()
+        let gate = FoundationAlphabetTestGate()
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            await recorder.append(request)
+            let count = await recorder.requests.count
+            if count == 1 { throw URLError(.notConnectedToInternet) }
+            await gate.suspend()
+            return (Data(#"{"Version":"10.11.8"}"#.utf8), Self.response(request))
+        }
+        let failed = await library.alphabetCapability()
+        XCTAssertEqual(failed, .unavailable)
+        let retry = Task {
+            await withTaskGroup(of: FoundationAlphabetCapability.self) { group in
+                for _ in 0..<10 {
+                    group.addTask { await library.alphabetCapability() }
+                }
+                for await value in group { XCTAssertEqual(value, .verified) }
+            }
+        }
+        await gate.entered()
+        await gate.release()
+        await retry.value
+        let cached = await library.alphabetCapability()
+        XCTAssertEqual(cached, .verified)
+        let requests = await recorder.requests
+        XCTAssertEqual(requests.count, 2)
+        XCTAssertTrue(requests.allSatisfy { $0.url!.path.hasSuffix("/System/Info/Public") })
+    }
+
+    func testFailedAlphabetProbeCachesResolvedUnsupportedVersionAfterExplicitRetry() async {
+        let recorder = Recorder()
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            await recorder.append(request)
+            if await recorder.requests.count == 1 { throw URLError(.timedOut) }
+            return (Data(#"{"Version":"10.11.9"}"#.utf8), Self.response(request))
+        }
+        for _ in 0..<3 {
+            let value = await library.alphabetCapability()
+            XCTAssertEqual(value, .unavailable)
+        }
+        let requests = await recorder.requests
+        XCTAssertEqual(requests.count, 2)
+        XCTAssertTrue(requests.allSatisfy { $0.url!.path.hasSuffix("/System/Info/Public") })
+    }
+
     func testAlphabetMemoIsRetiredAtAccountEnd() async throws {
         let recorder = Recorder()
         let library = FoundationJellyfinLibrary(session: session) { request in
