@@ -564,8 +564,6 @@ private struct FoundationQueueView: View {
             .buttonStyle(.plain)
             .padding(.horizontal, 24)
             .padding(.vertical, 12)
-            .background(.regularMaterial)
-            .environment(\.colorScheme, .dark)
             List {
                 if !player.history.isEmpty {
                     Section("History") {
@@ -578,6 +576,7 @@ private struct FoundationQueueView: View {
                 Section("Up Next") {
                     ForEach(player.upcoming) { row($0) }
                         .reorderable()
+                        .listRowBackground(Color.clear)
                 }
             }
             .reorderContainer(for: FoundationQueueEntry.self, isEnabled: isPresented) {
@@ -589,6 +588,7 @@ private struct FoundationQueueView: View {
             }
             .listStyle(.plain)
             .scrollContentBackground(.hidden)
+            .modifier(FoundationQueueFixtureIdentifier(kind: "list", entryID: nil))
             .clipped()
             .mask { FoundationPlayerContentFade() }
         }
@@ -646,13 +646,15 @@ private struct FoundationQueueView: View {
 
 private struct FoundationQueueFixtureIdentifier: ViewModifier {
     let kind: String
-    let entryID: UUID
+    let entryID: UUID?
     func body(content: Content) -> some View {
         #if DEBUG && os(iOS) && targetEnvironment(simulator)
             if FoundationDownloadsTestHarness.enabled,
                 ProcessInfo.processInfo.arguments.contains("-fixtureQueuePresentation")
             {
-                content.accessibilityIdentifier("fixture-queue-" + kind + "-" + entryID.uuidString)
+                content.accessibilityIdentifier(
+                    entryID.map { "fixture-queue-" + kind + "-" + $0.uuidString }
+                        ?? "fixture-queue-list")
             } else {
                 content
             }

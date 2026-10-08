@@ -103,6 +103,49 @@ final class FoundationDownloadsUITests: XCTestCase {
         return snapshot
     }
 
+    private func revealQueueControl(
+        _ control: XCUIElement, entryID: String, in app: XCUIApplication
+    ) {
+        let list = app.descendants(matching: .any)["fixture-queue-list"]
+        XCTAssertTrue(list.waitForExistence(timeout: 5))
+        let viewport = list.frame.intersection(app.frame).insetBy(dx: 8, dy: 16)
+        XCTAssertGreaterThan(viewport.height, 44)
+        for _ in 0..<16 {
+            if control.exists && control.frame.width > 0 && control.frame.height > 0,
+                control.isHittable,
+                viewport.contains(CGPoint(x: control.frame.midX, y: control.frame.midY))
+            {
+                break
+            }
+            let order = queueSnapshot(app)["queue"] as? [String] ?? []
+            guard let target = order.firstIndex(of: entryID) else {
+                XCTFail("The target queue occurrence must remain in the real queue")
+                return
+            }
+            let visible = order.enumerated().compactMap { index, id -> Int? in
+                let row = app.buttons["fixture-queue-select-" + id]
+                guard row.exists, row.frame.width > 0, row.frame.height > 0,
+                    row.isHittable,
+                    viewport.contains(CGPoint(x: row.frame.midX, y: row.frame.midY))
+                else { return nil }
+                return index
+            }
+            let upward = visible.min().map { target >= $0 } ?? (target > 0)
+            let origin = app.coordinate(withNormalizedOffset: .zero)
+            let start = origin.withOffset(
+                CGVector(
+                    dx: viewport.midX, dy: viewport.minY + viewport.height * (upward ? 0.8 : 0.2)))
+            let end = origin.withOffset(
+                CGVector(
+                    dx: viewport.midX, dy: viewport.minY + viewport.height * (upward ? 0.2 : 0.8)))
+            start.press(
+                forDuration: 0.1, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0.2)
+        }
+        XCTAssertTrue(control.exists && control.frame.width > 0 && control.frame.height > 0)
+        XCTAssertTrue(control.isHittable)
+        XCTAssertTrue(viewport.contains(CGPoint(x: control.frame.midX, y: control.frame.midY)))
+    }
+
     func testNativeQueueAppearanceLightDarkAndReducedTransparency() {
         continueAfterFailure = false
         for (scheme, reduced) in [("light", false), ("dark", false), ("dark", true)] {
@@ -171,6 +214,7 @@ final class FoundationDownloadsUITests: XCTestCase {
         capture("Native Queue baseline light", in: app)
         func action(_ title: String, entry: String) {
             let menu = app.buttons["fixture-queue-actions-" + entry]
+            revealQueueControl(menu, entryID: entry, in: app)
             XCTAssertTrue(menu.exists && menu.isHittable)
             menu.tap()
             let button = app.cells.buttons.matching(
