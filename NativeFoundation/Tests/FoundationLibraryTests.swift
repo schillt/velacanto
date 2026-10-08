@@ -118,7 +118,8 @@ final class FoundationLibraryTests: XCTestCase {
         let first = Task { await library.alphabetCapability() }
         await gate.entered()
         first.cancel()
-        let second = Task { await library.scoped(to: itemID).alphabetCapability() }
+        let scopeID = itemID
+        let second = Task { await library.scoped(to: scopeID).alphabetCapability() }
         await gate.release()
         let result = await second.value
         XCTAssertEqual(result, .verified)
@@ -334,7 +335,8 @@ final class FoundationLibraryTests: XCTestCase {
             await gate.suspend()
             return (Data(#"{"Version":"10.11.8"}"#.utf8), Self.response(request))
         }
-        let pending = Task { await library.scoped(to: itemID).alphabetCapability() }
+        let scopeID = itemID
+        let pending = Task { await library.scoped(to: scopeID).alphabetCapability() }
         await gate.entered()
         // This exact hook is called by App.open and successful local signOut.
         let retirement = FoundationAlphabetAccountLifecycle.retire(library)
