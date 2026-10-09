@@ -511,7 +511,8 @@ struct FoundationLibraryView: View {
                 Text("Library")
             }
             Section(isExpanded: $macPlaylistsExpanded) {
-                macLibraryButton("All Playlists", symbol: "music.note.list", route: .playlists)
+                macLibraryButton(
+                    "All Playlists", symbol: "music.note.square.stack", route: .playlists)
                 ForEach(
                     connectivity.localOnly ? downloads.downloadedPlaylists : playlists.items
                 ) { item in
