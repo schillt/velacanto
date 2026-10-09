@@ -2422,9 +2422,13 @@ struct FoundationDetailHero<Controls: View>: View {
                             }
                             FoundationOverviewSection(
                                 item: item, library: library, isActive: isActive,
-                                maximumLines: 5, horizontalInset: 0
-                            ).id(item.id)
-                        }.frame(maxWidth: .infinity, alignment: .leading)
+                                maximumLines: nil, horizontalInset: 0
+                            )
+                            .frame(maxHeight: .infinity, alignment: .top)
+                            .id(item.id)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .frame(height: imageSpace, alignment: .top)
                     }
                     controls().frame(maxWidth: .infinity)
                 }

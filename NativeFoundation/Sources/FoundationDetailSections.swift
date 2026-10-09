@@ -10,7 +10,7 @@ struct FoundationOverviewSection: View {
     let item: FoundationItem
     let library: any FoundationLibrary
     let isActive: Bool
-    var maximumLines = 3
+    var maximumLines: Int? = 3
     var horizontalInset: CGFloat = 16
     #if os(macOS)
         @ScaledMetric(relativeTo: .body) private var overviewTextSize = 15.0
