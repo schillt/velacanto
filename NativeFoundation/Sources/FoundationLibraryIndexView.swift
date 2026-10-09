@@ -42,7 +42,6 @@ struct FoundationLibraryIndexView: View {
     private var alphabetTitles: [String] {
         FoundationAlphabetAnchors.titles
     }
-    private var windowDescription: String { selectedLetter ?? "All" }
     private var isCoverGrid: Bool { kind == .album || kind == .playlist }
 
     private var title: String {
@@ -109,26 +108,6 @@ struct FoundationLibraryIndexView: View {
             .searchable(
                 text: $query, placement: .navigationBarDrawer(displayMode: .automatic),
                 prompt: "Search " + title.lowercased())
-        #else
-            .toolbar {
-                if alphabetAvailable, openedItem == nil {
-                    ToolbarItem(placement: .navigation) {
-                        Menu("Jump to letter", systemImage: "textformat.abc") {
-                            Picker(
-                                "Jump to letter",
-                                selection: Binding(
-                                    get: { selectedLetter ?? "A" }, set: chooseLetter)
-                            ) {
-                                ForEach(alphabetTitles, id: \.self) { letter in
-                                    Text(letter).tag(letter)
-                                }
-                            }
-                        }
-                        .accessibilityValue(windowDescription)
-                        .accessibilityIdentifier("library-alphabet-jump-\(kind)")
-                    }
-                }
-            }
         #endif
         .foundationCollectionDestination(
             item: $openedItem, library: library, player: player, isActive: isActive
