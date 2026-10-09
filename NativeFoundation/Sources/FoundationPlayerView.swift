@@ -986,7 +986,7 @@ extension EnvironmentValues {
             .background {
                 if reduceTransparency { Rectangle().fill(.background) }
             }
-            .glassEffect(reduceTransparency ? .identity : .regular, in: .rect)
+            .glassEffect(reduceTransparency ? .identity : .clear, in: .rect)
             .ignoresSafeArea(.container, edges: .top)
             .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
             .task(

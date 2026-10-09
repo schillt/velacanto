@@ -126,9 +126,9 @@ struct FoundationRelatedSection<Card: View>: View {
                                 }
                             }
                         }
-                    }.padding(.horizontal)
+                    }.foundationCarouselContentPadding()
                 }.scrollIndicators(.hidden)
-                    .foundationMacShelfUnderlap()
+                    .foundationMacShelfUnderlap(horizontalInset: 0, contentInset: 0)
             }
             if model.hasConnectionIssue {
                 FoundationOfflineNotice().padding(.horizontal)
@@ -206,9 +206,9 @@ struct FoundationArtistMostPlayed: View {
                                 }
                             }.frame(width: 300)
                         }
-                    }.padding(.horizontal)
+                    }.foundationCarouselContentPadding()
                 }.scrollIndicators(.hidden)
-                    .foundationMacShelfUnderlap()
+                    .foundationMacShelfUnderlap(horizontalInset: 0, contentInset: 0)
             }
             if model.hasConnectionIssue {
                 FoundationOfflineNotice().padding(.horizontal)

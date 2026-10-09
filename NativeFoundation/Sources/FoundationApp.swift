@@ -66,11 +66,16 @@ struct VelacantoFoundationApp: App {
                 }
             #else
                 FoundationRootView(model: model)
-                    .frame(minWidth: 320, minHeight: 480)
+                    #if os(macOS)
+                        .frame(minWidth: 1080, minHeight: 640)
+                    #else
+                        .frame(minWidth: 320, minHeight: 480)
+                    #endif
             #endif
         }
         #if os(macOS)
             .defaultSize(width: 1100, height: 760)
+            .windowResizability(.contentMinSize)
             .windowToolbarStyle(.unified)
             .commands { FoundationMacCommands() }
         #endif

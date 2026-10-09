@@ -271,15 +271,11 @@ struct FoundationLibraryView: View {
                 libraryNavigationID: macLibraryRoute.identity,
                 navigationRevision: macNavigationRevision,
                 playbackInset: $macTransportInset,
-                showsMiniPlayer: !displayedQueue.isEmpty
+                showsMiniPlayer: true
             ) { destination in
                 browsingContent(destination)
             } miniPlayer: {
-                VStack(spacing: 0) {
-                    miniPlayer()
-                    FoundationMacPlaybackTimeline(player: player)
-                        .padding(.horizontal, 12).padding(.bottom, 8)
-                }
+                macTransport
             } librarySidebar: {
                 macLibrarySidebar
             } profile: {
@@ -293,13 +289,12 @@ struct FoundationLibraryView: View {
                     .onGeometryChange(for: CGFloat.self) {
                         $0.size.width
                     } action: { width in
-                        // Closing geometry must not replace the remembered open width.
                         if showingPlayer, width > 0 { macInspectorWidth = width }
                     }
             }
             .environment(
                 \.foundationMacTransportBottomInset,
-                displayedQueue.isEmpty ? 0 : macTransportInset
+                macTransportInset
             )
             .environment(
                 \.foundationMacToolbarTrailingReserve,
@@ -461,7 +456,7 @@ struct FoundationLibraryView: View {
             case .downloads:
                 FoundationDownloadsView(
                     library: library, player: player, isActive: catalogIsActive(.library))
-            case .playlist(let item):
+            case .playlist(let item), .item(let item):
                 FoundationItemDestination(
                     item: item, library: library, player: player,
                     isActive: catalogIsActive(.library))
@@ -782,6 +777,28 @@ struct FoundationLibraryView: View {
     }
 
     #if os(macOS)
+        private var macTransport: some View {
+            let item = displayedQueue.first { $0.id == displayedEntryID }?.item
+            return FoundationMacTransport(
+                player: player, item: item, state: displayedState,
+                lyricsEnabled: item != nil && !connectivity.localOnly,
+                lyricsSelected: showingPlayer && macPanel == .lyrics,
+                queueSelected: showingPlayer && macPanel == .queue,
+                toggleLyrics: { toggleMacPanel(.lyrics) },
+                toggleQueue: { toggleMacPanel(.queue) },
+                navigate: { openMacLibrary(.item($0)) },
+                artwork: {
+                    if let item {
+                        FoundationCatalogArtwork(
+                            source: .current(currentArtwork.result(for: item)),
+                            item: item.catalogArtworkItem, library: library,
+                            isActive: true, size: 40
+                        ).id(item.sharedArtworkIdentity)
+                    }
+                }
+            )
+        }
+
         private func toggleMacPanel(_ mode: FoundationMacPlaybackPanel.Mode) {
             if showingPlayer && macPanel == mode {
                 showingPlayer = false
@@ -1017,7 +1034,7 @@ private struct FoundationFavoriteShelf: View {
                         }.padding(.horizontal, 16)
                     }
                 }.scrollIndicators(.hidden)
-                    .foundationMacShelfUnderlap()
+                    .foundationMacShelfUnderlap(horizontalInset: 0)
             } else if model.isLoading {
                 FoundationLoadingPlaceholder(layout: kind == .track ? .rows : .albumGrid)
                     .padding(.horizontal, 16)
@@ -1601,6 +1618,14 @@ private struct FoundationCollectionView: View {
         return copy
     }
 
+    #if os(macOS)
+        private var refreshTaskID: String {
+            "\(item.id)-\(isActive)-\(connectivity.localOnly)-\(refreshRevision)"
+        }
+    #else
+        private var refreshTaskID: Int? { connectivity.localOnly ? nil : refreshRevision }
+    #endif
+
     var body: some View {
         FoundationTrackList(
             title: displayItem.title, tracks: tracks, player: player, library: library,
@@ -1617,7 +1642,20 @@ private struct FoundationCollectionView: View {
                 return try await library.tracks(albumID: item.id, startIndex: offset)
             }
         )
-        .task(id: connectivity.localOnly ? nil : refreshRevision) {
+        .task(id: refreshTaskID) {
+            #if os(macOS)
+                guard isActive, !connectivity.localOnly else { return }
+                if refreshRevision == 0 {
+                    await tracks.loadPending(ifActive: isActive) { offset in
+                        if item.kind == .playlist {
+                            return try await library.playlistTracks(
+                                playlistID: item.id, startIndex: offset)
+                        }
+                        return try await library.tracks(albumID: item.id, startIndex: offset)
+                    }
+                    return
+                }
+            #endif
             guard !connectivity.localOnly, refreshRevision > completedRefreshRevision else {
                 return
             }
@@ -2543,11 +2581,18 @@ struct FoundationDetailActions: View {
 }
 
 #if os(macOS)
+    private struct FoundationMacDetailButtonStyle: ButtonStyle {
+        func makeBody(configuration: Configuration) -> some View {
+            configuration.label.contentShape(Circle())
+                .opacity(configuration.isPressed ? 0.7 : 1)
+        }
+    }
+
     private struct FoundationMacDetailButton: ViewModifier {
         @Environment(\.foundationReduceTransparency) private var reduceTransparency
 
         func body(content: Content) -> some View {
-            content.buttonStyle(.plain)
+            content.buttonStyle(FoundationMacDetailButtonStyle())
                 .background {
                     if reduceTransparency { Circle().fill(.background) }
                 }
