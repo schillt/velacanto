@@ -23,18 +23,21 @@ checkout's instructions to make them appear current. Explicit owner instructions
 take precedence, but a scoped exception does not permanently change the default
 workflow. Record its scope and reconcile shared documentation.
 
-Velacanto 0.3.5 follows the 0.3.0 (108) Foundation replacement. The maintained
+Velacanto 0.4.0 development follows the 0.3.5 and 0.3.0 (108) Foundation line.
+Read `docs/0.4-development-record.md` and `docs/0.4-plan.md` for the current
+integrated checkpoint and outstanding gates. The maintained
 app is `NativeFoundation/VelacantoFoundation.xcodeproj`, scheme
 `VelacantoFoundation`, product `Velacanto`. Read `NativeFoundation/AGENTS.md`,
 ADR 0012/0013 and `docs/0.3.5-acceptance.md`. Build 107 remains rejected. Historical
 0.3.0 freeze documents do not disable the scoped 0.3.5 features. Never restore old
 controllers to satisfy superseded plans.
 
-The owner authorized PR #174 into alpha after required checks pass, a 0.3.5
-GitHub prerelease from alpha and existing-workflow internal TestFlight, with
-documented known bugs and the native volume slider retained. No main promotion
-is authorized for this prerelease. This is a recorded
-release exception, not evidence the volume defect is fixed. Record current checks,
+The historical 0.3.5 exception authorized PR #174 into alpha after passing checks,
+a GitHub prerelease and existing-workflow internal TestFlight, with documented
+known bugs and the native volume slider retained. That exception did not authorize
+main promotion. The later accepted preview `de7abe9` was promoted through PR #190
+on 2026-10-07; newer 0.4 source is excluded. These recorded release decisions do
+not establish that the volume defect is fixed. Record current checks,
 exceptions and signed distribution status separately; no public App Store
 submission is implied. Do not change runtime/version metadata in planning-only
 work. Apply `docs/engineering-rubric.md` to future reviews without inventing grades.

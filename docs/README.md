@@ -1,5 +1,6 @@
 # Velacanto documentation
 
+- [0.4 development and acceptance record](0.4-development-record.md)
 - [Current 0.4 execution plan](0.4-plan.md)
 - [Roadmap](roadmap.md)
 - [0.3.5 release notes](0.3.5-release-notes.md)

@@ -7,8 +7,10 @@ old controllers. Use the exact assigned base; never edit another worktree.
 
 ## Release boundary
 
-0.3.5 builds on the accepted 0.3.0 (108) Foundation replacement. The historical
-0.3.0 freeze remains documented in ADR 0013; it does not disable the independently
+0.4.0 development builds on the 0.3.5 and accepted 0.3.0 (108) Foundation line.
+Read `docs/0.4-development-record.md` and `docs/0.4-plan.md` for current integrated
+features and pending acceptance; 0.3.5 documents below are historical evidence.
+The historical 0.3.0 freeze remains documented in ADR 0013; it does not disable the independently
 implemented 0.3.5 features. Build 107 remains rejected. Read
 `docs/0.3.5-release-notes.md`, `docs/0.3.5-known-issues.md` and
 `docs/0.3.5-acceptance.md` for current scope and evidence limits. Never restore
@@ -29,8 +31,10 @@ gain. The player owns playback intent and native items; the account-lifetime sys
 bridge forwards commands and metadata. Views must not create players, activate the
 audio session, restore system volume or trigger catalog/artwork work on redraw.
 Lyrics and artwork retain explicit cancellation and stale-result protection.
-Collection Shuffle is supported; persistent shuffle/repeat, playlist editing,
-offline/local libraries, new providers and playback reporting are not.
+Collection Shuffle, persistent shuffle/repeat, paused queue restoration, playlist
+editing and account-owned original-file downloads are implemented in alpha.
+Local-library indexing, new providers and playback reporting remain deferred or
+unimplemented. Keep implementation distinct from physical/server acceptance.
 
 ## Verification and delivery
 

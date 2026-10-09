@@ -2,11 +2,21 @@
 
 GitHub issues, latest owner scope comments and the [Development Project](https://github.com/users/schillt/projects/1) control current work. This roadmap records direction, not implementation or acceptance. No future milestone has a committed date.
 
-## Current checkpoint: 0.3.5 alpha
+## Current checkpoint: 0.4.0 development on alpha
 
-[0.3.5](https://github.com/schillt/velacanto/releases/tag/0.3.5) was published from alpha at `6efcd01d0526291c5f992d658a8d10ec93e5496d`; its exact post-merge [Quality Gate](https://github.com/schillt/velacanto/actions/runs/36362999380) passed. It includes native system commands, volume and AirPlay, shared current artwork, inline synchronized lyrics and playback handoff improvements. These are shipped alpha implementations with remaining physical/network/distribution limits in [#169](https://github.com/schillt/velacanto/issues/169). Main was not promoted.
+The combined iOS/iPadOS and Mac source is integrated at `488d0af65f215d5a781f8c4077b521537cd7b5d2`,
+version 0.4.0 (124). Downloads, playlist management, persistent queue modes/restoration,
+shared account artwork and native platform refinements are implemented. Both Release
+builds and 332 Mac tests passed on the final combined source. See the
+[development and acceptance record](0.4-development-record.md) for exact handoffs,
+security remediation, source-specific tests and outstanding physical/server gates.
+This round did not establish a 0.4 release or both-platform TestFlight availability.
 
-Post-release alpha includes sign-out and pin cleanup at `88aa9f6588dcdc5487979036b60c450d2af220a5`. Integrated source is not a new release or proof of all privacy checks. The initial 0.4 planning base is `de7abe9df9ae294184cadbddb01ecc2161038ab1`; fetch current alpha before each assignment.
+The earlier accepted preview `de7abe9` was promoted to main through
+[PR #190](https://github.com/schillt/velacanto/pull/190) on 2026-10-07, preserving ancestry.
+The newer 0.4 work is excluded from that release snapshot. The published 0.3.5
+prerelease and its historical evidence remain intact. Fetch current alpha before
+starting an assignment; the original 0.4 planning base is not the current source.
 
 ## 0.4.0 — Downloads, Playlists and Queue Management
 

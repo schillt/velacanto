@@ -1,10 +1,12 @@
 # Artwork and offline storage policy — issue #14
 
-## Shared catalog artwork implementation — local candidate
+## Shared catalog artwork implementation — integrated development
 
 Owner clarification on 2026-10-07 authorizes actual app-wide reuse, including artist,
 playlist and genre consumers, on the local issue #13 build 116 source `2a41f533`.
-This does not claim publication, integration, physical acceptance or #14 completion.
+The implementation and subsequent revision-key correction are now integrated in
+alpha through `488d0af`. The original local handoff remains historical; physical
+acceptance and #14 completion are separate. See the [0.4 record](0.4-development-record.md).
 
 The account-owned `FoundationArtworkCache` shares visible catalog and current-player
 reads through the existing provider. Track artwork projects supplied album references;
