@@ -38,11 +38,12 @@ struct FoundationHomeView<Profile: View>: View {
                     isActive: isActive, refreshRevision: refreshRevision, showsTracks: true,
                     openedItem: $openedItem
                 ) { try await library.recentlyPlayed(startIndex: $0) }
+                // A bounded mixed collection preview; the heading opens complete Favorites.
                 FoundationHomeShelf(
                     title: "Favorites", model: favorites, library: library, player: player,
                     isActive: isActive, refreshRevision: refreshRevision, isFavorites: true,
                     openedItem: $openedItem
-                ) { try await library.favoriteAlbums(startIndex: $0) }
+                ) { _ in try await library.favoriteCollectionsPreview() }
                 FoundationHomeShelf(
                     title: "Recently Added", model: recentAlbums, library: library, player: player,
                     isActive: isActive, refreshRevision: refreshRevision,
@@ -59,6 +60,7 @@ struct FoundationHomeView<Profile: View>: View {
             #endif
         }
         .onDisappear {
+            actions.cancelQueueAddition()
             isVisible = false
             #if DEBUG
                 FoundationTrace.event("ui origin=home disappeared")
@@ -261,6 +263,8 @@ private struct FoundationHomeGenreShelf: View {
 }
 
 private struct FoundationHomeShelf: View {
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var refreshOnActivation = true
     @EnvironmentObject private var downloads: FoundationDownloads
     @EnvironmentObject private var connectivity: FoundationConnectivity
     let title: String
@@ -279,14 +283,27 @@ private struct FoundationHomeShelf: View {
     @State private var consumedRefreshRevision = 0
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
+    private var displayedItems: [FoundationItem] {
+        isFavorites ? actions.favoriteItems(in: model.items) : model.items
+    }
+
+    private var favoritesActivation: Bool {
+        isActive && isVisible && scenePhase == .active && !connectivity.localOnly
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 6) {
-                if !model.items.isEmpty {
+                if isFavorites || !displayedItems.isEmpty || model.nextStartIndex != nil {
                     NavigationLink {
-                        FoundationCatalogView(
-                            title: title, model: model, library: library, player: player,
-                            isActive: isActive, isFavorites: isFavorites, loader: loader)
+                        if isFavorites {
+                            FoundationFavoritesView(
+                                library: library, player: player, isActive: isActive)
+                        } else {
+                            FoundationCatalogView(
+                                title: title, model: model, library: library, player: player,
+                                isActive: isActive, loader: loader)
+                        }
                     } label: {
                         HStack(spacing: 6) {
                             Text(title).font(.title2.bold())
@@ -297,6 +314,7 @@ private struct FoundationHomeShelf: View {
                     .buttonStyle(.plain)
                     .accessibilityLabel("See all " + title.lowercased())
                     .accessibilityAddTraits(.isHeader)
+                    .accessibilityIdentifier(isFavorites ? "home-favorites" : "home-shelf-" + title)
                 } else {
                     Text(title).font(.title2.bold()).accessibilityAddTraits(.isHeader)
                 }
@@ -320,26 +338,35 @@ private struct FoundationHomeShelf: View {
                     .foundationMacShelfUnderlap()
                     .accessibilityLabel("Recently Played carousel")
                 }
-            } else if !model.items.isEmpty {
+            } else if !displayedItems.isEmpty {
                 ScrollView(.horizontal) {
                     LazyHStack(alignment: .top, spacing: 16) {
-                        ForEach(Array(model.items.prefix(5).enumerated()), id: \.offset) {
+                        ForEach(Array(displayedItems.prefix(5).enumerated()), id: \.offset) {
                             _, item in
-                            FoundationAlbumShelfCard(
-                                item: item, library: library, player: player,
-                                isActive: isActive && isVisible, open: { openedItem = item },
-                                navigate: { openedItem = $0 })
+                            if isFavorites {
+                                FoundationCollectionCard(
+                                    item: item, library: library, player: player,
+                                    isActive: isActive && isVisible, open: { openedItem = item },
+                                    navigate: { openedItem = $0 }
+                                )
+                                .frame(width: dynamicTypeSize.isAccessibilitySize ? 240 : 160)
+                            } else {
+                                FoundationAlbumShelfCard(
+                                    item: item, library: library, player: player,
+                                    isActive: isActive && isVisible, open: { openedItem = item },
+                                    navigate: { openedItem = $0 })
+                            }
                         }
                     }.scrollTargetLayout()
                 }
                 .scrollTargetBehavior(.viewAligned)
                 .scrollIndicators(.hidden)
-                .foundationMacShelfUnderlap()
+                .modifier(FoundationHomeShelfBoundary(contained: isFavorites))
             }
             if model.hasConnectionIssue, !connectivity.hasConnectionIssue {
                 FoundationOfflineNotice()
             }
-            if model.isLoading, model.items.isEmpty, !connectivity.localOnly {
+            if model.isLoading, displayedItems.isEmpty, !connectivity.localOnly {
                 FoundationLoadingPlaceholder(layout: showsTracks ? .rows : .albumShelf)
             }
             if let error = model.errorMessage, !model.hasConnectionIssue {
@@ -350,9 +377,13 @@ private struct FoundationHomeShelf: View {
                     retryRevision += 1
                 }.disabled(connectivity.localOnly)
             } else if !connectivity.localOnly, !model.hasConnectionIssue, model.loaded,
-                model.items.isEmpty
+                displayedItems.isEmpty
             {
-                Text("No items yet.").foregroundStyle(.secondary)
+                Text(
+                    model.nextStartIndex == nil
+                        ? "No items yet."
+                        : "No matches in this page. Open the full list to load more."
+                ).foregroundStyle(.secondary)
             }
         }
         .onAppear {
@@ -363,9 +394,13 @@ private struct FoundationHomeShelf: View {
         }
         .onDisappear {
             isVisible = false
+            refreshOnActivation = true
             #if DEBUG
                 FoundationTrace.event("ui origin=home disappeared")
             #endif
+        }
+        .onChange(of: favoritesActivation) { _, active in
+            if !active { refreshOnActivation = true }
         }
         .onChange(of: actions.favoriteRevision) { _, _ in
             if isFavorites, isActive, isVisible, !connectivity.localOnly {
@@ -374,10 +409,16 @@ private struct FoundationHomeShelf: View {
             }
         }
         .task(
-            id: isActive && isVisible
+            id: isActive && isVisible && scenePhase == .active
                 ? "\(refreshRevision):\(retryRevision):\(connectivity.localOnly)" : nil
         ) {
-            guard isActive, isVisible, !Task.isCancelled else { return }
+            guard isActive, isVisible, scenePhase == .active, !Task.isCancelled else { return }
+            if isFavorites, favoritesActivation, refreshOnActivation {
+                refreshOnActivation = false
+                if model.loaded { model.request(.refresh) }
+            }
+            // This capped preview cannot establish nonmembership from absent rows.
+            model.configureFavoriteObservations(actions)
             if refreshRevision != consumedRefreshRevision {
                 model.request(.refresh)
                 consumedRefreshRevision = refreshRevision
@@ -401,12 +442,12 @@ private struct FoundationHomeShelf: View {
 
     private var usesVerticalRecentRows: Bool {
         dynamicTypeSize.isAccessibilitySize
-            || model.items.prefix(6).contains { actions.errorMessage(for: $0) != nil }
+            || displayedItems.prefix(6).contains { actions.errorMessage(for: $0) != nil }
     }
 
     private var recentRows: some View {
         ForEach(
-            Array(model.items.prefix(6).enumerated()).filter {
+            Array(displayedItems.prefix(6).enumerated()).filter {
                 !connectivity.localOnly || downloads.isReady($0.element)
             }, id: \.offset
         ) { index, item in
@@ -475,4 +516,15 @@ private struct FoundationHomeShelf: View {
     return FoundationCatalogArtwork(
         item: artworkItem, library: library, isActive: isActive, size: size
     ).id(artworkItem.id + (artworkItem.primaryImageTag ?? ""))
+}
+
+private struct FoundationHomeShelfBoundary: ViewModifier {
+    let contained: Bool
+    @ViewBuilder func body(content: Content) -> some View {
+        if contained {
+            content.foundationMacContainedShelf()
+        } else {
+            content.foundationMacShelfUnderlap()
+        }
+    }
 }

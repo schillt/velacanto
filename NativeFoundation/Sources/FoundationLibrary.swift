@@ -110,6 +110,7 @@ private actor FoundationAlphabetCapabilityMemo {
 }
 
 protocol FoundationLibrary: Sendable {
+    func reportPlayback(_ event: FoundationPlaybackReport) async throws
     func retireAlphabetCapability() async
     func alphabetCapability() async -> FoundationAlphabetCapability
     /// A relative cursor into the bounded SortName >= letter tail, never an absolute rank.
@@ -143,6 +144,7 @@ protocol FoundationLibrary: Sendable {
     func profile() async throws -> (name: String, image: Data?)
     func recentlyPlayed(startIndex: Int) async throws -> FoundationPage
     func favoriteAlbums(startIndex: Int) async throws -> FoundationPage
+    func favoriteCollectionsPreview() async throws -> FoundationPage
     func search(
         query: String, kind: FoundationItem.Kind, startIndex: Int, limit: Int
     ) async throws -> FoundationPage
@@ -171,6 +173,7 @@ protocol FoundationLibrary: Sendable {
 }
 
 extension FoundationLibrary {
+    func reportPlayback(_ event: FoundationPlaybackReport) async throws {}
     func retireAlphabetCapability() async {}
     func alphabetCapability() async -> FoundationAlphabetCapability { .unavailable }
     func alphabetPage(kind: FoundationItem.Kind, letter: String, startIndex: Int) async throws
@@ -249,6 +252,14 @@ extension FoundationLibrary {
     }
     func favoriteAlbums(startIndex: Int) async throws -> FoundationPage {
         throw FoundationLibraryError.unavailable
+    }
+
+    func favoriteCollectionsPreview() async throws -> FoundationPage {
+        let albums = try await favorites(kind: .album, startIndex: 0)
+        try Task.checkCancellation()
+        let playlists = try await favorites(kind: .playlist, startIndex: 0)
+        try Task.checkCancellation()
+        return foundationFavoriteCollectionsPreview(albums: albums, playlists: playlists)
     }
 
     func search(
@@ -637,6 +648,21 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
             kinds: [.album], parent: nil, startIndex: startIndex, limit: 24, isFavorite: true)
     }
 
+    func favoriteCollectionsPreview() async throws -> FoundationPage {
+        let albums: FoundationPage
+        if catalogAvailable {
+            albums = try await page(
+                kinds: [.album], parent: nil, startIndex: 0, limit: 5, isFavorite: true)
+        } else {
+            albums = .init(items: [], nextStartIndex: nil)
+        }
+        try Task.checkCancellation()
+        let playlists = try await page(
+            kinds: [.playlist], parent: nil, startIndex: 0, limit: 5, isFavorite: true)
+        try Task.checkCancellation()
+        return foundationFavoriteCollectionsPreview(albums: albums, playlists: playlists)
+    }
+
     func recentAlbums(startIndex: Int = 0) async throws -> FoundationPage {
         try await page(
             kinds: [.album], parent: nil, startIndex: startIndex, limit: 24,
@@ -734,7 +760,7 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
     }
 
     func itemDetails(for item: FoundationItem) async throws -> FoundationItem? {
-        guard Self.validID(item.id), item.kind == .album else {
+        guard Self.validID(item.id), item.kind == .album || item.kind == .artist else {
             throw FoundationLibraryError.invalidResponse
         }
         let detail: BaseItemDto = try await send(
@@ -809,7 +835,7 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
     }
 
     func favorites(kind: FoundationItem.Kind, startIndex: Int) async throws -> FoundationPage {
-        guard [.album, .artist, .track].contains(kind) else {
+        guard [.album, .artist, .track, .playlist].contains(kind) else {
             throw FoundationLibraryError.unavailable
         }
         return try await page(
@@ -1039,6 +1065,34 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
         return FoundationDownloadSource(
             request: request, fileExtension: container == "mp4" ? "m4a" : container,
             expectedBytes: Int64(size))
+    }
+
+    func reportPlayback(_ event: FoundationPlaybackReport) async throws {
+        try Task.checkCancellation()
+        guard Self.validID(event.itemID), event.position.isFinite, event.position >= 0,
+            event.position < Double(Int.max) / 10_000_000
+        else { throw FoundationLibraryError.invalidResponse }
+        let scaledPosition = event.position * 10_000_000
+        guard scaledPosition < Double(Int.max) else {
+            throw FoundationLibraryError.invalidResponse
+        }
+        let ticks = Int(scaledPosition)
+        if event.kind == .stop {
+            _ = try await responseData(
+                Paths.reportPlaybackStopped(
+                    .init(
+                        itemID: event.itemID, playSessionID: event.occurrenceID.uuidString,
+                        positionTicks: ticks)))
+        } else {
+            let body = PlaybackStateInfo(
+                isPaused: event.paused, itemID: event.itemID,
+                playSessionID: event.occurrenceID.uuidString, positionTicks: ticks)
+            if event.kind == .start {
+                _ = try await responseData(Paths.reportPlaybackStart(body))
+            } else {
+                _ = try await responseData(Paths.reportPlaybackProgress(body))
+            }
+        }
     }
 
     func playbackURL(for item: FoundationItem) async throws -> URL {
@@ -1469,4 +1523,25 @@ enum FoundationAlphabetAccountLifecycle {
         guard let library else { return nil }
         return Task { await library.retireAlphabetCapability() }
     }
+}
+
+/// At most ten interleaved candidates for five visible cards, not complete membership.
+/// Keep explicit false DTOs for reconciliation; presentation filters them after observation.
+/// Never use absence here to infer unfavorite.
+func foundationFavoriteCollectionsPreview(albums: FoundationPage, playlists: FoundationPage)
+    -> FoundationPage
+{
+    let albumCandidates = Array(albums.items.filter { $0.kind == .album }.prefix(5))
+    let playlistCandidates = Array(playlists.items.filter { $0.kind == .playlist }.prefix(5))
+    let albums = albumCandidates.filter { $0.isFavorite != false }
+    let playlists = playlistCandidates.filter { $0.isFavorite != false }
+    var items: [FoundationItem] = []
+    for index in 0..<max(albums.count, playlists.count) {
+        if albums.indices.contains(index) { items.append(albums[index]) }
+        if playlists.indices.contains(index) { items.append(playlists[index]) }
+    }
+    // Reconcile rejected candidates too, without letting them displace the mixed preview.
+    items.append(
+        contentsOf: (albumCandidates + playlistCandidates).filter { $0.isFavorite == false })
+    return FoundationPage(items: items, nextStartIndex: nil)
 }

@@ -19,7 +19,7 @@ import SwiftUI
         let navigationRevision: Int
         @FocusState private var searchFocused: Bool
         @State private var columnVisibility = NavigationSplitViewVisibility.all
-        @State private var sidebarWidth: CGFloat = 200
+        @State private var sidebarWidth: CGFloat = 230
         @Binding var playbackInset: CGFloat
         let showsMiniPlayer: Bool
         @ScaledMetric(relativeTo: .body) private var homeIconSize = 18.0
@@ -93,7 +93,7 @@ import SwiftUI
                     profile().padding(10)
                 }
                 .navigationTitle("Velacanto")
-                .navigationSplitViewColumnWidth(min: 170, ideal: 200, max: 280)
+                .navigationSplitViewColumnWidth(min: 170, ideal: 230, max: 280)
                 .onGeometryChange(for: CGFloat.self) {
                     $0.size.width
                 } action: {
@@ -732,6 +732,16 @@ private struct FoundationMacShelfUnderlap: ViewModifier {
 }
 
 extension View {
+    /// Keep Favorites aligned with its detail column while forwarding vertical wheel input.
+    @ViewBuilder func foundationMacContainedShelf() -> some View {
+        #if os(macOS)
+            self.background(FoundationMacCarouselWheelRouting())
+                .scrollClipDisabled(false)
+        #else
+            self
+        #endif
+    }
+
     func foundationMacShelfUnderlap(horizontalInset: CGFloat = 16, contentInset: CGFloat = 16)
         -> some View
     {

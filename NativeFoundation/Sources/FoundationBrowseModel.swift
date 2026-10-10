@@ -14,6 +14,11 @@ final class FoundationBrowseModel: ObservableObject {
     private var revision = UUID()
     private var writePermit = FoundationPageWritePermit()
     private var hasLiveLoad: Bool { isLoading && writePermit.isValid }
+    // A revoked write permit does not mean the underlying request has unwound.
+    private var executingLoads: Set<UUID> = []
+    private var initialDemandEpoch = UUID()
+    private var initialLoadWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
+    var pendingInitialLoadDemandCount: Int { initialLoadWaiters.count }
     private var pendingRequest = Request.initial
     private(set) var retryRequest = Request.initial
 
@@ -28,6 +33,17 @@ final class FoundationBrowseModel: ObservableObject {
     private var lastRefreshAttempt: Date?
     private let now: () -> Date
     private let refreshInterval: TimeInterval
+    private weak var favoriteActions: FoundationLibraryActions?
+    private var observesFavoriteMembership = false
+    private var favoriteRefreshCandidates: [FoundationItem] = []
+    private var favoriteRefreshRead: FoundationLibraryActions.FavoriteRead?
+
+    func configureFavoriteObservations(
+        _ actions: FoundationLibraryActions, knownFavorites: Bool = false
+    ) {
+        favoriteActions = actions
+        observesFavoriteMembership = knownFavorites
+    }
 
     init(
         refreshInterval: TimeInterval = 60, now: @escaping () -> Date = { Date() },
@@ -106,6 +122,9 @@ final class FoundationBrowseModel: ObservableObject {
 
     /// Install complete known membership without inventing a remote page or filtering occurrences.
     func installSnapshot(_ snapshot: [FoundationItem], complete: Bool = true) {
+        invalidateInitialDemands()
+        favoriteRefreshCandidates = []
+        favoriteRefreshRead = nil
         writePermit.revoke()
         revision = UUID()
         cachedRawPrefix = []
@@ -121,6 +140,9 @@ final class FoundationBrowseModel: ObservableObject {
     }
 
     func clearRetainedData() {
+        invalidateInitialDemands()
+        favoriteRefreshCandidates = []
+        favoriteRefreshRead = nil
         writePermit.revoke()
         revision = UUID()
         cachedRawPrefix = []
@@ -138,6 +160,7 @@ final class FoundationBrowseModel: ObservableObject {
     }
 
     func request(_ request: Request) {
+        invalidateInitialDemands()
         writePermit.revoke()
         revision = UUID()
         pendingRequest = request
@@ -150,6 +173,7 @@ final class FoundationBrowseModel: ObservableObject {
 
     func loadPending(
         ifActive isActive: Bool = true, allowsNetwork: Bool = true,
+        waitForInitialLoad: Bool = false,
         using loader: (Int) async throws -> FoundationPage
     ) async {
         guard isActive, !Task.isCancelled else {
@@ -160,7 +184,19 @@ final class FoundationBrowseModel: ObservableObject {
             #endif
             return
         }
+        let demandEpoch = initialDemandEpoch
         await restoreCache()
+        if waitForInitialLoad, case .initial = pendingRequest, !loaded, errorMessage == nil {
+            guard allowsNetwork, demandEpoch == initialDemandEpoch else { return }
+            // Keep visible initial demand alive when another view owns the same model.
+            // Successful or failed work satisfies demand; only abandonment hands it over.
+            while !executingLoads.isEmpty {
+                await waitForExecutingLoad()
+                guard !Task.isCancelled, demandEpoch == initialDemandEpoch else { return }
+                if loaded || errorMessage != nil { return }
+            }
+            guard !Task.isCancelled, demandEpoch == initialDemandEpoch else { return }
+        }
         guard allowsNetwork, !Task.isCancelled, !hasLiveLoad else { return }
         var request = pendingRequest
         if case .initial = request, pageCache != nil, loaded {
@@ -171,6 +207,34 @@ final class FoundationBrowseModel: ObservableObject {
         }
         pendingRequest = .initial
         await load(request, using: loader)
+    }
+
+    private func waitForExecutingLoad() async {
+        let waiter = UUID()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                guard !Task.isCancelled, !executingLoads.isEmpty else {
+                    continuation.resume()
+                    return
+                }
+                initialLoadWaiters[waiter] = continuation
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                self?.initialLoadWaiters.removeValue(forKey: waiter)?.resume()
+            }
+        }
+    }
+
+    private func resumeInitialLoadWaiters() {
+        let waiters = initialLoadWaiters.values
+        initialLoadWaiters.removeAll()
+        for waiter in waiters { waiter.resume() }
+    }
+
+    private func invalidateInitialDemands() {
+        initialDemandEpoch = UUID()
+        resumeInitialLoadWaiters()
     }
 
     /// Activation loads one page; further membership comes only from visible demand.
@@ -225,6 +289,9 @@ final class FoundationBrowseModel: ObservableObject {
         }
         if case .initial = request { retryRequest = .refresh } else { retryRequest = request }
         let owner = UUID()
+        let actions = favoriteActions
+        let favoriteRead = actions?.beginFavoriteRead()
+        let knownFavorites = observesFavoriteMembership
         writePermit.revoke()
         let permit = FoundationPageWritePermit()
         writePermit = permit
@@ -233,7 +300,12 @@ final class FoundationBrowseModel: ObservableObject {
         lastRefreshAttempt = now()
         errorMessage = nil
         errorCategory = nil
-        defer { if revision == owner { isLoading = false } }
+        executingLoads.insert(owner)
+        defer {
+            if revision == owner { isLoading = false }
+            executingLoads.remove(owner)
+            resumeInitialLoadWaiters()
+        }
         #if DEBUG
             FoundationJournal.shared.record(
                 "browse disposition=\(String(describing: request)) \(FoundationTrace.fields)")
@@ -289,6 +361,11 @@ final class FoundationBrowseModel: ObservableObject {
                 budget.retainedBytes += cost.bytes
                 catalogBudget = budget
             }
+            if offset == 0 {
+                // Keep only this destination's previous membership, not account-wide guesses.
+                favoriteRefreshCandidates = knownFavorites ? items : []
+                favoriteRefreshRead = favoriteRead
+            }
             if case .more = request {
                 if cachedRawPrefix.count < 200 {
                     cachedRawPrefix.append(
@@ -304,6 +381,24 @@ final class FoundationBrowseModel: ObservableObject {
             nextStartIndex = page.nextStartIndex
             loaded = true
             isRetainedSnapshot = false
+            if let actions, let favoriteRead {
+                actions.observeFavorites(
+                    in: page.items, knownFavorites: knownFavorites, read: favoriteRead)
+                if knownFavorites, page.nextStartIndex == nil, let read = favoriteRefreshRead {
+                    let membership = Set(items.map { $0.kind.rawValue + ":" + $0.id })
+                    let removed = favoriteRefreshCandidates.compactMap { item -> FoundationItem? in
+                        guard !membership.contains(item.kind.rawValue + ":" + item.id) else {
+                            return nil
+                        }
+                        var item = item
+                        item.isFavorite = false
+                        return item
+                    }
+                    actions.observeFavorites(in: removed, read: read)
+                    favoriteRefreshCandidates = []
+                    favoriteRefreshRead = nil
+                }
+            }
             if let pageCache, let cacheKey {
                 // Persist a bounded prefix; preserve the next offset so truncated pages stay usable.
                 let limit = 200

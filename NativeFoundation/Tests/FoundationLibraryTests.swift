@@ -9,15 +9,357 @@ import XCTest
 #endif
 
 final class FoundationLibraryTests: XCTestCase {
+    @MainActor
+    func testCollectionInitialDemandTakesOverCancelledOwnerAfterTransportUnwinds() async {
+        let model = FoundationBrowseModel()
+        let firstGate = FoundationAlphabetTestGate()
+        let secondGate = FoundationAlphabetTestGate()
+        let track = FoundationItem(
+            id: "replacement", title: "Replacement", subtitle: "Synthetic", kind: .track,
+            duration: 1)
+        var activeRequests = 0
+        var maximumActiveRequests = 0
+        var replacementReads = 0
+        let first = Task {
+            await model.loadPending(waitForInitialLoad: true) { _ in
+                activeRequests += 1
+                maximumActiveRequests = max(maximumActiveRequests, activeRequests)
+                defer { activeRequests -= 1 }
+                await firstGate.suspend()
+                return .init(items: [], nextStartIndex: nil)
+            }
+        }
+        await firstGate.entered()
+        let second = Task {
+            await model.loadPending(waitForInitialLoad: true) { _ in
+                replacementReads += 1
+                activeRequests += 1
+                maximumActiveRequests = max(maximumActiveRequests, activeRequests)
+                defer { activeRequests -= 1 }
+                await secondGate.suspend()
+                return .init(items: [track], nextStartIndex: nil)
+            }
+        }
+        await waitForInitialDemands(1, in: model)
+        first.cancel()
+        // The first synthetic transport ignores cancellation until explicitly released.
+        let third = Task {
+            await model.loadPending(waitForInitialLoad: true) { _ in
+                replacementReads += 1
+                activeRequests += 1
+                maximumActiveRequests = max(maximumActiveRequests, activeRequests)
+                defer { activeRequests -= 1 }
+                await secondGate.suspend()
+                return .init(items: [track], nextStartIndex: nil)
+            }
+        }
+        await waitForInitialDemands(2, in: model)
+        XCTAssertEqual(replacementReads, 0)
+        await firstGate.release()
+        await first.value
+        await secondGate.entered()
+        XCTAssertEqual(replacementReads, 1)
+        await secondGate.release()
+        await second.value
+        await third.value
+        XCTAssertEqual(maximumActiveRequests, 1)
+        XCTAssertEqual(replacementReads, 1)
+        XCTAssertEqual(model.items.map(\.id), ["replacement"])
+        XCTAssertTrue(model.loaded)
+        XCTAssertFalse(model.isLoading)
+        XCTAssertEqual(model.pendingInitialLoadDemandCount, 0)
+    }
+
+    @MainActor
+    func testCollectionInitialDemandDoesNotRetrySuccessfulOrFailedOwner() async {
+        for fails in [false, true] {
+            let model = FoundationBrowseModel()
+            let gate = FoundationAlphabetTestGate()
+            let track = FoundationItem(
+                id: "original", title: "Original", subtitle: "Synthetic", kind: .track, duration: 1)
+            let first = Task {
+                await model.loadPending(waitForInitialLoad: true) { _ in
+                    await gate.suspend()
+                    if fails { throw FoundationLibraryError.invalidResponse }
+                    return .init(items: [track], nextStartIndex: nil)
+                }
+            }
+            await gate.entered()
+            let second = Task {
+                await model.loadPending(waitForInitialLoad: true) { _ in
+                    XCTFail("Completed owner must satisfy initial demand without another request")
+                    return .init(items: [], nextStartIndex: nil)
+                }
+            }
+            await waitForInitialDemands(1, in: model)
+            await gate.release()
+            await first.value
+            await second.value
+            XCTAssertEqual(model.loaded, !fails)
+            XCTAssertEqual(model.errorMessage != nil, fails)
+            XCTAssertEqual(model.pendingInitialLoadDemandCount, 0)
+        }
+    }
+
+    @MainActor
+    func testCancelledCollectionWaiterReturnsWithoutWaitingForNoncooperativeTransport() async {
+        let model = FoundationBrowseModel()
+        let gate = FoundationAlphabetTestGate()
+        let first = Task {
+            await model.loadPending(waitForInitialLoad: true) { _ in
+                await gate.suspend()
+                return .init(items: [], nextStartIndex: nil)
+            }
+        }
+        await gate.entered()
+        let second = Task {
+            await model.loadPending(waitForInitialLoad: true) { _ in
+                XCTFail("Cancelled destination must not take over")
+                return .init(items: [], nextStartIndex: nil)
+            }
+        }
+        await waitForInitialDemands(1, in: model)
+        second.cancel()
+        await second.value
+        XCTAssertEqual(model.pendingInitialLoadDemandCount, 0)
+        XCTAssertTrue(model.isLoading)
+        first.cancel()
+        await gate.release()
+        await first.value
+        XCTAssertFalse(model.loaded)
+        XCTAssertNil(model.errorMessage)
+    }
+
+    @MainActor
+    func testCollectionDemandInvalidationCannotResurrectRetiredModel() async {
+        for invalidation in ["clear", "snapshot", "request"] {
+            let model = FoundationBrowseModel()
+            let gate = FoundationAlphabetTestGate()
+            let first = Task {
+                await model.loadPending(waitForInitialLoad: true) { _ in
+                    await gate.suspend()
+                    return .init(items: [], nextStartIndex: nil)
+                }
+            }
+            await gate.entered()
+            let second = Task {
+                await model.loadPending(waitForInitialLoad: true) { _ in
+                    XCTFail("Invalidated demand must not start another request")
+                    return .init(items: [], nextStartIndex: nil)
+                }
+            }
+            await waitForInitialDemands(1, in: model)
+            switch invalidation {
+            case "clear": model.clearRetainedData()
+            case "snapshot":
+                model.installSnapshot([
+                    FoundationItem(
+                        id: "snapshot", title: "Snapshot", subtitle: "Synthetic", kind: .track,
+                        duration: 1)
+                ])
+            default: model.request(.refresh)
+            }
+            await second.value
+            first.cancel()
+            await gate.release()
+            await first.value
+            XCTAssertEqual(model.pendingInitialLoadDemandCount, 0)
+            XCTAssertEqual(model.loaded, invalidation == "snapshot")
+            XCTAssertNil(model.errorMessage)
+        }
+    }
+
+    @MainActor
+    func testCollectionInitialHandoffPreservesExplicitRefreshAndRetry() async {
+        for initialFailure in [false, true] {
+            let model = FoundationBrowseModel()
+            let original = FoundationItem(
+                id: "original", title: "Original", subtitle: "Synthetic", kind: .track, duration: 1)
+            let replacement = FoundationItem(
+                id: "replacement", title: "Replacement", subtitle: "Synthetic", kind: .track,
+                duration: 1)
+            await model.loadPending { _ in
+                if initialFailure { throw FoundationLibraryError.invalidResponse }
+                return .init(items: [original], nextStartIndex: nil)
+            }
+            XCTAssertEqual(model.loaded, !initialFailure)
+            XCTAssertEqual(model.errorMessage != nil, initialFailure)
+
+            // Hold an older refresh across the explicit replacement request. The opt-in
+            // handoff must not change existing refresh/retry supersession behavior.
+            let gate = FoundationAlphabetTestGate()
+            let stale = Task {
+                await model.load(.refresh) { _ in
+                    await gate.suspend()
+                    return .init(items: [original], nextStartIndex: nil)
+                }
+            }
+            await gate.entered()
+            model.request(.refresh)
+            var replacementReads = 0
+            let current = Task {
+                await model.loadPending(waitForInitialLoad: true) { offset in
+                    XCTAssertEqual(offset, 0)
+                    replacementReads += 1
+                    return .init(items: [replacement], nextStartIndex: nil)
+                }
+            }
+            for _ in 0..<10_000 {
+                if replacementReads != 0 { break }
+                await Task.yield()
+            }
+            XCTAssertEqual(replacementReads, 1, "Explicit refresh must not wait for retired work")
+            await gate.release()
+            await stale.value
+            await current.value
+            XCTAssertEqual(model.items.map(\.id), ["replacement"])
+            XCTAssertTrue(model.loaded)
+            XCTAssertNil(model.errorMessage)
+            XCTAssertFalse(model.isLoading)
+            XCTAssertEqual(model.pendingInitialLoadDemandCount, 0)
+        }
+    }
+
+    @MainActor
+    private func waitForInitialDemands(_ count: Int, in model: FoundationBrowseModel) async {
+        // Bounded cooperative scheduling, not a timing-dependent sleep or real transport.
+        for _ in 0..<10_000 {
+            if model.pendingInitialLoadDemandCount == count { return }
+            await Task.yield()
+        }
+        XCTFail("Expected \(count) registered initial demand(s)")
+    }
+
+    func testHomeFavoriteCollectionsPreviewBoundsAndSeparatesLibraryScopes() async throws {
+        let recorder = Recorder()
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            await recorder.append(request)
+            let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!
+                .queryItems!
+            let type = query.first { $0.name == "includeItemTypes" }?.value
+            XCTAssertTrue(type == "MusicAlbum" || type == "Playlist")
+            XCTAssertEqual(query.first { $0.name == "limit" }?.value, "5")
+            XCTAssertEqual(query.first { $0.name == "startIndex" }?.value, "0")
+            XCTAssertEqual(query.first { $0.name == "isFavorite" }?.value, "true")
+            XCTAssertEqual(
+                query.first { $0.name == "parentId" }?.value,
+                type == "MusicAlbum" ? "selected-library" : nil)
+            let entries = (1...5).map { index in
+                "{\"Id\":\"0000000000000000000000000000000\(index)\",\"Type\":\"\(type!)\",\"UserData\":{\"Key\":\"synthetic\",\"IsFavorite\":true}}"
+            }.joined(separator: ",")
+            return (
+                Data("{\"Items\":[\(entries)],\"StartIndex\":0,\"TotalRecordCount\":30}".utf8),
+                Self.response(request)
+            )
+        }.scoped(to: "selected-library")
+        let preview = try await library.favoriteCollectionsPreview()
+        XCTAssertEqual(
+            preview.items.prefix(5).map(\.kind), [.album, .playlist, .album, .playlist, .album])
+        XCTAssertEqual(preview.items.count, 10)
+        XCTAssertNil(
+            preview.nextStartIndex, "Preview has no paging route; its heading opens full Favorites")
+        let requests = await recorder.requests
+        XCTAssertEqual(requests.count, 2)
+    }
+
+    func testHomeFavoritePreviewKeepsAccountPlaylistsWhenSelectedCatalogUnavailable() async throws {
+        let recorder = Recorder()
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            await recorder.append(request)
+            let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!
+                .queryItems!
+            XCTAssertNil(query.first { $0.name == "parentId" })
+            XCTAssertEqual(query.first { $0.name == "includeItemTypes" }?.value, "Playlist")
+            return (
+                Data(#"{"Items":[],"StartIndex":0,"TotalRecordCount":0}"#.utf8),
+                Self.response(request)
+            )
+        }.scoped(to: "unavailable-library", available: false)
+        _ = try await library.favoriteCollectionsPreview()
+        let requests = await recorder.requests
+        XCTAssertEqual(requests.count, 1)
+    }
+
+    func testHomeFavoritePreviewPreservesExplicitFalseForReconciliationWithoutInventingMetadata() {
+        let rejected = FoundationItem(
+            id: "rejected", title: "Rejected", subtitle: "", kind: .album,
+            duration: nil, isFavorite: false)
+        let unknown = FoundationItem(
+            id: "unknown", title: "Unknown", subtitle: "", kind: .album,
+            duration: nil)
+        let playlist = FoundationItem(
+            id: "playlist", title: "Playlist", subtitle: "", kind: .playlist,
+            duration: nil, isFavorite: true)
+        let preview = foundationFavoriteCollectionsPreview(
+            albums: .init(items: [rejected, unknown], nextStartIndex: 2),
+            playlists: .init(items: [playlist], nextStartIndex: nil))
+        XCTAssertEqual(preview.items.map(\.id), ["unknown", "playlist", "rejected"])
+        XCTAssertEqual(preview.items.last?.isFavorite, false)
+        XCTAssertNil(preview.items.first?.isFavorite)
+    }
+
+    func testPlaybackReportsUseOfficialEndpointsAndBoundedPayloadWithoutURLCredentials()
+        async throws
+    {
+        let occurrence = UUID()
+        for (kind, suffix) in [
+            (FoundationPlaybackReport.Kind.start, "/Sessions/Playing"),
+            (.progress, "/Sessions/Playing/Progress"), (.stop, "/Sessions/Playing/Stopped"),
+        ] {
+            let id = itemID
+            let library = FoundationJellyfinLibrary(session: session) { request in
+                XCTAssertEqual(request.httpMethod, "POST")
+                XCTAssertTrue(request.url!.path.hasSuffix(suffix))
+                XCTAssertTrue(request.url!.query?.isEmpty != false)
+                let body = try XCTUnwrap(
+                    JSONSerialization.jsonObject(with: try XCTUnwrap(request.httpBody))
+                        as? [String: Any])
+                XCTAssertEqual(body["ItemId"] as? String, id)
+                XCTAssertEqual(body["PlaySessionId"] as? String, occurrence.uuidString)
+                XCTAssertEqual(body["PositionTicks"] as? Int, 12_500_000)
+                XCTAssertNil(body["MediaSourceId"])
+                if kind != .stop { XCTAssertEqual(body["IsPaused"] as? Bool, true) }
+                return (Data(), Self.response(request, status: 204))
+            }
+            try await library.reportPlayback(
+                .init(
+                    kind: kind, occurrenceID: occurrence, itemID: itemID,
+                    position: 1.25, paused: true))
+        }
+    }
+
+    func testPlaybackReportsRejectInvalidIDsAndNonfinitePositionsBeforeNetwork() async {
+        let library = FoundationJellyfinLibrary(session: session) { _ in
+            XCTFail("Invalid playback metadata must not reach transport")
+            throw URLError(.badURL)
+        }
+        for (id, position) in [
+            ("../item", 1.0), (itemID, Double.nan), (itemID, Double.infinity), (itemID, -1.0),
+        ] {
+            do {
+                try await library.reportPlayback(
+                    .init(
+                        kind: .start, occurrenceID: UUID(), itemID: id, position: position,
+                        paused: false))
+                XCTFail("Expected validation failure")
+            } catch {}
+        }
+    }
 
     func testTypedFavoritesQueriesEachKindIndependentlyWithFavoriteFilterAndCursor() async throws {
+        let userID = session.userID
         for (kind, type) in [
             (FoundationItem.Kind.album, "MusicAlbum"), (.artist, "MusicArtist"), (.track, "Audio"),
+            (.playlist, "Playlist"),
         ] {
             let library = FoundationJellyfinLibrary(session: session) { request in
                 let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!
                     .queryItems!
                 XCTAssertEqual(query.first { $0.name == "includeItemTypes" }?.value, type)
+                XCTAssertEqual(
+                    query.first { $0.name == "parentId" }?.value,
+                    kind == .playlist ? nil : "selected-library")
+                XCTAssertEqual(query.first { $0.name == "userId" }?.value, userID)
                 XCTAssertEqual(query.first { $0.name == "isFavorite" }?.value, "true")
                 XCTAssertEqual(query.first { $0.name == "startIndex" }?.value, "50")
                 XCTAssertEqual(query.first { $0.name == "limit" }?.value, "50")
@@ -27,12 +369,42 @@ final class FoundationLibraryTests: XCTestCase {
                     + "\",\"Name\":\"Favorite\",\"UserData\":{\"Key\":\"synthetic-key\",\"IsFavorite\":true}}],\"StartIndex\":50,\"TotalRecordCount\":51}"
                 return (Data(payload.utf8), Self.response(request))
             }
-            let page = try await library.favorites(kind: kind, startIndex: 50)
+            let page = try await library.scoped(to: "selected-library")
+                .favorites(kind: kind, startIndex: 50)
             XCTAssertEqual(page.items.count, 1)
             XCTAssertEqual(page.items.first?.kind, kind)
             XCTAssertEqual(page.items.first?.isFavorite, true)
             XCTAssertNil(page.nextStartIndex)
         }
+    }
+
+    func testFavoritePlaylistsRemainAvailableWithoutSelectedCatalog() async throws {
+        let recorder = Recorder()
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            await recorder.append(request)
+            let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!
+                .queryItems!
+            XCTAssertNil(query.first { $0.name == "parentId" })
+            XCTAssertEqual(query.first { $0.name == "includeItemTypes" }?.value, "Playlist")
+            XCTAssertEqual(query.first { $0.name == "isFavorite" }?.value, "true")
+            return (
+                Data(#"{"Items":[],"StartIndex":0,"TotalRecordCount":0}"#.utf8),
+                Self.response(request)
+            )
+        }.scoped(to: "unavailable-library", available: false)
+        let page = try await library.favorites(kind: .playlist, startIndex: 0)
+        XCTAssertTrue(page.items.isEmpty)
+        XCTAssertNil(page.nextStartIndex)
+        for kind in [FoundationItem.Kind.track, .album, .artist, .genre] {
+            do {
+                _ = try await library.favorites(kind: kind, startIndex: 0)
+                XCTFail("Unavailable or unsupported category must not query another source")
+            } catch {
+                XCTAssertEqual(error as? FoundationLibraryError, .unavailable)
+            }
+        }
+        let requests = await recorder.requests
+        XCTAssertEqual(requests.count, 1)
     }
 
     @MainActor

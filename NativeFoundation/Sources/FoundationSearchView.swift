@@ -316,6 +316,7 @@ struct FoundationGenreCard: View {
 /// Small sequential result sections share local and remote catalog identities.
 private struct FoundationSearchOverview: View {
     @EnvironmentObject private var downloads: FoundationDownloads
+    @EnvironmentObject private var actions: FoundationLibraryActions
     @EnvironmentObject private var connectivity: FoundationConnectivity
     let query: String
     let library: any FoundationLibrary
@@ -361,7 +362,10 @@ private struct FoundationSearchOverview: View {
             }.padding(.horizontal).padding(.bottom)
         }
         .onAppear { isVisible = true }
-        .onDisappear { isVisible = false }
+        .onDisappear {
+            isVisible = false
+            actions.cancelQueueAddition()
+        }
         .foundationCollectionDestination(
             item: $openedItem, library: library, player: player, isActive: isActive
         )
@@ -387,16 +391,23 @@ private struct FoundationSearchOverview: View {
     }
 
     private func loadSections() async {
+        // The parent gives local and online searches separate view/model identities.
+        // Keep each load tied to that source so downloaded metadata cannot reconcile favorites.
+        let localOnly = connectivity.localOnly
         for section in sections {
-            guard !Task.isCancelled else { return }
-            if connectivity.localOnly { section.model.request(.refresh) }
-            await section.model.loadPending { offset in
-                if connectivity.localOnly {
-                    return downloads.localSearch(
+            guard !Task.isCancelled, connectivity.localOnly == localOnly else { return }
+            if localOnly {
+                section.model.request(.refresh)
+                await section.model.loadPending { offset in
+                    downloads.localSearch(
                         query: query, kind: section.kind, startIndex: offset, limit: 5)
                 }
-                return try await library.search(
-                    query: query, kind: section.kind, startIndex: offset, limit: 5)
+            } else {
+                section.model.configureFavoriteObservations(actions)
+                await section.model.loadPending { offset in
+                    try await library.search(
+                        query: query, kind: section.kind, startIndex: offset, limit: 5)
+                }
             }
         }
     }

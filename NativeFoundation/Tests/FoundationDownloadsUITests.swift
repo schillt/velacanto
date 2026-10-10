@@ -3,8 +3,118 @@ import XCTest
 
 @MainActor
 final class FoundationDownloadsUITests: XCTestCase {
+    func testColdPlaylistLoadsWithoutEditorAndCancelledFirstEntryReloads() {
+        continueAfterFailure = false
+        // No canonical-download setup: this begins with an empty account-owned model.
+        let cold = launch(productionShell: true)
+        selectTab("Library", in: cold)
+        openCanonicalCollection("playlist", fromDownloads: false, in: cold)
+        XCTAssertTrue(cold.buttons["collection-track-0"].waitForExistence(timeout: 5))
+        XCTAssertTrue(
+            cold.buttons["collection-track-1"].exists,
+            "Initial detail load preserves duplicate occurrences without opening Edit")
+        cold.terminate()
+
+        let app = launch(heldFirstPlaylistTracks: true, productionShell: true)
+        selectTab("Library", in: app)
+        openCanonicalCollection("playlist", fromDownloads: false, in: app)
+        tapNativeChrome(app.buttons["Read catalog counts"], in: app)
+        let firstRead = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label CONTAINS %@", "playlist-tracks 1"),
+            object: app.staticTexts["fixture-catalog-counts"])
+        XCTAssertEqual(XCTWaiter.wait(for: [firstRead], timeout: 3), .completed)
+        XCTAssertFalse(app.buttons["collection-track-0"].exists)
+        app.navigationBars.buttons.firstMatch.tap()
+        XCTAssertTrue(app.navigationBars["Playlists"].waitForExistence(timeout: 5))
+        let playlist = app.buttons.matching(
+            NSPredicate(
+                format: "label == %@ OR label BEGINSWITH %@",
+                "View Fixture Playlist", "Fixture Playlist")
+        ).firstMatch
+        tapVisible(playlist, in: app)
+        XCTAssertTrue(app.buttons["collection-track-0"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["collection-track-1"].exists)
+        tapNativeChrome(app.buttons["Read catalog counts"], in: app)
+        let secondRead = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label CONTAINS %@", "playlist-tracks 2"),
+            object: app.staticTexts["fixture-catalog-counts"])
+        XCTAssertEqual(
+            XCTWaiter.wait(for: [secondRead], timeout: 3), .completed,
+            "A cancelled first owner must not strand or duplicate its replacement load")
+    }
+
+    func testArtistShuffleProgressPreservesHeroAndPlaybackUntilCancelled() {
+        continueAfterFailure = false
+        let app = launch(
+            productionShell: true, canonicalDownloadState: "full", longPlayback: true,
+            compactFixtureControls: true, heldArtistTracks: true)
+        selectTab("Library", in: app)
+        openCanonicalCollection("album", fromDownloads: false, in: app, useVerifiedCenter: true)
+        tapVisibleCenter(app.buttons["collection-track-0"], in: app)
+        let identity = app.staticTexts["fixture-playback-identity"]
+        XCTAssertEqual(
+            XCTWaiter.wait(
+                for: [
+                    XCTNSPredicateExpectation(
+                        predicate: NSPredicate(format: "label CONTAINS %@", "state playing"),
+                        object: identity)
+                ], timeout: 10), .completed)
+        let originalIdentity = identity.label
+        app.navigationBars.buttons.firstMatch.tap()
+        app.navigationBars.buttons.firstMatch.tap()
+        tapVisibleCenter(app.buttons["library-category-artists"], in: app)
+        let artist = app.buttons.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "Fixture Artist")
+        ).firstMatch
+        tapVisibleCenter(artist, in: app)
+        let shuffle = app.buttons["Shuffle"]
+        reveal(shuffle, in: app)
+        let title = app.staticTexts["Fixture Artist"].firstMatch
+        XCTAssertTrue(title.exists && title.isHittable)
+        let originalTitleY = title.frame.minY
+        capture("Artist hero before collection loading", in: app)
+
+        // Accessory controls live outside the content scroll viewport.
+        func tapAccessory(_ button: XCUIElement) {
+            XCTAssertTrue(button.waitForExistence(timeout: 5) && button.isHittable)
+            let frame = button.frame
+            let applicationFrame = app.frame
+            let center = CGPoint(x: frame.midX, y: frame.midY)
+            XCTAssertTrue(applicationFrame.contains(center))
+            app.coordinate(withNormalizedOffset: .zero)
+                .withOffset(
+                    CGVector(
+                        dx: center.x - applicationFrame.minX,
+                        dy: center.y - applicationFrame.minY)
+                ).tap()
+        }
+        for attempt in 0..<2 {
+            tapVisibleCenter(shuffle, in: app)
+            let cancel = app.buttons["Cancel collection loading"]
+            XCTAssertTrue(cancel.waitForExistence(timeout: 5) && cancel.isHittable)
+            XCTAssertGreaterThan(cancel.frame.midY, app.frame.midY)
+            XCTAssertEqual(title.frame.minY, originalTitleY, accuracy: 2)
+            let playerControl = app.buttons["foundation-mini-playback-toggle"]
+            XCTAssertTrue(playerControl.exists && playerControl.isHittable)
+            XCTAssertEqual(identity.label, originalIdentity)
+            capture("Artist collection loading bottom accessory attempt \(attempt)", in: app)
+            tapAccessory(cancel)
+            XCTAssertTrue(
+                app.staticTexts["Collection loading cancelled."].waitForExistence(timeout: 5))
+            XCTAssertFalse(cancel.exists)
+            XCTAssertEqual(identity.label, originalIdentity)
+            XCTAssertEqual(title.frame.minY, originalTitleY, accuracy: 2)
+            capture("Artist collection cancellation preserves playback", in: app)
+            tapAccessory(app.buttons["Dismiss"])
+            XCTAssertTrue(
+                app.staticTexts["Collection loading cancelled."].waitForNonExistence(timeout: 5))
+            XCTAssertTrue(shuffle.isEnabled)
+        }
+    }
+
     private func launch(
-        failOnce: Bool = false, account: Bool = false, delayedAuth: Bool = false,
+        failOnce: Bool = false, heldFirstPlaylistTracks: Bool = false,
+        account: Bool = false, delayedAuth: Bool = false,
         productionShell: Bool = false, largeText: Bool = false,
         canonicalDownloadState: String? = nil, artworkCache: Bool = false,
         membership: String? = nil, slowTransfer: Bool = false, longPlayback: Bool = false,
@@ -18,15 +128,21 @@ final class FoundationDownloadsUITests: XCTestCase {
         compactFixtureControls: Bool = false, queuePresentation: Bool = false,
         alphabetCapabilityFailOnce: Bool = false, detachedPlayerArtwork: Bool = false,
         holdPlayerGlass: Bool = false, heldAlphabetPage: Bool = false,
-        favoritesCatalog: Bool = false, extendedSongsCatalog: Bool = false
+        favoritesCatalog: Bool = false, extendedSongsCatalog: Bool = false,
+        emptyFavoritePreview: Bool = false,
+        overview: Bool = false, heldArtistTracks: Bool = false
     )
         -> XCUIApplication
     {
         let app = XCUIApplication(bundleIdentifier: "com.chameleonenterprise.velacanto.uitesting")
         app.launchArguments = ["-foundationDownloadsUITesting", "-foundationTesting"]
+        if overview { app.launchArguments.append("-fixtureOverview") }
+        if heldArtistTracks { app.launchArguments.append("-fixtureHoldArtistTracks") }
+        if heldFirstPlaylistTracks { app.launchArguments.append("-fixtureHoldFirstPlaylistTracks") }
         if extendedSongsCatalog { app.launchArguments.append("-fixtureExtendedSongsCatalog") }
         if productionShell { app.launchArguments.append("-fixtureProductionShell") }
         if favoritesCatalog { app.launchArguments.append("-fixtureFavoritesCatalog") }
+        if emptyFavoritePreview { app.launchArguments.append("-fixtureEmptyFavoritePreview") }
         if queuePresentation { app.launchArguments.append("-fixtureQueuePresentation") }
         if detachedPlayerArtwork { app.launchArguments.append("-fixtureDetachedPlayerArtwork") }
         if holdPlayerGlass { app.launchArguments.append("-fixtureHoldPlayerGlass") }
@@ -96,6 +212,82 @@ final class FoundationDownloadsUITests: XCTestCase {
         }
         if compactFixtureControls { closeAlphabetFixtureControls(app) }
         return app
+    }
+
+    func testLoadedAlbumAndArtistOverviewSheetsInLightAppearance() {
+        checkLoadedOverviewSheets(colorScheme: "light")
+    }
+
+    func testLoadedAlbumAndArtistOverviewSheetsInDarkAppearance() {
+        checkLoadedOverviewSheets(colorScheme: "dark")
+    }
+
+    private func checkLoadedOverviewSheets(colorScheme: String) {
+        continueAfterFailure = false
+        for kind in ["album", "artist"] {
+            let app = launch(
+                productionShell: true, canonicalDownloadState: "none", colorScheme: colorScheme,
+                compactFixtureControls: true, overview: true)
+            selectTab("Library", in: app)
+            if kind == "album" {
+                openCanonicalCollection(
+                    kind, fromDownloads: false, in: app, useVerifiedCenter: true)
+            } else {
+                tapVisibleCenter(
+                    app.descendants(matching: .any)["library-category-artists"], in: app)
+                XCTAssertTrue(app.navigationBars["Artists"].waitForExistence(timeout: 5))
+                tapVisibleCenter(
+                    app.buttons.matching(
+                        NSPredicate(format: "label BEGINSWITH %@", "Fixture Artist")
+                    ).firstMatch, in: app)
+            }
+            let more = app.buttons.matching(
+                NSPredicate(format: "label BEGINSWITH %@", "Overview: Synthetic " + kind)
+            ).firstMatch
+            XCTAssertTrue(more.waitForExistence(timeout: 5))
+            let title = "About Fixture " + (kind == "album" ? "Album" : "Artist")
+            let navigation = app.navigationBars[title]
+            for reopening in 0..<2 {
+                tapVisibleCenter(more, in: app)
+                XCTAssertTrue(navigation.waitForExistence(timeout: 5))
+                let body = app.staticTexts.matching(
+                    NSPredicate(format: "label BEGINSWITH %@", "Synthetic " + kind + " overview")
+                ).firstMatch
+                XCTAssertTrue(body.waitForExistence(timeout: 5))
+                XCTAssertTrue(body.isHittable)
+                XCTAssertTrue(body.label.contains("overview paragraph 8."))
+                capture("Overview \(kind) \(colorScheme) medium reopen \(reopening)", in: app)
+                if reopening == 0 {
+                    navigation.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+                        .press(
+                            forDuration: 0.1,
+                            thenDragTo: app.coordinate(
+                                withNormalizedOffset: CGVector(dx: 0.5, dy: 0.1)))
+                    capture("Overview \(kind) \(colorScheme) expanded", in: app)
+                    body.swipeUp()
+                    capture("Overview \(kind) \(colorScheme) scrolled", in: app)
+                }
+                for _ in 0..<2 where navigation.exists {
+                    navigation.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+                        .press(
+                            forDuration: 0.1,
+                            thenDragTo: app.coordinate(
+                                withNormalizedOffset: CGVector(dx: 0.5, dy: 0.98)))
+                }
+                XCTAssertFalse(navigation.exists)
+                let counts = app.buttons["Read catalog counts"]
+                counts.tap()
+                XCTAssertEqual(
+                    XCTWaiter.wait(
+                        for: [
+                            XCTNSPredicateExpectation(
+                                predicate: NSPredicate(
+                                    format: "value == %@", "overview-" + kind + " 1"),
+                                object: counts)
+                        ], timeout: 5), .completed)
+            }
+            app.terminate()
+        }
     }
 
     private func queueSnapshot(_ app: XCUIApplication) -> [String: Any] {
@@ -598,15 +790,33 @@ final class FoundationDownloadsUITests: XCTestCase {
         element.tap()
     }
 
+    // On this runtime native tap() can choose {-1, -1} for a visible SwiftUI button.
+    // Use the verified on-screen center without bypassing reachability or hit testing.
+    private func tapVisibleCenter(_ element: XCUIElement, in app: XCUIApplication) {
+        reveal(element, in: app)
+        let frame = element.frame
+        let applicationFrame = app.frame
+        let center = CGPoint(x: frame.midX, y: frame.midY)
+        XCTAssertTrue(element.isHittable && applicationFrame.contains(center))
+        app.coordinate(withNormalizedOffset: .zero)
+            .withOffset(
+                CGVector(dx: center.x - applicationFrame.minX, dy: center.y - applicationFrame.minY)
+            )
+            .tap()
+    }
+
     private func reveal(
         _ element: XCUIElement, in app: XCUIApplication, context: XCUIElement? = nil
     ) {
         let root = context ?? app
         for step in 0..<32 {
-            if element.exists && element.frame.width > 0 && element.frame.height > 0
-                && tapCenterIsVisible(element, in: app, context: context) && element.isHittable
+            let exists = element.exists
+            let frame = exists ? element.frame : .zero
+            if exists && frame.width > 0 && frame.height > 0
+                && tapCenterIsVisible(element, in: app, context: context, frame: frame)
+                && element.isHittable
             {
-                break
+                return
             }
             let scroll = [
                 root.collectionViews.firstMatch, root.scrollViews.firstMatch,
@@ -615,28 +825,31 @@ final class FoundationDownloadsUITests: XCTestCase {
             .first { $0.exists }
             let viewport = scroll.map { uncoveredViewport($0, in: app, context: context) }
             let upward =
-                element.exists && element.frame.height > 0 && viewport != nil
-                ? element.frame.midY >= viewport!.midY : step < 24
+                exists && frame.height > 0 && viewport != nil
+                ? frame.midY >= viewport!.midY : step < 24
             scrollContent(in: app, upward: upward, context: context)
         }
-        if !element.exists || element.frame.width <= 0 || element.frame.height <= 0
-            || !tapCenterIsVisible(element, in: app, context: context) || !element.isHittable
-        {
+        let exists = element.exists
+        let frame = exists ? element.frame : .zero
+        let reachable =
+            exists && frame.width > 0 && frame.height > 0
+            && tapCenterIsVisible(element, in: app, context: context, frame: frame)
+            && element.isHittable
+        if !reachable {
             capture("Unreachable navigation target", in: app)
             let hierarchy = XCTAttachment(string: app.debugDescription)
             hierarchy.name = "Synthetic unreachable navigation hierarchy"
             hierarchy.lifetime = .keepAlways
             add(hierarchy)
         }
-        XCTAssertTrue(
-            element.exists && element.frame.width > 0 && element.frame.height > 0
-                && tapCenterIsVisible(element, in: app, context: context) && element.isHittable)
+        XCTAssertTrue(reachable)
     }
 
     // XCTest can report a clipped offscreen link as hittable and tap the adjacent row.
     // Scroll the actual target's center into the viewport before using its native tap.
     private func tapCenterIsVisible(
-        _ element: XCUIElement, in app: XCUIApplication, context: XCUIElement? = nil
+        _ element: XCUIElement, in app: XCUIApplication, context: XCUIElement? = nil,
+        frame: CGRect? = nil
     ) -> Bool {
         let root = context ?? app
         let scroll = [
@@ -644,15 +857,17 @@ final class FoundationDownloadsUITests: XCTestCase {
         ]
         .first { $0.exists }
         guard let scroll else { return true }
-        let viewport = uncoveredViewport(scroll, in: app, context: context)
+        let viewport = uncoveredViewport(scroll, in: app, context: context, gestureInset: false)
+        let targetFrame = frame ?? element.frame
         return viewport.height > 20
             && viewport.contains(
-                CGPoint(x: element.frame.midX, y: element.frame.midY))
+                CGPoint(x: targetFrame.midX, y: targetFrame.midY))
     }
 
     /// Reported scroll frames include native bars; gestures must start in actual content.
     private func uncoveredViewport(
-        _ scroll: XCUIElement, in app: XCUIApplication, context: XCUIElement? = nil
+        _ scroll: XCUIElement, in app: XCUIApplication, context: XCUIElement? = nil,
+        gestureInset: Bool = true
     ) -> CGRect {
         let root = context ?? app
         let original = scroll.frame.intersection(app.frame)
@@ -663,33 +878,45 @@ final class FoundationDownloadsUITests: XCTestCase {
             if frame.intersects(original), frame.maxY < original.maxY { top = max(top, frame.maxY) }
         }
         let profile = root.descendants(matching: .any)["Profile and settings"].firstMatch
-        if profile.exists && profile.frame.height > 0 && profile.frame.intersects(original)
-            && profile.frame.minY < original.midY && profile.isHittable
-        {
-            top = max(top, profile.frame.maxY + 12)
+        if profile.exists {
+            let frame = profile.frame
+            if frame.height > 0 && frame.intersects(original)
+                && frame.minY < original.midY && profile.isHittable
+            {
+                top = max(top, frame.maxY + 12)
+            }
         }
         let search = root.textFields["Search music"]
-        if search.exists && search.frame.height > 0 && search.frame.intersects(original)
-            && search.frame.minY < original.midY && search.isHittable
-        {
-            top = max(top, search.frame.maxY + 8)
+        if search.exists {
+            let frame = search.frame
+            if frame.height > 0 && frame.intersects(original)
+                && frame.minY < original.midY && search.isHittable
+            {
+                top = max(top, frame.maxY + 8)
+            }
         }
         let tabBar = root.tabBars.firstMatch
-        if tabBar.exists && tabBar.frame.intersects(original) {
-            bottom = min(bottom, tabBar.frame.minY)
+        if tabBar.exists {
+            let frame = tabBar.frame
+            if frame.intersects(original) { bottom = min(bottom, frame.minY) }
         }
         let miniPlayer = root.buttons["Show Now Playing"]
-        if miniPlayer.exists && miniPlayer.frame.height > 0 && miniPlayer.frame.intersects(original)
-            && miniPlayer.frame.minY > original.midY && miniPlayer.isHittable
-        {
-            bottom = min(bottom, miniPlayer.frame.minY)
+        if miniPlayer.exists {
+            let frame = miniPlayer.frame
+            if frame.height > 0 && frame.intersects(original)
+                && frame.minY > original.midY && miniPlayer.isHittable
+            {
+                bottom = min(bottom, frame.minY)
+            }
         }
         let keyboard = app.keyboards.firstMatch
-        if keyboard.exists && keyboard.frame.intersects(original) {
-            bottom = min(bottom, keyboard.frame.minY)
+        if keyboard.exists {
+            let frame = keyboard.frame
+            if frame.intersects(original) { bottom = min(bottom, frame.minY) }
         }
         let height = max(0, bottom - top)
-        let margin = min(12, height * 0.05)
+        // Keep drags away from chrome, but a visible button may validly sit closer to it.
+        let margin = gestureInset ? min(12, height * 0.05) : 0
         return CGRect(
             x: original.minX, y: top + margin, width: original.width,
             height: max(0, height - 2 * margin))
@@ -787,7 +1014,8 @@ final class FoundationDownloadsUITests: XCTestCase {
     }
 
     private func openCanonicalCollection(
-        _ kind: String, fromDownloads: Bool, in app: XCUIApplication
+        _ kind: String, fromDownloads: Bool, in app: XCUIApplication,
+        useVerifiedCenter: Bool = false
     ) {
         if fromDownloads {
             let downloads = app.buttons.matching(
@@ -803,13 +1031,17 @@ final class FoundationDownloadsUITests: XCTestCase {
             : app.descendants(matching: .any).matching(
                 identifier: "library-category-" + category.lowercased()
             ).firstMatch
-        tapVisible(link, in: app)
+        if useVerifiedCenter { tapVisibleCenter(link, in: app) } else { tapVisible(link, in: app) }
         XCTAssertTrue(app.navigationBars[category].waitForExistence(timeout: 5))
         let title = kind == "album" ? "Fixture Album" : "Fixture Playlist"
         let collection = app.buttons.matching(
             NSPredicate(format: "label == %@ OR label BEGINSWITH %@", "View " + title, title)
         ).firstMatch
-        tapVisible(collection, in: app)
+        if useVerifiedCenter {
+            tapVisibleCenter(collection, in: app)
+        } else {
+            tapVisible(collection, in: app)
+        }
         XCTAssertTrue(
             app.descendants(matching: .any)["collection-detail-" + kind + "-" + kind]
                 .waitForExistence(timeout: 5))
@@ -1699,18 +1931,52 @@ final class FoundationDownloadsUITests: XCTestCase {
         capture("Repeated Search split merge and tab reentry preserves query", in: app)
     }
 
+    func testHomeEmptyFavoritesHeadingStillOpensCompleteFavorites() {
+        let app = launch(productionShell: true, favoritesCatalog: true, emptyFavoritePreview: true)
+        selectTab("Home", in: app)
+        let heading = app.buttons["home-favorites"]
+        reveal(heading, in: app)
+        tapVisible(heading, in: app)
+        XCTAssertTrue(
+            app.descendants(matching: .any)["favorites-catalog"].waitForExistence(timeout: 5))
+    }
+
+    func testHomeMixedFavoritesHeadingOpensAllFavoriteCategories() {
+        continueAfterFailure = false
+        let app = launch(
+            productionShell: true, canonicalDownloadState: "full", artworkCache: true,
+            compactFixtureControls: true, favoritesCatalog: true)
+        selectTab("Home", in: app)
+        let allFavorites = app.buttons["home-favorites"]
+        reveal(allFavorites, in: app)
+        XCTAssertTrue(app.buttons["View Fixture Album"].exists)
+        XCTAssertTrue(app.buttons["View Fixture Playlist"].exists)
+        XCTAssertFalse(app.buttons["home-all-favorites"].exists)
+        tapVisibleCenter(allFavorites, in: app)
+        XCTAssertTrue(
+            app.descendants(matching: .any)["favorites-catalog"].waitForExistence(timeout: 5))
+        let playlist = app.buttons["View Fixture Playlist"].firstMatch
+        reveal(playlist, in: app)
+        tapVisibleCenter(playlist, in: app)
+        XCTAssertTrue(
+            app.descendants(matching: .any)["collection-detail-playlist-playlist"]
+                .waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["Play"].exists)
+        XCTAssertTrue(app.buttons["Unfavorite"].exists)
+    }
+
     func testFavoritesUsesLibraryCardsAndRowsAndKeepsSongPlaybackIdentity() {
         continueAfterFailure = false
         let app = launch(
             productionShell: true, canonicalDownloadState: "full", artworkCache: true,
-            longPlayback: true, favoritesCatalog: true)
+            longPlayback: true, compactFixtureControls: true, favoritesCatalog: true)
         selectTab("Library", in: app)
-        tapVisible(app.buttons["Favorites"], in: app)
+        tapVisibleCenter(app.buttons["Favorites"], in: app)
         let catalog = app.descendants(matching: .any)["favorites-catalog"].firstMatch
         XCTAssertTrue(catalog.waitForExistence(timeout: 5))
         for (kind, label) in [
             ("track", "Fixture Tone"), ("album", "View Fixture Album"),
-            ("artist", "Fixture Artist"),
+            ("artist", "Fixture Artist"), ("playlist", "View Fixture Playlist"),
         ] {
             let content = app.buttons.matching(
                 NSPredicate(format: "label BEGINSWITH %@", label)
@@ -1720,10 +1986,27 @@ final class FoundationDownloadsUITests: XCTestCase {
             XCTAssertTrue(
                 app.descendants(matching: .any)["favorites-section-" + kind].firstMatch.exists)
         }
-        XCTAssertFalse(app.descendants(matching: .any)["favorites-section-playlist"].exists)
-        tapVisible(app.buttons["favorites-section-track"], in: app)
+        let playlistHeading = catalog.buttons.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "Playlists")
+        ).firstMatch
+        XCTAssertTrue(playlistHeading.waitForExistence(timeout: 5))
+        tapVisibleCenter(playlistHeading, in: app)
+        XCTAssertTrue(app.navigationBars["Favorite Playlists"].waitForExistence(timeout: 5))
+        tapVisibleCenter(app.buttons["Load more"], in: app)
+        let finalPlaylist = app.buttons["View Fixture Playlist 7"].firstMatch
+        reveal(finalPlaylist, in: app)
+        XCTAssertTrue(finalPlaylist.isHittable)
+        app.navigationBars.buttons.firstMatch.tap()
+        XCTAssertTrue(catalog.waitForExistence(timeout: 5))
+        // Return to the first shelf before looking for its lazy header.
+        for _ in 0..<3 { app.swipeDown() }
+        let songsHeading = catalog.buttons.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "Songs")
+        ).firstMatch
+        XCTAssertTrue(songsHeading.waitForExistence(timeout: 5))
+        tapVisibleCenter(songsHeading, in: app)
         XCTAssertTrue(app.navigationBars["Favorite Songs"].waitForExistence(timeout: 5))
-        tapVisible(app.buttons["Load more"], in: app)
+        tapVisibleCenter(app.buttons["Load more"], in: app)
         let finalSong = app.buttons.matching(
             NSPredicate(format: "label BEGINSWITH %@", "Fixture Tone 7")
         ).firstMatch
@@ -1732,13 +2015,13 @@ final class FoundationDownloadsUITests: XCTestCase {
         app.navigationBars.buttons.firstMatch.tap()
         XCTAssertTrue(catalog.waitForExistence(timeout: 5))
         capture(
-            "Three independently paged favorite shelves and complete Songs destination", in: app)
+            "Four independently paged favorite shelves and complete Songs destination", in: app)
         let album = app.buttons["View Fixture Album"].firstMatch
         for _ in 0..<6 {
             if album.exists && album.isHittable { break }
             app.swipeDown()
         }
-        tapVisible(album, in: app)
+        tapVisibleCenter(album, in: app)
         XCTAssertTrue(
             app.descendants(matching: .any)["collection-detail-album-album"]
                 .waitForExistence(timeout: 5))
@@ -1749,7 +2032,7 @@ final class FoundationDownloadsUITests: XCTestCase {
         let song = app.buttons.matching(
             NSPredicate(format: "label BEGINSWITH %@", "Fixture Tone")
         ).firstMatch
-        tapVisible(song, in: app)
+        tapVisibleCenter(song, in: app)
         let identity = app.staticTexts["fixture-playback-identity"]
         let playing = expectation(
             for: NSPredicate(

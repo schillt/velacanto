@@ -115,6 +115,13 @@ final class FoundationPlayer: ObservableObject {
             }
         }
     #endif
+    private var reporting: FoundationPlaybackReporting?
+    private var reportingAttempted = false
+    private let reportingAllowed: @MainActor @Sendable () -> Bool
+
+    func invalidateReporting() { reporting?.invalidate() }
+    func suspendReporting() { reporting?.cancelPending() }
+
     private var generation: UInt64 = 0
     private let resolve: @Sendable (FoundationItem) async throws -> FoundationPlaybackResource
     private var installedResource: FoundationPlaybackResource?
@@ -139,11 +146,14 @@ final class FoundationPlayer: ObservableObject {
         library: any FoundationLibrary,
         resolveResource: (@Sendable (FoundationItem) async throws -> FoundationPlaybackResource)? =
             nil,
-        makeItem: @escaping (URL) -> AVPlayerItem = { AVPlayerItem(url: $0) }
+        makeItem: @escaping (URL) -> AVPlayerItem = { AVPlayerItem(url: $0) },
+        reportingAllowed: @escaping @MainActor @Sendable () -> Bool = { true }
     ) {
         self.init(
             resolve: { try await library.playbackURL(for: $0) },
-            resolveResource: resolveResource, makeItem: makeItem)
+            resolveResource: resolveResource, makeItem: makeItem,
+            reportPlayback: { try await library.reportPlayback($0) },
+            reportingAllowed: reportingAllowed)
     }
 
     init(
@@ -168,8 +178,17 @@ final class FoundationPlayer: ObservableObject {
                 else { throw AudioSessionFailure.deactivationDeclined }
             #endif
         },
-        startPlayback: @escaping (AVPlayer) -> Void = { $0.play() }
+        startPlayback: @escaping (AVPlayer) -> Void = { $0.play() },
+        reportPlayback: (@Sendable (FoundationPlaybackReport) async throws -> Void)? = nil,
+        reportingAllowed: @escaping @MainActor @Sendable () -> Bool = { true }
     ) {
+        self.reportingAllowed = reportingAllowed
+        if let reportPlayback {
+            reporting = FoundationPlaybackReporting { event in
+                guard await reportingAllowed() else { return }
+                try await reportPlayback(event)
+            }
+        }
         self.resolve = resolveResource ?? { FoundationPlaybackResource(url: try await resolve($0)) }
         self.makeItem = makeItem
         self.activateSession = activateSession
@@ -283,6 +302,7 @@ final class FoundationPlayer: ObservableObject {
     }
 
     isolated deinit {
+        reporting?.invalidate()
         playTask?.cancel()
         selectionTask?.cancel()
         if let timeObserver { nativePlayer.removeTimeObserver(timeObserver) }
@@ -441,6 +461,10 @@ final class FoundationPlayer: ObservableObject {
                     self.generation == seekGeneration
                 else { return }
                 self.refreshTime()
+                if finished {
+                    self.reporting?.progress(
+                        position: self.elapsed, paused: !self.wantsPlayback, seek: true)
+                }
                 self.playbackPositionChanged.send()
                 #if DEBUG
                     let reached = abs(self.nativePlayer.currentTime().seconds - target.seconds) < 1
@@ -610,6 +634,8 @@ final class FoundationPlayer: ObservableObject {
     }
 
     private func discardSelection(retainingNativeItem: Bool = false) {
+        finishReporting()
+        reportingAttempted = false
         cancelPendingPlay()
         generation &+= 1
         #if DEBUG
@@ -669,6 +695,20 @@ final class FoundationPlayer: ObservableObject {
         @unknown default: state = .paused
         }
         refreshTime()
+        if state == .playing, !reportingAttempted,
+            let index = selectedIndex
+        {
+            reportingAttempted = true
+            if reportingAllowed() {
+                reporting?.begin(itemID: queue[index].item.id, position: elapsed)
+            }
+        }
+        reporting?.progress(position: elapsed, paused: !wantsPlayback)
+    }
+
+    private func finishReporting() {
+        let position = nativePlayer.currentTime().seconds
+        reporting?.stop(position: position.isFinite ? max(0, position) : elapsed)
     }
 
     private func refreshTime() {
@@ -677,6 +717,7 @@ final class FoundationPlayer: ObservableObject {
         let length = nativePlayer.currentItem?.duration.seconds ?? 0
         elapsed = seconds.isFinite ? max(0, seconds) : 0
         duration = length.isFinite ? max(0, length) : 0
+        reporting?.progress(position: elapsed, paused: !wantsPlayback)
     }
 
     // Native callback identity is the only end-of-item seam; no simulated transport state.
@@ -686,6 +727,7 @@ final class FoundationPlayer: ObservableObject {
         #if DEBUG
             recordSnapshot("item.ended")
         #endif
+        finishReporting()
         let successor: UUID?
         if repeatMode == .one {
             successor = selectedEntryID
@@ -711,6 +753,7 @@ final class FoundationPlayer: ObservableObject {
     }
 
     private func fail(_ category: FailureCategory, error: Error?) {
+        finishReporting()
         cancelPendingPlay()
         wantsPlayback = false
         nativePlayer.pause()

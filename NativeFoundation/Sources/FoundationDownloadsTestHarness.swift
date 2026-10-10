@@ -178,6 +178,7 @@
                 }
                 if ProcessInfo.processInfo.arguments.contains("-fixturePagedCatalog")
                     || ProcessInfo.processInfo.arguments.contains("-fixtureAlphabetCatalog")
+                    || ProcessInfo.processInfo.arguments.contains("-fixtureHoldFirstPlaylistTracks")
                 {
                     if ProcessInfo.processInfo.arguments.contains("-fixtureHoldInitialCatalog") {
                         Button("Release initial catalog page") {
@@ -833,6 +834,17 @@
                 .map { "\($0.key) \($0.value)" }.joined(separator: ", ")
         }
 
+        func overview(for item: FoundationItem) async throws -> String? {
+            guard ProcessInfo.processInfo.arguments.contains("-fixtureOverview"),
+                item.kind == .album || item.kind == .artist
+            else { return nil }
+            catalogRequests["overview-\(item.kind)", default: 0] += 1
+            return (1...8).map { paragraph in
+                "Synthetic \(item.kind) overview paragraph \(paragraph). "
+                    + "This loaded text checks readable native sheet presentation, scrolling and reopening without another metadata request."
+            }.joined(separator: "\n\n")
+        }
+
         private func catalogPage(kind: FoundationItem.Kind, startIndex: Int, query: String? = nil)
             async throws -> FoundationPage
         {
@@ -1006,11 +1018,23 @@
                     .init(
                         id: "playlist", title: "Fixture Playlist", subtitle: "Synthetic",
                         kind: .playlist, duration: nil,
-                        primaryImageTag: usesCache ? "synthetic" : nil, isFavorite: false)
+                        primaryImageTag: usesCache ? "synthetic" : nil,
+                        isFavorite: ProcessInfo.processInfo.arguments.contains(
+                            "-fixtureFavoritesCatalog"))
                 ], nextStartIndex: nil)
         }
+        private var heldInitialPlaylistRead = false
         func playlistTracks(playlistID: String, startIndex: Int) async throws -> FoundationPage {
-            .init(items: orderedTracks, nextStartIndex: nil)
+            catalogRequests["playlist-tracks", default: 0] += 1
+            if ProcessInfo.processInfo.arguments.contains("-fixtureHoldFirstPlaylistTracks"),
+                !heldInitialPlaylistRead
+            {
+                heldInitialPlaylistRead = true
+                // Synthetic first-entry cancellation; a subsequent visible owner can load.
+                try await Task.sleep(for: .seconds(30))
+            }
+            try Task.checkCancellation()
+            return .init(items: orderedTracks, nextStartIndex: nil)
         }
 
         private let track = FoundationItem(
@@ -1019,7 +1043,7 @@
                 ? "# Fixture Tone" : "Fixture Tone",
             subtitle: "Generated silent PCM", kind: .track,
             duration: TimeInterval(FoundationDownloadsTestHarness.generatedToneSeconds),
-            isFavorite: false,
+            isFavorite: ProcessInfo.processInfo.arguments.contains("-fixtureFavoritesCatalog"),
             album: ProcessInfo.processInfo.arguments.contains("-fixtureUnknownRelatedItems")
                 ? nil
                 : .init(id: "album", title: "Fixture Album", primaryImageTag: "synthetic"),
@@ -1028,7 +1052,8 @@
                 : .init(id: "artist", title: "Fixture Artist", primaryImageTag: "synthetic"))
         private let album = FoundationItem(
             id: "album", title: "Fixture Album", subtitle: "Synthetic Artist", kind: .album,
-            duration: 30, primaryImageTag: "synthetic", isFavorite: false,
+            duration: 30, primaryImageTag: "synthetic",
+            isFavorite: ProcessInfo.processInfo.arguments.contains("-fixtureFavoritesCatalog"),
             artist: .init(id: "artist", title: "Fixture Artist", primaryImageTag: "synthetic"),
             genres: ProcessInfo.processInfo.arguments.contains("-fixtureArtworkCache")
                 ? [.init(id: "genre", title: "Fixture Genre", primaryImageTag: "synthetic")] : [])
@@ -1053,7 +1078,11 @@
             return .init(items: [album], nextStartIndex: nil)
         }
         func tracks(artistID: String, startIndex: Int) async throws -> FoundationPage {
-            .init(items: canonical ? [track, missing] : [track], nextStartIndex: nil)
+            if ProcessInfo.processInfo.arguments.contains("-fixtureHoldArtistTracks") {
+                // User cancellation must unwind the real collection action, not a test release.
+                while true { try await Task.sleep(for: .seconds(60)) }
+            }
+            return .init(items: canonical ? [track, missing] : [track], nextStartIndex: nil)
         }
         func recentAlbums(startIndex: Int) async throws -> FoundationPage {
             if let selected = try selectedAlbums() { return selected }
@@ -1067,12 +1096,16 @@
         }
         func favorites(kind: FoundationItem.Kind, startIndex: Int) async throws -> FoundationPage {
             guard ProcessInfo.processInfo.arguments.contains("-fixtureFavoritesCatalog"),
-                [.album, .artist, .track].contains(kind)
+                [.album, .artist, .track, .playlist].contains(kind)
             else { throw FoundationLibraryError.unavailable }
             let base: FoundationItem
             switch kind {
             case .album: base = album
             case .track: base = track
+            case .playlist:
+                base = FoundationItem(
+                    id: "playlist", title: "Fixture Playlist", subtitle: "Synthetic",
+                    kind: .playlist, duration: nil, primaryImageTag: "synthetic")
             default:
                 base = FoundationItem(
                     id: "artist", title: "Fixture Artist", subtitle: "", kind: .artist,
@@ -1115,6 +1148,15 @@
                 return favorite
             }
             return .init(items: items, nextStartIndex: nil)
+        }
+
+        func favoriteCollectionsPreview() async throws -> FoundationPage {
+            if ProcessInfo.processInfo.arguments.contains("-fixtureEmptyFavoritePreview") {
+                return .init(items: [], nextStartIndex: nil)
+            }
+            let albums = try await favorites(kind: .album, startIndex: 0)
+            let playlists = try await favorites(kind: .playlist, startIndex: 0)
+            return foundationFavoriteCollectionsPreview(albums: albums, playlists: playlists)
         }
 
         func favoriteAlbums(startIndex: Int) async throws -> FoundationPage {
