@@ -47,10 +47,11 @@ original-reference Simulator or build 106 physical comparison without instructio
 
 Workers commit only their assigned paths and proactively report exact base,
 parent/final SHA, clean status, changed paths, deletions, commands/results and
-limitations. The workspace maintainer publishes focused task PRs into alpha; acceptance and
-audit review precede authorized serial merges. Root AGENTS.md governs PRs,
-protected-branch policy and tagged release promotion to main. Do not use the
-historical direct-push or alpha/beta/preview branch chain.
+limitations. The workspace maintainer integrates accepted local work and publishes
+it to alpha without remote task branches. Acceptance and audit precede publication;
+alpha → beta promotion uses a PR and the exact-candidate release gate. Root
+AGENTS.md governs authorization, protected branches and subsequent main release
+promotion. Never force-push or bypass actual GitHub rules.
 Passing synthetic tests is not physical streaming or TestFlight acceptance.
 
 ## Identity and privacy
