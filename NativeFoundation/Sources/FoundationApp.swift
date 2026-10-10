@@ -261,6 +261,7 @@ final class FoundationAppModel: ObservableObject {
         nowPlaying = nil
         actions?.invalidate()
         player?.stop()
+        player?.invalidateReporting()
         downloads?.invalidate()
         connectivity?.invalidate()
         policySubscriptions.removeAll()
@@ -330,13 +331,15 @@ final class FoundationAppModel: ObservableObject {
             resolveResource: { item in
                 try await downloads.playbackResource(
                     for: item, allowsRemoteFallback: !connectivity.localOnly)
-            }, makeItem: { preferences.makePlayerItem(for: $0) })
+            }, makeItem: { preferences.makePlayerItem(for: $0) },
+            reportingAllowed: { !connectivity.localOnly })
         currentArtworkLocalOnly = connectivity.localOnly
         connectivity.objectWillChange.sink { [weak self, weak downloads, weak connectivity] in
             Task { @MainActor in
                 guard let self, let downloads, let connectivity,
                     self.connectivity === connectivity
                 else { return }
+                if connectivity.localOnly { self.player?.suspendReporting() }
                 if self.currentArtworkLocalOnly != connectivity.localOnly {
                     self.currentArtworkLocalOnly = connectivity.localOnly
                     self.currentArtwork?.refreshRetainedArtwork()
@@ -452,6 +455,7 @@ final class FoundationAppModel: ObservableObject {
         currentArtwork = nil
         mediaSession = nil
         nowPlaying = nil
+        player?.invalidateReporting()
         player = nil
         library = nil
         credentialError = nil

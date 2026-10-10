@@ -6,6 +6,7 @@ import SwiftUI
 
 /// Optional item text owns one visible-page read; presenting it adds no work.
 struct FoundationOverviewSection: View {
+    @Environment(\.colorScheme) private var colorScheme
     @EnvironmentObject private var connectivity: FoundationConnectivity
     let item: FoundationItem
     let library: any FoundationLibrary
@@ -68,6 +69,8 @@ struct FoundationOverviewSection: View {
                             }
                         #endif
                     }
+                    // Match native sheet chrome to the semantic colors inherited from its detail.
+                    .preferredColorScheme(colorScheme)
                     #if os(iOS)
                         .presentationDetents([.medium, .large])
                         .presentationDragIndicator(.hidden)

@@ -30,6 +30,11 @@ enum FoundationPinStorage {
 /// One source's local pins and explicit, pessimistic favorite changes.
 @MainActor
 final class FoundationLibraryActions: ObservableObject {
+    struct FavoriteRead {
+        fileprivate let owner: UUID
+        fileprivate let sequence: UInt
+    }
+
     private struct Key: Hashable {
         let id: String
         let kind: String
@@ -80,12 +85,21 @@ final class FoundationLibraryActions: ObservableObject {
     @Published private(set) var pinErrorMessage: String?
     @Published private(set) var isQueueLoading = false
     @Published private(set) var queueErrorMessage: String?
+    @Published private(set) var queueLoadedCount = 0
+    @Published private(set) var queueNotice: String?
+    @Published private(set) var canRetryQueueAddition = false
+    private var retryQueueAdditionAction: (() -> Void)?
+    static let maximumCollectionPages = 200
+    static let maximumCollectionTracks = 10_000
     private let storageKey: String
     private let write: (String, Data) throws -> Void
     private let mutateFavorite: @Sendable (FoundationItem, Bool) async throws -> Void
     private var tasks: [Key: Task<Void, Error>] = [:]
     private var favoriteReads: [UUID: Task<FoundationItem?, Error>] = [:]
     private var active = true
+    private let favoriteOwner = UUID()
+    private var favoriteSequence: UInt = 0
+    private var favoriteVersions: [Key: UInt] = [:]
     private(set) var queueTask: Task<Void, Never>?
     private var playbackPreparation: AnyCancellable?
 
@@ -137,18 +151,44 @@ final class FoundationLibraryActions: ObservableObject {
         favorites[Key(item)] ?? observedFavorites[Key(item)] ?? initial
     }
 
-    /// Server observations never override successful mutations from this account session.
-    /// Membership in a favorites response is itself positive favorite metadata.
-    func observeFavorites(in items: [FoundationItem], knownFavorites: Bool = false) {
-        guard active, !Task.isCancelled else { return }
+    /// Display membership only; keep raw server pages intact for cursors and budgets.
+    func favoriteItems(in items: [FoundationItem]) -> [FoundationItem] {
+        items.filter { favoriteState(for: $0, initial: $0.isFavorite) != false }
+    }
+
+    func favoriteTrackQueue(in items: [FoundationItem], selecting index: Int)
+        -> (items: [FoundationItem], index: Int)?
+    {
+        guard items.indices.contains(index), items[index].kind == .track,
+            favoriteState(for: items[index], initial: items[index].isFavorite) != false
+        else { return nil }
+        let tracks = favoriteItems(in: items).filter { $0.kind == .track }
+        let selected = favoriteItems(in: Array(items.prefix(index))).filter { $0.kind == .track }
+            .count
+        return (tracks, selected)
+    }
+
+    /// Capture before starting a remote read, never when rendering retained items.
+    func beginFavoriteRead() -> FavoriteRead {
+        favoriteSequence &+= 1
+        return FavoriteRead(owner: favoriteOwner, sequence: favoriteSequence)
+    }
+
+    /// Only reads begun after the last mutation/observation can reconcile that item.
+    /// Absence from a bounded favorites page does not establish nonmembership.
+    func observeFavorites(
+        in items: [FoundationItem], knownFavorites: Bool = false, read: FavoriteRead
+    ) {
+        guard active, !Task.isCancelled, read.owner == favoriteOwner else { return }
         var updated = observedFavorites
         for item in items where item.kind != .genre {
             let key = Key(item)
-            guard favorites[key] == nil,
-                let value = knownFavorites ? true : item.isFavorite,
-                updated[key] != value
+            guard !pending.contains(key), read.sequence >= (favoriteVersions[key] ?? 0),
+                let value = item.isFavorite ?? (knownFavorites ? true : nil)
             else { continue }
             updated[key] = value
+            favoriteVersions[key] = read.sequence
+            favorites[key] = nil
         }
         if updated != observedFavorites { observedFavorites = updated }
     }
@@ -158,9 +198,10 @@ final class FoundationLibraryActions: ObservableObject {
         for item: FoundationItem,
         using load: @escaping @Sendable () async throws -> FoundationItem?
     ) async {
-        guard active, !Task.isCancelled, item.kind == .album,
+        guard active, !Task.isCancelled, item.kind == .album || item.kind == .artist,
             favoriteState(for: item, initial: item.isFavorite) == nil
         else { return }
+        let read = beginFavoriteRead()
         let id = UUID()
         let operation = Task { try await load() }
         favoriteReads[id] = operation
@@ -175,7 +216,7 @@ final class FoundationLibraryActions: ObservableObject {
                 let detail, detail.id == item.id, detail.kind == item.kind,
                 favoriteState(for: item, initial: item.isFavorite) == nil
             else { return }
-            observeFavorites(in: [detail])
+            observeFavorites(in: [detail], read: read)
         } catch {
             // Unknown remains unknown; returning to the destination can retry explicitly.
         }
@@ -187,6 +228,8 @@ final class FoundationLibraryActions: ObservableObject {
     func setFavorite(for item: FoundationItem, isFavorite: Bool) async {
         let key = Key(item)
         guard active, item.kind != .genre, !pending.contains(key), !Task.isCancelled else { return }
+        favoriteSequence &+= 1
+        favoriteVersions[key] = favoriteSequence
         pending.insert(key)
         errors[key] = nil
         let mutate = mutateFavorite
@@ -203,6 +246,8 @@ final class FoundationLibraryActions: ObservableObject {
                 operation.cancel()
             }
             guard active, !Task.isCancelled, !operation.isCancelled else { return }
+            favoriteSequence &+= 1
+            favoriteVersions[key] = favoriteSequence
             favorites[key] = isFavorite
             favoriteRevision &+= 1
         } catch {
@@ -217,7 +262,7 @@ final class FoundationLibraryActions: ObservableObject {
         library: (any FoundationLibrary)? = nil, player: FoundationPlayer
     ) {
         guard active, !isQueueLoading else { return }
-        queueErrorMessage = nil
+        dismissQueueOutcome()
         if item.kind == .track {
             player.enqueue([item], position: position)
             return
@@ -227,7 +272,11 @@ final class FoundationLibraryActions: ObservableObject {
             return
         }
         playbackPreparation = player.sessionChanged.sink { [weak self] in
-            self?.queueTask?.cancel()
+            self?.cancelQueueAddition()
+        }
+        retryQueueAdditionAction = { [weak self, weak player] in
+            guard let player else { return }
+            self?.enqueue(item, position: position, library: library, player: player)
         }
         loadCollection(item, library: library) { player.enqueue($0, position: position) }
     }
@@ -238,7 +287,11 @@ final class FoundationLibraryActions: ObservableObject {
     ) {
         guard active, !isQueueLoading else { return }
         playbackPreparation = player.sessionChanged.sink { [weak self] in
-            self?.queueTask?.cancel()
+            self?.cancelQueueAddition()
+        }
+        retryQueueAdditionAction = { [weak self, weak player] in
+            guard let player else { return }
+            self?.play(item, shuffled: shuffled, library: library, player: player)
         }
         loadCollection(item, library: library) { items in
             player.setQueue(shuffled ? items.shuffled() : items, selectedIndex: 0)
@@ -251,6 +304,9 @@ final class FoundationLibraryActions: ObservableObject {
     ) {
         guard active, !isQueueLoading else { return }
         queueErrorMessage = nil
+        queueNotice = nil
+        queueLoadedCount = 0
+        canRetryQueueAddition = false
         isQueueLoading = true
         queueTask = Task { [weak self] in
             // Cancellation keeps the addition occupied until this task actually finishes.
@@ -262,7 +318,11 @@ final class FoundationLibraryActions: ObservableObject {
             do {
                 var items: [FoundationItem] = []
                 var offset = 0
+                var pages = 0
                 while true {
+                    guard pages < Self.maximumCollectionPages else {
+                        throw CollectionLimit.reached
+                    }
                     try Task.checkCancellation()
                     let page: FoundationPage
                     switch item.kind {
@@ -279,31 +339,66 @@ final class FoundationLibraryActions: ObservableObject {
                     guard page.items.allSatisfy({ $0.kind == .track }) else {
                         throw FoundationLibraryError.invalidResponse
                     }
+                    guard page.items.count <= Self.maximumCollectionTracks - items.count else {
+                        throw CollectionLimit.reached
+                    }
                     items.append(contentsOf: page.items)
+                    pages += 1
+                    self?.queueLoadedCount = items.count
                     guard let next = page.nextStartIndex else { break }
                     guard next > offset else { throw FoundationLibraryError.invalidResponse }
                     offset = next
                 }
                 guard let self, self.active, !Task.isCancelled else { return }
                 if items.isEmpty {
-                    self.queueErrorMessage = "This collection has no songs."
+                    self.queueNotice = "This collection has no songs."
+                    self.retryQueueAdditionAction = nil
                 } else {
                     self.playbackPreparation = nil
+                    self.retryQueueAdditionAction = nil
                     commit(items)
                 }
             } catch {
                 guard let self, self.active, !Task.isCancelled else { return }
-                self.queueErrorMessage = FoundationLibraryError.category(error).errorDescription
+                self.queueErrorMessage =
+                    error is CollectionLimit
+                    ? "This collection is too large to load at once. Choose a smaller collection."
+                    : FoundationLibraryError.category(error).errorDescription
+                self.canRetryQueueAddition = !(error is CollectionLimit)
+                if error is CollectionLimit { self.retryQueueAdditionAction = nil }
             }
         }
     }
 
-    func cancelQueueAddition() { queueTask?.cancel() }
+    private enum CollectionLimit: Error { case reached }
+
+    func cancelQueueAddition() {
+        retryQueueAdditionAction = nil
+        canRetryQueueAddition = false
+        guard isQueueLoading else { return }
+        queueTask?.cancel()
+        queueNotice = "Collection loading cancelled."
+    }
+
+    func retryQueueAddition() {
+        guard active, !isQueueLoading, canRetryQueueAddition else { return }
+        let retry = retryQueueAdditionAction
+        retry?()
+    }
+
+    func dismissQueueOutcome() {
+        guard !isQueueLoading else { return }
+        queueErrorMessage = nil
+        queueNotice = nil
+        canRetryQueueAddition = false
+        retryQueueAdditionAction = nil
+    }
 
     /// Called by the source owner before replacing or dismissing this source.
     func invalidate() {
         active = false
         cancelQueueAddition()
+        retryQueueAdditionAction = nil
         for task in tasks.values { task.cancel() }
         for task in favoriteReads.values { task.cancel() }
     }

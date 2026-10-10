@@ -118,12 +118,6 @@ struct FoundationLibraryIndexView: View {
             isVisible = true
             if openedItem == nil { usesNativeAlphabet = wantsNativeAlphabet }
         }
-        .onChange(of: model.items, initial: true) { _, items in
-            if !model.isRetainedSnapshot { actions.observeFavorites(in: items) }
-        }
-        .onChange(of: searchModel.items, initial: true) { _, items in
-            if !searchModel.isRetainedSnapshot { actions.observeFavorites(in: items) }
-        }
         .onChange(of: wantsNativeAlphabet) { _, desired in
             // Keep the actual matched source hierarchy in place until navigation returns.
             guard openedItem == nil else { return }
@@ -133,6 +127,7 @@ struct FoundationLibraryIndexView: View {
             if item == nil { usesNativeAlphabet = wantsNativeAlphabet }
         }
         .onDisappear {
+            actions.cancelQueueAddition()
             isVisible = false
         }
         .onChange(of: query) { old, new in
@@ -174,6 +169,8 @@ struct FoundationLibraryIndexView: View {
             id: "\(active)-\(!allowsNetwork)-\(library.catalogScopeID)-\(term)-\(requestRevision)"
         ) {
             guard active, !Task.isCancelled else { return }
+            model.configureFavoriteObservations(actions)
+            displayed.configureFavoriteObservations(actions)
             if !allowsNetwork {
                 let items =
                     term.isEmpty
