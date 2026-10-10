@@ -2,6 +2,8 @@ import SwiftUI
 
 /// Home composes independently owned, visible catalog sections around the existing player.
 struct FoundationHomeView<Profile: View>: View {
+    @EnvironmentObject private var connectivity: FoundationConnectivity
+    @EnvironmentObject private var downloads: FoundationDownloads
     let profile: Profile
     let library: any FoundationLibrary
     let player: FoundationPlayer
@@ -10,8 +12,11 @@ struct FoundationHomeView<Profile: View>: View {
     @ObservedObject var recentAlbums: FoundationBrowseModel
     @ObservedObject var genres: FoundationBrowseModel
     let isActive: Bool
+    var hasQueue = false
+    var accountLibrary: (any FoundationLibrary)? = nil
     @State private var isVisible = false
     @State private var genreRetryRevision = 0
+    @State private var refreshRevision = 0
     @State private var showingPlayer = false
     @State private var openedItem: FoundationItem?
     @EnvironmentObject private var actions: FoundationLibraryActions
@@ -19,22 +24,29 @@ struct FoundationHomeView<Profile: View>: View {
     var body: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 28) {
+                if connectivity.hasConnectionIssue
+                    || [recentTracks, favorites, recentAlbums, genres].contains(
+                        where: \.hasConnectionIssue)
+                {
+                    FoundationOfflineNotice()
+                }
                 FoundationContinueListening(
                     player: player, library: library, isActive: isActive && isVisible,
                     showingPlayer: $showingPlayer)
                 FoundationHomeShelf(
                     title: "Recently Played", model: recentTracks, library: library, player: player,
-                    isActive: isActive, showsTracks: true,
+                    isActive: isActive, refreshRevision: refreshRevision, showsTracks: true,
                     openedItem: $openedItem
                 ) { try await library.recentlyPlayed(startIndex: $0) }
+                // A bounded mixed collection preview; the heading opens complete Favorites.
                 FoundationHomeShelf(
                     title: "Favorites", model: favorites, library: library, player: player,
-                    isActive: isActive, isFavorites: true,
+                    isActive: isActive, refreshRevision: refreshRevision, isFavorites: true,
                     openedItem: $openedItem
-                ) { try await library.favoriteAlbums(startIndex: $0) }
+                ) { _ in try await library.favoriteCollectionsPreview() }
                 FoundationHomeShelf(
                     title: "Recently Added", model: recentAlbums, library: library, player: player,
-                    isActive: isActive,
+                    isActive: isActive, refreshRevision: refreshRevision,
                     openedItem: $openedItem
                 ) { try await library.recentAlbums(startIndex: $0) }
                 genreShelves
@@ -48,10 +60,29 @@ struct FoundationHomeView<Profile: View>: View {
             #endif
         }
         .onDisappear {
+            actions.cancelQueueAddition()
             isVisible = false
             #if DEBUG
                 FoundationTrace.event("ui origin=home disappeared")
             #endif
+        }
+        .refreshable {
+            guard isActive, !connectivity.localOnly else { return }
+            recentTracks.request(.refresh)
+            favorites.request(.refresh)
+            recentAlbums.request(.refresh)
+            genres.request(.refresh)
+            refreshRevision += 1
+            genreRetryRevision += 1
+        }
+        .onChange(of: connectivity.successfulRetryRevision) { _, _ in
+            guard isActive else { return }
+            recentTracks.request(.refresh)
+            favorites.request(.refresh)
+            recentAlbums.request(.refresh)
+            genres.request(.refresh)
+            refreshRevision += 1
+            genreRetryRevision += 1
         }
         .foundationHeader("Home", profile: profile)
         #if DEBUG
@@ -61,19 +92,11 @@ struct FoundationHomeView<Profile: View>: View {
                         ? "ui origin=home player=presented" : "ui origin=home player=dismissed")
             }
         #endif
-        .foundationPlayerCover(isPresented: $showingPlayer) {
-            FoundationPlayerView(player: player, library: library)
+        .foundationPlayerCover(isPresented: $showingPlayer, player: player) {
+            FoundationPlayerView(player: player, library: accountLibrary ?? library)
         }
-        .navigationDestination(
-            isPresented: Binding(
-                get: { openedItem != nil }, set: { if !$0 { openedItem = nil } }
-            )
-        ) {
-            if let item = openedItem {
-                FoundationItemDestination(
-                    item: item, library: library, player: player, isActive: isActive)
-            }
-        }
+        .foundationCollectionDestination(
+            item: $openedItem, library: library, player: player, isActive: isActive)
     }
 
     private var genreShelves: some View {
@@ -81,27 +104,36 @@ struct FoundationHomeView<Profile: View>: View {
             ForEach(Array(genres.items.prefix(5).enumerated()), id: \.element.id) { _, genre in
                 FoundationHomeGenreShelf(
                     genre: genre, library: library, player: player,
-                    isActive: isActive,
+                    isActive: isActive, refreshRevision: refreshRevision,
                     openedItem: $openedItem)
             }
-            if genres.isLoading { FoundationLoadingPlaceholder(layout: .albumShelf) }
-            if let error = genres.errorMessage {
+            if genres.isLoading, genres.items.isEmpty, !connectivity.localOnly {
+                FoundationLoadingPlaceholder(layout: .albumShelf)
+            }
+            if let error = genres.errorMessage, !genres.hasConnectionIssue {
                 Text(error).foregroundStyle(.red)
                 Button("Retry genres") {
+                    guard !connectivity.localOnly else { return }
                     genres.request(genres.retryRequest)
                     genreRetryRevision += 1
-                }
+                }.disabled(connectivity.localOnly)
             }
         }
-        .task(id: isActive && isVisible ? genreRetryRevision : nil) {
+        .task(
+            id: isActive && isVisible
+                ? genreRetryRevision * 2 + (connectivity.localOnly ? 1 : 0) : nil
+        ) {
+            guard isActive, isVisible, !Task.isCancelled else { return }
             #if DEBUG
                 await FoundationTrace.withPage(origin: .home, page: .genreIndex) {
-                    await genres.loadPending(ifActive: isActive && isVisible) { _ in
+                    await genres.refreshVisible(
+                        allowsNetwork: !connectivity.localOnly
+                    ) { _ in
                         try await library.homeGenres()
                     }
                 }
             #else
-                await genres.loadPending(ifActive: isActive && isVisible) { _ in
+                await genres.refreshVisible(allowsNetwork: !connectivity.localOnly) { _ in
                     try await library.homeGenres()
                 }
             #endif
@@ -111,13 +143,17 @@ struct FoundationHomeView<Profile: View>: View {
 
 private struct FoundationContinueListening: View {
     @EnvironmentObject private var currentArtwork: FoundationCurrentArtwork
+    @EnvironmentObject private var connectivity: FoundationConnectivity
+    @EnvironmentObject private var downloads: FoundationDownloads
     @ObservedObject var player: FoundationPlayer
     let library: any FoundationLibrary
     let isActive: Bool
     @Binding var showingPlayer: Bool
 
     var body: some View {
-        if let item = player.queue.first(where: { $0.id == player.selectedEntryID })?.item {
+        if let item = player.queue.first(where: { $0.id == player.selectedEntryID })?.item,
+            !connectivity.localOnly || downloads.isReady(item)
+        {
             continueListening(item)
         }
     }
@@ -197,24 +233,46 @@ private struct FoundationHomeGenreShelf: View {
     let library: any FoundationLibrary
     let player: FoundationPlayer
     let isActive: Bool
+    let refreshRevision: Int
     @Binding var openedItem: FoundationItem?
-    @StateObject private var albums = FoundationBrowseModel()
+    @StateObject private var albums: FoundationBrowseModel
+
+    init(
+        genre: FoundationItem, library: any FoundationLibrary, player: FoundationPlayer,
+        isActive: Bool, refreshRevision: Int, openedItem: Binding<FoundationItem?>
+    ) {
+        self.genre = genre
+        self.library = library
+        self.player = player
+        self.isActive = isActive
+        self.refreshRevision = refreshRevision
+        _openedItem = openedItem
+        let model = FoundationBrowseModel()
+        model.configureCache(
+            library.catalogPageCache, key: library.catalogCacheKey("home.genre." + genre.id))
+        _albums = StateObject(wrappedValue: model)
+    }
 
     var body: some View {
         FoundationHomeShelf(
             title: genre.title, model: albums, library: library, player: player,
-            isActive: isActive,
+            isActive: isActive, refreshRevision: refreshRevision,
             openedItem: $openedItem
         ) { try await library.albums(genreID: genre.id, startIndex: $0) }
     }
 }
 
 private struct FoundationHomeShelf: View {
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var refreshOnActivation = true
+    @EnvironmentObject private var downloads: FoundationDownloads
+    @EnvironmentObject private var connectivity: FoundationConnectivity
     let title: String
     @ObservedObject var model: FoundationBrowseModel
     let library: any FoundationLibrary
     let player: FoundationPlayer
     let isActive: Bool
+    var refreshRevision = 0
     var showsTracks = false
     var isFavorites = false
     @Binding var openedItem: FoundationItem?
@@ -222,16 +280,30 @@ private struct FoundationHomeShelf: View {
     @EnvironmentObject private var actions: FoundationLibraryActions
     @State private var isVisible = false
     @State private var retryRevision = 0
+    @State private var consumedRefreshRevision = 0
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
+    private var displayedItems: [FoundationItem] {
+        isFavorites ? actions.favoriteItems(in: model.items) : model.items
+    }
+
+    private var favoritesActivation: Bool {
+        isActive && isVisible && scenePhase == .active && !connectivity.localOnly
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 6) {
-                if !model.items.isEmpty {
+                if isFavorites || !displayedItems.isEmpty || model.nextStartIndex != nil {
                     NavigationLink {
-                        FoundationCatalogView(
-                            title: title, model: model, library: library, player: player,
-                            isActive: isActive, isFavorites: isFavorites, loader: loader)
+                        if isFavorites {
+                            FoundationFavoritesView(
+                                library: library, player: player, isActive: isActive)
+                        } else {
+                            FoundationCatalogView(
+                                title: title, model: model, library: library, player: player,
+                                isActive: isActive, loader: loader)
+                        }
                     } label: {
                         HStack(spacing: 6) {
                             Text(title).font(.title2.bold())
@@ -242,6 +314,7 @@ private struct FoundationHomeShelf: View {
                     .buttonStyle(.plain)
                     .accessibilityLabel("See all " + title.lowercased())
                     .accessibilityAddTraits(.isHeader)
+                    .accessibilityIdentifier(isFavorites ? "home-favorites" : "home-shelf-" + title)
                 } else {
                     Text(title).font(.title2.bold()).accessibilityAddTraits(.isHeader)
                 }
@@ -262,34 +335,55 @@ private struct FoundationHomeShelf: View {
                     }
                     .scrollTargetBehavior(.viewAligned)
                     .scrollIndicators(.hidden)
+                    .foundationMacShelfUnderlap()
                     .accessibilityLabel("Recently Played carousel")
                 }
-            } else if !model.items.isEmpty {
+            } else if !displayedItems.isEmpty {
                 ScrollView(.horizontal) {
                     LazyHStack(alignment: .top, spacing: 16) {
-                        ForEach(Array(model.items.prefix(5).enumerated()), id: \.offset) {
+                        ForEach(Array(displayedItems.prefix(5).enumerated()), id: \.offset) {
                             _, item in
-                            FoundationAlbumShelfCard(
-                                item: item, library: library, player: player,
-                                isActive: isActive && isVisible, open: { openedItem = item },
-                                navigate: { openedItem = $0 })
+                            if isFavorites {
+                                FoundationCollectionCard(
+                                    item: item, library: library, player: player,
+                                    isActive: isActive && isVisible, open: { openedItem = item },
+                                    navigate: { openedItem = $0 }
+                                )
+                                .frame(width: dynamicTypeSize.isAccessibilitySize ? 240 : 160)
+                            } else {
+                                FoundationAlbumShelfCard(
+                                    item: item, library: library, player: player,
+                                    isActive: isActive && isVisible, open: { openedItem = item },
+                                    navigate: { openedItem = $0 })
+                            }
                         }
                     }.scrollTargetLayout()
                 }
                 .scrollTargetBehavior(.viewAligned)
                 .scrollIndicators(.hidden)
+                .modifier(FoundationHomeShelfBoundary(contained: isFavorites))
             }
-            if model.isLoading {
+            if model.hasConnectionIssue, !connectivity.hasConnectionIssue {
+                FoundationOfflineNotice()
+            }
+            if model.isLoading, displayedItems.isEmpty, !connectivity.localOnly {
                 FoundationLoadingPlaceholder(layout: showsTracks ? .rows : .albumShelf)
             }
-            if let error = model.errorMessage {
+            if let error = model.errorMessage, !model.hasConnectionIssue {
                 Text(error).foregroundStyle(.red)
                 Button("Retry") {
+                    guard !connectivity.localOnly else { return }
                     model.request(model.retryRequest)
                     retryRevision += 1
-                }
-            } else if model.loaded, model.items.isEmpty {
-                Text("No items yet.").foregroundStyle(.secondary)
+                }.disabled(connectivity.localOnly)
+            } else if !connectivity.localOnly, !model.hasConnectionIssue, model.loaded,
+                displayedItems.isEmpty
+            {
+                Text(
+                    model.nextStartIndex == nil
+                        ? "No items yet."
+                        : "No matches in this page. Open the full list to load more."
+                ).foregroundStyle(.secondary)
             }
         }
         .onAppear {
@@ -300,36 +394,63 @@ private struct FoundationHomeShelf: View {
         }
         .onDisappear {
             isVisible = false
+            refreshOnActivation = true
             #if DEBUG
                 FoundationTrace.event("ui origin=home disappeared")
             #endif
         }
+        .onChange(of: favoritesActivation) { _, active in
+            if !active { refreshOnActivation = true }
+        }
         .onChange(of: actions.favoriteRevision) { _, _ in
-            if isFavorites, isActive, isVisible {
+            if isFavorites, isActive, isVisible, !connectivity.localOnly {
                 model.request(.refresh)
                 retryRevision += 1
             }
         }
-        .task(id: isActive && isVisible ? retryRevision : nil) {
+        .task(
+            id: isActive && isVisible && scenePhase == .active
+                ? "\(refreshRevision):\(retryRevision):\(connectivity.localOnly)" : nil
+        ) {
+            guard isActive, isVisible, scenePhase == .active, !Task.isCancelled else { return }
+            if isFavorites, favoritesActivation, refreshOnActivation {
+                refreshOnActivation = false
+                if model.loaded { model.request(.refresh) }
+            }
+            // This capped preview cannot establish nonmembership from absent rows.
+            model.configureFavoriteObservations(actions)
+            if refreshRevision != consumedRefreshRevision {
+                model.request(.refresh)
+                consumedRefreshRevision = refreshRevision
+            }
             #if DEBUG
                 await FoundationTrace.withPage(origin: .home, page: .shelf) {
-                    guard isActive, isVisible, !Task.isCancelled else { return }
-                    await model.loadPending(using: loader)
+                    guard isActive, isVisible, !Task.isCancelled else {
+                        return
+                    }
+                    await model.refreshVisible(
+                        allowsNetwork: !connectivity.localOnly, using: loader)
                 }
             #else
-                guard isActive, isVisible, !Task.isCancelled else { return }
-                await model.loadPending(using: loader)
+                guard isActive, isVisible, !Task.isCancelled else {
+                    return
+                }
+                await model.refreshVisible(allowsNetwork: !connectivity.localOnly, using: loader)
             #endif
         }
     }
 
     private var usesVerticalRecentRows: Bool {
         dynamicTypeSize.isAccessibilitySize
-            || model.items.prefix(6).contains { actions.errorMessage(for: $0) != nil }
+            || displayedItems.prefix(6).contains { actions.errorMessage(for: $0) != nil }
     }
 
     private var recentRows: some View {
-        ForEach(Array(model.items.prefix(6).enumerated()), id: \.offset) { index, item in
+        ForEach(
+            Array(displayedItems.prefix(6).enumerated()).filter {
+                !connectivity.localOnly || downloads.isReady($0.element)
+            }, id: \.offset
+        ) { index, item in
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 4) {
                     Button {
@@ -346,6 +467,7 @@ private struct FoundationHomeShelf: View {
                             }.frame(maxWidth: .infinity, alignment: .leading)
                         }.contentShape(Rectangle())
                     }.buttonStyle(.plain)
+                    FoundationDownloadBadge(item: item)
                     Menu {
                         recentMenu(item, index: index)
                     } label: {
@@ -353,6 +475,7 @@ private struct FoundationHomeShelf: View {
                             .frame(width: 44, height: 44)
                     }
                     .menuStyle(.borderlessButton)
+                    .foundationEllipsisMenuIndicator()
                     .accessibilityLabel("Actions for " + item.title)
                 }
                 if let error = actions.errorMessage(for: item) {
@@ -366,7 +489,15 @@ private struct FoundationHomeShelf: View {
 
     private func playRecent(_ index: Int) {
         guard let selection = model.trackQueue(selecting: index) else { return }
-        player.setQueue(selection.items, selectedIndex: selection.index)
+        if connectivity.localOnly {
+            guard downloads.isReady(selection.items[selection.index]) else { return }
+            let ready = selection.items.filter { downloads.isReady($0) }
+            let index = selection.items.prefix(selection.index).filter { downloads.isReady($0) }
+                .count
+            player.setQueue(ready, selectedIndex: index)
+        } else {
+            player.setQueue(selection.items, selectedIndex: selection.index)
+        }
     }
 
     private func recentMenu(_ item: FoundationItem, index: Int) -> some View {
@@ -385,4 +516,15 @@ private struct FoundationHomeShelf: View {
     return FoundationCatalogArtwork(
         item: artworkItem, library: library, isActive: isActive, size: size
     ).id(artworkItem.id + (artworkItem.primaryImageTag ?? ""))
+}
+
+private struct FoundationHomeShelfBoundary: ViewModifier {
+    let contained: Bool
+    @ViewBuilder func body(content: Content) -> some View {
+        if contained {
+            content.foundationMacContainedShelf()
+        } else {
+            content.foundationMacShelfUnderlap()
+        }
+    }
 }

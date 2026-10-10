@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Fail when internal diagnostic/test implementation leaks into a Release app."""
+import os
 import pathlib
 import plistlib
 import sys
@@ -11,14 +12,25 @@ if not info_path.exists():
 info = plistlib.loads(info_path.read_bytes())
 assert info["CFBundleIdentifier"] == "com.chameleonenterprise.velacanto"
 assert info["CFBundleDisplayName"] == "Velacanto"
-assert info["CFBundleShortVersionString"] == "0.3.5"
-assert info["CFBundleVersion"] == "109"
+assert info["CFBundleShortVersionString"] == "0.4.0"
+assert info["CFBundleVersion"] == os.environ.get("VELACANTO_BUILD_NUMBER", "124")
+assert info["ITSAppUsesNonExemptEncryption"] is False
+privacy_path = app / "PrivacyInfo.xcprivacy"
+if not privacy_path.exists():
+    privacy_path = app / "Contents/Resources/PrivacyInfo.xcprivacy"
+privacy = plistlib.loads(privacy_path.read_bytes())
+reasons = {entry["NSPrivacyAccessedAPIType"]: entry["NSPrivacyAccessedAPITypeReasons"]
+           for entry in privacy["NSPrivacyAccessedAPITypes"]}
+for category, reason in (("UserDefaults", "CA92.1"), ("FileTimestamp", "C617.1"), ("DiskSpace", "E174.1")):
+    assert reason in reasons.get("NSPrivacyAccessedAPICategory" + category, []), category
 executable = app / info["CFBundleExecutable"]
 if not executable.exists():
     executable = app / "Contents/MacOS" / info["CFBundleExecutable"]
 markers = (
     b"foundation-journal.log", b"-foundationTesting", b"seek.request direction=",
     b"seek.complete direction=", b"FoundationSystemMediaControlsTests",
+    b"-foundationDownloadsUITesting", b"DownloadUITestFixtures", b"FoundationDownloadUIFixture",
+    b"FoundationAccountUITestHarness", b"synthetic-not-a-password",
 )
 for binary in [executable, *app.rglob("*.dylib")]:
     content = binary.read_bytes()

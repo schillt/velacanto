@@ -1,10 +1,15 @@
 # Velacanto
 
-Velacanto is a native Jellyfin music app for iPhone, iPad and Mac. **0.3.5 alpha prerelease**
-restores system controls, lyrics, AirPlay and volume while improving playback and
-Now Playing presentation. It follows the 0.3.0 Foundation replacement; earlier
-releases remain in Git history and tags. Publication and distribution status are
-recorded separately in the [release acceptance record](docs/0.3.5-acceptance.md).
+Velacanto is a native Jellyfin music app for iPhone, iPad and Mac. **0.4.0 is
+in development on alpha**, with downloads, playlist management, queue restoration
+and native platform refinements integrated at `488d0af` (build 124). Read the
+[0.4 development and acceptance record](docs/0.4-development-record.md) for the
+exact source, verification and remaining gates. TestFlight signing, upload,
+processing and both-platform availability remain pending for this checkpoint.
+
+The published [0.3.5 alpha prerelease](https://github.com/schillt/velacanto/releases/tag/0.3.5)
+and its [historical acceptance record](docs/0.3.5-acceptance.md) retain their own
+evidence. Earlier releases remain in Git history and tags.
 
 The app is named **Velacanto**, bundle `com.chameleonenterprise.velacanto`.
 Users upgrading from the original app may need to sign in again. No legacy
@@ -22,10 +27,22 @@ Now Playing includes an inline queue, synchronized lyrics with line seeking and
 idle follow, shared system artwork, Control Center/lock-screen commands, native
 AirPlay selection and volume. Lyrics availability depends on the library.
 iOS volume uses Apple's native control; Mac volume adjusts app playback gain.
+Original-file track, album and playlist downloads use Wi-Fi defaults with explicit
+cellular opt-in, progress/cancel/retry and account-owned storage controls. Downloaded
+playlists reconcile on scoped lifecycle/edit triggers and preserve usable content
+on refresh failure. Ready local files play through the same player.
+
+Create, rename, delete and edit Jellyfin playlists, including song and album
+additions. Up Next supports removal and native reordering; shuffle/repeat persist,
+and relaunch restores the queue paused without a saved playback position. Favorites
+loads Songs, Albums and Artists independently. Mac has persistent transport,
+queue/lyrics sidebars and a shared native Settings window.
+
 Playback reporting is not implemented; server history/play-count shelves may not
-reflect listening in this app. Offline/local libraries, playlist editing,
-persistent shuffle/repeat and CarPlay are deferred. Collection Shuffle exists.
-See [release notes](docs/0.3.5-release-notes.md) and [known issues](docs/0.3.5-known-issues.md), including the accepted volume-jump defect.
+reflect listening in this app. Local-library indexing, server playlist reordering,
+new providers and CarPlay remain deferred. Physical and server acceptance is still
+tracked in the [0.4 record](docs/0.4-development-record.md); earlier known defects
+are retained in the [0.3.5 history](docs/0.3.5-known-issues.md).
 
 ## Development
 
@@ -54,17 +71,20 @@ the OS 27 Quality Gate and validates its existing simulator before testing; Xcod
 (no tracked generator). See the [platform decision update](docs/decisions/0013-rebuilt-03-release.md#035-development-platform-update).
 
 The published 0.3.0 (108) minimums and historical acceptance remain unchanged.
-The 0.3.5 packaging candidate uses build 109; distribution must verify that identity is available before upload.
+The current integrated packaging identity is 0.4.0 (124); distribution must verify
+that identity is available before upload.
 Unsigned local/CI checks do not establish signed, physical or distribution
 acceptance; signing/export and Apple processing remain tracked by issue #149.
 
-Existing 106 formatting findings are explicitly baselined in
-`scripts/foundation-lint-baseline.txt` to avoid mixing historical formatting cleanup with functional changes. New findings fail; strict compiler/test gates still apply.
-Remove this formatting debt separately after release.
+The current lint run reports no new findings and zero retained build-106 findings.
+`scripts/foundation-lint-baseline.txt` retains the historical baseline mechanism;
+new findings fail and strict compiler/test gates still apply.
 
 ## Release and architecture
 
-- [0.3.5 acceptance and provenance](docs/0.3.5-acceptance.md)
+- [0.4 development and acceptance](docs/0.4-development-record.md)
+- [0.4 execution plan](docs/0.4-plan.md)
+- [Historical 0.3.5 acceptance and provenance](docs/0.3.5-acceptance.md)
 - [Historical 0.3 acceptance](docs/0.3-acceptance-and-provenance.md)
 - [Engineering history and investigations](docs/0.3-engineering-record.md)
 - [Dependencies and notices](docs/0.3-dependencies.md)
@@ -73,12 +93,11 @@ Remove this formatting debt separately after release.
 - [Historical 0.3 plan](docs/0.3-plan.md)
 - [Agent instructions](AGENTS.md)
 
-The owner authorized PR #174 into alpha after passing checks, a 0.3.5 GitHub
-prerelease from alpha and internal TestFlight through the existing Xcode Cloud
-workflow, with the documented known defects. Main promotion and public App Store
-submission are not authorized.
-Publication still requires recorded candidate checks and signed distribution verification. Credentials,
-signing material and raw device traces never belong in the repository.
+The 0.4 combined source is published to alpha. The prior accepted preview source
+was promoted to main through PR #190; it excludes the newer 0.4 work. No 0.4 main
+promotion or public App Store submission is implied. Freeze and verify an exact
+candidate before release publication; record signed distribution separately.
+Credentials, signing material and raw device traces never belong in the repository.
 
 Publisher: Chameleon Enterprise Ltd. Velacanto is independent of Jellyfin and is
 not affiliated with or endorsed by Jellyfin.

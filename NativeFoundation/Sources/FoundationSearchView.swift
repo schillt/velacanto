@@ -2,8 +2,14 @@ import SwiftUI
 
 /// Native search controls with the existing catalog owner, rows and destinations.
 struct FoundationSearchView<Profile: View>: View {
+    @EnvironmentObject private var connectivity: FoundationConnectivity
     let profile: Profile
+    @Environment(\.foundationReduceMotion) private var reduceMotion
+    @Environment(\.foundationReduceTransparency) private var reduceTransparency
+    @Namespace private var searchGlass
     @FocusState private var searchFocused: Bool
+    @State private var searchExpanded = false
+    @State private var cancelledActivation: Int?
     let library: any FoundationLibrary
     @ObservedObject var player: FoundationPlayer
     @ObservedObject var genres: FoundationBrowseModel
@@ -21,12 +27,21 @@ struct FoundationSearchView<Profile: View>: View {
                 FoundationSearchOverview(
                     query: term, library: library, player: player, isActive: isActive
                 )
-                .id(term)
+                .id(term + (connectivity.localOnly ? "-local" : "-online"))
             }
         }
-        .foundationSearchHeader(profile: profile, search: searchField, keepsVisible: searchFocused)
-        .onChange(of: activation, initial: true) { _, value in
-            if isActive, value > 0 { searchFocused = true }
+        #if os(macOS)
+            .foundationHeader("Search", profile: profile)
+        #else
+            .foundationSearchHeader(
+                profile: profile, search: searchField, keepsVisible: searchExpanded
+            )
+            .onChange(of: activation, initial: true) { _, value in
+                if isActive, value > 0, cancelledActivation != value { beginSearchFocus() }
+            }
+        #endif
+        .onChange(of: searchFocused) { _, focused in
+            animateSearchExpansion(focused)
         }
         .onChange(of: isActive) { _, active in
             if !active { searchFocused = false }
@@ -42,36 +57,91 @@ struct FoundationSearchView<Profile: View>: View {
     private var searchInput: some View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-            TextField("Albums, artists, and songs", text: $query)
-                .textFieldStyle(.plain)
-                .focused($searchFocused)
-                .autocorrectionDisabled()
-                .submitLabel(.search)
-                #if os(iOS)
-                    .textInputAutocapitalization(.never)
-                #endif
-                .accessibilityLabel("Search music")
+            TextField(
+                connectivity.localOnly
+                    ? "Downloaded music and saved collections" : "Albums, artists, and songs",
+                text: $query
+            )
+            .textFieldStyle(.plain)
+            .focused($searchFocused)
+            .autocorrectionDisabled()
+            .submitLabel(.search)
+            #if os(iOS)
+                .textInputAutocapitalization(.never)
+            #endif
+            .simultaneousGesture(TapGesture().onEnded { beginSearchFocus() })
+            .accessibilityLabel("Search music")
             if !query.isEmpty {
                 Button {
                     query = ""
                 } label: {
                     Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
                         .frame(width: 44, height: 44)
-                }.buttonStyle(.plain).accessibilityLabel("Clear search")
+                }.buttonStyle(.plain).accessibilityLabel(
+                    "Clear search")
             }
         }
         .padding(.leading, 14).padding(.trailing, query.isEmpty ? 14 : 0)
         .frame(minHeight: 44)
     }
 
+    private func beginSearchFocus() {
+        // Start splitting the glass on touch, before keyboard focus/layout completes.
+        animateSearchExpansion(true)
+        searchFocused = true
+    }
+
+    private func animateSearchExpansion(_ expanded: Bool) {
+        withAnimation(reduceMotion ? nil : .smooth(duration: 0.25)) {
+            searchExpanded = expanded
+        }
+    }
+
+    private func cancelSearchFocus() {
+        cancelledActivation = activation
+        animateSearchExpansion(false)
+        searchFocused = false
+    }
+
     private var searchField: some View {
-        Group {
-            if #available(iOS 26.0, macOS 26.0, *) {
-                searchInput.glassEffect(.regular, in: Capsule())
-            } else {
-                searchInput.background(.regularMaterial, in: Capsule())
+        GlassEffectContainer(spacing: 12) {
+            HStack(spacing: 8) {
+                Group {
+                    if reduceTransparency {
+                        searchInput.background(.background, in: Capsule())
+                    } else {
+                        searchInput.glassEffect(.regular, in: Capsule())
+                            .glassEffectID("search-input", in: searchGlass)
+                    }
+                }
+                if searchExpanded {
+                    dismissKeyboardButton
+                        .glassEffectID("search-dismiss", in: searchGlass)
+                        .glassEffectTransition(reduceMotion ? .identity : .matchedGeometry)
+                        .transition(.identity)
+                }
             }
-        }.padding(.horizontal, 16).padding(.bottom, 8)
+            .animation(reduceMotion ? nil : .smooth(duration: 0.25), value: searchExpanded)
+        }
+        .padding(.horizontal, 16).padding(.bottom, 8)
+    }
+
+    private var dismissKeyboardButton: some View {
+        Button(action: cancelSearchFocus) {
+            Image(systemName: "xmark")
+                .font(.body.weight(.semibold))
+                .frame(width: 44, height: 44)
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .background {
+            if reduceTransparency { Circle().fill(.background) }
+        }
+        .glassEffect(reduceTransparency ? .identity : .regular.interactive(), in: Circle())
+        .keyboardShortcut(.cancelAction)
+        .accessibilityLabel("Dismiss search keyboard")
+        .accessibilityIdentifier("search-dismiss-keyboard")
+        .accessibilityHint("Keeps your search. Tap the search field to type again.")
     }
 
     private var genreGrid: some View {
@@ -84,6 +154,8 @@ struct FoundationSearchView<Profile: View>: View {
 
 /// Search and Library share card layout, ownership, pagination and local recovery.
 struct FoundationGenreIndex: View {
+    @EnvironmentObject private var connectivity: FoundationConnectivity
+    @EnvironmentObject private var downloads: FoundationDownloads
     @ObservedObject var genres: FoundationBrowseModel
     let library: any FoundationLibrary
     @ObservedObject var player: FoundationPlayer
@@ -97,15 +169,27 @@ struct FoundationGenreIndex: View {
         @Environment(\.foundationTraceOrigin) private var traceOrigin
     #endif
 
+    private var visibleGenres: [FoundationItem] {
+        connectivity.localOnly
+            ? genres.items.filter { !downloads.browseTracks(for: $0).isEmpty } : genres.items
+    }
+
+    private var genreColumns: [GridItem] {
+        #if os(macOS)
+            [GridItem(.adaptive(minimum: 128, maximum: 168), spacing: 12)]
+        #else
+            [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)]
+        #endif
+    }
+
     var body: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 16) {
-                LazyVGrid(
-                    columns: [
-                        GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12),
-                    ], spacing: 12
-                ) {
-                    ForEach(Array(genres.items.enumerated()), id: \.offset) { _, genre in
+                if connectivity.hasConnectionIssue || genres.hasConnectionIssue {
+                    FoundationOfflineNotice()
+                }
+                LazyVGrid(columns: genreColumns, spacing: 12) {
+                    ForEach(Array(visibleGenres.enumerated()), id: \.offset) { _, genre in
                         FoundationGenreCard(
                             genre: genre, library: library,
                             isActive: isActive && isVisible, open: { openedGenre = genre }
@@ -118,13 +202,23 @@ struct FoundationGenreIndex: View {
                     }
                 }
                 if genres.nextStartIndex != nil {
-                    Button("Load more") { reloadGenres(.more) }.disabled(genres.isLoading)
+                    Button("Load more") { reloadGenres(.more) }.disabled(
+                        genres.isLoading || connectivity.localOnly)
                 }
-                if genres.isLoading { FoundationLoadingPlaceholder(layout: .genreCards) }
-                if genres.loaded, genres.items.isEmpty { Text("No genres found.") }
-                if let error = genres.errorMessage {
+                if genres.isLoading, !connectivity.localOnly {
+                    FoundationLoadingPlaceholder(layout: .genreCards)
+                }
+                if genres.loaded, genres.items.isEmpty, !connectivity.hasConnectionIssue,
+                    !genres.hasConnectionIssue
+                {
+                    Text("No genres found.")
+                }
+                if let error = genres.errorMessage, !genres.hasConnectionIssue,
+                    !connectivity.localOnly
+                {
                     Text(error).foregroundStyle(.red)
-                    Button("Retry") { reloadGenres(genres.retryRequest) }
+                    Button("Retry") { reloadGenres(genres.retryRequest) }.disabled(
+                        connectivity.localOnly)
                 }
                 if let error = actions.pinErrorMessage { Text(error).foregroundStyle(.red) }
             }.padding(.horizontal).padding(.bottom)
@@ -143,18 +237,26 @@ struct FoundationGenreIndex: View {
                 #endif
             }
         }
-        .task(id: isActive && isVisible ? genreRevision : nil) {
+        .onChange(of: connectivity.successfulRetryRevision) { _, _ in
+            guard isActive, isVisible else { return }
+            genres.request(.refresh)
+            genreRevision += 1
+        }
+        .task(id: "\(isActive && isVisible)-\(connectivity.localOnly)-\(genreRevision)") {
+            guard isActive, isVisible else { return }
             #if DEBUG
                 await FoundationTrace.withPage(origin: traceOrigin, page: .genreIndex) {
-                    await genres.loadPending(ifActive: isActive && isVisible, using: loader)
+                    await genres.refreshVisible(
+                        allowsNetwork: !connectivity.localOnly, using: loader)
                 }
             #else
-                await genres.loadPending(ifActive: isActive && isVisible, using: loader)
+                await genres.refreshVisible(allowsNetwork: !connectivity.localOnly, using: loader)
             #endif
         }
     }
 
     private func reloadGenres(_ request: FoundationBrowseModel.Request) {
+        guard !connectivity.localOnly else { return }
         genres.request(request)
         genreRevision += 1
     }
@@ -189,10 +291,7 @@ struct FoundationGenreCard: View {
                             isActive: isActive && isVisible, size: geometry.size.width,
                             sampledColor: $tint
                         )
-                        .id(
-                            (artworkItem ?? genre).id
-                                + ((artworkItem ?? genre).primaryImageTag ?? "")
-                        )
+                        .id((artworkItem ?? genre).sharedArtworkIdentity)
                         .frame(width: geometry.size.width, height: geometry.size.height)
                         .clipped()
                         LinearGradient(
@@ -214,8 +313,11 @@ struct FoundationGenreCard: View {
     }
 }
 
-/// Three small, sequential, independently recoverable result sections.
+/// Small sequential result sections share local and remote catalog identities.
 private struct FoundationSearchOverview: View {
+    @EnvironmentObject private var downloads: FoundationDownloads
+    @EnvironmentObject private var actions: FoundationLibraryActions
+    @EnvironmentObject private var connectivity: FoundationConnectivity
     let query: String
     let library: any FoundationLibrary
     @ObservedObject var player: FoundationPlayer
@@ -223,6 +325,7 @@ private struct FoundationSearchOverview: View {
     @StateObject private var artists = FoundationBrowseModel()
     @StateObject private var albums = FoundationBrowseModel()
     @StateObject private var songs = FoundationBrowseModel()
+    @StateObject private var playlists = FoundationBrowseModel()
     @State private var isVisible = false
     @State private var revision = 0
     @State private var openedItem: FoundationItem?
@@ -230,11 +333,21 @@ private struct FoundationSearchOverview: View {
     private var sections: [(title: String, kind: FoundationItem.Kind, model: FoundationBrowseModel)]
     {
         [("Songs", .track, songs), ("Albums", .album, albums), ("Artists", .artist, artists)]
+            + (connectivity.localOnly ? [("Playlists", .playlist, playlists)] : [])
     }
 
     var body: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 24) {
+                if connectivity.hasConnectionIssue
+                    || sections.contains(where: { $0.model.hasConnectionIssue })
+                {
+                    FoundationOfflineNotice()
+                }
+                if connectivity.localOnly {
+                    Text("Searching downloaded music and saved collections.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 ForEach(sections, id: \.title) { section in
                     if !section.model.items.isEmpty || section.model.errorMessage != nil {
                         resultSection(section.title, kind: section.kind, model: section.model)
@@ -249,22 +362,24 @@ private struct FoundationSearchOverview: View {
             }.padding(.horizontal).padding(.bottom)
         }
         .onAppear { isVisible = true }
-        .onDisappear { isVisible = false }
-        .navigationDestination(
-            isPresented: Binding(get: { openedItem != nil }, set: { if !$0 { openedItem = nil } })
-        ) {
-            if let item = openedItem {
-                FoundationItemDestination(
-                    item: item, library: library, player: player, isActive: isActive
-                )
-                #if os(iOS)
-                    .toolbar(.visible, for: .navigationBar)
-                #endif
-            }
+        .onDisappear {
+            isVisible = false
+            actions.cancelQueueAddition()
         }
-        .task(id: isActive && isVisible ? revision : nil) {
+        .foundationCollectionDestination(
+            item: $openedItem, library: library, player: player, isActive: isActive
+        )
+        .onChange(of: connectivity.successfulRetryRevision) { _, _ in
+            for section in sections { section.model.request(.refresh) }
+        }
+        .onReceive(downloads.objectWillChange) {
+            if connectivity.localOnly { revision += 1 }
+        }
+        .task(id: "\(isActive && isVisible)-\(revision)-\(connectivity.successfulRetryRevision)") {
             guard isActive, isVisible else { return }
-            do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
+            if !connectivity.localOnly {
+                do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
+            }
             #if DEBUG
                 await FoundationTrace.withPage(origin: .search, page: .catalog) {
                     await loadSections()
@@ -276,11 +391,23 @@ private struct FoundationSearchOverview: View {
     }
 
     private func loadSections() async {
+        // The parent gives local and online searches separate view/model identities.
+        // Keep each load tied to that source so downloaded metadata cannot reconcile favorites.
+        let localOnly = connectivity.localOnly
         for section in sections {
-            guard !Task.isCancelled else { return }
-            await section.model.loadPending {
-                try await library.search(
-                    query: query, kind: section.kind, startIndex: $0, limit: 5)
+            guard !Task.isCancelled, connectivity.localOnly == localOnly else { return }
+            if localOnly {
+                section.model.request(.refresh)
+                await section.model.loadPending { offset in
+                    downloads.localSearch(
+                        query: query, kind: section.kind, startIndex: offset, limit: 5)
+                }
+            } else {
+                section.model.configureFavoriteObservations(actions)
+                await section.model.loadPending { offset in
+                    try await library.search(
+                        query: query, kind: section.kind, startIndex: offset, limit: 5)
+                }
             }
         }
     }
@@ -311,23 +438,37 @@ private struct FoundationSearchOverview: View {
                     play: item.kind == .track
                         ? {
                             guard let selection = model.trackQueue(selecting: index) else { return }
-                            player.setQueue(selection.items, selectedIndex: selection.index)
+                            if connectivity.localOnly {
+                                guard downloads.isReady(selection.items[selection.index]) else {
+                                    return
+                                }
+                                let ready = selection.items.filter { downloads.isReady($0) }
+                                let index = selection.items.prefix(selection.index).filter {
+                                    downloads.isReady($0)
+                                }.count
+                                player.setQueue(ready, selectedIndex: index)
+                            } else {
+                                player.setQueue(selection.items, selectedIndex: selection.index)
+                            }
 
                         } : nil, player: player, showsTrackArtwork: true,
                     navigate: { openedItem = $0 })
             }
-            if let error = model.errorMessage {
+            if let error = model.errorMessage, !model.hasConnectionIssue {
                 Text(error).foregroundStyle(.red)
                 Button("Retry") {
+                    guard !connectivity.localOnly else { return }
                     model.request(model.retryRequest)
                     revision += 1
-                }
+                }.disabled(connectivity.localOnly)
             }
         }
     }
 }
 
 private struct FoundationSearchCategory: View {
+    @EnvironmentObject private var downloads: FoundationDownloads
+    @EnvironmentObject private var connectivity: FoundationConnectivity
     let title: String
     let query: String
     let kind: FoundationItem.Kind
@@ -340,11 +481,31 @@ private struct FoundationSearchCategory: View {
         FoundationCatalogView(
             title: title, model: results, library: library, player: player,
             isActive: isActive, showsTrackArtwork: true
-        ) {
-            try await library.search(query: query, kind: kind, startIndex: $0, limit: 50)
+        ) { offset in
+            if connectivity.localOnly {
+                return downloads.localSearch(
+                    query: query, kind: kind, startIndex: offset, limit: 50)
+            }
+            return try await library.search(query: query, kind: kind, startIndex: offset, limit: 50)
+        }
+        .onChange(of: connectivity.localOnly) { _, _ in results.clearRetainedData() }
+        .task(id: connectivity.localOnly) {
+            if connectivity.localOnly { installLocalResults() }
+        }
+        .onReceive(downloads.objectWillChange) {
+            if connectivity.localOnly {
+                Task { @MainActor in
+                    guard connectivity.localOnly else { return }
+                    installLocalResults()
+                }
+            }
         }
         #if os(iOS)
             .toolbar(.visible, for: .navigationBar)
         #endif
+    }
+
+    private func installLocalResults() {
+        results.installSnapshot(downloads.localSearchItems(query: query, kind: kind))
     }
 }

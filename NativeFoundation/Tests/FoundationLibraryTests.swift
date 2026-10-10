@@ -3,7 +3,1314 @@ import XCTest
 
 @testable import VelacantoFoundation
 
+#if os(iOS)
+    import SwiftUI
+    import UIKit
+#endif
+
 final class FoundationLibraryTests: XCTestCase {
+    @MainActor
+    func testCollectionInitialDemandTakesOverCancelledOwnerAfterTransportUnwinds() async {
+        let model = FoundationBrowseModel()
+        let firstGate = FoundationAlphabetTestGate()
+        let secondGate = FoundationAlphabetTestGate()
+        let track = FoundationItem(
+            id: "replacement", title: "Replacement", subtitle: "Synthetic", kind: .track,
+            duration: 1)
+        var activeRequests = 0
+        var maximumActiveRequests = 0
+        var replacementReads = 0
+        let first = Task {
+            await model.loadPending(waitForInitialLoad: true) { _ in
+                activeRequests += 1
+                maximumActiveRequests = max(maximumActiveRequests, activeRequests)
+                defer { activeRequests -= 1 }
+                await firstGate.suspend()
+                return .init(items: [], nextStartIndex: nil)
+            }
+        }
+        await firstGate.entered()
+        let second = Task {
+            await model.loadPending(waitForInitialLoad: true) { _ in
+                replacementReads += 1
+                activeRequests += 1
+                maximumActiveRequests = max(maximumActiveRequests, activeRequests)
+                defer { activeRequests -= 1 }
+                await secondGate.suspend()
+                return .init(items: [track], nextStartIndex: nil)
+            }
+        }
+        await waitForInitialDemands(1, in: model)
+        first.cancel()
+        // The first synthetic transport ignores cancellation until explicitly released.
+        let third = Task {
+            await model.loadPending(waitForInitialLoad: true) { _ in
+                replacementReads += 1
+                activeRequests += 1
+                maximumActiveRequests = max(maximumActiveRequests, activeRequests)
+                defer { activeRequests -= 1 }
+                await secondGate.suspend()
+                return .init(items: [track], nextStartIndex: nil)
+            }
+        }
+        await waitForInitialDemands(2, in: model)
+        XCTAssertEqual(replacementReads, 0)
+        await firstGate.release()
+        await first.value
+        await secondGate.entered()
+        XCTAssertEqual(replacementReads, 1)
+        await secondGate.release()
+        await second.value
+        await third.value
+        XCTAssertEqual(maximumActiveRequests, 1)
+        XCTAssertEqual(replacementReads, 1)
+        XCTAssertEqual(model.items.map(\.id), ["replacement"])
+        XCTAssertTrue(model.loaded)
+        XCTAssertFalse(model.isLoading)
+        XCTAssertEqual(model.pendingInitialLoadDemandCount, 0)
+    }
+
+    @MainActor
+    func testCollectionInitialDemandDoesNotRetrySuccessfulOrFailedOwner() async {
+        for fails in [false, true] {
+            let model = FoundationBrowseModel()
+            let gate = FoundationAlphabetTestGate()
+            let track = FoundationItem(
+                id: "original", title: "Original", subtitle: "Synthetic", kind: .track, duration: 1)
+            let first = Task {
+                await model.loadPending(waitForInitialLoad: true) { _ in
+                    await gate.suspend()
+                    if fails { throw FoundationLibraryError.invalidResponse }
+                    return .init(items: [track], nextStartIndex: nil)
+                }
+            }
+            await gate.entered()
+            let second = Task {
+                await model.loadPending(waitForInitialLoad: true) { _ in
+                    XCTFail("Completed owner must satisfy initial demand without another request")
+                    return .init(items: [], nextStartIndex: nil)
+                }
+            }
+            await waitForInitialDemands(1, in: model)
+            await gate.release()
+            await first.value
+            await second.value
+            XCTAssertEqual(model.loaded, !fails)
+            XCTAssertEqual(model.errorMessage != nil, fails)
+            XCTAssertEqual(model.pendingInitialLoadDemandCount, 0)
+        }
+    }
+
+    @MainActor
+    func testCancelledCollectionWaiterReturnsWithoutWaitingForNoncooperativeTransport() async {
+        let model = FoundationBrowseModel()
+        let gate = FoundationAlphabetTestGate()
+        let first = Task {
+            await model.loadPending(waitForInitialLoad: true) { _ in
+                await gate.suspend()
+                return .init(items: [], nextStartIndex: nil)
+            }
+        }
+        await gate.entered()
+        let second = Task {
+            await model.loadPending(waitForInitialLoad: true) { _ in
+                XCTFail("Cancelled destination must not take over")
+                return .init(items: [], nextStartIndex: nil)
+            }
+        }
+        await waitForInitialDemands(1, in: model)
+        second.cancel()
+        await second.value
+        XCTAssertEqual(model.pendingInitialLoadDemandCount, 0)
+        XCTAssertTrue(model.isLoading)
+        first.cancel()
+        await gate.release()
+        await first.value
+        XCTAssertFalse(model.loaded)
+        XCTAssertNil(model.errorMessage)
+    }
+
+    @MainActor
+    func testCollectionDemandInvalidationCannotResurrectRetiredModel() async {
+        for invalidation in ["clear", "snapshot", "request"] {
+            let model = FoundationBrowseModel()
+            let gate = FoundationAlphabetTestGate()
+            let first = Task {
+                await model.loadPending(waitForInitialLoad: true) { _ in
+                    await gate.suspend()
+                    return .init(items: [], nextStartIndex: nil)
+                }
+            }
+            await gate.entered()
+            let second = Task {
+                await model.loadPending(waitForInitialLoad: true) { _ in
+                    XCTFail("Invalidated demand must not start another request")
+                    return .init(items: [], nextStartIndex: nil)
+                }
+            }
+            await waitForInitialDemands(1, in: model)
+            switch invalidation {
+            case "clear": model.clearRetainedData()
+            case "snapshot":
+                model.installSnapshot([
+                    FoundationItem(
+                        id: "snapshot", title: "Snapshot", subtitle: "Synthetic", kind: .track,
+                        duration: 1)
+                ])
+            default: model.request(.refresh)
+            }
+            await second.value
+            first.cancel()
+            await gate.release()
+            await first.value
+            XCTAssertEqual(model.pendingInitialLoadDemandCount, 0)
+            XCTAssertEqual(model.loaded, invalidation == "snapshot")
+            XCTAssertNil(model.errorMessage)
+        }
+    }
+
+    @MainActor
+    func testCollectionInitialHandoffPreservesExplicitRefreshAndRetry() async {
+        for initialFailure in [false, true] {
+            let model = FoundationBrowseModel()
+            let original = FoundationItem(
+                id: "original", title: "Original", subtitle: "Synthetic", kind: .track, duration: 1)
+            let replacement = FoundationItem(
+                id: "replacement", title: "Replacement", subtitle: "Synthetic", kind: .track,
+                duration: 1)
+            await model.loadPending { _ in
+                if initialFailure { throw FoundationLibraryError.invalidResponse }
+                return .init(items: [original], nextStartIndex: nil)
+            }
+            XCTAssertEqual(model.loaded, !initialFailure)
+            XCTAssertEqual(model.errorMessage != nil, initialFailure)
+
+            // Hold an older refresh across the explicit replacement request. The opt-in
+            // handoff must not change existing refresh/retry supersession behavior.
+            let gate = FoundationAlphabetTestGate()
+            let stale = Task {
+                await model.load(.refresh) { _ in
+                    await gate.suspend()
+                    return .init(items: [original], nextStartIndex: nil)
+                }
+            }
+            await gate.entered()
+            model.request(.refresh)
+            var replacementReads = 0
+            let current = Task {
+                await model.loadPending(waitForInitialLoad: true) { offset in
+                    XCTAssertEqual(offset, 0)
+                    replacementReads += 1
+                    return .init(items: [replacement], nextStartIndex: nil)
+                }
+            }
+            for _ in 0..<10_000 {
+                if replacementReads != 0 { break }
+                await Task.yield()
+            }
+            XCTAssertEqual(replacementReads, 1, "Explicit refresh must not wait for retired work")
+            await gate.release()
+            await stale.value
+            await current.value
+            XCTAssertEqual(model.items.map(\.id), ["replacement"])
+            XCTAssertTrue(model.loaded)
+            XCTAssertNil(model.errorMessage)
+            XCTAssertFalse(model.isLoading)
+            XCTAssertEqual(model.pendingInitialLoadDemandCount, 0)
+        }
+    }
+
+    @MainActor
+    private func waitForInitialDemands(_ count: Int, in model: FoundationBrowseModel) async {
+        // Bounded cooperative scheduling, not a timing-dependent sleep or real transport.
+        for _ in 0..<10_000 {
+            if model.pendingInitialLoadDemandCount == count { return }
+            await Task.yield()
+        }
+        XCTFail("Expected \(count) registered initial demand(s)")
+    }
+
+    func testHomeFavoriteCollectionsPreviewBoundsAndSeparatesLibraryScopes() async throws {
+        let recorder = Recorder()
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            await recorder.append(request)
+            let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!
+                .queryItems!
+            let type = query.first { $0.name == "includeItemTypes" }?.value
+            XCTAssertTrue(type == "MusicAlbum" || type == "Playlist")
+            XCTAssertEqual(query.first { $0.name == "limit" }?.value, "5")
+            XCTAssertEqual(query.first { $0.name == "startIndex" }?.value, "0")
+            XCTAssertEqual(query.first { $0.name == "isFavorite" }?.value, "true")
+            XCTAssertEqual(
+                query.first { $0.name == "parentId" }?.value,
+                type == "MusicAlbum" ? "selected-library" : nil)
+            let entries = (1...5).map { index in
+                "{\"Id\":\"0000000000000000000000000000000\(index)\",\"Type\":\"\(type!)\",\"UserData\":{\"Key\":\"synthetic\",\"IsFavorite\":true}}"
+            }.joined(separator: ",")
+            return (
+                Data("{\"Items\":[\(entries)],\"StartIndex\":0,\"TotalRecordCount\":30}".utf8),
+                Self.response(request)
+            )
+        }.scoped(to: "selected-library")
+        let preview = try await library.favoriteCollectionsPreview()
+        XCTAssertEqual(
+            preview.items.prefix(5).map(\.kind), [.album, .playlist, .album, .playlist, .album])
+        XCTAssertEqual(preview.items.count, 10)
+        XCTAssertNil(
+            preview.nextStartIndex, "Preview has no paging route; its heading opens full Favorites")
+        let requests = await recorder.requests
+        XCTAssertEqual(requests.count, 2)
+    }
+
+    func testHomeFavoritePreviewKeepsAccountPlaylistsWhenSelectedCatalogUnavailable() async throws {
+        let recorder = Recorder()
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            await recorder.append(request)
+            let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!
+                .queryItems!
+            XCTAssertNil(query.first { $0.name == "parentId" })
+            XCTAssertEqual(query.first { $0.name == "includeItemTypes" }?.value, "Playlist")
+            return (
+                Data(#"{"Items":[],"StartIndex":0,"TotalRecordCount":0}"#.utf8),
+                Self.response(request)
+            )
+        }.scoped(to: "unavailable-library", available: false)
+        _ = try await library.favoriteCollectionsPreview()
+        let requests = await recorder.requests
+        XCTAssertEqual(requests.count, 1)
+    }
+
+    func testHomeFavoritePreviewPreservesExplicitFalseForReconciliationWithoutInventingMetadata() {
+        let rejected = FoundationItem(
+            id: "rejected", title: "Rejected", subtitle: "", kind: .album,
+            duration: nil, isFavorite: false)
+        let unknown = FoundationItem(
+            id: "unknown", title: "Unknown", subtitle: "", kind: .album,
+            duration: nil)
+        let playlist = FoundationItem(
+            id: "playlist", title: "Playlist", subtitle: "", kind: .playlist,
+            duration: nil, isFavorite: true)
+        let preview = foundationFavoriteCollectionsPreview(
+            albums: .init(items: [rejected, unknown], nextStartIndex: 2),
+            playlists: .init(items: [playlist], nextStartIndex: nil))
+        XCTAssertEqual(preview.items.map(\.id), ["unknown", "playlist", "rejected"])
+        XCTAssertEqual(preview.items.last?.isFavorite, false)
+        XCTAssertNil(preview.items.first?.isFavorite)
+    }
+
+    func testPlaybackReportsUseOfficialEndpointsAndBoundedPayloadWithoutURLCredentials()
+        async throws
+    {
+        let occurrence = UUID()
+        for (kind, suffix) in [
+            (FoundationPlaybackReport.Kind.start, "/Sessions/Playing"),
+            (.progress, "/Sessions/Playing/Progress"), (.stop, "/Sessions/Playing/Stopped"),
+        ] {
+            let id = itemID
+            let library = FoundationJellyfinLibrary(session: session) { request in
+                XCTAssertEqual(request.httpMethod, "POST")
+                XCTAssertTrue(request.url!.path.hasSuffix(suffix))
+                XCTAssertTrue(request.url!.query?.isEmpty != false)
+                let body = try XCTUnwrap(
+                    JSONSerialization.jsonObject(with: try XCTUnwrap(request.httpBody))
+                        as? [String: Any])
+                XCTAssertEqual(body["ItemId"] as? String, id)
+                XCTAssertEqual(body["PlaySessionId"] as? String, occurrence.uuidString)
+                XCTAssertEqual(body["PositionTicks"] as? Int, 12_500_000)
+                XCTAssertNil(body["MediaSourceId"])
+                if kind != .stop { XCTAssertEqual(body["IsPaused"] as? Bool, true) }
+                return (Data(), Self.response(request, status: 204))
+            }
+            try await library.reportPlayback(
+                .init(
+                    kind: kind, occurrenceID: occurrence, itemID: itemID,
+                    position: 1.25, paused: true))
+        }
+    }
+
+    func testPlaybackReportsRejectInvalidIDsAndNonfinitePositionsBeforeNetwork() async {
+        let library = FoundationJellyfinLibrary(session: session) { _ in
+            XCTFail("Invalid playback metadata must not reach transport")
+            throw URLError(.badURL)
+        }
+        for (id, position) in [
+            ("../item", 1.0), (itemID, Double.nan), (itemID, Double.infinity), (itemID, -1.0),
+        ] {
+            do {
+                try await library.reportPlayback(
+                    .init(
+                        kind: .start, occurrenceID: UUID(), itemID: id, position: position,
+                        paused: false))
+                XCTFail("Expected validation failure")
+            } catch {}
+        }
+    }
+
+    func testTypedFavoritesQueriesEachKindIndependentlyWithFavoriteFilterAndCursor() async throws {
+        let userID = session.userID
+        for (kind, type) in [
+            (FoundationItem.Kind.album, "MusicAlbum"), (.artist, "MusicArtist"), (.track, "Audio"),
+            (.playlist, "Playlist"),
+        ] {
+            let library = FoundationJellyfinLibrary(session: session) { request in
+                let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!
+                    .queryItems!
+                XCTAssertEqual(query.first { $0.name == "includeItemTypes" }?.value, type)
+                XCTAssertEqual(
+                    query.first { $0.name == "parentId" }?.value,
+                    kind == .playlist ? nil : "selected-library")
+                XCTAssertEqual(query.first { $0.name == "userId" }?.value, userID)
+                XCTAssertEqual(query.first { $0.name == "isFavorite" }?.value, "true")
+                XCTAssertEqual(query.first { $0.name == "startIndex" }?.value, "50")
+                XCTAssertEqual(query.first { $0.name == "limit" }?.value, "50")
+                XCTAssertEqual(query.first { $0.name == "enableUserData" }?.value, "true")
+                let payload =
+                    "{\"Items\":[{\"Id\":\"00000000000000000000000000000001\",\"Type\":\"" + type
+                    + "\",\"Name\":\"Favorite\",\"UserData\":{\"Key\":\"synthetic-key\",\"IsFavorite\":true}}],\"StartIndex\":50,\"TotalRecordCount\":51}"
+                return (Data(payload.utf8), Self.response(request))
+            }
+            let page = try await library.scoped(to: "selected-library")
+                .favorites(kind: kind, startIndex: 50)
+            XCTAssertEqual(page.items.count, 1)
+            XCTAssertEqual(page.items.first?.kind, kind)
+            XCTAssertEqual(page.items.first?.isFavorite, true)
+            XCTAssertNil(page.nextStartIndex)
+        }
+    }
+
+    func testFavoritePlaylistsRemainAvailableWithoutSelectedCatalog() async throws {
+        let recorder = Recorder()
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            await recorder.append(request)
+            let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!
+                .queryItems!
+            XCTAssertNil(query.first { $0.name == "parentId" })
+            XCTAssertEqual(query.first { $0.name == "includeItemTypes" }?.value, "Playlist")
+            XCTAssertEqual(query.first { $0.name == "isFavorite" }?.value, "true")
+            return (
+                Data(#"{"Items":[],"StartIndex":0,"TotalRecordCount":0}"#.utf8),
+                Self.response(request)
+            )
+        }.scoped(to: "unavailable-library", available: false)
+        let page = try await library.favorites(kind: .playlist, startIndex: 0)
+        XCTAssertTrue(page.items.isEmpty)
+        XCTAssertNil(page.nextStartIndex)
+        for kind in [FoundationItem.Kind.track, .album, .artist, .genre] {
+            do {
+                _ = try await library.favorites(kind: kind, startIndex: 0)
+                XCTFail("Unavailable or unsupported category must not query another source")
+            } catch {
+                XCTAssertEqual(error as? FoundationLibraryError, .unavailable)
+            }
+        }
+        let requests = await recorder.requests
+        XCTAssertEqual(requests.count, 1)
+    }
+
+    @MainActor
+    func testSongsActivationLoadsOnePageThenScrollDemandLoadsMoreWithoutAButton() async {
+        let model = FoundationBrowseModel()
+        model.configureCatalogPagination(sortByTitle: true)
+        var offsets: [Int] = []
+        let loader: (Int) async throws -> FoundationPage = { offset in
+            offsets.append(offset)
+            return .init(
+                items: [
+                    .init(
+                        id: "\(offset)", title: "Song \(offset)",
+                        subtitle: "", kind: .track, duration: nil)
+                ], nextStartIndex: offset + 1)
+        }
+        await model.loadCatalogPage(using: loader)
+        XCTAssertEqual(offsets, [0])
+        await model.loadCatalogPage(using: loader)
+        XCTAssertEqual(offsets, [0], "Revisiting must not drain the catalog")
+        await model.loadNextPage(using: loader)
+        XCTAssertEqual(offsets, [0, 1])
+        XCTAssertEqual(model.items.count, 2)
+        XCTAssertNil(model.errorMessage)
+    }
+
+    @MainActor
+    func testAdvancingPagesStopAtLifetimeSafetyLimitAndRetryCannotResetIt() async {
+        let model = FoundationBrowseModel(catalogLimits: .init(maximumPages: 3))
+        model.configureCatalogPagination()
+        var requests = 0
+        let loader: (Int) async throws -> FoundationPage = { offset in
+            requests += 1
+            return .init(
+                items: [
+                    .init(
+                        id: "\(offset)", title: "Song", subtitle: "",
+                        kind: .track, duration: nil)
+                ], nextStartIndex: offset + 1)
+        }
+        await model.drainDemandedPagesForTesting(using: loader)
+        XCTAssertEqual(requests, 3)
+        XCTAssertEqual(model.items.count, 3)
+        XCTAssertEqual(model.nextStartIndex, 3)
+        XCTAssertEqual(model.errorCategory, .invalidResponse)
+        model.request(.more)
+        await model.loadPending(using: loader)
+        XCTAssertEqual(requests, 3)
+        XCTAssertEqual(model.items.count, 3)
+    }
+
+    @MainActor
+    func testDuplicatePagesConsumeRawItemBudgetBeforeDeduplication() async {
+        let model = FoundationBrowseModel(catalogLimits: .init(maximumItems: 400))
+        model.configureCatalogPagination()
+        let item = FoundationItem(
+            id: "same", title: "Song", subtitle: "",
+            kind: .track, duration: nil)
+        var requests = 0
+        await model.drainDemandedPagesForTesting { offset in
+            requests += 1
+            return .init(items: Array(repeating: item, count: 200), nextStartIndex: offset + 200)
+        }
+        XCTAssertEqual(requests, 2)
+        XCTAssertEqual(model.items, [item])
+        XCTAssertEqual(model.nextStartIndex, 400)
+        XCTAssertEqual(model.errorCategory, .invalidResponse)
+    }
+
+    @MainActor
+    func testMetadataBudgetRejectsOversizedPageBeforePublishingAndRefreshRetainsRowsOnError() async
+    {
+        let model = FoundationBrowseModel(catalogLimits: .init(maximumBytes: 2_048))
+        model.configureCatalogPagination()
+        let earlier = FoundationItem(
+            id: "earlier", title: "Earlier", subtitle: "",
+            kind: .track, duration: nil)
+        let huge = FoundationItem(
+            id: "huge", title: String(repeating: "x", count: 2_048),
+            subtitle: "", kind: .track, duration: nil)
+        await model.drainDemandedPagesForTesting { offset in
+            offset == 0
+                ? .init(items: [earlier], nextStartIndex: 50)
+                : .init(items: [huge], nextStartIndex: 100)
+        }
+        XCTAssertEqual(model.items, [earlier])
+        XCTAssertEqual(model.nextStartIndex, 50)
+        XCTAssertEqual(model.errorCategory, .invalidResponse)
+        model.request(.refresh)
+        await model.loadCatalogPage { _ in throw FoundationLibraryError.network }
+        XCTAssertEqual(model.items, [earlier])
+        model.request(.refresh)
+        await model.loadCatalogPage { _ in .init(items: [earlier], nextStartIndex: nil) }
+        XCTAssertNil(model.errorMessage)
+        XCTAssertNil(model.nextStartIndex)
+        model.clearRetainedData()
+        await model.loadCatalogPage { _ in .init(items: [earlier], nextStartIndex: 50) }
+        XCTAssertNil(model.errorMessage)
+    }
+
+    func testMetadataCostIncludesEmptyNestedReferences() {
+        var item = FoundationItem(id: "", title: "", subtitle: "", kind: .track, duration: nil)
+        item.genres = Array(repeating: .init(id: "", title: ""), count: 100)
+        XCTAssertNil(
+            FoundationCatalogBudget(maximumBytes: 2_048).cost(
+                of: .init(items: [item], nextStartIndex: nil)))
+    }
+
+    @MainActor
+    func testDemandedSongsPagesRetainMembershipForLetterSelection() async {
+        let model = FoundationBrowseModel()
+        model.configureCatalogPagination()
+        let a = FoundationItem(id: "a", title: "Alpha", subtitle: "", kind: .track, duration: nil)
+        let c = FoundationItem(id: "c", title: "Charlie", subtitle: "", kind: .track, duration: nil)
+        let f = FoundationItem(id: "f", title: "Foxtrot", subtitle: "", kind: .track, duration: nil)
+        var offsets: [Int] = []
+        await model.drainDemandedPagesForTesting { offset in
+            offsets.append(offset)
+            switch offset {
+            case 0: return .init(items: [a], nextStartIndex: 50)
+            case 50: return .init(items: [c], nextStartIndex: 100)
+            default: return .init(items: [f], nextStartIndex: nil)
+            }
+        }
+        XCTAssertEqual(offsets, [0, 50, 100])
+        XCTAssertEqual(model.items, [a, c, f])
+        XCTAssertNil(model.nextStartIndex)
+        for letter in FoundationAlphabetAnchors.titles {
+            XCTAssertNotNil(FoundationAlphabetAnchors.index(for: letter, in: model.items))
+        }
+        XCTAssertEqual(model.items, [a, c, f])
+        XCTAssertEqual(offsets, [0, 50, 100])
+        await model.drainDemandedPagesForTesting { _ in
+            XCTFail("Reactivation retains the complete catalog without a cache refresh")
+            return .init(items: [], nextStartIndex: nil)
+        }
+    }
+
+    @MainActor
+    func testSongsActivationCancellationRejectsStalePageAndResumesRemainingMembership() async {
+        let model = FoundationBrowseModel()
+        model.configureCatalogPagination()
+        let a = FoundationItem(id: "a", title: "Alpha", subtitle: "", kind: .track, duration: nil)
+        let f = FoundationItem(id: "f", title: "Foxtrot", subtitle: "", kind: .track, duration: nil)
+        await model.loadPending { _ in .init(items: [a], nextStartIndex: 50) }
+        let gate = FoundationAlphabetTestGate()
+        let old = Task {
+            await model.drainDemandedPagesForTesting { offset in
+                XCTAssertEqual(offset, 50)
+                await gate.suspend()
+                return .init(items: [f], nextStartIndex: nil)
+            }
+        }
+        await gate.entered()
+        old.cancel()
+        await gate.release()
+        await old.value
+        XCTAssertEqual(model.items, [a])
+        XCTAssertEqual(model.nextStartIndex, 50)
+        XCTAssertFalse(model.isLoading)
+        await model.drainDemandedPagesForTesting { offset in
+            XCTAssertEqual(offset, 50)
+            return .init(items: [f], nextStartIndex: nil)
+        }
+        XCTAssertEqual(model.items, [a, f])
+        XCTAssertNil(model.nextStartIndex)
+    }
+
+    @MainActor
+    func testCompleteCatalogStopsOnFailureWithoutAutomaticRetry() async {
+        let model = FoundationBrowseModel()
+        model.configureCatalogPagination()
+        let a = FoundationItem(id: "a", title: "Alpha", subtitle: "", kind: .track, duration: nil)
+        var requests = 0
+        await model.drainDemandedPagesForTesting { offset in
+            requests += 1
+            if offset == 0 { return .init(items: [a], nextStartIndex: 50) }
+            throw FoundationLibraryError.network
+        }
+        XCTAssertEqual(requests, 2)
+        XCTAssertEqual(model.items, [a])
+        XCTAssertNotNil(model.errorMessage)
+        await model.drainDemandedPagesForTesting { _ in
+            XCTFail("A failed catalog requires explicit retry")
+            return .init(items: [], nextStartIndex: nil)
+        }
+    }
+
+    @MainActor
+    func testCachedCatalogFailureRequiresExplicitRetryOnRevisit() async {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cache = FoundationCatalogPageCache(scope: "synthetic-rail-retry", root: directory)
+        let a = FoundationItem(id: "a", title: "Alpha", subtitle: "", kind: .track, duration: nil)
+        let f = FoundationItem(id: "f", title: "Foxtrot", subtitle: "", kind: .track, duration: nil)
+        // Cover a refresh failure retaining disk data and a later-page failure retaining live data.
+        for failRefresh in [true, false] {
+            let key = "songs-\(failRefresh)"
+            await cache.write(.init(items: [a], nextStartIndex: 50), key: key)
+            let model = FoundationBrowseModel(refreshInterval: 0)
+            model.configureCatalogPagination()
+            model.configureCache(cache, key: key)
+            await model.drainDemandedPagesForTesting { offset in
+                if !failRefresh, offset == 0 {
+                    return .init(items: [a], nextStartIndex: 50)
+                }
+                throw FoundationLibraryError.network
+            }
+            XCTAssertEqual(model.items, [a])
+            XCTAssertEqual(model.isRetainedSnapshot, failRefresh)
+            XCTAssertEqual(model.errorCategory, .network)
+            await model.drainDemandedPagesForTesting { _ in
+                XCTFail("Revisiting a failed cached catalog must not retry any page")
+                return .init(items: [], nextStartIndex: nil)
+            }
+            XCTAssertEqual(model.items, [a])
+            XCTAssertEqual(model.errorCategory, .network)
+            model.request(model.retryRequest)
+            await model.drainDemandedPagesForTesting { offset in
+                offset == 0
+                    ? .init(items: [a], nextStartIndex: 50)
+                    : .init(items: [f], nextStartIndex: nil)
+            }
+            XCTAssertEqual(model.items, [a, f])
+            XCTAssertNil(model.errorMessage)
+            XCTAssertNil(model.nextStartIndex)
+        }
+    }
+
+    @MainActor
+    func testCompleteCatalogAccountResetRejectsLatePageAndStopsPaging() async {
+        let model = FoundationBrowseModel()
+        model.configureCatalogPagination()
+        let a = FoundationItem(id: "a", title: "Alpha", subtitle: "", kind: .track, duration: nil)
+        let gate = FoundationAlphabetTestGate()
+        var requests = 0
+        let loading = Task {
+            await model.drainDemandedPagesForTesting { _ in
+                requests += 1
+                await gate.suspend()
+                return .init(items: [a], nextStartIndex: 50)
+            }
+        }
+        await gate.entered()
+        model.clearRetainedData()
+        await gate.release()
+        await loading.value
+        XCTAssertEqual(requests, 1)
+        XCTAssertTrue(model.items.isEmpty)
+        XCTAssertNil(model.nextStartIndex)
+        XCTAssertFalse(model.isLoading)
+    }
+
+    @MainActor
+    func testCompleteCatalogRejectsNonAdvancingCursor() async {
+        let model = FoundationBrowseModel()
+        model.configureCatalogPagination()
+        let a = FoundationItem(id: "a", title: "Alpha", subtitle: "", kind: .track, duration: nil)
+        var requests = 0
+        await model.drainDemandedPagesForTesting { offset in
+            requests += 1
+            return .init(items: [a], nextStartIndex: offset)
+        }
+        XCTAssertEqual(requests, 1)
+        XCTAssertEqual(model.errorCategory, .invalidResponse)
+    }
+
+    func testAlphabetRailOffersNumbersThenAZAndMissingLettersUseFollowingOrFinalAnchor() {
+        let a = FoundationItem(id: "a", title: "Alpha", subtitle: "", kind: .track, duration: nil)
+        let g = FoundationItem(id: "g", title: "Golf", subtitle: "", kind: .track, duration: nil)
+        XCTAssertEqual(FoundationAlphabetAnchors.titles.count, 27)
+        XCTAssertEqual(FoundationAlphabetAnchors.titles.first, "#")
+        XCTAssertEqual(FoundationAlphabetAnchors.titles.last, "Z")
+        XCTAssertNil(FoundationAlphabetAnchors.index(for: "All", in: [a, g]))
+        XCTAssertEqual(FoundationAlphabetAnchors.index(for: "#", in: [a, g]), 0)
+        XCTAssertEqual(FoundationAlphabetAnchors.index(for: "F", in: [a, g]), 1)
+        XCTAssertEqual(FoundationAlphabetAnchors.index(for: "Z", in: [a, g]), 1)
+        XCTAssertNil(FoundationAlphabetAnchors.index(for: "A", in: []))
+    }
+
+    func testAlphabetNumberAndSymbolAnchorsAndRailDragGeometry() {
+        let number = FoundationItem(
+            id: "number", title: "2 Songs", subtitle: "", kind: .track, duration: nil)
+        let symbol = FoundationItem(
+            id: "symbol", title: "! Song", subtitle: "", kind: .track, duration: nil)
+        let alpha = FoundationItem(
+            id: "alpha", title: "Alpha", subtitle: "", kind: .track, duration: nil)
+        XCTAssertEqual(FoundationAlphabetAnchors.letter(for: number), "#")
+        XCTAssertEqual(FoundationAlphabetAnchors.letter(for: symbol), "#")
+        XCTAssertEqual(FoundationAlphabetAnchors.index(for: "#", in: [number, symbol, alpha]), 0)
+        XCTAssertEqual(FoundationAlphabetAnchors.index(for: "A", in: [number, symbol, alpha]), 2)
+        // Every equal-height hit region maps consistently while dragging down and back up.
+        for index in 0..<27 {
+            XCTAssertEqual(
+                FoundationAlphabetRailGeometry.index(
+                    y: Double(index) * 22 + 11, height: 594, count: 27), index)
+        }
+        XCTAssertEqual(FoundationAlphabetRailGeometry.index(y: -50, height: 594, count: 27), 0)
+        XCTAssertEqual(FoundationAlphabetRailGeometry.index(y: 650, height: 594, count: 27), 26)
+        XCTAssertNil(FoundationAlphabetRailGeometry.index(y: 0, height: 0, count: 27))
+    }
+
+    @MainActor
+    func testSongsSortActualTitlesAcrossShuffledPagesAndKeepQueueAligned() async {
+        let model = FoundationBrowseModel()
+        model.configureCatalogPagination(sortByTitle: true)
+        let z = FoundationItem(
+            id: "z", title: "Zulu", subtitle: "", kind: .track, duration: nil, sortName: "001 album"
+        )
+        let a = FoundationItem(
+            id: "a", title: "Alpha", subtitle: "", kind: .track, duration: nil,
+            sortName: "999 album")
+        let number = FoundationItem(
+            id: "n", title: "42", subtitle: "", kind: .track, duration: nil, sortName: "z")
+        let accented = FoundationItem(
+            id: "e", title: "Écho", subtitle: "", kind: .track, duration: nil, sortName: "0")
+        var offsets: [Int] = []
+        await model.drainDemandedPagesForTesting { offset in
+            offsets.append(offset)
+            return offset == 0
+                ? .init(items: [z, accented], nextStartIndex: 2)
+                : .init(items: [a, number], nextStartIndex: nil)
+        }
+        XCTAssertEqual(offsets, [0, 2])
+        XCTAssertEqual(model.items.map(\.id), ["n", "a", "e", "z"])
+        XCTAssertEqual(model.items.map(FoundationAlphabetAnchors.letter), ["#", "A", "E", "Z"])
+        let anchor = FoundationAlphabetAnchors.index(for: "E", in: model.items)
+        XCTAssertEqual(anchor, 2)
+        let queue = model.trackQueue(selecting: anchor ?? -1)
+        XCTAssertEqual(queue?.items.map(\.id), ["n", "a", "e", "z"])
+        XCTAssertEqual(queue?.index, 2)
+        XCTAssertEqual(FoundationAlphabetAnchors.sorted([a, z, number, accented]), model.items)
+    }
+
+    func testTitleSortTieBreakAndScrubBubbleStayDeterministic() {
+        let first = FoundationItem(
+            id: "1", title: "Echo", subtitle: "", kind: .track, duration: nil)
+        let second = FoundationItem(
+            id: "2", title: "ÉCHO", subtitle: "", kind: .track, duration: nil)
+        XCTAssertEqual(FoundationAlphabetAnchors.sorted([second, first]).map(\.id), ["1", "2"])
+        XCTAssertEqual(
+            FoundationAlphabetRailGeometry.bubbleTop(index: 0, height: 594, count: 27), 0)
+        XCTAssertEqual(
+            FoundationAlphabetRailGeometry.bubbleTop(index: 13, height: 594, count: 27), 270)
+        XCTAssertEqual(
+            FoundationAlphabetRailGeometry.bubbleTop(index: 26, height: 594, count: 27), 540)
+    }
+
+    func testAlphabetAnchorUsesActualTitleAndDecodesOlderCaches() throws {
+        let a = FoundationItem(
+            id: "a", title: "The Zebra", subtitle: "", kind: .track,
+            duration: nil, sortName: "alpha")
+        let b = FoundationItem(id: "b", title: "Bravo", subtitle: "", kind: .track, duration: nil)
+        XCTAssertEqual(FoundationAlphabetAnchors.letter(for: a), "T")
+        XCTAssertEqual(FoundationAlphabetAnchors.index(for: "T", in: [b, a]), 1)
+        XCTAssertEqual(FoundationAlphabetAnchors.index(for: "B", in: [a, b]), 1)
+        let encoded = try JSONEncoder().encode(a)
+        XCTAssertEqual(
+            try JSONDecoder().decode(FoundationItem.self, from: encoded).sortName, "alpha")
+        var older = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        older.removeValue(forKey: "sortName")
+        let legacy = try JSONSerialization.data(withJSONObject: older)
+        XCTAssertNil(try JSONDecoder().decode(FoundationItem.self, from: legacy).sortName)
+    }
+
+    func testOrdinarySongsPageRequestsProviderSortNameForFullListAnchors() async throws {
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!
+                .queryItems!
+            XCTAssertEqual(query.first { $0.name == "fields" }?.value, "SortName")
+            XCTAssertNil(query.first { $0.name == "nameStartsWithOrGreater" })
+            return (
+                Data(
+                    #"{"Items":[{"Id":"00000000000000000000000000000001","Type":"Audio","Name":"The Zebra","SortName":"alpha"}],"StartIndex":0,"TotalRecordCount":1}"#
+                        .utf8), Self.response(request)
+            )
+        }
+        let page = try await library.songs(startIndex: 0)
+        XCTAssertEqual(page.items.first?.sortName, "alpha")
+        XCTAssertEqual(page.items.first?.title, "The Zebra")
+    }
+
+    func testFunctionalAlphabetProbeUsesSortNameNotDisplayTitleAndHasNoVersionGate() async {
+        let recorder = Recorder()
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            await recorder.append(request)
+            return (Self.alphabetProbeData(request)!, Self.response(request))
+        }
+        let result = await library.alphabetCapability()
+        XCTAssertEqual(result, .verified)
+        let requests = await recorder.requests
+        XCTAssertEqual(requests.count, 2)
+        for request in requests {
+            XCTAssertTrue(request.url!.path.hasSuffix("/Items"))
+            let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!
+                .queryItems!
+            func value(_ name: String) -> String? { query.first { $0.name == name }?.value }
+            XCTAssertEqual(value("limit"), "1")
+            XCTAssertEqual(value("fields"), "SortName")
+            XCTAssertEqual(value("includeItemTypes"), "Audio")
+            XCTAssertEqual(value("sortBy"), "SortName")
+            XCTAssertEqual(value("enableImages"), "false")
+            XCTAssertNil(value("parentId"))
+        }
+        let boundary = URLComponents(url: requests[1].url!, resolvingAgainstBaseURL: false)!
+            .queryItems!.first { $0.name == "nameStartsWithOrGreater" }?.value
+        XCTAssertEqual(boundary, "b")
+    }
+
+    func testFunctionalAlphabetProbeRejectsMissingSortNameEmptyCatalogAndIncoherentCount() async {
+        let initial =
+            #"{"Items":[{"Id":"00000000000000000000000000000001","Type":"Audio","Name":"The Zebra","SortName":"alpha"}],"StartIndex":0,"TotalRecordCount":2}"#
+        let cases = [
+            (#"{"Items":[],"StartIndex":0,"TotalRecordCount":0}"#, initial, 2),
+            (initial.replacingOccurrences(of: #","SortName":"alpha""#, with: ""), initial, 2),
+            (initial.replacingOccurrences(of: "alpha", with: "zebra"), initial, 2),
+            (initial, initial, 2),
+            (
+                initial,
+                #"{"Items":[{"Id":"00000000000000000000000000000002","Type":"Audio","SortName":"bravo"}],"StartIndex":0,"TotalRecordCount":2}"#,
+                4
+            ),
+            (
+                initial,
+                #"{"Items":[{"Id":"00000000000000000000000000000002","Type":"Audio"}],"StartIndex":0,"TotalRecordCount":1}"#,
+                4
+            ),
+            (initial, #"{"Items":[],"StartIndex":0,"TotalRecordCount":1}"#, 4),
+            (
+                initial,
+                #"{"Items":[{"Id":"00000000000000000000000000000002","Type":"Audio","SortName":"bravo"}],"StartIndex":0,"TotalRecordCount":3}"#,
+                4
+            ),
+        ]
+        for (first, filtered, count) in cases {
+            let recorder = Recorder()
+            let library = FoundationJellyfinLibrary(session: session) { request in
+                await recorder.append(request)
+                let hasBoundary = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!
+                    .queryItems!.contains { $0.name == "nameStartsWithOrGreater" }
+                return (Data((hasBoundary ? filtered : first).utf8), Self.response(request))
+            }
+            let result = await library.alphabetCapability()
+            XCTAssertEqual(result, .unavailable)
+            let cached = await library.alphabetCapability()
+            XCTAssertEqual(cached, .unavailable)
+            let requests = await recorder.requests
+            XCTAssertEqual(requests.count, count)
+        }
+    }
+
+    func testInconclusiveAlphabetProbeRetriesWhenCatalogFills() async {
+        let recorder = Recorder()
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            await recorder.append(request)
+            if await recorder.requests.count == 1 {
+                return (
+                    Data(#"{"Items":[],"StartIndex":0,"TotalRecordCount":0}"#.utf8),
+                    Self.response(request)
+                )
+            }
+            return (Self.alphabetProbeData(request)!, Self.response(request))
+        }
+        let empty = await library.alphabetCapability()
+        XCTAssertEqual(empty, .unavailable)
+        let filled = await library.alphabetCapability()
+        XCTAssertEqual(filled, .verified)
+        let requests = await recorder.requests
+        XCTAssertEqual(requests.count, 3)
+    }
+
+    func testAlphabetWindowsAreBoundedScopedRelativeAndShareOneCapabilityRequest() async throws {
+        let recorder = Recorder()
+        let scope = "00000000000000000000000000000009"
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            await recorder.append(request)
+            if let data = Self.alphabetProbeData(request) {
+                return (data, Self.response(request))
+            }
+            let query =
+                URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
+            let start = Int(query.first { $0.name == "startIndex" }?.value ?? "") ?? 0
+            let json = #"{"Items":[],"TotalRecordCount":START,"StartIndex":START}"#
+                .replacingOccurrences(of: "START", with: String(start))
+            return (Data(json.utf8), Self.response(request))
+        }
+        await withTaskGroup(of: FoundationAlphabetCapability.self) { group in
+            for _ in 0..<10 {
+                group.addTask { await library.scoped(to: scope).alphabetCapability() }
+            }
+            for await value in group { XCTAssertEqual(value, .verified) }
+        }
+        for kind in [FoundationItem.Kind.album, .artist, .track, .playlist, .genre] {
+            for offset in [0, 50] {
+                _ = try await library.scoped(to: scope).alphabetPage(
+                    kind: kind, letter: "F", startIndex: offset)
+            }
+        }
+        let requests = await recorder.requests
+        XCTAssertEqual(
+            requests.filter { Self.alphabetProbeData($0) != nil }.count, 2)
+        let pages = requests.filter { Self.alphabetProbeData($0) == nil }
+        XCTAssertEqual(pages.count, 10)
+        for (index, request) in pages.enumerated() {
+            let query =
+                URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
+            func value(_ name: String) -> String? { query.first { $0.name == name }?.value }
+            XCTAssertEqual(value("nameStartsWithOrGreater"), "f")
+            XCTAssertNil(value("nameStartsWith"))
+            XCTAssertNil(value("nameLessThan"))
+            XCTAssertEqual(value("startIndex"), index.isMultiple(of: 2) ? "0" : "50")
+            XCTAssertEqual(value("limit"), "50")
+            XCTAssertEqual(value("sortBy"), "SortName")
+            XCTAssertEqual(value("sortOrder"), "Ascending")
+            XCTAssertEqual(value("enableTotalRecordCount"), "true")
+            XCTAssertEqual(value("parentId"), index / 2 == 3 ? nil : scope)
+            XCTAssertEqual(value("userId"), session.userID)
+            let path = request.url!.path
+            if index / 2 == 1 {
+                XCTAssertTrue(path.hasSuffix("/Artists/AlbumArtists"))
+            } else if index / 2 == 4 {
+                XCTAssertTrue(path.hasSuffix("/MusicGenres"))
+            } else {
+                XCTAssertTrue(path.hasSuffix("/Items"))
+            }
+        }
+    }
+
+    func testIgnoredAlphabetBoundaryDoesNotIssueUserCatalogSeek() async throws {
+        let recorder = Recorder()
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            await recorder.append(request)
+            return (Self.alphabetProbeData(request, ignoresBoundary: true)!, Self.response(request))
+        }
+        for _ in 0..<2 {
+            do {
+                _ = try await library.alphabetPage(kind: .album, letter: "F", startIndex: 0)
+                XCTFail("Unsupported server must not issue a seek")
+            } catch { XCTAssertEqual(error as? FoundationLibraryError, .unavailable) }
+        }
+        let requests = await recorder.requests
+        XCTAssertEqual(requests.count, 2)
+        XCTAssertNotNil(Self.alphabetProbeData(requests[0]))
+    }
+
+    func testFailedAlphabetProbeCanExplicitlyRetryWithOneCoalescedAccountRequest() async {
+        let recorder = Recorder()
+        let gate = FoundationAlphabetTestGate()
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            await recorder.append(request)
+            let count = await recorder.requests.count
+            if count == 1 { throw URLError(.notConnectedToInternet) }
+            if count == 2 { await gate.suspend() }
+            return (Self.alphabetProbeData(request)!, Self.response(request))
+        }
+        let failed = await library.alphabetCapability()
+        XCTAssertEqual(failed, .unavailable)
+        let retry = Task {
+            await withTaskGroup(of: FoundationAlphabetCapability.self) { group in
+                for _ in 0..<10 {
+                    group.addTask { await library.alphabetCapability() }
+                }
+                for await value in group { XCTAssertEqual(value, .verified) }
+            }
+        }
+        await gate.entered()
+        await gate.release()
+        await retry.value
+        let cached = await library.alphabetCapability()
+        XCTAssertEqual(cached, .verified)
+        let requests = await recorder.requests
+        XCTAssertEqual(requests.count, 3)
+        XCTAssertTrue(requests.allSatisfy { Self.alphabetProbeData($0) != nil })
+    }
+
+    func testFailedAlphabetProbeCachesResolvedUnsupportedFilterAfterExplicitRetry() async {
+        let recorder = Recorder()
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            await recorder.append(request)
+            if await recorder.requests.count == 1 { throw URLError(.timedOut) }
+            return (Self.alphabetProbeData(request, ignoresBoundary: true)!, Self.response(request))
+        }
+        for _ in 0..<3 {
+            let value = await library.alphabetCapability()
+            XCTAssertEqual(value, .unavailable)
+        }
+        let requests = await recorder.requests
+        XCTAssertEqual(requests.count, 3)
+        XCTAssertTrue(requests.allSatisfy { Self.alphabetProbeData($0) != nil })
+    }
+
+    func testAlphabetMemoIsRetiredAtAccountEnd() async throws {
+        let recorder = Recorder()
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            await recorder.append(request)
+            if let data = Self.alphabetProbeData(request) {
+                return (data, Self.response(request))
+            }
+            return (Data(), Self.response(request, status: 204))
+        }
+        let initial = await library.alphabetCapability()
+        XCTAssertEqual(initial, .verified)
+        try await library.endSession()
+        let ended = await library.scoped(to: itemID).alphabetCapability()
+        XCTAssertEqual(ended, .unavailable)
+        let requests = await recorder.requests
+        XCTAssertEqual(requests.count, 3)
+    }
+
+    func testCancellingOneCapabilityWaiterKeepsAccountSingleflightAvailable() async {
+        let recorder = Recorder()
+        let gate = FoundationAlphabetTestGate()
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            await recorder.append(request)
+            if await recorder.requests.count == 1 { await gate.suspend() }
+            return (Self.alphabetProbeData(request)!, Self.response(request))
+        }
+        let first = Task { await library.alphabetCapability() }
+        await gate.entered()
+        first.cancel()
+        let scopeID = itemID
+        let second = Task { await library.scoped(to: scopeID).alphabetCapability() }
+        await gate.release()
+        let result = await second.value
+        XCTAssertEqual(result, .verified)
+        _ = await first.value
+        let requests = await recorder.requests
+        XCTAssertEqual(requests.count, 2)
+    }
+
+    func testLogoutWhileCapabilityInflightRejectsLateCompletionAndNewReads() async throws {
+        let recorder = Recorder()
+        let gate = FoundationAlphabetTestGate()
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            await recorder.append(request)
+            if let data = Self.alphabetProbeData(request) {
+                if await recorder.requests.count == 1 { await gate.suspend() }
+                return (data, Self.response(request))
+            }
+            return (Data(), Self.response(request, status: 204))
+        }
+        let pending = Task { await library.alphabetCapability() }
+        await gate.entered()
+        try await library.endSession()
+        await gate.release()
+        let late = await pending.value
+        XCTAssertEqual(late, .unavailable)
+        let retired = await library.alphabetCapability()
+        XCTAssertEqual(retired, .unavailable)
+        let requests = await recorder.requests
+        XCTAssertEqual(requests.count, 2)
+    }
+
+    func testAlphabetItemTypesAndProviderMappingPreserveAllFiveTypedIndexes() async throws {
+        let recorder = Recorder()
+        let types: [(FoundationItem.Kind, String)] = [
+            (.album, "MusicAlbum"), (.artist, "MusicArtist"), (.track, "Audio"),
+            (.playlist, "Playlist"), (.genre, "MusicGenre"),
+        ]
+        for (kind, type) in types {
+            let library = FoundationJellyfinLibrary(session: session) { request in
+                await recorder.append(request)
+                if let data = Self.alphabetProbeData(request) {
+                    return (data, Self.response(request))
+                }
+                let body =
+                    #"{"Items":[{"Id":"00000000000000000000000000000001","Type":"TYPE","Name":"Synthetic F"}],"StartIndex":0,"TotalRecordCount":1}"#
+                    .replacingOccurrences(of: "TYPE", with: type)
+                return (Data(body.utf8), Self.response(request))
+            }
+            let page = try await library.alphabetPage(kind: kind, letter: "F", startIndex: 0)
+            XCTAssertEqual(page.items.count, 1)
+            XCTAssertEqual(page.items.first?.kind, kind)
+            XCTAssertNil(page.nextStartIndex)
+        }
+        let requests = await recorder.requests
+        let pages = requests.filter { Self.alphabetProbeData($0) == nil }
+        for (index, request) in pages.enumerated() {
+            let query =
+                URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
+            let itemTypes = query.first { $0.name == "includeItemTypes" }?.value
+            if index == 1 {
+                XCTAssertNil(itemTypes)
+            } else if index == 4 {
+                let genreTypes = query.filter { $0.name == "includeItemTypes" }.compactMap(\.value)
+                XCTAssertEqual(genreTypes, ["MusicAlbum", "Audio"])
+            } else {
+                XCTAssertEqual(itemTypes, types[index].1)
+            }
+        }
+    }
+
+    func testAlphabetEmptyTailIsCompleteButEmptyPositiveCountIsRejected() async throws {
+        for (offset, total, valid) in [(0, 0, true), (50, 50, true), (0, 2, false)] {
+            let library = FoundationJellyfinLibrary(session: session) { request in
+                if let data = Self.alphabetProbeData(request) {
+                    return (data, Self.response(request))
+                }
+                let body = "{\"Items\":[],\"StartIndex\":OFFSET,\"TotalRecordCount\":TOTAL}"
+                    .replacingOccurrences(of: "OFFSET", with: String(offset))
+                    .replacingOccurrences(of: "TOTAL", with: String(total))
+                return (Data(body.utf8), Self.response(request))
+            }
+            do {
+                let page = try await library.alphabetPage(
+                    kind: .album, letter: "Z", startIndex: offset)
+                XCTAssertTrue(valid)
+                XCTAssertTrue(page.items.isEmpty)
+                XCTAssertNil(page.nextStartIndex)
+            } catch {
+                XCTAssertFalse(valid)
+                XCTAssertEqual(error as? FoundationLibraryError, .invalidResponse)
+            }
+        }
+    }
+
+    @MainActor
+    func testAlphabetDuplicateSuppressionPreservesProviderRelativeCursor() async {
+        let model = FoundationBrowseModel()
+        model.configureCatalogPagination()
+        let first = FoundationItem(
+            id: "first", title: "", subtitle: "", kind: .album, duration: nil)
+        let next = FoundationItem(id: "next", title: "", subtitle: "", kind: .album, duration: nil)
+        await model.loadPending { offset in
+            XCTAssertEqual(offset, 0)
+            return FoundationPage(items: [first, first], nextStartIndex: 2)
+        }
+        XCTAssertEqual(model.items.map(\.id), ["first"])
+        XCTAssertEqual(model.nextStartIndex, 2)
+        await model.loadNextPage { offset in
+            XCTAssertEqual(offset, 2)
+            return FoundationPage(items: [first, next], nextStartIndex: nil)
+        }
+        XCTAssertEqual(model.items.map(\.id), ["first", "next"])
+        XCTAssertNil(model.nextStartIndex)
+    }
+
+    func testAlphabetCapabilityIsNotSharedAcrossAccountOwnedAdapters() async {
+        let recorder = Recorder()
+        let otherSession = FoundationSession(
+            serverURL: session.serverURL, accessToken: "second-synthetic-token",
+            userID: "00000000000000000000000000000004", deviceID: session.deviceID)
+        let first = FoundationJellyfinLibrary(session: session) { request in
+            await recorder.append(request)
+            return (Self.alphabetProbeData(request)!, Self.response(request))
+        }
+        let second = FoundationJellyfinLibrary(session: otherSession) { request in
+            await recorder.append(request)
+            return (Self.alphabetProbeData(request, ignoresBoundary: true)!, Self.response(request))
+        }
+        let supported = await first.alphabetCapability()
+        let unsupported = await second.alphabetCapability()
+        XCTAssertEqual(supported, .verified)
+        XCTAssertEqual(unsupported, .unavailable)
+        let requests = await recorder.requests
+        XCTAssertEqual(requests.count, 4)
+    }
+
+    @MainActor
+    func testAlphabetScopeAndQueryInvalidationRejectStaleCompletion() async {
+        for boundaryChange in ["scope", "query"] {
+            let model = FoundationBrowseModel()
+            model.configureCatalogPagination()
+            let gate = FoundationAlphabetTestGate()
+            let old = FoundationItem(
+                id: "old", title: "", subtitle: "", kind: .album, duration: nil)
+            let current = FoundationItem(
+                id: boundaryChange, title: "", subtitle: "", kind: .album, duration: nil)
+            let stale = Task {
+                await model.loadPending { _ in
+                    await gate.suspend()
+                    return FoundationPage(items: [old], nextStartIndex: 50)
+                }
+            }
+            await gate.entered()
+            // This is the LibraryIndex ownership revocation on either scope or query change.
+            model.clearRetainedData()
+            stale.cancel()
+            await model.loadPending { _ in
+                FoundationPage(items: [current], nextStartIndex: nil)
+            }
+            await gate.release()
+            await stale.value
+            XCTAssertEqual(model.items.map(\.id), [boundaryChange])
+            XCTAssertNil(model.nextStartIndex)
+            XCTAssertNil(model.errorMessage)
+            XCTAssertFalse(model.isLoading)
+        }
+    }
+
+    @MainActor
+    func testAlphabetMoreCancelledByKeyedViewOwnerCannotPublishOffscreen() async {
+        let model = FoundationBrowseModel()
+        model.configureCatalogPagination()
+        let first = FoundationItem(
+            id: "first", title: "", subtitle: "", kind: .album, duration: nil)
+        let offscreen = FoundationItem(
+            id: "offscreen", title: "", subtitle: "", kind: .album, duration: nil)
+        await model.loadPending { _ in FoundationPage(items: [first], nextStartIndex: 50) }
+        let gate = FoundationAlphabetTestGate()
+        // Native demand requests pending.more; the view's keyed task owns this await.
+        model.request(.more)
+        let viewTask = Task {
+            await model.loadPending { offset in
+                XCTAssertEqual(offset, 50)
+                await gate.suspend()
+                return FoundationPage(items: [offscreen], nextStartIndex: 100)
+            }
+        }
+        await gate.entered()
+        viewTask.cancel()  // SwiftUI cancels its keyed owner on disappear or identity change.
+        await gate.release()
+        await viewTask.value
+        XCTAssertEqual(model.items.map(\.id), ["first"])
+        XCTAssertEqual(model.nextStartIndex, 50)
+        XCTAssertNil(model.errorMessage)
+        XCTAssertFalse(model.isLoading)
+    }
+
+    func testOfflineAlphabetReconnectNormalizesOtherAndUnsupportedWindowsToAll() {
+        XCTAssertNil(FoundationAlphabetSelectionPolicy.onlineSelection("#", capability: .verified))
+        XCTAssertNil(
+            FoundationAlphabetSelectionPolicy.onlineSelection("#", capability: .unavailable))
+        XCTAssertNil(
+            FoundationAlphabetSelectionPolicy.onlineSelection("A", capability: .unavailable))
+        XCTAssertNil(FoundationAlphabetSelectionPolicy.onlineSelection(nil, capability: .verified))
+        XCTAssertEqual(
+            FoundationAlphabetSelectionPolicy.onlineSelection("F", capability: .verified), "F")
+    }
+
+    func testAccountLifecycleHookRetiresActualAdapterWithoutLogoutTransport() async {
+        let recorder = Recorder()
+        let gate = FoundationAlphabetTestGate()
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            await recorder.append(request)
+            if await recorder.requests.count == 1 { await gate.suspend() }
+            return (Self.alphabetProbeData(request)!, Self.response(request))
+        }
+        let scopeID = itemID
+        let pending = Task { await library.scoped(to: scopeID).alphabetCapability() }
+        await gate.entered()
+        // This exact hook is called by App.open and successful local signOut.
+        let retirement = FoundationAlphabetAccountLifecycle.retire(library)
+        await retirement?.value
+        await gate.release()
+        let late = await pending.value
+        let ended = await library.alphabetCapability()
+        XCTAssertEqual(late, .unavailable)
+        XCTAssertEqual(ended, .unavailable)
+        let requests = await recorder.requests
+        XCTAssertEqual(requests.count, 1)
+        XCTAssertNotNil(Self.alphabetProbeData(requests[0]))
+    }
+
+    func testLibraryCoverGridGeometryMatchesCompactWideAndAccessibilityViewports() {
+        XCTAssertEqual(FoundationLibraryGridLayout.columnCount(width: 375, accessibility: false), 2)
+        XCTAssertEqual(
+            FoundationLibraryGridLayout.columnCount(width: 1024, accessibility: false), 6)
+        XCTAssertEqual(FoundationLibraryGridLayout.columnCount(width: 375, accessibility: true), 1)
+        XCTAssertEqual(FoundationLibraryGridLayout.columnCount(width: 1024, accessibility: true), 3)
+        XCTAssertEqual(
+            FoundationLibraryGridLayout.columnCount(
+                width: 375, accessibility: false,
+                nativeIndex: true), 2)
+        XCTAssertEqual(
+            FoundationLibraryGridLayout.placeholderCount(
+                width: 375, height: 800,
+                accessibility: false, textHeight: 72), 8)
+        XCTAssertEqual(
+            FoundationLibraryGridLayout.placeholderCount(
+                width: 1024, height: 1000,
+                accessibility: false, textHeight: 72), 30)
+    }
+
+    func testLibraryCoverGridGroupingPreservesEveryCanonicalItemAndPartialFinalRow() {
+        let items = Array(0..<5)
+        let rows = (0..<FoundationLibraryGridLayout.rowCount(itemCount: items.count, columns: 2))
+            .map { row in
+                Array(
+                    items[
+                        FoundationLibraryGridLayout.itemRange(
+                            row: row, itemCount: items.count, columns: 2)])
+            }
+        XCTAssertEqual(rows, [[0, 1], [2, 3], [4]])
+        XCTAssertEqual(rows.flatMap { $0 }, items)
+        XCTAssertEqual(FoundationLibraryGridLayout.rowCount(itemCount: 0, columns: 2), 0)
+        XCTAssertTrue(
+            FoundationLibraryGridLayout.itemRange(row: 3, itemCount: 5, columns: 2).isEmpty)
+    }
+
+    func testLibraryCoverGridInvalidGeometryRemainsBounded() {
+        XCTAssertEqual(
+            FoundationLibraryGridLayout.columnCount(width: .nan, accessibility: false), 1)
+        XCTAssertEqual(
+            FoundationLibraryGridLayout.columnCount(width: .infinity, accessibility: false), 1)
+        XCTAssertEqual(
+            FoundationLibraryGridLayout.columnCount(
+                width: .greatestFiniteMagnitude,
+                accessibility: false), 100)
+        XCTAssertEqual(
+            FoundationLibraryGridLayout.placeholderCount(
+                width: 375,
+                height: .greatestFiniteMagnitude, accessibility: false, textHeight: 72), 200)
+    }
+
     private let itemID = "00000000000000000000000000000001"
     private var session: FoundationSession {
         FoundationSession(
@@ -27,6 +1334,35 @@ final class FoundationLibraryTests: XCTestCase {
             XCTAssertTrue(error is FoundationPinStorageError)
         }
         XCTAssertFalse(authenticated)
+    }
+
+    func testRetainedArtworkRequestsEnforceIndependentDownloadNetworkPolicy() async throws {
+        let recorder = Recorder()
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            await recorder.append(request)
+            return (Data(), Self.response(request))
+        }
+        let album = FoundationItem(
+            id: itemID, title: "", subtitle: "", kind: .album, duration: nil,
+            primaryImageTag: "synthetic-tag")
+        _ = try await library.downloadArtwork(for: album, size: 640, allowsCellular: false)
+        _ = try await library.downloadArtwork(for: album, size: 640, allowsCellular: true)
+        _ = try await library.artwork(for: album, size: 160)
+        let requests = await recorder.requests
+        XCTAssertEqual(requests.count, 3)
+        XCTAssertFalse(requests[0].allowsCellularAccess)
+        XCTAssertFalse(requests[0].allowsExpensiveNetworkAccess)
+        XCTAssertFalse(requests[0].allowsConstrainedNetworkAccess)
+        XCTAssertTrue(requests[1].allowsCellularAccess)
+        XCTAssertTrue(requests[1].allowsExpensiveNetworkAccess)
+        XCTAssertFalse(requests[1].allowsConstrainedNetworkAccess)
+        // Normal catalog image reads keep their existing independent policy.
+        XCTAssertTrue(requests[2].allowsCellularAccess)
+        for request in requests {
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Accept"), "image/jpeg")
+            XCTAssertNotNil(request.value(forHTTPHeaderField: "Authorization"))
+            XCTAssertFalse(request.url?.absoluteString.contains(session.accessToken) ?? true)
+        }
     }
 
     func testSessionEndUsesAuthenticatedFixedPathAndAcceptsNoContent() async throws {
@@ -761,6 +2097,72 @@ final class FoundationLibraryTests: XCTestCase {
         XCTAssertEqual(after, 1)
     }
 
+    func testScopedPlaylistAndGenreSearchUsesFullServerPages() async throws {
+        let recorder = Recorder()
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            await recorder.append(request)
+            let components = try XCTUnwrap(
+                URLComponents(url: request.url!, resolvingAgainstBaseURL: false))
+            let query = try XCTUnwrap(components.queryItems)
+            let start = try XCTUnwrap(query.first { $0.name == "startIndex" }?.value)
+            let type = request.url!.path.hasSuffix("MusicGenres") ? "MusicGenre" : "Playlist"
+            return (
+                Data(
+                    """
+                    {"Items":[{"Id":"00000000000000000000000000000001","Name":"Beyond first page","Type":"\(type)","ImageTags":{"Primary":"synthetic"}}],"StartIndex":\(start),"TotalRecordCount":101}
+                    """.utf8), Self.response(request)
+            )
+        }
+        for kind in [FoundationItem.Kind.playlist, .genre] {
+            let page = try await library.search(
+                query: "  Beyond  ", kind: kind, startIndex: 50, limit: 25)
+            XCTAssertEqual(page.items.first?.kind, kind)
+            XCTAssertEqual(page.items.first?.primaryImageTag, "synthetic")
+            XCTAssertEqual(page.nextStartIndex, 51)
+        }
+        let requests = await recorder.requests
+        XCTAssertEqual(requests.count, 2)
+        for (index, request) in requests.enumerated() {
+            XCTAssertEqual(
+                request.url?.path,
+                index == 0 ? "/proxy/jellyfin/Items" : "/proxy/jellyfin/MusicGenres")
+            let query = try XCTUnwrap(
+                URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems)
+            for (name, value) in [
+                ("searchTerm", "Beyond"), ("startIndex", "50"), ("limit", "25"),
+                ("sortBy", "SortName"), ("enableTotalRecordCount", "true"),
+            ] {
+                XCTAssertTrue(query.contains(URLQueryItem(name: name, value: value)))
+            }
+            if index == 0 {
+                XCTAssertTrue(
+                    query.contains(URLQueryItem(name: "includeItemTypes", value: "Playlist")))
+            }
+        }
+        let empty = try await library.search(query: "  ", kind: .genre, startIndex: 0, limit: 25)
+        XCTAssertTrue(empty.items.isEmpty)
+        XCTAssertNil(empty.nextStartIndex)
+        let finalCount = await recorder.requests.count
+        XCTAssertEqual(finalCount, 2)
+    }
+
+    /// SortName deliberately differs from display title to cover article-aware provider sorting.
+    private static func alphabetProbeData(_ request: URLRequest, ignoresBoundary: Bool = false)
+        -> Data?
+    {
+        let query =
+            URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        guard query.contains(where: { $0.name == "limit" && $0.value == "1" }),
+            query.contains(where: { $0.name == "fields" && $0.value == "SortName" })
+        else { return nil }
+        let filtered = !ignoresBoundary && query.contains { $0.name == "nameStartsWithOrGreater" }
+        let body =
+            filtered
+            ? #"{"Items":[{"Id":"00000000000000000000000000000002","Type":"Audio","Name":"The Apple","SortName":"bravo"}],"StartIndex":0,"TotalRecordCount":1}"#
+            : #"{"Items":[{"Id":"00000000000000000000000000000001","Type":"Audio","Name":"The Zebra","SortName":"alpha"}],"StartIndex":0,"TotalRecordCount":2}"#
+        return Data(body.utf8)
+    }
+
     private static func response(_ request: URLRequest, status: Int = 200) -> HTTPURLResponse {
         HTTPURLResponse(
             url: request.url!, statusCode: status, httpVersion: "HTTP/1.1", headerFields: nil)!
@@ -770,4 +2172,278 @@ final class FoundationLibraryTests: XCTestCase {
 private actor Recorder {
     var requests: [URLRequest] = []
     func append(_ request: URLRequest) { requests.append(request) }
+}
+
+@MainActor
+final class FoundationBrowsePaginationTests: XCTestCase {
+    private func item(_ id: String, kind: FoundationItem.Kind = .album) -> FoundationItem {
+        FoundationItem(id: id, title: id, subtitle: "", kind: kind, duration: nil)
+    }
+
+    func testCatalogDedupKeepsRawCursorAndOrderingWhileDetailsKeepOccurrences() async {
+        let model = FoundationBrowseModel()
+        model.configureCatalogPagination()
+        await model.loadPending { _ in
+            .init(items: [self.item("a"), self.item("a")], nextStartIndex: 2)
+        }
+        var offsets: [Int] = []
+        await model.loadNextPage { offset in
+            offsets.append(offset)
+            return .init(
+                items: [self.item("a"), self.item("b"), self.item("a", kind: .artist)],
+                nextStartIndex: nil)
+        }
+        await model.loadNextPage { _ in
+            XCTFail("End must stop requests")
+            return .init(items: [], nextStartIndex: nil)
+        }
+        XCTAssertEqual(offsets, [2])
+        XCTAssertEqual(
+            model.items.map { $0.kind.rawValue + ":" + $0.id }, ["album:a", "album:b", "artist:a"])
+        let details = FoundationBrowseModel()
+        await details.loadPending { _ in
+            .init(items: [self.item("same", kind: .track)], nextStartIndex: 1)
+        }
+        await details.loadNextPage { _ in
+            .init(items: [self.item("same", kind: .track)], nextStartIndex: nil)
+        }
+        XCTAssertEqual(details.items.count, 2)
+    }
+
+    func testDemandGatesAndMalformedCursorRequireExplicitRetry() async {
+        let model = FoundationBrowseModel()
+        model.configureCatalogPagination()
+        await model.loadPending { _ in .init(items: [self.item("a")], nextStartIndex: 1) }
+        var calls = 0
+        let loader: (Int) async throws -> FoundationPage = { offset in
+            calls += 1
+            return .init(items: [self.item("b")], nextStartIndex: offset)
+        }
+        await model.loadNextPage(ifActive: false, using: loader)
+        await model.loadNextPage(allowsNetwork: false, using: loader)
+        XCTAssertEqual(calls, 0)
+        await model.loadNextPage(using: loader)
+        XCTAssertEqual(model.errorCategory, .invalidResponse)
+        XCTAssertEqual(model.items.map(\.id), ["a"])
+        XCTAssertEqual(model.nextStartIndex, 1)
+        await model.loadNextPage(using: loader)
+        XCTAssertEqual(calls, 1)
+        model.request(model.retryRequest)
+        await model.loadPending { offset in
+            XCTAssertEqual(offset, 1)
+            return .init(items: [self.item("b")], nextStartIndex: nil)
+        }
+        XCTAssertEqual(model.items.map(\.id), ["a", "b"])
+        XCTAssertNil(model.errorMessage)
+    }
+
+    func testCatalogCacheRetainsRawPrefixAndResumesCorrectOffsetAfterRelaunch() async {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cache = FoundationCatalogPageCache(scope: "synthetic-account/server", root: directory)
+        let model = FoundationBrowseModel()
+        model.configureCatalogPagination()
+        model.configureCache(cache, key: "library.albums")
+        await model.loadPending { _ in
+            .init(items: (0..<100).map { self.item(String($0 / 2)) }, nextStartIndex: 100)
+        }
+        await model.loadNextPage { _ in
+            .init(items: (100..<200).map { self.item(String($0 / 2)) }, nextStartIndex: 200)
+        }
+        await model.loadNextPage { _ in
+            .init(items: [self.item("last")], nextStartIndex: nil)
+        }
+        let restored = FoundationBrowseModel()
+        restored.configureCatalogPagination()
+        restored.configureCache(cache, key: "library.albums")
+        await restored.loadPending(allowsNetwork: false) { _ in
+            XCTFail("Offline cache restore must not read server")
+            return .init(items: [], nextStartIndex: nil)
+        }
+        XCTAssertEqual(restored.items.count, 100)
+        XCTAssertEqual(restored.nextStartIndex, 200)
+        await restored.loadNextPage { offset in
+            XCTAssertEqual(offset, 200)
+            return .init(items: [self.item("last")], nextStartIndex: nil)
+        }
+        XCTAssertEqual(restored.items.last?.id, "last")
+        XCTAssertNil(restored.nextStartIndex)
+    }
+
+    func testEmptyNonterminalCatalogPageRetainsRowsWithoutAutomaticRetry() async {
+        let model = FoundationBrowseModel()
+        model.configureCatalogPagination()
+        await model.loadPending { _ in .init(items: [self.item("a")], nextStartIndex: 1) }
+        await model.loadNextPage { _ in .init(items: [], nextStartIndex: 2) }
+        XCTAssertEqual(model.errorCategory, .invalidResponse)
+        XCTAssertEqual(model.items.map(\.id), ["a"])
+        await model.loadNextPage { _ in
+            XCTFail("Invalid page must require explicit retry")
+            return .init(items: [], nextStartIndex: nil)
+        }
+    }
+
+    func testConcurrentDemandAndCancelledResponseCannotDuplicateOrPublish() async {
+        let model = FoundationBrowseModel()
+        model.configureCatalogPagination()
+        await model.loadPending { _ in .init(items: [self.item("a")], nextStartIndex: 1) }
+        var continuation: CheckedContinuation<FoundationPage, Never>?
+        var calls = 0
+        let task = Task {
+            await model.loadNextPage { _ in
+                calls += 1
+                return await withCheckedContinuation { continuation = $0 }
+            }
+        }
+        while continuation == nil { await Task.yield() }
+        await model.loadNextPage { _ in
+            calls += 1
+            return .init(items: [], nextStartIndex: nil)
+        }
+        XCTAssertEqual(calls, 1)
+        task.cancel()
+        continuation?.resume(returning: .init(items: [item("stale")], nextStartIndex: nil))
+        await task.value
+        XCTAssertEqual(model.items.map(\.id), ["a"])
+        XCTAssertEqual(model.nextStartIndex, 1)
+        XCTAssertFalse(model.isLoading)
+        await model.loadNextPage { _ in .init(items: [self.item("b")], nextStartIndex: nil) }
+        XCTAssertEqual(model.items.map(\.id), ["a", "b"])
+    }
+}
+
+/// Controlled synthetic transport suspension; no clock-dependent race or real network.
+private actor FoundationAlphabetTestGate {
+    private var blocked: CheckedContinuation<Void, Never>?
+    private var observer: CheckedContinuation<Void, Never>?
+
+    func suspend() async {
+        await withCheckedContinuation { continuation in
+            blocked = continuation
+            observer?.resume()
+            observer = nil
+        }
+    }
+
+    func entered() async {
+        if blocked != nil { return }
+        await withCheckedContinuation { observer = $0 }
+    }
+
+    func release() {
+        blocked?.resume()
+        blocked = nil
+    }
+}
+
+#if os(iOS)
+    @MainActor
+    final class FoundationAlphabetTableLayoutTests: XCTestCase {
+        private func section(_ letter: String, count: Int) -> FoundationAlphabetSection {
+            .init(
+                id: letter, title: letter, availability: .loaded,
+                rows: (0..<count).map { index in
+                    let id = letter + "-" + String(index)
+                    return .init(
+                        id: id,
+                        item: FoundationItem(
+                            id: id, title: id, subtitle: "", kind: .track, duration: nil))
+                })
+        }
+
+        private func view(_ sections: [FoundationAlphabetSection])
+            -> FoundationLibraryAlphabetIndex<Text>
+        {
+            FoundationLibraryAlphabetIndex(
+                contextID: "synthetic-layout", sections: sections,
+                onDemandNextPage: {}, onRefresh: {}, row: { Text($0.item.title) })
+        }
+
+        func testAccessibilityScrollCreatesDemandAndRailLandingClearsIt() throws {
+            let initial = view([section("A", count: 30)])
+            let coordinator = initial.makeCoordinator()
+            let table = initial.makeTable(coordinator: coordinator)
+            initial.updateTable(table, coordinator: coordinator)
+            XCTAssertFalse(coordinator.hasScrollDemand)
+            let accessible = try XCTUnwrap(table as? FoundationDemandTableView)
+            _ = accessible.accessibilityScroll(.down)
+            XCTAssertTrue(coordinator.hasScrollDemand)
+            var jump = initial
+            jump.anchorRowID = "A-29"
+            jump.anchorRevision = 1
+            jump.updateTable(table, coordinator: coordinator)
+            XCTAssertFalse(coordinator.hasScrollDemand)
+        }
+
+        func testDistantRailLandingSurvivesHostedLayoutAndSortedPageReload() async throws {
+            let initial = view([
+                section("A", count: 30), section("M", count: 30), section("Z", count: 30),
+            ])
+            let coordinator = initial.makeCoordinator()
+            let table = initial.makeTable(coordinator: coordinator)
+            let controller = UIViewController()
+            guard
+                let scene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }
+                ).first
+            else {
+                throw XCTSkip("A connected host scene is required for native table layout")
+            }
+            let window = UIWindow(windowScene: scene)
+            window.frame = CGRect(x: 0, y: 0, width: 390, height: 700)
+            window.rootViewController = controller
+            table.frame = window.bounds
+            controller.view.addSubview(table)
+            window.isHidden = false
+            defer { window.isHidden = true }
+            initial.updateTable(table, coordinator: coordinator)
+            XCTAssertEqual(table.estimatedRowHeight, 0)
+            XCTAssertEqual(table.estimatedSectionHeaderHeight, 0)
+            XCTAssertEqual(table.selfSizingInvalidation, .disabled)
+
+            var jump = initial
+            jump.anchorRowID = "M-0"
+            jump.anchorRevision = 1
+            jump.updateTable(table, coordinator: coordinator)
+            // Let the real deferred rail callback run, then force subsequent hosted layout.
+            await withCheckedContinuation { continuation in
+                DispatchQueue.main.async { continuation.resume() }
+            }
+            table.layoutIfNeeded()
+            let landed = try XCTUnwrap(coordinator.visibleAnchor(in: table))
+            XCTAssertEqual(landed.rowID, "M-0")
+            let landedOffset = table.contentOffset.y
+            table.setNeedsLayout()
+            table.layoutIfNeeded()
+            XCTAssertEqual(table.contentOffset.y, landedOffset, accuracy: 0.5)
+
+            var appended = view([
+                section("A", count: 30), section("B", count: 25),
+                section("M", count: 30), section("Z", count: 30),
+            ])
+            appended.anchorRowID = "M-0"
+            appended.anchorRevision = 1
+            appended.updateTable(table, coordinator: coordinator)
+            table.setNeedsLayout()
+            table.layoutIfNeeded()
+            let retained = try XCTUnwrap(coordinator.visibleAnchor(in: table))
+            XCTAssertEqual(retained.rowID, landed.rowID)
+            XCTAssertEqual(retained.offsetFromTop, landed.offsetFromTop, accuracy: 0.5)
+            XCTAssertGreaterThan(table.contentOffset.y, landedOffset)
+        }
+    }
+#endif
+
+// Model tests explicitly supply each scroll demand; production activation never owns this loop.
+extension FoundationBrowseModel {
+    func drainDemandedPagesForTesting(using loader: (Int) async throws -> FoundationPage) async {
+        await loadCatalogPage(using: loader)
+        for _ in 0..<2_001 {
+            guard !Task.isCancelled, errorMessage == nil, let offset = nextStartIndex else {
+                return
+            }
+            await loadNextPage(using: loader)
+            guard nextStartIndex != offset else { return }
+        }
+    }
 }

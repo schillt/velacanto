@@ -7,8 +7,10 @@ old controllers. Use the exact assigned base; never edit another worktree.
 
 ## Release boundary
 
-0.3.5 builds on the accepted 0.3.0 (108) Foundation replacement. The historical
-0.3.0 freeze remains documented in ADR 0013; it does not disable the independently
+0.4.0 development builds on the 0.3.5 and accepted 0.3.0 (108) Foundation line.
+Read `docs/0.4-development-record.md` and `docs/0.4-plan.md` for current integrated
+features and pending acceptance; 0.3.5 documents below are historical evidence.
+The historical 0.3.0 freeze remains documented in ADR 0013; it does not disable the independently
 implemented 0.3.5 features. Build 107 remains rejected. Read
 `docs/0.3.5-release-notes.md`, `docs/0.3.5-known-issues.md` and
 `docs/0.3.5-acceptance.md` for current scope and evidence limits. Never restore
@@ -29,8 +31,10 @@ gain. The player owns playback intent and native items; the account-lifetime sys
 bridge forwards commands and metadata. Views must not create players, activate the
 audio session, restore system volume or trigger catalog/artwork work on redraw.
 Lyrics and artwork retain explicit cancellation and stale-result protection.
-Collection Shuffle is supported; persistent shuffle/repeat, playlist editing,
-offline/local libraries, new providers and playback reporting are not.
+Collection Shuffle, persistent shuffle/repeat, paused queue restoration, playlist
+editing and account-owned original-file downloads are implemented in alpha.
+Local-library indexing, new providers and playback reporting remain deferred or
+unimplemented. Keep implementation distinct from physical/server acceptance.
 
 ## Verification and delivery
 
@@ -43,10 +47,11 @@ original-reference Simulator or build 106 physical comparison without instructio
 
 Workers commit only their assigned paths and proactively report exact base,
 parent/final SHA, clean status, changed paths, deletions, commands/results and
-limitations. The workspace maintainer publishes focused task PRs into alpha; acceptance and
-audit review precede authorized serial merges. Root AGENTS.md governs PRs,
-protected-branch policy and tagged release promotion to main. Do not use the
-historical direct-push or alpha/beta/preview branch chain.
+limitations. The workspace maintainer integrates accepted local work and publishes
+it to alpha without remote task branches. Acceptance and audit precede publication;
+alpha → beta promotion uses a PR and the exact-candidate release gate. Root
+AGENTS.md governs authorization, protected branches and subsequent main release
+promotion. Never force-push or bypass actual GitHub rules.
 Passing synthetic tests is not physical streaming or TestFlight acceptance.
 
 ## Identity and privacy

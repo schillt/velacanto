@@ -10,11 +10,14 @@ implementation. Local notes, chat summaries and unpublished plans are working
 material, not integrated dependencies. Record approved changes in GitHub through
 the workspace maintainer so every worker receives the same contract.
 
-This owner-approved workflow supersedes historical direct pushes to alpha,
-local-only issue branches and mandatory alpha → beta → preview → main promotion.
-Do not follow those older instructions from archived documents or stale worktrees.
-Current owner instructions can change scope; reconcile their approved contract in
-GitHub before dependent work begins. Do not silently promote unpublished plans.
+The owner-approved workflow, updated 2026-10-10, keeps development branches and
+worktrees local. Publish accepted changes to `alpha`; promote candidates through
+an **alpha → beta PR**. A local `codex/` branch name is an implementation detail,
+not a reason to create a GitHub development branch. Main/release distribution
+requires its own authorization and acceptance. See [workflow](docs/development-workflow.md).
+This supersedes the earlier requirement to publish every task branch and open a
+PR into alpha. Preserve existing branches and historical PR evidence; do not
+force-push, rewrite history or delete unintegrated work during this transition.
 
 Before editing, compare the fetched alpha guide, applicable nested guides, current
 owner instructions and the issue contract. Check that board workflow descriptions
@@ -23,18 +26,21 @@ checkout's instructions to make them appear current. Explicit owner instructions
 take precedence, but a scoped exception does not permanently change the default
 workflow. Record its scope and reconcile shared documentation.
 
-Velacanto 0.3.5 follows the 0.3.0 (108) Foundation replacement. The maintained
+Velacanto 0.4.0 development follows the 0.3.5 and 0.3.0 (108) Foundation line.
+Read `docs/0.4-development-record.md` and `docs/0.4-plan.md` for the current
+integrated checkpoint and outstanding gates. The maintained
 app is `NativeFoundation/VelacantoFoundation.xcodeproj`, scheme
 `VelacantoFoundation`, product `Velacanto`. Read `NativeFoundation/AGENTS.md`,
 ADR 0012/0013 and `docs/0.3.5-acceptance.md`. Build 107 remains rejected. Historical
 0.3.0 freeze documents do not disable the scoped 0.3.5 features. Never restore old
 controllers to satisfy superseded plans.
 
-The owner authorized PR #174 into alpha after required checks pass, a 0.3.5
-GitHub prerelease from alpha and existing-workflow internal TestFlight, with
-documented known bugs and the native volume slider retained. No main promotion
-is authorized for this prerelease. This is a recorded
-release exception, not evidence the volume defect is fixed. Record current checks,
+The historical 0.3.5 exception authorized PR #174 into alpha after passing checks,
+a GitHub prerelease and existing-workflow internal TestFlight, with documented
+known bugs and the native volume slider retained. That exception did not authorize
+main promotion. The later accepted preview `de7abe9` was promoted through PR #190
+on 2026-10-07; newer 0.4 source is excluded. These recorded release decisions do
+not establish that the volume defect is fixed. Record current checks,
 exceptions and signed distribution status separately; no public App Store
 submission is implied. Do not change runtime/version metadata in planning-only
 work. Apply `docs/engineering-rubric.md` to future reviews without inventing grades.
@@ -50,8 +56,9 @@ remain with one agent. Delegation does not expand scope or count as acceptance.
 - **Acceptance agent:** independently tests the supplied exact candidate and
   records pass/fail/pending plus reproduction. Does not silently modify the source
   being accepted or invent physical/audible evidence.
-- **Workspace maintainer:** maintains project/setup/docs, publishes assigned task
-  branches/PRs, coordinates build/device slots and executes authorized merges.
+- **Workspace maintainer:** maintains project/setup/docs, publishes accepted local
+  integration to alpha, coordinates promotion PRs and build/device slots, and
+  executes authorized promotion merges.
   Does not self-certify product acceptance.
 - **Auditor:** reviews scope, design, ownership, privacy, findings and acceptance
   evidence; requests focused corrections and records disposition.
@@ -77,75 +84,71 @@ from a different account. Never impersonate another reviewer or bypass a require
 review. Configure required approval counts only when eligible reviewers exist;
 otherwise record agent review and the owner's merge decision explicitly.
 
-## Branches, issues and pull requests
+## Local development, alpha publication and promotion
 
-The normal flow is **issue → short-lived task branch → PR into alpha → accepted
-release PR into main → release tag/artifact**. Beta and preview are candidate
-validation/distribution stages, not mandatory permanent merge branches. Retain
-existing beta/preview/recovery branches until explicitly retired; do not delete
-history or rewrite them as part of routine cleanup.
+The normal flow is **issue → local task branch/worktree → accepted local
+integration → alpha publication → alpha → beta PR**. Beta is the validation
+stage. Promotion from beta into main and tagged distribution needs a separate
+owner-authorized release decision; preview is not a mandatory stage.
 
-1. Read the entire assigned GitHub issue and latest relevant comments. It must
-   define Outcome, User behavior, Implementation boundaries, Acceptance criteria,
-   Out of scope, Dependencies and Verification. Use P0–P3 priorities.
-2. Fetch alpha. Confirm dependencies are integrated and inspect worktree ownership.
-   Start one `codex/<issue>-<description>` branch in one clean worktree from the
-   current `origin/alpha`; record the full base SHA. Never reuse another issue's
-   dirty tree or start dependent code on an unpublished assumption.
-3. Implement only the issue contract. Commit only owned files; run focused gates
-   and `git diff --check`. Never reset, stash, stage or revert another worker's work.
-4. The maintainer publishes the task branch and opens a focused PR **into alpha**,
-   linking the issue and recording behavior, evidence and limitations. A draft PR
-   is allowed for early review but is not merge-ready. Issue workers publish only
-   when specifically delegated that responsibility; no direct shared-branch push.
-5. Acceptance and audit review the latest candidate. Update the branch with alpha
-   if it has advanced, resolve conflicts in the task worktree, and rerun affected
-   verification. Review evidence must identify the current SHA. Material edits
-   invalidate affected acceptance and require re-review.
-6. Merge ordinary development changes after relevant local checks, resolved
-   discussions, scoped P0/P1 disposition and required physical gates plus the
-   owner/authorized merge decision. Hosted checks are required only for release
-   candidates, as described below. Merge one PR at a time; do not use bypass/admin
-   overrides or ignore failed applicable checks.
-7. **Squash-merge focused task PRs** into alpha. Record the integrated SHA and run
-   affected local integration checks before using it as an accepted dependency.
-   PR-head tests are not proof of the integrated commit. If integration fails,
-   stop dependent work and submit a focused fix/revert PR; do not hide a repair.
-8. Update the issue, milestone/Project and release checklist after actual merge and
-   applicable verification. Distinguish code integrated from feature accepted and
-   release ready. Delete the merged task branch and clean worktree only after
-   proving integration; preserve unintegrated work and evidence.
+1. Read the assigned issue and latest relevant comments. Record outcome, user
+   behavior, boundaries, acceptance, dependencies, verification and P0–P3 priority.
+2. Fetch alpha. Confirm dependencies and worktree ownership. Start one clean,
+   isolated local branch/worktree per issue from current `origin/alpha`; record
+   its full base SHA. Never reuse another worker's dirty tree. Do not publish
+   temporary task branches unless the owner explicitly requests a remote review.
+3. Implement the issue contract and commit only explicit owned paths. Run focused
+   checks and `git diff --check`; preserve others' dirty work and references.
+4. Acceptance and audit review the exact local candidate. Resolve discussions and
+   scoped P0/P1 findings, and complete relevant physical checks or record an
+   owner-approved pending gate. A task assignment alone is not acceptance or
+   permission to publish unreviewed work.
+5. The maintainer integrates accepted local commits serially from current alpha.
+   If alpha advanced, integrate its changes locally and rerun affected checks.
+   Review the complete publication diff and sanitized issue evidence before writing.
+6. Publish accepted integration to alpha with a normal fast-forward push or the
+   GitHub connector's non-force ref update guarded by the expected old SHA. Never
+   force-push or bypass actual protection. If a rule blocks publication, report
+   the rule; do not weaken settings or create a remote task branch as a workaround.
+7. Verify the published source/tree and record its integrated SHA, local evidence
+   and remaining gates in the issue or development record. Do not publish local
+   signed apps, private evidence, credentials or raw traces.
+8. Freeze an owner-selected alpha candidate. Run the required hosted release gate
+   on its exact SHA, then open/merge **alpha → beta** with a merge commit after
+   success and the owner-authorized promotion decision. Recheck head/base before
+   merging. If alpha changes, freeze and validate the new candidate rather than
+   silently promoting untested changes. No separate remote candidate branch is
+   required. Use immutable candidate tags when tagging is authorized.
+9. Update issues/milestones after integration and actual acceptance. Keep
+   implementation, accepted behavior and distribution separate. Remove local
+   task worktrees only after proving integration and preserving needed evidence.
 
-Do not squash long-lived alpha into main: use a release merge commit to preserve
-ancestry. Allow merge commits for release PRs; do not impose global linear history
-that conflicts with this release strategy. Do not rebase/force-push shared branches.
+Do not squash long-lived promotion branches or rebase/force-push shared branches.
+Retain existing beta/preview/recovery branches until explicitly retired. Independent
+agent review is useful evidence, not an approving review from another GitHub account.
 
 ## GitHub access and enforcement
 
-Before a GitHub write verify account and repository, without exposing credentials:
+Before a GitHub write verify the authenticated account, intended repository and
+write permission using the available interface. The authenticated GitHub plugin
+is an approved interface for repository/issues/PRs and supported Git data writes.
+Authenticated `gh` or Git may also be used when already available; CLI sign-in is
+not a prerequisite when the plugin can perform the task. Use an authenticated
+browser only for capabilities the connector does not expose, such as workflow
+manual dispatch. Never extract or copy tokens/cookies between interfaces.
 
-```sh
-gh auth status
-gh repo view --json nameWithOwner --jq .nameWithOwner
-```
+Private Project work requires appropriate access; query field/option IDs rather
+than copying stale values. Stop on actual missing authorization or a rejected
+write. Diagnose sandbox/network failures through the normal permission mechanism
+before asking for reauthentication. Do not change credentials, bypass protection
+or retry a rejected write blindly.
 
-Use authenticated `gh` for repository/issues/PRs/Projects. Private Project work
-requires the relevant repo/project scopes; query field and option IDs rather than
-copying stale values. Stop on actual missing authorization or a rejected push;
-do not retry blindly, change credentials or use copied tokens/cookies. A sandbox
-network failure is not invalid authentication if `gh auth status` succeeds.
-A sandbox/keychain restriction can also make that command report an invalid token.
-Before asking for reauthentication, verify it in the approved host/network context
-using the normal permission mechanism. If it still fails there, stop and report
-that actual failure; never extract credentials or work around authorization.
-
-Desired protection on alpha/main: PR required, up-to-date base, resolved
-conversations, no force pushes/deletion or routine bypass. Do not require a hosted
-`Quality Gate` on ordinary development PRs when it is intentionally release-only.
-Enforce the exact-candidate hosted gate at release promotion/publication. Require
-eligible independent approvals when available. Until repository settings enforce
-these rules, agents must enforce them procedurally and report
-that distinction. This file alone does not install branch protection.
+Desired alpha policy permits the maintainer's accepted non-force publication,
+with no force pushes/deletion or routine bypass. Beta/main promotions use PRs,
+resolved discussions and the applicable exact-candidate hosted gate. Require
+eligible independent approvals when configured; never impersonate a reviewer.
+Until settings enforce a rule, agents enforce it procedurally and report that
+distinction. Documentation does not install or change GitHub protection.
 
 Check actual rulesets/protection and required-check names before changing settings.
 Do not mark a job required simply because a workflow calls it a gate; do not treat
@@ -203,7 +206,7 @@ parallel testing. Protect original-reference apps and Foundation106. Physical
 or delete archives/unintegrated work to make room for tests.
 
 Local checks include `./scripts/preflight.sh --skip-xcode`, `git diff --check`,
-lint and relevant tests/builds. Ordinary patches, documentation changes, task PRs
+lint and relevant tests/builds. Ordinary patches, documentation changes
 and development integrations use local verification; do not dispatch, wait for or
 rerun hosted quality gates for them. Scope verification proportionately for
 documentation; runtime/interface changes require relevant regression, platform
@@ -235,14 +238,16 @@ identities. Do not move published tags. Any source change produces a new candida
 and invalidates affected evidence; re-signing/rebuilding produces a new artifact
 whose provenance must be recorded. TestFlight acceptance names the actual upload.
 
-Open a release PR from alpha into main after full candidate acceptance. Verify
-its final integrated source and checks, retain the candidate-to-release mapping,
+Open a release PR from beta into main after full candidate acceptance and a
+separate owner-authorized main promotion decision. Verify its final integrated
+source and checks, retain the candidate-to-release mapping,
 and tag the accepted release. Build signed artifacts from recorded source and
 verify distribution separately; an unsigned CI build is not a TestFlight build.
 Keep alpha frozen through release promotion or use a separately approved release
 branch strategy if continued development is necessary. Hotfixes use a focused PR
-from current main, then reconcile the fix into alpha through a PR before further
-release promotion. No routine cherry-pick-only divergence between shared branches.
+from current main, then reconcile the accepted fix locally and publish it to alpha
+before further release promotion. No routine cherry-pick-only divergence between
+shared branches.
 
 ## Quality, privacy and completion
 
