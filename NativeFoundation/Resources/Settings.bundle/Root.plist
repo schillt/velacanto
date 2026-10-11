@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>PreferenceSpecifiers</key>
+	<array>
+		<dict>
+			<key>FooterText</key>
+			<string>Streaming controls affect audio played from your server, not downloaded music.</string>
+			<key>Title</key>
+			<string>Streaming</string>
+			<key>Type</key>
+			<string>PSGroupSpecifier</string>
+		</dict>
+		<dict>
+			<key>DefaultValue</key>
+			<string>Native / AAC fallback</string>
+			<key>Key</key>
+			<string>audio.streaming.qualityDescription</string>
+			<key>Title</key>
+			<string>Quality</string>
+			<key>Type</key>
+			<string>PSTitleValueSpecifier</string>
+		</dict>
+		<dict>
+			<key>DefaultValue</key>
+			<true/>
+			<key>Key</key>
+			<string>audio.streaming.allowCellular</string>
+			<key>Title</key>
+			<string>Allow Cellular Streaming</string>
+			<key>Type</key>
+			<string>PSToggleSwitchSpecifier</string>
+		</dict>
+		<dict>
+			<key>FooterText</key>
+			<string>Download controls affect new downloads. Manage downloaded music and storage in Velacanto Settings.</string>
+			<key>Title</key>
+			<string>Downloads</string>
+			<key>Type</key>
+			<string>PSGroupSpecifier</string>
+		</dict>
+		<dict>
+			<key>DefaultValue</key>
+			<string>Original</string>
+			<key>Key</key>
+			<string>audio.downloads.qualityDescription</string>
+			<key>Title</key>
+			<string>Quality</string>
+			<key>Type</key>
+			<string>PSTitleValueSpecifier</string>
+		</dict>
+		<dict>
+			<key>DefaultValue</key>
+			<false/>
+			<key>Key</key>
+			<string>audio.downloads.allowCellular</string>
+			<key>Title</key>
+			<string>Allow Cellular Downloads</string>
+			<key>Type</key>
+			<string>PSToggleSwitchSpecifier</string>
+		</dict>
+	</array>
+	<key>StringsTable</key>
+	<string>Root</string>
+</dict>
+</plist>

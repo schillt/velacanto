@@ -53,6 +53,7 @@ final class FoundationNowPlaying: MediaSessionRepresentable {
             player.$state.removeDuplicates().map { _ in () }.eraseToAnyPublisher(),
             player.$wantsPlayback.removeDuplicates().map { _ in () }.eraseToAnyPublisher(),
             player.$duration.removeDuplicates().map { _ in () }.eraseToAnyPublisher(),
+            player.$repeatMode.removeDuplicates().map { _ in () }.eraseToAnyPublisher(),
             player.$isInterrupted.removeDuplicates().map { _ in () }.eraseToAnyPublisher(),
             player.playbackPositionChanged.eraseToAnyPublisher()
         ).sink { [weak self] in self?.scheduleUpdate() }.store(in: &subscriptions)
@@ -128,7 +129,11 @@ final class FoundationNowPlaying: MediaSessionRepresentable {
             case .idle, .ended, .failed: state = .stopped
             case .loading, .waiting: state = .buffering
             case .paused: state = .paused
-            case .playing: state = .playing(rate: player.nativePlayer.rate)
+            case .playing:
+                // Native rate can reach zero before the queued player-state callback.
+                // A playing snapshot requires an advancing clock; never publish a zero rate.
+                let rate = player.nativePlayer.rate
+                state = rate.isFinite && rate != 0 ? .playing(rate: rate) : .paused
             }
         }
         let nativeTime = player.selectionTask == nil ? player.nativePlayer.currentTime().seconds : 0
@@ -137,7 +142,7 @@ final class FoundationNowPlaying: MediaSessionRepresentable {
             state: state, elapsedTime: elapsed, timestamp: Date())
         availability = Availability(
             play: !player.wantsPlayback, pause: player.wantsPlayback,
-            next: index + 1 < player.queue.count, previous: index > 0 || player.duration > 0,
+            next: player.canAdvance, previous: index > 0 || player.duration > 0,
             seek: player.duration > 0 && player.selectionTask == nil
                 && player.nativePlayer.currentItem?.status == .readyToPlay)
         requestPrimacyIfEligible()
@@ -173,7 +178,7 @@ final class FoundationNowPlaying: MediaSessionRepresentable {
         case .pause: player.pause()
         case .toggle: player.togglePlayback()
         case .next:
-            guard index + 1 < player.queue.count else { throw MediaSessionError.invalidState }
+            guard player.canAdvance else { throw MediaSessionError.invalidState }
             player.next()
         case .previous:
             guard index > 0 || player.duration > 0 else { throw MediaSessionError.invalidState }

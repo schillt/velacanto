@@ -65,7 +65,7 @@
         func snapshot() -> String {
             lock.lock()
             defer { lock.unlock() }
-            return (try? String(contentsOf: file, encoding: .utf8)) ?? "No events recorded."
+            return (try? String(contentsOf: file, encoding: .utf8)) ?? ""
         }
 
         func clear() {

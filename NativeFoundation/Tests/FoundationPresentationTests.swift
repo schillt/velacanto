@@ -4,6 +4,133 @@ import XCTest
 
 @MainActor
 final class FoundationPresentationTests: XCTestCase {
+    func testPlayerSurfaceExpandsOnlyMeasuredVisibleBarIntoFinalPlayerBounds() {
+        let bounds = CGRect(x: 0, y: 0, width: 390, height: 844)
+        let bar = CGRect(x: 12, y: 720, width: 366, height: 56)
+        XCTAssertEqual(
+            FoundationPlayerSurfaceTransitionDecision.resolve(
+                compact: bar, expanded: bounds, reduceMotion: false),
+            .expand(compact: bar, expanded: bounds))
+        for invalid in [
+            CGRect.zero, CGRect(x: 12, y: 830, width: 366, height: 56),
+            CGRect(x: 12, y: 720, width: CGFloat.infinity, height: 56),
+        ] {
+            XCTAssertEqual(
+                FoundationPlayerSurfaceTransitionDecision.resolve(
+                    compact: invalid, expanded: bounds, reduceMotion: false), .fade)
+        }
+    }
+
+    func testPlayerSurfaceHonorsReducedMotionAndDoesNotInventMissingBarGeometry() {
+        let bounds = CGRect(x: 0, y: 0, width: 390, height: 844)
+        let bar = CGRect(x: 12, y: 720, width: 366, height: 56)
+        XCTAssertEqual(
+            FoundationPlayerSurfaceTransitionDecision.resolve(
+                compact: bar, expanded: bounds, reduceMotion: true), .fade)
+        XCTAssertEqual(
+            FoundationPlayerSurfaceTransitionDecision.resolve(
+                compact: nil, expanded: bounds, reduceMotion: false), .fade)
+        XCTAssertEqual(
+            FoundationPlayerSurfaceTransitionDecision.resolve(
+                compact: bar, expanded: .zero, reduceMotion: false), .fade)
+    }
+
+    func testArtworkMorphUsesCanonicalIdentityAndExactArtworkRectangles() {
+        let compact = CGRect(x: 18, y: 730, width: 34, height: 34)
+        let expanded = CGRect(x: 0, y: 60, width: 390, height: 430)
+        XCTAssertEqual(
+            artworkTransition(compact: compact, expanded: expanded),
+            .morph(compact: compact, expanded: expanded))
+        XCTAssertEqual(
+            artworkTransition(compact: compact, expanded: expanded, compactIdentity: "other"),
+            .fade(.differentIdentity))
+    }
+
+    func testArtworkMorphNeverGuessesMissingOrOffscreenSourceGeometry() {
+        let expanded = CGRect(x: 0, y: 60, width: 390, height: 430)
+        XCTAssertEqual(
+            artworkTransition(compact: nil, expanded: expanded), .fade(.unavailableGeometry))
+        XCTAssertEqual(
+            artworkTransition(compact: .zero, expanded: expanded), .fade(.unavailableGeometry))
+        XCTAssertEqual(
+            artworkTransition(
+                compact: CGRect(x: 18, y: 830, width: 34, height: 34), expanded: expanded),
+            .fade(.offscreenSource))
+        XCTAssertEqual(
+            artworkTransition(
+                compact: CGRect(x: 18, y: 730, width: CGFloat.infinity, height: 34),
+                expanded: expanded),
+            .fade(.unavailableGeometry))
+    }
+
+    func testArtworkMorphRequiresAnImageAndHonorsReduceMotion() {
+        let compact = CGRect(x: 18, y: 730, width: 34, height: 34)
+        let expanded = CGRect(x: 0, y: 60, width: 390, height: 430)
+        XCTAssertEqual(
+            artworkTransition(compact: compact, expanded: expanded, artworkIdentity: nil),
+            .fade(.missingArtwork))
+        XCTAssertEqual(
+            artworkTransition(compact: compact, expanded: expanded, reduceMotion: true),
+            .fade(.reduceMotion))
+    }
+
+    private func artworkTransition(
+        compact: CGRect?, expanded: CGRect?, artworkIdentity: String? = "album",
+        compactIdentity: String? = "album", reduceMotion: Bool = false
+    ) -> FoundationPlayerArtworkTransitionDecision {
+        FoundationPlayerArtworkTransitionDecision.resolve(
+            artworkIdentity: artworkIdentity, compactIdentity: compactIdentity,
+            expandedIdentity: "album", compactRect: compact, expandedRect: expanded,
+            containerBounds: CGRect(x: 0, y: 0, width: 390, height: 844),
+            reduceMotion: reduceMotion)
+    }
+
+    func testRelatedCatalogRoutesRetainCanonicalMetadataAndArtworkIdentity() throws {
+        let artist = FoundationItemReference(
+            id: "artist", title: "Album Artist", primaryImageTag: "artist-revision")
+        let album = FoundationItemReference(
+            id: "album", title: "Album", primaryImageTag: "album-revision")
+        let track = FoundationItem(
+            id: "track", title: "Song", subtitle: "Track credit", kind: .track, duration: 60,
+            album: album, artist: artist)
+        let albumRoute = try XCTUnwrap(track.relatedAlbum)
+        let artistRoute = try XCTUnwrap(track.relatedArtist)
+        XCTAssertEqual(albumRoute.artist, artist)
+        XCTAssertEqual(albumRoute.subtitle, "Album Artist")
+        XCTAssertEqual(albumRoute.primaryImageTag, "album-revision")
+        XCTAssertEqual(artistRoute.primaryImageTag, "artist-revision")
+        XCTAssertEqual(albumRoute.relatedArtist, artistRoute)
+        XCTAssertEqual(albumRoute.sharedArtworkIdentity, track.sharedArtworkIdentity)
+        XCTAssertNotEqual(artistRoute.sharedArtworkIdentity, albumRoute.sharedArtworkIdentity)
+    }
+
+    func testMissingRelatedMetadataCannotRouteToAnInventedCatalogItem() {
+        var track = FoundationItem(
+            id: "track", title: "Song", subtitle: "Track credit", kind: .track, duration: nil)
+        XCTAssertNil(track.relatedAlbum)
+        XCTAssertNil(track.relatedArtist)
+        track.album = FoundationItemReference(id: "", title: "Album")
+        track.artist = FoundationItemReference(id: "", title: "Artist")
+        XCTAssertNil(track.relatedAlbum)
+        XCTAssertNil(track.relatedArtist)
+    }
+
+    func testKnownRelatedIdentityWithUnknownTitleKeepsUsableFallback() throws {
+        let track = FoundationItem(
+            id: "track", title: "Song", subtitle: "Track credit", kind: .track, duration: nil,
+            album: FoundationItemReference(id: "album", title: ""),
+            artist: FoundationItemReference(id: "artist", title: ""))
+        let album = try XCTUnwrap(track.relatedAlbum)
+        let artist = try XCTUnwrap(track.relatedArtist)
+        XCTAssertEqual(album.id, "album")
+        XCTAssertEqual(album.title, "Album")
+        XCTAssertEqual(album.subtitle, "Track credit")
+        XCTAssertEqual(artist.id, "artist")
+        XCTAssertEqual(artist.title, "Artist")
+        XCTAssertNil(album.primaryImageTag)
+        XCTAssertNil(artist.primaryImageTag)
+    }
+
     func testAccountAlertDismissalDefersModelChangeAndKeepsNewNotice() async {
         let model = FoundationAppModel()
         model.signOutNotice = "First sign-out result"

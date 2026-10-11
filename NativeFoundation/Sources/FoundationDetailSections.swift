@@ -1,10 +1,30 @@
 import SwiftUI
 
+#if os(iOS)
+    import UIKit
+#endif
+
 /// Optional item text owns one visible-page read; presenting it adds no work.
 struct FoundationOverviewSection: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @EnvironmentObject private var connectivity: FoundationConnectivity
     let item: FoundationItem
     let library: any FoundationLibrary
     let isActive: Bool
+    var maximumLines: Int? = 3
+    var horizontalInset: CGFloat = 16
+    #if os(macOS)
+        @ScaledMetric(relativeTo: .body) private var overviewTextSize = 15.0
+    #endif
+
+    private var overviewFont: Font {
+        #if os(macOS)
+            .system(size: overviewTextSize)
+        #else
+            .subheadline
+        #endif
+    }
+
     @State private var overview: String?
     @State private var loaded = false
     @State private var showingOverview = false
@@ -16,21 +36,25 @@ struct FoundationOverviewSection: View {
                     showingOverview = true
                 } label: {
                     HStack(alignment: .bottom, spacing: 6) {
-                        Text(overview).lineLimit(3)
+                        Text(overview).lineLimit(maximumLines)
                             .frame(maxWidth: .infinity, alignment: .leading)
                         Text("… MORE").font(.caption.weight(.semibold))
                     }
-                    .font(.subheadline).multilineTextAlignment(.leading)
+                    .font(overviewFont).multilineTextAlignment(.leading)
                     .foregroundStyle(.secondary)
                     .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain).padding(.horizontal).padding(.bottom, 8)
+                .buttonStyle(.plain).padding(.horizontal, horizontalInset).padding(.bottom, 8)
                 .accessibilityLabel("Overview: " + overview)
                 .accessibilityHint("Opens the complete overview")
                 .sheet(isPresented: $showingOverview) {
                     NavigationStack {
                         ScrollView {
-                            Text(overview).frame(maxWidth: .infinity, alignment: .leading)
+                            Text(overview)
+                                #if os(macOS)
+                                    .font(overviewFont)
+                                #endif
+                                .frame(maxWidth: .infinity, alignment: .leading)
                                 .textSelection(.enabled).padding()
                         }
                         .navigationTitle("About " + item.title)
@@ -45,9 +69,12 @@ struct FoundationOverviewSection: View {
                             }
                         #endif
                     }
+                    // Match native sheet chrome to the semantic colors inherited from its detail.
+                    .preferredColorScheme(colorScheme)
                     #if os(iOS)
                         .presentationDetents([.medium, .large])
-                        .presentationDragIndicator(.visible)
+                        .presentationDragIndicator(.hidden)
+                        .foundationIdleGrabber(showsOverlay: true)
                         .accessibilityAction(.escape) { showingOverview = false }
                     #else
                         .frame(minWidth: 360, idealWidth: 480, minHeight: 320, idealHeight: 520)
@@ -56,8 +83,10 @@ struct FoundationOverviewSection: View {
                 }
             }
         }
-        .task(id: isActive) {
-            guard isActive, item.kind == .artist || item.kind == .album, !loaded else { return }
+        .task(id: isActive && !connectivity.localOnly) {
+            guard isActive, !connectivity.localOnly, item.kind == .artist || item.kind == .album,
+                !loaded
+            else { return }
             do {
                 let text = try await library.overview(for: item)
                 try Task.checkCancellation()
@@ -72,6 +101,7 @@ struct FoundationOverviewSection: View {
 
 /// Reuses catalog ownership and cards; each optional shelf fails independently.
 struct FoundationRelatedSection<Card: View>: View {
+    @EnvironmentObject private var connectivity: FoundationConnectivity
     let title: String
     let isActive: Bool
     var twoRows = false
@@ -99,31 +129,46 @@ struct FoundationRelatedSection<Card: View>: View {
                                 }
                             }
                         }
-                    }.padding(.horizontal)
+                    }.foundationCarouselContentPadding()
                 }.scrollIndicators(.hidden)
+                    .foundationMacShelfUnderlap(horizontalInset: 0, contentInset: 0)
             }
-            if let error = model.errorMessage {
-                Text(error).font(.caption).foregroundStyle(.secondary).padding(.horizontal)
-                Button("Retry") { request(model.retryRequest) }.padding(.horizontal)
+            if model.hasConnectionIssue {
+                FoundationOfflineNotice().padding(.horizontal)
             }
-            if model.isLoading {
+            if let error = model.errorMessage, !model.hasConnectionIssue {
+                if connectivity.localOnly {
+                    if model.items.isEmpty { FoundationOfflineNotice().padding(.horizontal) }
+                } else {
+                    Text(error).font(.caption).foregroundStyle(.secondary).padding(.horizontal)
+                    Button("Retry") { request(model.retryRequest) }.padding(.horizontal)
+                }
+            }
+            if model.isLoading, !connectivity.localOnly {
                 VStack(spacing: 20) {
                     FoundationLoadingPlaceholder(layout: .albumShelf)
                     if twoRows { FoundationLoadingPlaceholder(layout: .albumShelf) }
                 }.padding(.horizontal)
             }
             if model.nextStartIndex != nil {
-                Button("Load more") { request(.more) }.disabled(model.isLoading).padding(
+                Button("Load more") { request(.more) }.disabled(
+                    model.isLoading || connectivity.localOnly
+                ).padding(
                     .horizontal)
             }
         }
         .padding(.vertical, model.items.isEmpty && model.errorMessage == nil ? 0 : 12)
-        .task(id: isActive ? revision : nil) {
-            await model.loadPending(ifActive: isActive, using: loader)
+        .onChange(of: connectivity.successfulRetryRevision) { _, _ in
+            model.request(.refresh)
+            revision += 1
+        }
+        .task(id: isActive && !connectivity.localOnly ? revision : nil) {
+            await model.loadPending(ifActive: isActive && !connectivity.localOnly, using: loader)
         }
     }
 
     private func request(_ request: FoundationBrowseModel.Request) {
+        guard !connectivity.localOnly else { return }
         model.request(request)
         revision += 1
     }
@@ -131,6 +176,8 @@ struct FoundationRelatedSection<Card: View>: View {
 
 /// A bounded personal-history shelf; it never expands the artist's catalog.
 struct FoundationArtistMostPlayed: View {
+    @EnvironmentObject private var downloads: FoundationDownloads
+    @EnvironmentObject private var connectivity: FoundationConnectivity
     let artist: FoundationItem
     let library: any FoundationLibrary
     @ObservedObject var player: FoundationPlayer
@@ -162,23 +209,32 @@ struct FoundationArtistMostPlayed: View {
                                 }
                             }.frame(width: 300)
                         }
-                    }.padding(.horizontal)
+                    }.foundationCarouselContentPadding()
                 }.scrollIndicators(.hidden)
+                    .foundationMacShelfUnderlap(horizontalInset: 0, contentInset: 0)
             }
-            if let error = model.errorMessage {
+            if model.hasConnectionIssue {
+                FoundationOfflineNotice().padding(.horizontal)
+            }
+            if let error = model.errorMessage, !model.hasConnectionIssue {
                 Text(error).font(.caption).foregroundStyle(.secondary).padding(.horizontal)
                 Button("Retry") {
+                    guard !connectivity.localOnly else { return }
                     model.request(model.retryRequest)
                     revision += 1
-                }.padding(.horizontal)
+                }.disabled(connectivity.localOnly).padding(.horizontal)
             }
-            if model.isLoading {
+            if model.isLoading, !connectivity.localOnly {
                 FoundationLoadingPlaceholder().padding(.horizontal)
             }
         }
         .padding(.vertical, model.items.isEmpty && model.errorMessage == nil ? 0 : 12)
-        .task(id: isActive ? revision : nil) {
-            await model.loadPending(ifActive: isActive) { _ in
+        .onChange(of: connectivity.successfulRetryRevision) { _, _ in
+            model.request(.refresh)
+            revision += 1
+        }
+        .task(id: isActive && !connectivity.localOnly ? revision : nil) {
+            await model.loadPending(ifActive: isActive && !connectivity.localOnly) { _ in
                 try await library.mostPlayed(artistID: artist.id)
             }
         }
@@ -186,7 +242,199 @@ struct FoundationArtistMostPlayed: View {
 
     private func play(_ index: Int) {
         guard let selection = model.trackQueue(selecting: index) else { return }
-        player.setQueue(selection.items, selectedIndex: selection.index)
+        if connectivity.localOnly {
+            guard downloads.isReady(selection.items[selection.index]) else { return }
+            let ready = selection.items.filter { downloads.isReady($0) }
+            let index = selection.items.prefix(selection.index).filter { downloads.isReady($0) }
+                .count
+            player.setQueue(ready, selectedIndex: index)
+        } else {
+            player.setQueue(selection.items, selectedIndex: selection.index)
+        }
 
     }
 }
+
+/// A visual hint only; native sheet and player gestures keep ownership of dismissal.
+private struct FoundationIdleGrabber: ViewModifier {
+    let showsOverlay: Bool
+    @Environment(\.foundationReduceMotion) private var reduceMotion
+    @State private var visible = true
+    @State private var activity = 0
+    @State private var touching = false
+    #if os(macOS)
+        @GestureState private var dragging = false
+    #endif
+
+    func body(content: Content) -> some View {
+        content
+            .environment(\.foundationGrabberVisible, visible)
+            .overlay(alignment: .top) {
+                if showsOverlay {
+                    Capsule().fill(.secondary.opacity(0.65))
+                        .frame(width: 36, height: 5)
+                        .padding(.top, 8)
+                        .opacity(visible ? 1 : 0)
+                        .allowsHitTesting(false)
+                        .accessibilityHidden(true)
+                }
+            }
+            #if os(iOS)
+                .background {
+                    FoundationGrabberTouchObserver { active in
+                        touching = active
+                        activity += 1
+                    }
+                    .allowsHitTesting(false)
+                }
+            #else
+                .simultaneousGesture(TapGesture().onEnded { activity += 1 })
+                .simultaneousGesture(
+                    DragGesture(minimumDistance: 10)
+                        .updating($dragging) { _, state, _ in state = true }
+                )
+                .onChange(of: dragging) { _, active in
+                    touching = active
+                    activity += 1
+                }
+                .onHover { hovering in
+                    if hovering { activity += 1 }
+                }
+            #endif
+            .task(id: activity) {
+                visible = true
+                guard !touching else { return }
+                do {
+                    try await Task.sleep(for: .seconds(3))
+                    try Task.checkCancellation()
+                    withAnimation(reduceMotion ? nil : .easeOut(duration: 0.35)) {
+                        visible = false
+                    }
+                } catch {}
+            }
+    }
+}
+
+private struct FoundationGrabberVisibleKey: EnvironmentKey {
+    static let defaultValue = true
+}
+
+extension EnvironmentValues {
+    fileprivate var foundationGrabberVisible: Bool {
+        get { self[FoundationGrabberVisibleKey.self] }
+        set { self[FoundationGrabberVisibleKey.self] = newValue }
+    }
+}
+
+private struct FoundationGrabberVisibility: ViewModifier {
+    @Environment(\.foundationGrabberVisible) private var visible
+    func body(content: Content) -> some View {
+        content.opacity(visible ? 1 : 0)
+    }
+}
+
+extension View {
+    func foundationIdleGrabber(showsOverlay: Bool = false) -> some View {
+        modifier(FoundationIdleGrabber(showsOverlay: showsOverlay))
+    }
+
+    func foundationGrabberVisibility() -> some View {
+        modifier(FoundationGrabberVisibility())
+    }
+}
+
+#if os(iOS)
+    /// Observes activity without winning, cancelling, or delaying any app gesture.
+    private struct FoundationGrabberTouchObserver: UIViewRepresentable {
+        let interaction: (Bool) -> Void
+
+        func makeUIView(context: Context) -> ObserverView {
+            let view = ObserverView()
+            view.recognizer.interaction = interaction
+            return view
+        }
+
+        func updateUIView(_ view: ObserverView, context: Context) {
+            view.recognizer.interaction = interaction
+        }
+
+        static func dismantleUIView(_ view: ObserverView, coordinator: ()) {
+            view.recognizer.interaction = nil
+            view.recognizer.view?.removeGestureRecognizer(view.recognizer)
+        }
+
+        final class ObserverView: UIView {
+            let recognizer = ActivityRecognizer()
+
+            override func didMoveToWindow() {
+                super.didMoveToWindow()
+                guard recognizer.view !== window else { return }
+                recognizer.view?.removeGestureRecognizer(recognizer)
+                window?.addGestureRecognizer(recognizer)
+            }
+        }
+
+        final class ActivityRecognizer: UIGestureRecognizer, UIGestureRecognizerDelegate {
+            var interaction: ((Bool) -> Void)?
+            private var activeTouches: Set<UITouch> = []
+
+            init() {
+                super.init(target: nil, action: nil)
+                cancelsTouchesInView = false
+                delaysTouchesBegan = false
+                delaysTouchesEnded = false
+                delegate = self
+            }
+
+            override func canPrevent(_ preventedGestureRecognizer: UIGestureRecognizer) -> Bool {
+                false
+            }
+
+            override func canBePrevented(by preventingGestureRecognizer: UIGestureRecognizer)
+                -> Bool
+            {
+                false
+            }
+
+            func gestureRecognizer(
+                _ gestureRecognizer: UIGestureRecognizer,
+                shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
+            ) -> Bool {
+                true
+            }
+
+            override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
+                let wasEmpty = activeTouches.isEmpty
+                activeTouches.formUnion(touches)
+                state = wasEmpty ? .began : .changed
+                if wasEmpty { interaction?(true) }
+            }
+
+            override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) {
+                state = .changed
+            }
+
+            override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) {
+                finish(touches)
+            }
+
+            override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent) {
+                finish(touches)
+            }
+
+            private func finish(_ touches: Set<UITouch>) {
+                activeTouches.subtract(touches)
+                if activeTouches.isEmpty {
+                    interaction?(false)
+                    state = .ended
+                }
+            }
+
+            override func reset() {
+                super.reset()
+                if !activeTouches.isEmpty { interaction?(false) }
+                activeTouches.removeAll()
+            }
+        }
+    }
+#endif

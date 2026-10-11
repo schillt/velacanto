@@ -26,7 +26,11 @@ test_ios() {
     printf '%s\n' 'Set VELACANTO_IOS_SIMULATOR_DESTINATION to an existing authorized OS 27 simulator.' >&2
     return 2
   fi
-  run_xcode -configuration Debug -destination "$ios_destination" -parallel-testing-enabled NO test
+  # Simulator Keychain tests need the identity entitlements supplied by signing.
+  # Ad-hoc signing requires neither a certificate nor a provisioning profile.
+  run_xcode CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual \
+    DEVELOPMENT_TEAM= -configuration Debug -destination "$ios_destination" \
+    -parallel-testing-enabled NO test
 }
 release() {
   run_xcode -configuration Release -destination 'generic/platform=macOS' build

@@ -1,2 +1,4 @@
 # Preserve upstream license text verbatim, including its Markdown line breaks.
 NativeFoundation/Resources/ThirdPartyNotices.txt -whitespace
+# PDF cross-reference records require fixed-width trailing spaces.
+NativeFoundation/Resources/NavigationIcons.xcassets/HomeRounded.imageset/HomeRounded.pdf binary

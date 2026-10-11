@@ -10,6 +10,33 @@ final class FoundationNowPlayingTests: XCTestCase {
     private let track = FoundationItem(
         id: "synthetic", title: "Test title", subtitle: "Test artist", kind: .track, duration: 8)
 
+    func testRepeatAllEnablesSystemNextAtEndAndWrapsOccurrence() async throws {
+        let source = NowPlayingSourceProbe()
+        let player = FoundationPlayer(
+            resolve: { _ in await source.resolve() },
+            makeItem: { _ in AVPlayerItem(asset: AVMutableComposition()) },
+            activateSession: {}, deactivateSession: {}, startPlayback: { _ in })
+        let bridge = FoundationNowPlaying(player: player)
+        defer {
+            bridge.invalidate()
+            player.stop()
+        }
+        player.setQueue([track, track], selectedIndex: 1)
+        await player.selectionTask?.value
+        await player.playTask?.value
+        await bridge.updateTask?.value
+        let last = try XCTUnwrap(player.selectedEntryID)
+        XCTAssertFalse(bridge.availability.next)
+        player.setRepeat(.all)
+        await bridge.updateTask?.value
+        XCTAssertTrue(bridge.availability.next)
+        try bridge.perform(.next, entryID: last)
+        await player.selectionTask?.value
+        await player.playTask?.value
+        XCTAssertEqual(player.selectedEntryID, player.queue.first?.id)
+        XCTAssertThrowsError(try bridge.perform(.next, entryID: last))
+    }
+
     func testTextCommandsBoundariesAndDuplicateOccurrenceOwnership() async throws {
         let source = NowPlayingSourceProbe()
         let player = FoundationPlayer(
@@ -101,12 +128,43 @@ final class FoundationNowPlayingTests: XCTestCase {
         XCTAssertEqual(player.nativePlayer.currentTime().seconds, 3, accuracy: 0.3)
     }
 
+    func testNativePauseBeforePublishedStateKeepsSnapshotValid() async throws {
+        let file = try XCTUnwrap(FoundationTestTones.resolve(FoundationTestTones.items[0]))
+        let player = FoundationPlayer(
+            resolve: { _ in file }, activateSession: {}, deactivateSession: {})
+        player.nativePlayer.volume = 0
+        player.setQueue([track], selectedIndex: 0)
+        await waitForPlayback(player)
+        // Native changes precede the queued MainActor callback updating published state.
+        player.nativePlayer.pause()
+        XCTAssertEqual(player.state, .playing)
+        XCTAssertEqual(player.nativePlayer.rate, 0)
+        let bridge = FoundationNowPlaying(player: player)
+        defer {
+            bridge.invalidate()
+            player.stop()
+        }
+        XCTAssertNotNil(bridge.playbackSnapshot)
+        XCTAssertTrue(player.wantsPlayback, "Presentation must not change playback intent")
+        XCTAssertTrue(bridge.availability.pause)
+        let paused = XCTestExpectation(description: "Native pause reaches published player state")
+        let subscription = player.$state.filter { $0 == .paused }.first()
+            .sink { _ in paused.fulfill() }
+        let result = await XCTWaiter.fulfillment(of: [paused], timeout: 5)
+        subscription.cancel()
+        XCTAssertEqual(result, .completed)
+        await bridge.updateTask?.value
+        XCTAssertEqual(player.state, .paused)
+        XCTAssertNotNil(bridge.playbackSnapshot)
+    }
+
     func testDeniedPrimacyDoesNotRetryDuringNaturalHandoff() async throws {
         let file = try XCTUnwrap(
             FoundationTestTones.resolve(FoundationTestTones.items[0]))
         let source = NowPlayingHandoffProbe(file: file)
         let player = FoundationPlayer(
-            resolve: { _ in await source.resolve() }, activateSession: {}, deactivateSession: {})
+            resolve: { _ in try await source.resolve() }, activateSession: {}, deactivateSession: {}
+        )
         player.nativePlayer.volume = 0
         player.setQueue([track, track], selectedIndex: 0)
         await waitForPlayback(player)
@@ -118,11 +176,20 @@ final class FoundationNowPlayingTests: XCTestCase {
         defer {
             bridge.invalidate()
             player.stop()
+            Task { await source.complete() }
         }
         await bridge.primacyTask?.value
         XCTAssertEqual(requests, 1)
         player.didReachEnd(try XCTUnwrap(player.nativePlayer.currentItem))
-        await source.waitForPending()
+        let handoff = await source.waitForPending()
+        guard handoff == .completed else {
+            let calls = await source.calls
+            await source.complete()
+            XCTFail(
+                "Natural handoff did not reach the second source resolve; observed \(calls) resolves"
+            )
+            return
+        }
         await bridge.updateTask?.value
         XCTAssertEqual(player.state, .loading)
         XCTAssertTrue(player.wantsPlayback)
@@ -140,6 +207,49 @@ final class FoundationNowPlayingTests: XCTestCase {
         await bridge.updateTask?.value
         await bridge.primacyTask?.value
         XCTAssertEqual(requests, 2)
+    }
+
+    func testHandoffProbeMissingSecondResolveHasFiniteTimeout() async throws {
+        let source = NowPlayingHandoffProbe(file: URL(fileURLWithPath: "/synthetic"))
+        _ = try await source.resolve()
+        let outcome = await source.waitForPending(timeout: 0.01)
+        XCTAssertEqual(outcome, .timedOut)
+        let calls = await source.calls
+        XCTAssertEqual(calls, 1, "The missing event is the second source resolve")
+        await source.complete()
+    }
+
+    func testHandoffProbeCancellationReleasesHeldResolve() async throws {
+        let source = NowPlayingHandoffProbe(file: URL(fileURLWithPath: "/synthetic"))
+        _ = try await source.resolve()
+        let finished = XCTestExpectation(description: "Cancelled source resolve completed")
+        let resolving = Task {
+            defer { finished.fulfill() }
+            return try await source.resolve()
+        }
+        let outcome = await source.waitForPending(timeout: 2)
+        guard outcome == .completed else {
+            resolving.cancel()
+            await source.complete()
+            XCTFail("Fixture did not hold the second source resolve")
+            return
+        }
+        resolving.cancel()
+        let cancelled = await XCTWaiter.fulfillment(of: [finished], timeout: 2)
+        guard cancelled == .completed else {
+            await source.complete()
+            XCTFail("Cancellation did not release the held second source resolve")
+            return
+        }
+        do {
+            _ = try await resolving.value
+            XCTFail("Cancelled fixture returned a playable source")
+        } catch is CancellationError {} catch {
+            XCTFail("Unexpected fixture cancellation error")
+        }
+        let isPending = await source.isPending
+        XCTAssertFalse(isPending)
+        await source.complete()
     }
 
     func testPauseBeforeQueuedPrimacyPreventsRequest() async throws {
@@ -206,25 +316,34 @@ private actor NowPlayingSourceProbe {
 
 private actor NowPlayingHandoffProbe {
     let file: URL
-    private var calls = 0
-    private var pending: CheckedContinuation<URL, Never>?
-    private var waiter: CheckedContinuation<Void, Never>?
+    private(set) var calls = 0
+    private var pending: CheckedContinuation<URL, Error>?
+    private let pendingEvent = XCTestExpectation(description: "Second source resolve reached")
+    var isPending: Bool { pending != nil }
 
     init(file: URL) { self.file = file }
 
-    func resolve() async -> URL {
+    func resolve() async throws -> URL {
+        try Task.checkCancellation()
         calls += 1
         guard calls == 2 else { return file }
-        return await withCheckedContinuation { continuation in
-            pending = continuation
-            waiter?.resume()
-            waiter = nil
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                pending = continuation
+                pendingEvent.fulfill()
+            }
+        } onCancel: {
+            Task { await self.cancelPending() }
         }
     }
 
-    func waitForPending() async {
-        guard pending == nil else { return }
-        await withCheckedContinuation { waiter = $0 }
+    func waitForPending(timeout: TimeInterval = 10) async -> XCTWaiter.Result {
+        await XCTWaiter.fulfillment(of: [pendingEvent], timeout: timeout)
+    }
+
+    private func cancelPending() {
+        pending?.resume(throwing: CancellationError())
+        pending = nil
     }
 
     func complete() {

@@ -1,14 +1,16 @@
 import SwiftUI
 
-/// One view-owned image read. Failure remains a local placeholder; no retries.
+/// View publication is owned locally; catalog bytes and decoding share the account cache.
 struct FoundationCatalogArtwork: View {
     enum Source {
         case catalog
         case current(FoundationCurrentArtwork.Result?)
     }
+    @EnvironmentObject private var downloads: FoundationDownloads
+    @EnvironmentObject private var connectivity: FoundationConnectivity
     var source: Source = .catalog
-    private var currentResultID: UUID? {
-        if case .current(let result) = source { return result?.id }
+    private var currentResultRevision: UUID? {
+        if case .current(let result) = source { return result?.revision }
         return nil
     }
     let item: FoundationItem
@@ -21,7 +23,7 @@ struct FoundationCatalogArtwork: View {
     var loadedImage: Binding<Image?>? = nil
     var upperEdgeColors: Binding<[Color]?>? = nil
     @State private var image: Image?
-    @State private var completed = false
+    @State private var installedIdentity: String?
     #if DEBUG
         @Environment(\.foundationTraceOrigin) private var traceOrigin
     #endif
@@ -30,8 +32,8 @@ struct FoundationCatalogArtwork: View {
         ZStack {
             RoundedRectangle(cornerRadius: isHero ? 0 : (item.kind == .artist ? size / 2 : 6)).fill(
                 .quaternary)
-            if let image {
-                image.resizable().scaledToFill()
+            if let displayImage {
+                displayImage.resizable().scaledToFill()
                     .scaleEffect(item.kind == .genre ? 2 : 1, anchor: .topLeading)
             } else {
                 Image(systemName: item.kind == .artist ? "music.mic" : "music.note")
@@ -43,53 +45,72 @@ struct FoundationCatalogArtwork: View {
             RoundedRectangle(cornerRadius: isHero ? 0 : (item.kind == .artist ? size / 2 : 6))
         )
         .accessibilityHidden(true)
-        .task(id: currentResultID) {
+        .task(id: currentResultRevision) {
             if case .current(let result) = source {
-                installImage(result?.image)
+                installImage(result?.image, precomputedColor: result?.tint)
             }
         }
-        .task(id: isActive) {
-            guard case .catalog = source else { return }
+        .task(id: artworkTaskIdentity) {
+            guard case .catalog = source, isActive, !Task.isCancelled else { return }
+            let identity = item.sharedArtworkIdentity
+            if installedIdentity != identity {
+                installImage(nil)
+                installedIdentity = identity
+            }
+            if let data = await downloads.retainedArtwork(for: item) {
+                let result = await Task.detached(priority: .utility) {
+                    FoundationCurrentArtwork.decode(data, maximumPixels: isHero ? 640 : 160)
+                }.value
+                guard !Task.isCancelled else { return }
+                installImage(result?.image)
+                return
+            }
+            if let cached = try? await library.cachedArtworkResult(
+                for: item, size: isHero ? 640 : 160)
+            {
+                guard !Task.isCancelled else { return }
+                installImage(cached.image)
+            }
             #if DEBUG
                 await FoundationTrace.withPage(origin: traceOrigin, page: .artwork) {
-                    guard isActive, !completed, !Task.isCancelled else { return }
-                    do {
-                        let data = try await library.artwork(for: item, size: isHero ? 640 : 160)
-                        try Task.checkCancellation()
-                        installArtwork(data)
-                        completed = true
-                    } catch {
-                        if !Task.isCancelled { completed = true }
-                    }
+                    await loadCatalogArtwork()
                 }
             #else
-                guard isActive, !completed, !Task.isCancelled else { return }
-                do {
-                    let data = try await library.artwork(for: item, size: isHero ? 640 : 160)
-                    try Task.checkCancellation()
-                    installArtwork(data)
-                    completed = true
-                } catch {
-                    if !Task.isCancelled { completed = true }
-                }
+                await loadCatalogArtwork()
             #endif
         }
     }
 
-    private func installArtwork(_ data: Data?) {
-        #if os(iOS)
-            let native = data.flatMap { UIImage(data: $0) }
-            let cgImage = native?.cgImage
-            let displayed = native.map { Image(uiImage: $0) }
-        #else
-            let native = data.flatMap { NSImage(data: $0) }
-            let cgImage = native?.cgImage(forProposedRect: nil, context: nil, hints: nil)
-            let displayed = native.map { Image(nsImage: $0) }
-        #endif
-        installImage(cgImage, displayImage: displayed)
+    // Current artwork is already decoded before presentation. Use it in the first
+    // render rather than waiting for the task to copy it into view state.
+    private var displayImage: Image? {
+        if case .current(let result) = source {
+            return result.map { Image(decorative: $0.image, scale: 1) }
+        }
+        return image
     }
 
-    private func installImage(_ cgImage: CGImage?, displayImage: Image? = nil) {
+    private func loadCatalogArtwork() async {
+        do {
+            let result = try await library.artworkResult(
+                for: item, size: isHero ? 640 : 160,
+                allowsNetwork: !connectivity.localOnly)
+            try Task.checkCancellation()
+            if let result { installImage(result.image) }
+        } catch {
+            // Optional failure keeps the deterministic placeholder until task identity changes.
+        }
+    }
+
+    private var artworkTaskIdentity: String {
+        let key = FoundationArtworkCache.key(item, pixels: isHero ? 640 : 160)
+        return
+            "\(isActive)-\(key.identity)-\(key.pixels)-\(downloads.retainedArtworkIdentity(for: item) ?? "")-\(connectivity.localOnly)"
+    }
+
+    private func installImage(
+        _ cgImage: CGImage?, displayImage: Image? = nil, precomputedColor: Color? = nil
+    ) {
         image = displayImage ?? cgImage.map { Image(decorative: $0, scale: 1) }
         loadedImage?.wrappedValue = image
         guard let cgImage else {
@@ -126,9 +147,19 @@ struct FoundationCatalogArtwork: View {
             }
         }
         guard sampledColor != nil else { return }
+        if let precomputedColor {
+            sampledColor?.wrappedValue = precomputedColor
+            return
+        }
+        if let color = Self.sampledColor(for: cgImage, isGenre: item.kind == .genre) {
+            sampledColor?.wrappedValue = color
+        }
+    }
+
+    nonisolated static func sampledColor(for cgImage: CGImage, isGenre: Bool = false) -> Color? {
         // Genre artwork displays the top-left tile of the supplied image.
         let source =
-            item.kind == .genre
+            isGenre
             ? cgImage.cropping(
                 to: CGRect(
                     x: 0, y: 0, width: max(1, cgImage.width / 2),
@@ -173,13 +204,18 @@ struct FoundationCatalogArtwork: View {
             }
             return Color(red: channels[0], green: channels[1], blue: channels[2])
         }
-        if let color { sampledColor?.wrappedValue = color }
+        return color
     }
 
 }
-
 /// Project a supplied album reference for track covers without a metadata lookup.
 extension FoundationItem {
+    /// Stable across rendition upgrades and missing revision metadata; no provider lookup.
+    var sharedArtworkIdentity: String {
+        let artwork = catalogArtworkItem
+        return FoundationArtworkCache.digest("\(artwork.kind)\0\(artwork.id)")
+    }
+
     var catalogArtworkItem: FoundationItem {
         guard kind == .track, let album else { return self }
         return FoundationItem(
