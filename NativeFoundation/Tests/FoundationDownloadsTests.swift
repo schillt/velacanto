@@ -17,8 +17,10 @@ final class FoundationDownloadsTests: XCTestCase {
         FoundationItem(id: id, title: "Synthetic", subtitle: "Fixture", kind: kind, duration: 1)
     }
 
-    private func waitUntil(_ condition: @MainActor () -> Bool) async throws {
-        let deadline = ContinuousClock.now.advanced(by: .seconds(3))
+    private func waitUntil(
+        timeout: Duration = .seconds(3), _ condition: @MainActor () -> Bool
+    ) async throws {
+        let deadline = ContinuousClock.now.advanced(by: timeout)
         while !condition(), ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(5))
         }
@@ -892,7 +894,7 @@ final class FoundationDownloadsTests: XCTestCase {
         manager.updateConnectivity(isAllowed: true)
         manager.download(playlist)
         manager.download(first)
-        try await waitUntil {
+        try await waitUntil(timeout: .seconds(15)) {
             manager.artworkBytes > 0 && manager.owners.allSatisfy { $0.state == .ready }
         }
         let retained = await manager.retainedArtwork(for: first)
@@ -1034,7 +1036,12 @@ final class FoundationDownloadsTests: XCTestCase {
             monitorConnectivity: false)
         manager.updateConnectivity(isAllowed: true)
         manager.download(item("playlist", kind: .playlist))
-        try await waitUntil { manager.artworkBytes > 0 }
+        // Artwork and audio have independent workers. Finish audio before corrupting
+        // the manifest so the injected failure exercises only artwork publication.
+        try await waitUntil(timeout: .seconds(15)) {
+            manager.artworkBytes > 0 && manager.isReady(track)
+                && manager.owners.allSatisfy { $0.state == .ready }
+        }
         await manager.artworkTask?.value
         let oldData = await manager.retainedArtwork(for: track)
         let revision = manager.artworkRevision
@@ -1080,10 +1087,13 @@ final class FoundationDownloadsTests: XCTestCase {
         manager.updateConnectivity(isAllowed: true)
         manager.download(track)
         try await waitUntilAsync { await gate.started }
+        // A held artwork response does not imply the separate audio transfer committed.
+        try await waitUntil(timeout: .seconds(15)) { manager.isReady(track) }
         XCTAssertTrue(manager.isReady(track))
+        let task = manager.artworkTask
         manager.removeTrack(track)
         await gate.resume()
-        for _ in 0..<30 { await Task.yield() }
+        await task?.value
         XCTAssertEqual(manager.artworkBytes, 0)
         let data = await manager.retainedArtwork(for: track)
         XCTAssertNil(data)
