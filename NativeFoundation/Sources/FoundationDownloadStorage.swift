@@ -14,6 +14,8 @@ nonisolated struct FoundationStoredDownloadItem: Codable, Equatable, Sendable {
     let albumTitle: String?
     let albumTag: String?
     var artist: FoundationItemReference? = nil
+    var trackNumber: Int? = nil
+    var discNumber: Int? = nil
 
     init(_ item: FoundationItem) {
         id = item.id
@@ -33,6 +35,8 @@ nonisolated struct FoundationStoredDownloadItem: Codable, Equatable, Sendable {
         albumTitle = item.album?.title
         artist = item.artist
         albumTag = item.album?.primaryImageTag
+        trackNumber = item.trackNumber
+        discNumber = item.discNumber
     }
 
     var item: FoundationItem {
@@ -45,6 +49,8 @@ nonisolated struct FoundationStoredDownloadItem: Codable, Equatable, Sendable {
                 id: albumID, title: albumTitle, primaryImageTag: albumTag)
         }
         result.artist = artist
+        result.trackNumber = trackNumber
+        result.discNumber = discNumber
         return result
     }
 }

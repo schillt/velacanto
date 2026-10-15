@@ -265,6 +265,7 @@ struct FoundationPlayerView: View {
             }
             .onChange(of: relatedItem != nil) { _, _ in updateArtworkDismissalAvailability() }
         #endif
+        .onAppear { currentArtwork.retryMissingArtwork() }
         .task(id: LoadingCueKey(entryID: player.selectedEntryID, waiting: isWaitingForAudio)) {
             showsDelayedLoading = false
             guard isWaitingForAudio else { return }
@@ -465,6 +466,7 @@ struct FoundationPlayerView: View {
                 player.previous()
             } label: {
                 Image(systemName: "backward.fill").frame(width: 60, height: 60)
+                    .contentShape(Rectangle())
             }
             .accessibilityLabel("Previous").disabled(selectedIndex == nil)
             Spacer()
@@ -479,6 +481,7 @@ struct FoundationPlayerView: View {
                     .pulse, options: .repeating, isActive: showsDelayedLoading && !reduceMotion
                 )
                 .font(.system(size: 46)).frame(width: 72, height: 72)
+                .contentShape(Rectangle())
             }.accessibilityLabel(player.wantsPlayback ? "Pause" : "Play")
                 .accessibilityValue(showsDelayedLoading ? "Loading audio" : "")
                 .disabled(current == nil)
@@ -487,6 +490,7 @@ struct FoundationPlayerView: View {
                 player.next()
             } label: {
                 Image(systemName: "forward.fill").frame(width: 60, height: 60)
+                    .contentShape(Rectangle())
             }
             .accessibilityLabel("Next").disabled(
                 !player.canAdvance)

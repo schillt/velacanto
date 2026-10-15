@@ -60,6 +60,8 @@ final class FoundationDownloads: ObservableObject {
     @Published private(set) var artworkRevision: UInt = 0
     @Published private(set) var catalogRevision: UInt = 0
     private let library: any FoundationLibrary
+    private let projectTracks: @MainActor ([FoundationItem], String?) -> [FoundationItem]
+    private let observeTracks: @MainActor ([FoundationItem], String?) -> Void
     private let directory: URL
     private let transfer: Transfer
     private let verifyReacquisitionFiles: FileVerifier
@@ -92,9 +94,15 @@ final class FoundationDownloads: ObservableObject {
     init(
         scope: String, library: any FoundationLibrary, root: URL? = nil,
         transfer: Transfer? = nil, monitorConnectivity: Bool = true,
-        verifyReacquisitionFiles: FileVerifier? = nil
+        verifyReacquisitionFiles: FileVerifier? = nil,
+        observeTracks: @escaping @MainActor ([FoundationItem], String?) -> Void = { _, _ in },
+        projectTracks: @escaping @MainActor ([FoundationItem], String?) -> [FoundationItem] = {
+            items, _ in items
+        }
     ) {
         self.library = library
+        self.projectTracks = projectTracks
+        self.observeTracks = observeTracks
         self.verifyReacquisitionFiles =
             verifyReacquisitionFiles ?? { files, directory in
                 try await FoundationDownloadStorage.verifiedFiles(files, directory: directory)
@@ -117,6 +125,14 @@ final class FoundationDownloads: ObservableObject {
                     FoundationDownloadOwner(
                         id: saved.id, item: saved.item.item, tracks: saved.tracks.map(\.item),
                         state: saved.paused ? .cancelled : .queued))
+            }
+            for owner in owners {
+                observeTracks(owner.tracks, owner.item.kind == .album ? owner.item.id : nil)
+            }
+            for collection in manifest.collections ?? [] {
+                observeTracks(
+                    collection.tracks.map(\.item),
+                    collection.item.kind == "album" ? collection.item.id : nil)
             }
             if manifest.files.isEmpty && (manifest.artwork?.isEmpty ?? true) {
                 try finishInventory()
@@ -255,7 +271,9 @@ final class FoundationDownloads: ObservableObject {
     }
 
     func download(_ item: FoundationItem) {
-        guard isLive, storageUsable, [.track, .album, .playlist].contains(item.kind) else { return }
+        guard isLive, storageUsable, [.track, .album, .playlist].contains(item.kind),
+            item.kind != .track || !projectTracks([item], nil).isEmpty
+        else { return }
         let id = ownerID(item)
         if owners.contains(where: { $0.id == id }) {
             retry(ownerID: id)
@@ -285,6 +303,8 @@ final class FoundationDownloads: ObservableObject {
 
     func retry(ownerID: String) {
         guard isLive, storageUsable, let index = owners.firstIndex(where: { $0.id == ownerID })
+        else { return }
+        guard owners[index].item.kind != .track || !projectTracks([owners[index].item], nil).isEmpty
         else { return }
         paused.remove(ownerID)
         owners[index].state = .queued
@@ -348,7 +368,9 @@ final class FoundationDownloads: ObservableObject {
     /// Physical files are shared; the Songs projection never repeats playlist occurrences.
     var downloadedSongs: [FoundationItem] {
         var seen: Set<String> = []
-        return owners.flatMap(\.tracks).filter { isReady($0) && seen.insert($0.id).inserted }
+        // Visibility is reversible; physical manifests and retained file accounting stay raw.
+        let ready = owners.flatMap(\.tracks).filter { isReady($0) && seen.insert($0.id).inserted }
+        return projectTracks(ready, nil)
     }
 
     var downloadedPlaylists: [FoundationItem] {
@@ -455,21 +477,25 @@ final class FoundationDownloads: ObservableObject {
         }
     }
 
-    /// Local search uses verified playable audio and its remembered related containers only.
-    func localSearchItems(query: String, kind: FoundationItem.Kind? = nil) -> [FoundationItem] {
-        let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard isLive, storageUsable, !query.isEmpty else {
-            return []
-        }
+    /// Shared account-owned catalog projection for local browsing and search.
+    func localCatalogItems(kind: FoundationItem.Kind? = nil) -> [FoundationItem] {
+        guard isLive, storageUsable else { return [] }
         var seen: Set<String> = []
         let containers = downloadedAlbums + downloadedArtists + downloadedPlaylists
         let candidates =
             downloadedSongs
             + containers.filter { availability(for: $0) != .unavailable || $0.kind == .artist }
+        return candidates.filter {
+            (kind == nil || kind == $0.kind) && seen.insert(collectionKey($0)).inserted
+        }
+    }
+
+    /// Local search uses verified playable audio and its remembered related containers only.
+    func localSearchItems(query: String, kind: FoundationItem.Kind? = nil) -> [FoundationItem] {
+        let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return [] }
+        let candidates = localCatalogItems(kind: kind)
         return candidates.filter { item in
-            guard kind == nil || kind == item.kind, seen.insert(collectionKey(item)).inserted else {
-                return false
-            }
             return [item.title, item.subtitle, item.album?.title ?? "", item.artist?.title ?? ""]
                 .contains {
                     $0.localizedStandardContains(query)
@@ -617,12 +643,15 @@ final class FoundationDownloads: ObservableObject {
     }
 
     func browseTracks(for item: FoundationItem) -> [FoundationItem] {
-        knownCollectionTracks(for: item).filter { isReady($0) }
+        projectTracks(
+            knownCollectionTracks(for: item).filter { isReady($0) },
+            item.kind == .album ? item.id : nil)
     }
 
     func availability(for item: FoundationItem) -> FoundationDownloadAvailability {
         if item.kind == .track { return isReady(item) ? .ready : .unavailable }
-        let tracks = knownCollectionTracks(for: item)
+        let tracks = projectTracks(
+            knownCollectionTracks(for: item), item.kind == .album ? item.id : nil)
         let ready = tracks.filter { isReady($0) }.count
         guard ready > 0 else { return .unavailable }
         // Partial derived groups do not prove complete membership; a full server snapshot does.
@@ -661,7 +690,7 @@ final class FoundationDownloads: ObservableObject {
     }
 
     func removeTrack(_ item: FoundationItem) {
-        guard item.kind == .track else { return }
+        guard item.kind == .track, !projectTracks([item], nil).isEmpty else { return }
         removeSelected(ownerIDs: [], trackIDs: [item.id])
     }
 
@@ -830,6 +859,10 @@ final class FoundationDownloads: ObservableObject {
                     guard let index = owners.firstIndex(where: { $0.id == owner.id }) else {
                         return
                     }
+                    // Read the current preference after all expansion/verification awaits.
+                    observeTracks(tracks, owner.item.kind == .album ? owner.item.id : nil)
+                    let projectedTracks = projectTracks(
+                        tracks, owner.item.kind == .album ? owner.item.id : nil)
                     let before = owners[index].tracks
                     let previousManifest = manifest
                     let previousExpanded = expanded
@@ -838,7 +871,7 @@ final class FoundationDownloads: ObservableObject {
                     expanded.insert(owner.id)
                     if reacquires {
                         manifest.excludedTrackIDs = (manifest.excludedTrackIDs ?? []).subtracting(
-                            Set(tracks.map(\.id)))
+                            Set(projectedTracks.map(\.id)))
                         reacquiring.remove(owner.id)
                     }
                     do { try save() } catch {
@@ -856,7 +889,13 @@ final class FoundationDownloads: ObservableObject {
                 guard let current = owners.first(where: { $0.id == owner.id }) else { continue }
                 setState(owner.id, .downloading)
                 var visited: Set<String> = []
-                for track in current.tracks where visited.insert(track.id).inserted {
+                let demand = projectTracks(
+                    current.tracks, current.item.kind == .album ? current.item.id : nil)
+                for track in demand where visited.insert(track.id).inserted {
+                    guard
+                        !projectTracks([track], current.item.kind == .album ? current.item.id : nil)
+                            .isEmpty
+                    else { continue }
                     try check(epoch: epoch, ownerID: owner.id)
                     if isExcluded(track.id) || isReady(track) { continue }
                     transferRevision &+= 1
@@ -867,6 +906,10 @@ final class FoundationDownloads: ObservableObject {
                     }
                     let source = try await library.downloadSource(for: track)
                     try check(epoch: epoch, ownerID: owner.id)
+                    guard
+                        !projectTracks([track], current.item.kind == .album ? current.item.id : nil)
+                            .isEmpty
+                    else { continue }
                     let ext = source.fileExtension.lowercased()
                     guard !ext.isEmpty, ext.count <= 8,
                         ext.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber) })
@@ -988,7 +1031,11 @@ final class FoundationDownloads: ObservableObject {
             owners[index].availability = availability(for: owners[index].item)
             if paused.contains(id) { continue }
             if expanded.contains(id),
-                owners[index].tracks.allSatisfy({ isExcluded($0.id) || isReady($0) })
+                projectTracks(
+                    owners[index].tracks,
+                    owners[index].item.kind == .album ? owners[index].item.id : nil
+                )
+                .allSatisfy({ isExcluded($0.id) || isReady($0) })
             {
                 owners[index].state = .ready
                 owners[index].progress = 1

@@ -33,3 +33,13 @@ ask for CLI login when the plugin can complete the requested operation.
 This workflow does not waive source/publication review, tests, physical gates,
 known-issue disclosure or owner release authorization. It changes where routine
 development lives and how accepted changes reach alpha.
+
+## Product naming — owner decision 2026-10-11
+
+The product spelling is **VelaCanto**. Completed integrated alpha builds display
+**VelaCanto Alpha** on iOS and macOS; retire the earlier Siri Test display label
+on the next build. `VELACANTO_APP_DISPLAY_NAME` defaults to `VelaCanto Alpha`
+in the maintained project. A separately authorized production distribution uses
+`VELACANTO_APP_DISPLAY_NAME=VelaCanto` explicitly for the build and verification.
+Internal targets, executable paths, bundle IDs, Keychain services and storage keys
+retain their existing names so this cosmetic change preserves identity and data.

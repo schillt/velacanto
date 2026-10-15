@@ -12,98 +12,135 @@ struct FoundationItemMenu: View {
     var player: FoundationPlayer?
     var navigate: ((FoundationItem) -> Void)?
     var currentPageKind: FoundationItem.Kind?
+    var removeFromPlaylist: (() -> Void)?
+    var removalPending = false
+    @Environment(\.foundationCollectionOperationOwner) private var collectionOperationOwner
     @EnvironmentObject private var downloads: FoundationDownloads
     @EnvironmentObject private var connectivity: FoundationConnectivity
     @Environment(\.foundationAddToPlaylist) private var addToPlaylist
 
     var body: some View {
-        if let open {
-            switch item.kind {
-            case .album: Button("View Album", systemImage: "square.stack", action: open)
-            case .artist: Button("View Artist", systemImage: "music.mic", action: open)
-            case .playlist: Button("View Playlist", systemImage: "music.note.list", action: open)
-            case .genre: Button("View Genre", systemImage: "guitars", action: open)
-            case .track: EmptyView()
-            }
-        }
-        if let play {
-            Button("Play", systemImage: "play.fill") {
-                if connectivity.localOnly, item.kind != .track, let player {
-                    let ready = downloads.browseTracks(for: item)
-                    if !ready.isEmpty { player.setQueue(ready, selectedIndex: 0) }
-                } else {
-                    play()
-                }
-            }.disabled(connectivity.localOnly && downloads.browseTracks(for: item).isEmpty)
-        }
-        if let player,
-            item.kind == .track
-                || ((item.kind == .album || item.kind == .playlist) && library != nil)
-        {
-            Button("Play Next", systemImage: "text.line.first.and.arrowtriangle.forward") {
-                if connectivity.localOnly {
-                    player.enqueue(downloads.browseTracks(for: item), position: .next)
-                } else {
-                    actions.enqueue(item, position: .next, library: library, player: player)
-                }
-            }.disabled(
-                actions.isQueueLoading
-                    || (connectivity.localOnly && downloads.browseTracks(for: item).isEmpty))
-            Button("Play Last", systemImage: "text.line.last.and.arrowtriangle.forward") {
-                if connectivity.localOnly {
-                    player.enqueue(downloads.browseTracks(for: item), position: .last)
-                } else {
-                    actions.enqueue(item, position: .last, library: library, player: player)
-                }
-            }.disabled(
-                actions.isQueueLoading
-                    || (connectivity.localOnly && downloads.browseTracks(for: item).isEmpty))
-        }
-        if item.kind == .track || item.kind == .album, let navigate {
-            FoundationRelatedDestinations(
-                item: item, navigate: navigate, currentPageKind: currentPageKind)
-        }
-        if !connectivity.localOnly, item.kind == .track || item.kind == .album, let addToPlaylist {
-            Button("Add to Playlist", systemImage: "music.note.list") { addToPlaylist(item) }
-        }
-        if item.kind == .track || item.kind == .album || item.kind == .playlist {
-            FoundationDownloadActionButton(item: item, showsTitle: true)
-            if let owner = downloads.owners.first(where: {
-                $0.item.id == item.id && $0.item.kind == item.kind
-            }) {
-                switch owner.state {
-                case .queued, .expanding, .waitingForWiFi, .downloading:
-                    Button("Cancel Download", systemImage: "xmark.circle") {
-                        downloads.cancel(ownerID: owner.id)
+        Section {
+            if item.kind != .genre {
+                let favorite = actions.favoriteState(for: item, initial: initialFavorite)
+                Button(
+                    favorite == true ? "Unfavorite" : "Favorite",
+                    systemImage: favorite == true ? "star.slash" : "star"
+                ) {
+                    guard !connectivity.localOnly, let favorite else { return }
+                    Task {
+                        guard !connectivity.localOnly else { return }
+                        await actions.setFavorite(for: item, isFavorite: !favorite)
                     }
-                case .cancelled, .failed:
-                    Button("Retry Download", systemImage: "arrow.clockwise") {
-                        downloads.retry(ownerID: owner.id)
-                    }.disabled(connectivity.localOnly)
-                case .ready:
-                    EmptyView()
+                }
+                .disabled(connectivity.localOnly || favorite == nil || actions.isPending(item))
+            }
+            if item.kind != .track {
+                Button(
+                    actions.isPinned(item) ? "Unpin" : "Pin",
+                    systemImage: actions.isPinned(item) ? "pin.slash" : "pin"
+                ) { actions.togglePin(item) }
+            }
+        }
+        Section {
+            if let open {
+                switch item.kind {
+                case .album: Button("View Album", systemImage: "square.stack", action: open)
+                case .artist: Button("View Artist", systemImage: "music.mic", action: open)
+                case .playlist:
+                    Button("View Playlist", systemImage: "music.note.list", action: open)
+                case .genre: Button("View Genre", systemImage: "guitars", action: open)
+                case .track: EmptyView()
+                }
+            }
+            if let play {
+                Button("Play", systemImage: "play.fill") {
+                    if connectivity.localOnly, item.kind != .track, let player {
+                        let ready = actions.collectionTracks(
+                            downloads.browseTracks(for: item), for: item)
+                        if !ready.isEmpty { player.setQueue(ready, selectedIndex: 0) }
+                    } else {
+                        play()
+                    }
+                }.disabled(connectivity.localOnly && downloads.browseTracks(for: item).isEmpty)
+            }
+            if let player,
+                item.kind == .track
+                    || ((item.kind == .album || item.kind == .playlist) && library != nil)
+            {
+                Button("Play Next", systemImage: "text.line.first.and.arrowtriangle.forward") {
+                    if connectivity.localOnly {
+                        player.enqueue(
+                            actions.collectionTracks(downloads.browseTracks(for: item), for: item),
+                            position: .next)
+                    } else {
+                        actions.enqueue(
+                            item, position: .next, library: library, player: player,
+                            owner: collectionOperationOwner)
+                    }
+                }.disabled(
+                    actions.isQueueLoading
+                        || (connectivity.localOnly && downloads.browseTracks(for: item).isEmpty))
+                Button("Play Last", systemImage: "text.line.last.and.arrowtriangle.forward") {
+                    if connectivity.localOnly {
+                        player.enqueue(
+                            actions.collectionTracks(downloads.browseTracks(for: item), for: item),
+                            position: .last)
+                    } else {
+                        actions.enqueue(
+                            item, position: .last, library: library, player: player,
+                            owner: collectionOperationOwner)
+                    }
+                }.disabled(
+                    actions.isQueueLoading
+                        || (connectivity.localOnly && downloads.browseTracks(for: item).isEmpty))
+            }
+            if item.kind == .track || item.kind == .album, let navigate {
+                FoundationRelatedDestinations(
+                    item: item, navigate: navigate, currentPageKind: currentPageKind)
+            }
+            if !connectivity.localOnly, item.kind == .track || item.kind == .album,
+                let addToPlaylist
+            {
+                Button("Add to Playlist", systemImage: "music.note.list") { addToPlaylist(item) }
+            }
+            if item.kind == .track || item.kind == .album || item.kind == .playlist {
+                if !downloads.hasDownloadedData(for: item) {
+                    FoundationDownloadActionButton(item: item, showsTitle: true)
+                }
+                if let owner = downloads.owners.first(where: {
+                    $0.item.id == item.id && $0.item.kind == item.kind
+                }) {
+                    switch owner.state {
+                    case .queued, .expanding, .waitingForWiFi, .downloading:
+                        Button("Cancel Download", systemImage: "xmark.circle") {
+                            downloads.cancel(ownerID: owner.id)
+                        }
+                    case .cancelled, .failed:
+                        Button("Retry Download", systemImage: "arrow.clockwise") {
+                            downloads.retry(ownerID: owner.id)
+                        }.disabled(connectivity.localOnly)
+                    case .ready:
+                        EmptyView()
+                    }
                 }
             }
         }
-        if item.kind != .genre {
-            let favorite = actions.favoriteState(for: item, initial: initialFavorite)
-            Button(
-                favorite == true ? "Unfavorite" : "Favorite",
-                systemImage: favorite == true ? "star.slash" : "star"
-            ) {
-                guard !connectivity.localOnly, let favorite else { return }
-                Task {
-                    guard !connectivity.localOnly else { return }
-                    await actions.setFavorite(for: item, isFavorite: !favorite)
+        if downloads.hasDownloadedData(for: item) || removeFromPlaylist != nil {
+            Section {
+                if downloads.hasDownloadedData(for: item),
+                    item.kind == .track || item.kind == .album || item.kind == .playlist
+                {
+                    FoundationDownloadActionButton(item: item, showsTitle: true)
+                }
+                if let removeFromPlaylist {
+                    Button(
+                        "Remove from Playlist", systemImage: "minus.circle", role: .destructive,
+                        action: removeFromPlaylist
+                    )
+                    .disabled(connectivity.localOnly || removalPending)
                 }
             }
-            .disabled(connectivity.localOnly || favorite == nil || actions.isPending(item))
-        }
-        if item.kind != .track {
-            Button(
-                actions.isPinned(item) ? "Unpin" : "Pin",
-                systemImage: actions.isPinned(item) ? "pin.slash" : "pin"
-            ) { actions.togglePin(item) }
         }
         if let error = actions.errorMessage(for: item) { Text(error) }
     }
@@ -166,7 +203,7 @@ struct FoundationDownloadActionButton: View {
     }
 
     var body: some View {
-        Button {
+        Button(role: hasDownload && showsTitle ? .destructive : nil) {
             if hasDownload {
                 if let requestRemoval { requestRemoval(item) } else { confirmingRemoval = true }
             } else {

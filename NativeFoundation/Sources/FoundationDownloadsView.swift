@@ -2,6 +2,8 @@ import SwiftUI
 
 /// Downloads selects existing catalog identities; every result uses the normal destination.
 struct FoundationDownloadsView: View {
+    @EnvironmentObject private var preferences: FoundationPlaybackPreferences
+    @EnvironmentObject private var actions: FoundationLibraryActions
     @EnvironmentObject private var downloads: FoundationDownloads
     let library: any FoundationLibrary
     let player: FoundationPlayer
@@ -48,6 +50,8 @@ struct FoundationDownloadsView: View {
 
 /// Only the query is local. Rows, menus, player policy and destinations remain canonical.
 private struct FoundationDownloadFilteredCatalog: View {
+    @EnvironmentObject private var preferences: FoundationPlaybackPreferences
+    @EnvironmentObject private var actions: FoundationLibraryActions
     @EnvironmentObject private var downloads: FoundationDownloads
     let kind: FoundationItem.Kind
     let library: any FoundationLibrary
@@ -99,7 +103,10 @@ private struct FoundationDownloadFilteredCatalog: View {
                 ) { _ in .init(items: items, nextStartIndex: nil) }
             }
         }
-        .onAppear { results.installSnapshot(items) }
+        .onAppear {
+            results.configureFavoriteObservations(actions)
+            results.installSnapshot(items)
+        }
         .onReceive(downloads.objectWillChange) {
             Task { @MainActor in results.installSnapshot(items) }
         }

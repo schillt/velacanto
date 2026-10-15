@@ -19,19 +19,24 @@ struct FoundationDownloadManagementView: View {
     }
 
     var body: some View {
-        List {
-            storageSection
-            songsSection
-            collectionsSection
-            settingsSection
-            actionsSection
+        Group {
+            #if os(macOS)
+                Form { managementSections }
+                    .formStyle(.grouped)
+            #else
+                List { managementSections }
+            #endif
         }
         .navigationTitle("Downloaded Music")
+        #if os(macOS)
+            .toolbarTitleDisplayMode(.inline)
+        #endif
         .toolbar {
-            Button(editing ? "Done" : "Edit") {
-                editing.toggle()
-                if !editing { clearSelection() }
-            }.disabled(removingAll)
+            #if os(macOS)
+                ToolbarItem(placement: .confirmationAction) { editButton }
+            #else
+                editButton
+            #endif
         }
         .alert("Remove selected downloads?", isPresented: $confirmingSelected) {
             Button("Remove", role: .destructive) {
@@ -67,6 +72,23 @@ struct FoundationDownloadManagementView: View {
         .onChange(of: downloads.downloadedSongs.map(\.id)) { _, ids in
             selectedTracks.formIntersection(Set(ids))
         }
+    }
+
+    @ViewBuilder private var managementSections: some View {
+        storageSection
+        songsSection
+        collectionsSection
+        #if os(iOS)
+            settingsSection
+        #endif
+        actionsSection
+    }
+
+    private var editButton: some View {
+        Button(editing ? "Done" : "Edit") {
+            editing.toggle()
+            if !editing { clearSelection() }
+        }.disabled(removingAll)
     }
 
     private var storageSection: some View {
@@ -136,23 +158,17 @@ struct FoundationDownloadManagementView: View {
         }
     }
 
-    private var settingsSection: some View {
-        Section("Settings") {
-            #if os(iOS)
+    #if os(iOS)
+        private var settingsSection: some View {
+            Section("Settings") {
                 Button("Download Settings", systemImage: "gearshape") {
                     if let url = URL(string: UIApplication.openSettingsURLString) {
                         UIApplication.shared.open(url)
                     }
                 }
-            #else
-                Toggle(
-                    "Allow Cellular Downloads",
-                    isOn: Binding(
-                        get: { preferences.allowsCellularDownloads },
-                        set: { preferences.setAllowsCellularDownloads($0) }))
-            #endif
+            }
         }
-    }
+    #endif
 
     private func selectionRow(
         item: FoundationItem, title: String, footprint: Int64, selected: Bool,

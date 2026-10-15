@@ -15,6 +15,7 @@ struct FoundationHomeView<Profile: View>: View {
     var hasQueue = false
     var accountLibrary: (any FoundationLibrary)? = nil
     @State private var isVisible = false
+    @State private var collectionOperationOwner = UUID()
     @State private var genreRetryRevision = 0
     @State private var refreshRevision = 0
     @State private var showingPlayer = false
@@ -53,6 +54,7 @@ struct FoundationHomeView<Profile: View>: View {
                 if let error = actions.pinErrorMessage { Text(error).foregroundStyle(.red) }
             }.padding()
         }
+        .environment(\.foundationCollectionOperationOwner, collectionOperationOwner)
         .onAppear {
             isVisible = true
             #if DEBUG
@@ -60,7 +62,7 @@ struct FoundationHomeView<Profile: View>: View {
             #endif
         }
         .onDisappear {
-            actions.cancelQueueAddition()
+            actions.cancelQueueAdditionOwned(by: collectionOperationOwner)
             isVisible = false
             #if DEBUG
                 FoundationTrace.event("ui origin=home disappeared")
@@ -283,6 +285,15 @@ private struct FoundationHomeShelf: View {
     @State private var consumedRefreshRevision = 0
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
+    /// Wider Mac shelves use more of the retained page; full-list navigation owns pagination.
+    private var previewLimit: Int {
+        #if os(macOS)
+            12
+        #else
+            showsTracks ? 6 : 5
+        #endif
+    }
+
     private var displayedItems: [FoundationItem] {
         isFavorites ? actions.favoriteItems(in: model.items) : model.items
     }
@@ -302,7 +313,7 @@ private struct FoundationHomeShelf: View {
                         } else {
                             FoundationCatalogView(
                                 title: title, model: model, library: library, player: player,
-                                isActive: isActive, loader: loader)
+                                isActive: isActive, showsTrackArtwork: showsTracks, loader: loader)
                         }
                     } label: {
                         HStack(spacing: 6) {
@@ -341,7 +352,9 @@ private struct FoundationHomeShelf: View {
             } else if !displayedItems.isEmpty {
                 ScrollView(.horizontal) {
                     LazyHStack(alignment: .top, spacing: 16) {
-                        ForEach(Array(displayedItems.prefix(5).enumerated()), id: \.offset) {
+                        ForEach(
+                            Array(displayedItems.prefix(previewLimit).enumerated()), id: \.offset
+                        ) {
                             _, item in
                             if isFavorites {
                                 FoundationCollectionCard(
@@ -442,12 +455,12 @@ private struct FoundationHomeShelf: View {
 
     private var usesVerticalRecentRows: Bool {
         dynamicTypeSize.isAccessibilitySize
-            || displayedItems.prefix(6).contains { actions.errorMessage(for: $0) != nil }
+            || displayedItems.prefix(previewLimit).contains { actions.errorMessage(for: $0) != nil }
     }
 
     private var recentRows: some View {
         ForEach(
-            Array(displayedItems.prefix(6).enumerated()).filter {
+            Array(displayedItems.prefix(previewLimit).enumerated()).filter {
                 !connectivity.localOnly || downloads.isReady($0.element)
             }, id: \.offset
         ) { index, item in

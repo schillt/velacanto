@@ -240,6 +240,75 @@ final class FoundationPlaylistTests: XCTestCase {
         XCTAssertEqual(count, 1)
     }
 
+    @MainActor
+    func testContextRemovalUsesSelectedMembershipAndInvalidatesPlaylist() async throws {
+        let fixture = PlaylistRemovalFixture()
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            if request.url!.path.contains("/Users/") {
+                return (
+                    Data(#"{"UserId":"00000000000000000000000000000003","CanEdit":true}"#.utf8),
+                    Self.response(request)
+                )
+            }
+            if request.url!.path.hasPrefix("/Items/") {
+                return (
+                    Data(
+                        #"{"Id":"00000000000000000000000000000001","Type":"Playlist","Name":"Fixture"}"#
+                            .utf8), Self.response(request)
+                )
+            }
+            return (await fixture.data(request: request), Self.response(request))
+        }
+        let changes = FoundationPlaylistChanges()
+        var selected = track
+        selected.playlistEntryID = "target"
+        try await changes.remove(playlistID: playlistID, track: selected, library: library)
+        let remaining = try await FoundationPlaylistSnapshot.load(id: playlistID, library: library)
+        XCTAssertEqual(remaining.map(\.mutationID), ["sibling"])
+        XCTAssertEqual(changes.revision(for: playlistID), 1)
+    }
+
+    @MainActor
+    func testContextRemovalRejectsReadOnlyPermissionWithoutMutation() async throws {
+        let recorder = PlaylistRecorder()
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            await recorder.append(request)
+            let json =
+                request.url!.path.contains("/Users/")
+                ? #"{"UserId":"00000000000000000000000000000003","CanEdit":false}"#
+                : #"{"Id":"00000000000000000000000000000001","Type":"Playlist","Name":"Fixture"}"#
+            return (Data(json.utf8), Self.response(request))
+        }
+        let changes = FoundationPlaylistChanges()
+        var selected = track
+        selected.playlistEntryID = "target"
+        do {
+            try await changes.remove(playlistID: playlistID, track: selected, library: library)
+            XCTFail("Read-only playlists must not be mutated")
+        } catch { XCTAssertEqual(error as? FoundationPlaylistError, .readOnly) }
+        XCTAssertEqual(changes.revision(for: playlistID), 0)
+        let last = await recorder.last()
+        XCTAssertEqual(last?.httpMethod, "GET")
+        let count = await recorder.count
+        XCTAssertEqual(count, 2)
+    }
+
+    @MainActor
+    func testContextRemovalRequiresMembershipIdentityWithoutAnyRequest() async {
+        let recorder = PlaylistRecorder()
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            await recorder.append(request)
+            return (Data(), Self.response(request))
+        }
+        let changes = FoundationPlaylistChanges()
+        do {
+            try await changes.remove(playlistID: playlistID, track: track, library: library)
+            XCTFail("A song ID cannot stand in for its playlist membership")
+        } catch { XCTAssertEqual(error as? FoundationPlaylistError, .changed) }
+        let count = await recorder.count
+        XCTAssertEqual(count, 0)
+    }
+
     func testRemovalChecksLaterPagesAndPreservesDuplicateSibling() async throws {
         let fixture = PlaylistRemovalFixture()
         let library = FoundationJellyfinLibrary(session: session) { request in
@@ -464,6 +533,62 @@ final class FoundationPlaylistTests: XCTestCase {
         XCTAssertTrue(batches.isEmpty)
     }
 
+    @MainActor
+    func testEditorProjectionRetainsExactMutationIdentityAndCanonicalRepeats() {
+        var first = track
+        first.album = .init(id: "album", title: "Album")
+        first.trackNumber = 1
+        var alternate = FoundationItem(
+            id: "alternate", title: first.title, subtitle: first.subtitle, kind: .track,
+            duration: 10)
+        alternate.album = first.album
+        alternate.trackNumber = 1
+        let entries = [
+            FoundationPlaylistEntry(id: "one", mutationID: "remove-one", item: first),
+            FoundationPlaylistEntry(id: "other", mutationID: "remove-other", item: alternate),
+            FoundationPlaylistEntry(id: "repeat", mutationID: "remove-repeat", item: first),
+        ]
+        var showDuplicates = false
+        let changes = FoundationPlaylistChanges { items, albumID in
+            FoundationAlbumTrackPolicy.visibleTracks(
+                items, albumID: albumID, showDuplicates: showDuplicates)
+        }
+        let visible = changes.visibleEntries(entries)
+        XCTAssertEqual(visible.map(\.id), ["one", "repeat"])
+        XCTAssertEqual(visible.map(\.mutationID), ["remove-one", "remove-repeat"])
+        XCTAssertEqual(visible.map { $0.item }, [first, first])
+        XCTAssertEqual(entries.count, 3)
+        showDuplicates = true
+        XCTAssertEqual(changes.visibleEntries(entries).map(\.mutationID), entries.map(\.mutationID))
+    }
+
+    @MainActor
+    func testAlbumAdditionProjectsAlternateCopiesBeforeBatchesAndHonorsLivePreference() async throws
+    {
+        var showDuplicates = true
+        let changes = FoundationPlaylistChanges { items, albumID in
+            FoundationAlbumTrackPolicy.visibleTracks(
+                items, albumID: albumID, showDuplicates: showDuplicates)
+        }
+        // Change after constructing the account owner: the commit must read the live preference.
+        showDuplicates = false
+        let fixture = PlaylistAlbumFixture(count: 3, duplicateAlbumTracks: true)
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            try await fixture.response(request)
+        }
+        let result = try await changes.add(playlistID: playlistID, source: album, library: library)
+        XCTAssertEqual(result.added, 2)
+        let hiddenBatches = await fixture.batches
+        XCTAssertEqual(
+            hiddenBatches.flatMap { $0 }, [PlaylistAlbumFixture.id(1), PlaylistAlbumFixture.id(3)])
+        showDuplicates = true
+        let restored = try await changes.add(
+            playlistID: playlistID, source: album, library: library)
+        XCTAssertEqual(restored.added, 1)
+        let restoredBatches = await fixture.batches
+        XCTAssertEqual(restoredBatches.last, [PlaylistAlbumFixture.id(2)])
+    }
+
     private static func response(_ request: URLRequest, status: Int = 200) -> HTTPURLResponse {
         HTTPURLResponse(
             url: request.url!, statusCode: status, httpVersion: "HTTP/1.1", headerFields: nil)!
@@ -512,11 +637,16 @@ private actor PlaylistAlbumFixture {
     let count: Int
     let failBatch: Int?
     let cancelExpansion: Bool
+    let duplicateAlbumTracks: Bool
     private var members: [String]
     private(set) var batches: [[String]] = []
 
-    init(count: Int, existing: [Int] = [], failBatch: Int? = nil, cancelExpansion: Bool = false) {
+    init(
+        count: Int, existing: [Int] = [], failBatch: Int? = nil, cancelExpansion: Bool = false,
+        duplicateAlbumTracks: Bool = false
+    ) {
         self.count = count
+        self.duplicateAlbumTracks = duplicateAlbumTracks
         self.failBatch = failBatch
         self.cancelExpansion = cancelExpansion
         members = existing.map(Self.id)
@@ -548,7 +678,13 @@ private actor PlaylistAlbumFixture {
             let ids = isAlbum ? (1...count).map(Self.id) : members
             let page = Array(ids.dropFirst(offset).prefix(100))
             let rows = page.map { id in
-                var row = ["Id": id, "Type": "Audio"]
+                var row: [String: Any] = ["Id": id, "Type": "Audio"]
+                if isAlbum, duplicateAlbumTracks {
+                    let number = id == Self.id(3) ? 2 : 1
+                    row["Name"] = number == 1 ? "Same Song" : "Next Song"
+                    row["IndexNumber"] = number
+                    row["ParentIndexNumber"] = 1
+                }
                 if !isAlbum { row["PlaylistItemId"] = id }
                 return row
             }

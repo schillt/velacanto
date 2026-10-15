@@ -2,13 +2,15 @@ import AVFoundation
 import Combine
 import Foundation
 
-/// App-wide audio policies. System Settings writes the same scalar defaults.
+/// App-wide playback and library presentation preferences.
 @MainActor
 final class FoundationPlaybackPreferences: ObservableObject {
     static let streamingCellularKey = "audio.streaming.allowCellular"
     static let downloadsCellularKey = "audio.downloads.allowCellular"
+    static let duplicateAlbumTracksKey = "library.showDuplicateAlbumTracks"
     @Published private(set) var allowsCellularStreaming: Bool
     @Published private(set) var allowsCellularDownloads: Bool
+    @Published private(set) var showDuplicateAlbumTracks: Bool
     private let defaults: UserDefaults
     private var observer: NSObjectProtocol?
 
@@ -16,9 +18,11 @@ final class FoundationPlaybackPreferences: ObservableObject {
         self.defaults = defaults
         defaults.register(defaults: [
             Self.streamingCellularKey: true, Self.downloadsCellularKey: false,
+            Self.duplicateAlbumTracksKey: false,
         ])
         allowsCellularStreaming = defaults.bool(forKey: Self.streamingCellularKey)
         allowsCellularDownloads = defaults.bool(forKey: Self.downloadsCellularKey)
+        showDuplicateAlbumTracks = defaults.bool(forKey: Self.duplicateAlbumTracksKey)
         observer = NotificationCenter.default.addObserver(
             forName: UserDefaults.didChangeNotification, object: defaults, queue: .main
         ) { [weak self] _ in
@@ -35,6 +39,8 @@ final class FoundationPlaybackPreferences: ObservableObject {
         let downloads = defaults.bool(forKey: Self.downloadsCellularKey)
         if streaming != allowsCellularStreaming { allowsCellularStreaming = streaming }
         if downloads != allowsCellularDownloads { allowsCellularDownloads = downloads }
+        let duplicates = defaults.bool(forKey: Self.duplicateAlbumTracksKey)
+        if duplicates != showDuplicateAlbumTracks { showDuplicateAlbumTracks = duplicates }
     }
 
     func setAllowsCellularStreaming(_ value: Bool) {
@@ -44,6 +50,11 @@ final class FoundationPlaybackPreferences: ObservableObject {
 
     func setAllowsCellularDownloads(_ value: Bool) {
         defaults.set(value, forKey: Self.downloadsCellularKey)
+        refresh()
+    }
+
+    func setShowDuplicateAlbumTracks(_ value: Bool) {
+        defaults.set(value, forKey: Self.duplicateAlbumTracksKey)
         refresh()
     }
 

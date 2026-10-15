@@ -7,6 +7,92 @@ final class FoundationLibraryActionsTests: XCTestCase {
     private let album = FoundationItem(
         id: "synthetic", title: "Synthetic", subtitle: "", kind: .album, duration: nil)
 
+    func testOnlyExplicitPlayCarriesProtectedIntentAcrossCollectionPages() async throws {
+        for startsPlayback in [true, false] {
+            let responses = CollectionResponses()
+            let library = makeCollectionLibrary { request in
+                XCTAssertEqual(FoundationRequestIntent.isPlayback, startsPlayback)
+                let page = await responses.next() - 1
+                let body = """
+                    {"Items":[{"Id":"0000000000000000000000000000000\(page + 4)","Type":"Audio"}],"StartIndex":\(page),"TotalRecordCount":2}
+                    """
+                return (
+                    Data(body.utf8),
+                    HTTPURLResponse(
+                        url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+                )
+            }
+            let player = FoundationPlayer(resolve: { _ in throw CancellationError() })
+            let actions = makeCollectionActions()
+            if startsPlayback {
+                actions.play(collectionItem, shuffled: false, library: library, player: player)
+            } else {
+                actions.enqueue(collectionItem, position: .last, library: library, player: player)
+            }
+            await actions.queueTask?.value
+            let calls = await responses.count()
+            XCTAssertEqual(calls, 2)
+            XCTAssertEqual(player.queue.count, 2)
+            XCTAssertFalse(FoundationRequestIntent.isPlayback)
+            player.stop()
+        }
+    }
+
+    func testDepartingAncestorCannotCancelDestinationCollectionWork() async throws {
+        for startsPlayback in [true, false] {
+            let gate = CollectionGate()
+            let library = makeCollectionLibrary { request in
+                await gate.hold()
+                return selfContainedResponse(
+                    request,
+                    items: "{\"Id\":\"00000000000000000000000000000002\",\"Type\":\"Audio\"}")
+            }
+            let player = FoundationPlayer(resolve: { _ in throw CancellationError() })
+            let actions = makeCollectionActions()
+            let destinationOwner = UUID()
+            if startsPlayback {
+                actions.play(
+                    collectionItem, shuffled: false, library: library, player: player,
+                    owner: destinationOwner)
+            } else {
+                actions.enqueue(
+                    collectionItem, position: .last, library: library, player: player,
+                    owner: destinationOwner)
+            }
+            let task = try XCTUnwrap(actions.queueTask)
+            try await gate.waitUntilStarted()
+            actions.cancelQueueAdditionOwned(by: UUID())
+            actions.cancelQueueAdditionOwned(by: nil)
+            XCTAssertFalse(task.isCancelled)
+            XCTAssertNil(actions.queueNotice)
+            await gate.release()
+            await task.value
+            XCTAssertEqual(player.queue.count, 1)
+            player.stop()
+        }
+    }
+
+    func testDepartingPlaybackOwnerCancelsQuietlyAndRejectsLateResult() async throws {
+        let gate = CollectionGate()
+        let library = makeCollectionLibrary { request in
+            await gate.hold()
+            return selfContainedResponse(
+                request, items: "{\"Id\":\"00000000000000000000000000000002\",\"Type\":\"Audio\"}")
+        }
+        let player = FoundationPlayer(resolve: { _ in throw CancellationError() })
+        let actions = makeCollectionActions()
+        let owner = UUID()
+        actions.play(collectionItem, shuffled: true, library: library, player: player, owner: owner)
+        let task = try XCTUnwrap(actions.queueTask)
+        try await gate.waitUntilStarted()
+        actions.cancelQueueAdditionOwned(by: owner)
+        XCTAssertTrue(task.isCancelled)
+        await gate.release()
+        await task.value
+        XCTAssertNil(actions.queueNotice)
+        XCTAssertTrue(player.queue.isEmpty)
+    }
+
     func testDelayedCollectionPlayAndEnqueueCannotOverwriteExplicitUpcomingEdits() async throws {
         for startsPlayback in [true, false] {
             for removesEntry in [true, false] {
@@ -41,6 +127,7 @@ final class FoundationLibraryActionsTests: XCTestCase {
                 } else {
                     actions.enqueue(collection, position: .last, library: library, player: player)
                 }
+                XCTAssertEqual(actions.queueOperation, startsPlayback ? .playback : .enqueue)
                 let expansion = try XCTUnwrap(actions.queueTask)
                 try await gate.waitUntilStarted()
                 let selected = player.selectedEntryID
@@ -51,12 +138,16 @@ final class FoundationLibraryActionsTests: XCTestCase {
                 }
                 let edited = player.queue
                 XCTAssertTrue(expansion.isCancelled)
+                XCTAssertTrue(actions.isQueueLoading)
+                XCTAssertEqual(actions.queueOperation, startsPlayback ? .playback : .enqueue)
                 await gate.release()
                 await expansion.value
                 XCTAssertEqual(player.queue, edited)
                 XCTAssertEqual(player.selectedEntryID, selected)
                 XCTAssertFalse(actions.isQueueLoading)
+                XCTAssertNil(actions.queueOperation)
                 XCTAssertNil(actions.queueErrorMessage)
+                if startsPlayback { XCTAssertNil(actions.queueNotice) }
             }
         }
     }
@@ -78,12 +169,15 @@ final class FoundationLibraryActionsTests: XCTestCase {
         actions.enqueue(collectionItem, position: .last, library: library, player: player)
         await actions.queueTask?.value
         XCTAssertNotNil(actions.queueErrorMessage)
+        XCTAssertNil(actions.queueOperation)
         XCTAssertTrue(actions.canRetryQueueAddition)
         XCTAssertEqual(player.queue, original)
         let calls = await responses.count()
         XCTAssertEqual(calls, 1)
         actions.retryQueueAddition()
+        XCTAssertEqual(actions.queueOperation, .enqueue)
         await actions.queueTask?.value
+        XCTAssertNil(actions.queueOperation)
         XCTAssertNil(actions.queueErrorMessage)
         XCTAssertFalse(actions.canRetryQueueAddition)
         XCTAssertEqual(player.queue.count, 2)
@@ -139,16 +233,54 @@ final class FoundationLibraryActionsTests: XCTestCase {
         actions.cancelQueueAddition()
         XCTAssertTrue(task.isCancelled)
         XCTAssertTrue(actions.isQueueLoading)
+        XCTAssertEqual(actions.queueOperation, .enqueue)
         await gate.release()
         await task.value
         XCTAssertFalse(actions.isQueueLoading)
+        XCTAssertNil(actions.queueOperation)
         XCTAssertTrue(player.queue.isEmpty)
         XCTAssertEqual(actions.queueNotice, "Collection loading cancelled.")
         XCTAssertFalse(actions.canRetryQueueAddition)
         let empty = makeCollectionLibrary { request in selfContainedResponse(request, items: "") }
-        actions.play(collectionItem, shuffled: false, library: empty, player: player)
+        actions.play(collectionItem, shuffled: true, library: empty, player: player)
+        XCTAssertEqual(actions.queueOperation, .playback)
         await actions.queueTask?.value
+        XCTAssertNil(actions.queueOperation)
         XCTAssertEqual(actions.queueNotice, "This collection has no songs.")
+    }
+
+    func testInvalidationRetainsPlaybackDomainUntilCancelledReadActuallyFinishes() async throws {
+        let gate = CollectionGate()
+        let library = makeCollectionLibrary { request in
+            await gate.hold()
+            return selfContainedResponse(
+                request, items: "{\"Id\":\"00000000000000000000000000000002\",\"Type\":\"Audio\"}")
+        }
+        let player = FoundationPlayer(resolve: { _ in throw CancellationError() })
+        let existing = FoundationItem(
+            id: "existing", title: "", subtitle: "", kind: .track, duration: nil)
+        player.setQueue([existing], selectedIndex: 0)
+        await player.selectionTask?.value
+        let previous = player.queue
+        let actions = makeCollectionActions()
+        actions.play(collectionItem, shuffled: true, library: library, player: player)
+        let task = try XCTUnwrap(actions.queueTask)
+        try await gate.waitUntilStarted()
+        actions.invalidate()
+        XCTAssertTrue(task.isCancelled)
+        XCTAssertTrue(actions.isQueueLoading)
+        XCTAssertEqual(actions.queueOperation, .playback)
+        actions.dismissQueueOutcome()
+        XCTAssertEqual(actions.queueOperation, .playback)
+        XCTAssertEqual(player.queue, previous)
+        await gate.release()
+        await task.value
+        XCTAssertFalse(actions.isQueueLoading)
+        XCTAssertNil(actions.queueOperation)
+        XCTAssertEqual(player.queue, previous)
+        actions.dismissQueueOutcome()
+        XCTAssertNil(actions.queueOperation)
+        player.stop()
     }
 
     func testCollectionPageBudgetFailsWithoutCommittingPartialQueue() async {

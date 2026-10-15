@@ -7,12 +7,15 @@ import SwiftUI
 /// Optional item text owns one visible-page read; presenting it adds no work.
 struct FoundationOverviewSection: View {
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.foundationReduceMotion) private var reduceMotion
     @EnvironmentObject private var connectivity: FoundationConnectivity
     let item: FoundationItem
     let library: any FoundationLibrary
     let isActive: Bool
     var maximumLines: Int? = 3
     var horizontalInset: CGFloat = 16
+    var retryMetadata: (() -> Void)? = nil
+    var artistUsesLightText: Bool? = nil
     #if os(macOS)
         @ScaledMetric(relativeTo: .body) private var overviewTextSize = 15.0
     #endif
@@ -21,36 +24,64 @@ struct FoundationOverviewSection: View {
         #if os(macOS)
             .system(size: overviewTextSize)
         #else
-            .subheadline
+            item.kind == .artist ? .body : .subheadline
         #endif
+    }
+
+    private var overviewForeground: Color {
+        guard item.kind == .artist else { return .secondary }
+        return artistUsesLightText.map { $0 ? .white : .black } ?? .primary
     }
 
     @State private var overview: String?
     @State private var loaded = false
+    @State private var loadedRetryRevision: Int?
+    @State private var failed = false
+    @State private var retryRevision = 0
     @State private var showingOverview = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
+            if item.kind == .artist, overview == nil, !loaded, !failed,
+                isActive, !connectivity.localOnly
+            {
+                FoundationLoadingPlaceholder(layout: .overview)
+                    .font(overviewFont)
+                    .padding(.horizontal, horizontalInset).padding(.bottom, 8)
+                    .transition(.opacity)
+            }
             if let overview, !overview.isEmpty {
                 Button {
                     showingOverview = true
                 } label: {
-                    HStack(alignment: .bottom, spacing: 6) {
-                        Text(overview).lineLimit(maximumLines)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        Text("… MORE").font(.caption.weight(.semibold))
+                    Group {
+                        if item.kind == .artist {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text(overview).lineLimit(maximumLines).lineSpacing(4)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                Text("Read More").font(.subheadline.weight(.semibold))
+                            }
+                        } else {
+                            HStack(alignment: .bottom, spacing: 6) {
+                                Text(overview).lineLimit(maximumLines)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                Text("… MORE").font(.caption.weight(.semibold))
+                            }
+                        }
                     }
                     .font(overviewFont).multilineTextAlignment(.leading)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(overviewForeground)
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain).padding(.horizontal, horizontalInset).padding(.bottom, 8)
                 .accessibilityLabel("Overview: " + overview)
                 .accessibilityHint("Opens the complete overview")
+                .transition(.opacity)
                 .sheet(isPresented: $showingOverview) {
                     NavigationStack {
                         ScrollView {
                             Text(overview)
+                                .lineSpacing(item.kind == .artist ? 4 : 0)
                                 #if os(macOS)
                                     .font(overviewFont)
                                 #endif
@@ -82,18 +113,41 @@ struct FoundationOverviewSection: View {
                     #endif
                 }
             }
+            if failed, !connectivity.localOnly {
+                Button(item.kind == .artist ? "Retry Artist Details" : "Retry Overview") {
+                    retryMetadata?()
+                    failed = false
+                    loaded = false
+                    retryRevision += 1
+                }
+                .font(.caption).padding(.horizontal, horizontalInset)
+            }
         }
-        .task(id: isActive && !connectivity.localOnly) {
-            guard isActive, !connectivity.localOnly, item.kind == .artist || item.kind == .album,
-                !loaded
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: overview != nil)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: loaded || failed)
+        .task(
+            id:
+                "\(library.catalogScopeID)-\(item.id)-\(isActive)-\(connectivity.localOnly)-\(connectivity.successfulRetryRevision)-\(retryRevision)"
+        ) {
+            guard isActive, item.kind == .artist || item.kind == .album else { return }
+            if let cached = await library.cachedArtistDetails(for: item) {
+                guard !Task.isCancelled else { return }
+                overview = cached.overview
+            }
+            guard !connectivity.localOnly,
+                !loaded || loadedRetryRevision != connectivity.successfulRetryRevision
             else { return }
             do {
                 let text = try await library.overview(for: item)
                 try Task.checkCancellation()
                 overview = text
                 loaded = true
+                loadedRetryRevision = connectivity.successfulRetryRevision
+                failed = false
             } catch {
-                if !Task.isCancelled { loaded = true }
+                // A failed optional read remains eligible for explicit connection retry.
+                // Keep any previously loaded overview visible.
+                if !Task.isCancelled { failed = true }
             }
         }
     }
@@ -101,10 +155,13 @@ struct FoundationOverviewSection: View {
 
 /// Reuses catalog ownership and cards; each optional shelf fails independently.
 struct FoundationRelatedSection<Card: View>: View {
+    @Environment(\.foundationReduceMotion) private var reduceMotion
+    @EnvironmentObject private var actions: FoundationLibraryActions
     @EnvironmentObject private var connectivity: FoundationConnectivity
     let title: String
     let isActive: Bool
     var twoRows = false
+    var priority: TaskPriority = .userInitiated
     let loader: (Int) async throws -> FoundationPage
     @ViewBuilder let card: (FoundationItem) -> Card
     @StateObject private var model = FoundationBrowseModel()
@@ -112,7 +169,7 @@ struct FoundationRelatedSection<Card: View>: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            if !model.items.isEmpty || model.errorMessage != nil {
+            if showsInitialPlaceholder || !model.items.isEmpty || model.errorMessage != nil {
                 Text(title).font(.title2.bold()).padding(.horizontal)
             }
             if !model.items.isEmpty {
@@ -131,7 +188,8 @@ struct FoundationRelatedSection<Card: View>: View {
                         }
                     }.foundationCarouselContentPadding()
                 }.scrollIndicators(.hidden)
-                    .foundationMacShelfUnderlap(horizontalInset: 0, contentInset: 0)
+                    .foundationMacShelfUnderlap(horizontalInset: 0)
+                    .transition(.opacity)
             }
             if model.hasConnectionIssue {
                 FoundationOfflineNotice().padding(.horizontal)
@@ -144,7 +202,7 @@ struct FoundationRelatedSection<Card: View>: View {
                     Button("Retry") { request(model.retryRequest) }.padding(.horizontal)
                 }
             }
-            if model.isLoading, !connectivity.localOnly {
+            if model.items.isEmpty, showsInitialPlaceholder {
                 VStack(spacing: 20) {
                     FoundationLoadingPlaceholder(layout: .albumShelf)
                     if twoRows { FoundationLoadingPlaceholder(layout: .albumShelf) }
@@ -157,14 +215,25 @@ struct FoundationRelatedSection<Card: View>: View {
                     .horizontal)
             }
         }
-        .padding(.vertical, model.items.isEmpty && model.errorMessage == nil ? 0 : 12)
+        .padding(
+            .vertical,
+            showsInitialPlaceholder || !model.items.isEmpty || model.errorMessage != nil ? 12 : 0
+        )
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: model.items.isEmpty)
         .onChange(of: connectivity.successfulRetryRevision) { _, _ in
             model.request(.refresh)
             revision += 1
         }
-        .task(id: isActive && !connectivity.localOnly ? revision : nil) {
-            await model.loadPending(ifActive: isActive && !connectivity.localOnly, using: loader)
+        .task(id: isActive && !connectivity.localOnly ? revision : nil, priority: priority) {
+            model.configureFavoriteObservations(actions)
+            await model.loadPending(
+                ifActive: isActive && !connectivity.localOnly, waitForInitialLoad: true,
+                using: loader)
         }
+    }
+
+    private var showsInitialPlaceholder: Bool {
+        isActive && !connectivity.localOnly && !model.loaded && model.errorMessage == nil
     }
 
     private func request(_ request: FoundationBrowseModel.Request) {
@@ -174,8 +243,10 @@ struct FoundationRelatedSection<Card: View>: View {
     }
 }
 
-/// A bounded personal-history shelf; it never expands the artist's catalog.
-struct FoundationArtistMostPlayed: View {
+/// A stable bounded discovery shelf, including artists without listening history.
+struct FoundationArtistSuggestedSongs: View {
+    @Environment(\.foundationReduceMotion) private var reduceMotion
+    @EnvironmentObject private var actions: FoundationLibraryActions
     @EnvironmentObject private var downloads: FoundationDownloads
     @EnvironmentObject private var connectivity: FoundationConnectivity
     let artist: FoundationItem
@@ -183,13 +254,14 @@ struct FoundationArtistMostPlayed: View {
     @ObservedObject var player: FoundationPlayer
     let isActive: Bool
     let navigate: (FoundationItem) -> Void
-    @StateObject private var model = FoundationBrowseModel()
+    @StateObject private var model = FoundationBrowseModel(
+        refreshInterval: 30 * 60, usesCachedFreshness: true)
     @State private var revision = 0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            if !model.items.isEmpty || model.errorMessage != nil {
-                Text("Most Played").font(.title2.bold()).padding(.horizontal)
+            if showsInitialPlaceholder || !model.items.isEmpty || model.errorMessage != nil {
+                Text("Suggested Songs").font(.title2.bold()).padding(.horizontal)
             }
             if !model.items.isEmpty {
                 ScrollView(.horizontal) {
@@ -211,7 +283,8 @@ struct FoundationArtistMostPlayed: View {
                         }
                     }.foundationCarouselContentPadding()
                 }.scrollIndicators(.hidden)
-                    .foundationMacShelfUnderlap(horizontalInset: 0, contentInset: 0)
+                    .foundationMacShelfUnderlap(horizontalInset: 0)
+                    .transition(.opacity)
             }
             if model.hasConnectionIssue {
                 FoundationOfflineNotice().padding(.horizontal)
@@ -224,20 +297,37 @@ struct FoundationArtistMostPlayed: View {
                     revision += 1
                 }.disabled(connectivity.localOnly).padding(.horizontal)
             }
-            if model.isLoading, !connectivity.localOnly {
-                FoundationLoadingPlaceholder().padding(.horizontal)
+            if model.items.isEmpty, showsInitialPlaceholder {
+                FoundationLoadingPlaceholder(rowCount: 2, rowArtworkSize: 52).padding(.horizontal)
             }
         }
-        .padding(.vertical, model.items.isEmpty && model.errorMessage == nil ? 0 : 12)
+        .padding(
+            .vertical,
+            showsInitialPlaceholder || !model.items.isEmpty || model.errorMessage != nil ? 12 : 0
+        )
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: model.items.isEmpty)
         .onChange(of: connectivity.successfulRetryRevision) { _, _ in
             model.request(.refresh)
             revision += 1
         }
-        .task(id: isActive && !connectivity.localOnly ? revision : nil) {
-            await model.loadPending(ifActive: isActive && !connectivity.localOnly) { _ in
-                try await library.mostPlayed(artistID: artist.id)
+        .task(
+            id:
+                "\(library.catalogScopeID)-\(artist.id)-\(isActive && !connectivity.localOnly)-\(revision)"
+        ) {
+            model.configureCache(
+                library.catalogPageCache,
+                key: library.catalogCacheKey("artist-suggested-songs-" + artist.id))
+            model.configureFavoriteObservations(actions)
+            await model.loadPending(
+                ifActive: isActive && !connectivity.localOnly, waitForInitialLoad: true
+            ) { _ in
+                try await library.suggestedSongs(artistID: artist.id)
             }
         }
+    }
+
+    private var showsInitialPlaceholder: Bool {
+        isActive && !connectivity.localOnly && !model.loaded && model.errorMessage == nil
     }
 
     private func play(_ index: Int) {

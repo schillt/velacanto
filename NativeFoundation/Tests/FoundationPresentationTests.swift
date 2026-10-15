@@ -4,6 +4,79 @@ import XCTest
 
 @MainActor
 final class FoundationPresentationTests: XCTestCase {
+    func testSongAlphabetSeeksUnloadedFarLetterWithoutWalkingCatalogPages() async throws {
+        let source = SongAlphabetFixture(total: 1_000_000, split: 750_000)
+        let offset = try await FoundationSongAlphabetSeek.lowerBound(letter: "Z") {
+            await source.read($0)
+        }
+        XCTAssertEqual(offset, 750_000)
+        let reads = await source.reads
+        XCTAssertLessThanOrEqual(reads.count, 24)
+        XCTAssertTrue(reads.contains(749_999))
+        XCTAssertTrue(reads.contains(750_000))
+    }
+
+    func testSongAlphabetEmptyCatalogAndRepeatedTitlesHaveValidBoundaries() async throws {
+        let empty = SongAlphabetFixture(names: [])
+        let emptyOffset = try await FoundationSongAlphabetSeek.lowerBound(letter: "M") {
+            await empty.read($0)
+        }
+        XCTAssertEqual(emptyOffset, 0)
+        let duplicateTitles = SongAlphabetFixture(names: ["Alpha", "Bravo", "Bravo", "Zulu"])
+        let first = try await FoundationSongAlphabetSeek.lowerBound(letter: "B") {
+            await duplicateTitles.read($0)
+        }
+        XCTAssertEqual(first, 1)
+        let missing = try await FoundationSongAlphabetSeek.lowerBound(letter: "M") {
+            await duplicateTitles.read($0)
+        }
+        XCTAssertEqual(missing, 3)
+    }
+
+    func testSongAlphabetCleanNamePreservesArticlesAndNormalizesPunctuationAndDiacritics() {
+        func item(_ title: String) -> FoundationItem {
+            .init(id: title, title: title, subtitle: "", kind: .track, duration: nil)
+        }
+        XCTAssertEqual(FoundationSongAlphabetSeek.key(item(" !Éclair—Live ")), "eclair live")
+        XCTAssertEqual(FoundationSongAlphabetSeek.letter(item("!Éclair")), "E")
+        XCTAssertEqual(FoundationSongAlphabetSeek.letter(item("The Apple")), "T")
+        XCTAssertEqual(FoundationSongAlphabetSeek.letter(item("42 Songs")), "#")
+    }
+
+    func testSongAlphabetRejectsOversizedCatalogAndIgnoredOffsets() async throws {
+        do {
+            _ = try await FoundationSongAlphabetSeek.lowerBound(letter: "Z") { offset in
+                .init(
+                    startIndex: offset, totalCount: 1_000_001,
+                    items: [
+                        .init(id: "one", title: "Alpha", subtitle: "", kind: .track, duration: nil)
+                    ])
+            }
+            XCTFail("Oversized catalog should fail without walking it")
+        } catch { XCTAssertEqual(error as? FoundationLibraryError, .invalidResponse) }
+        do {
+            _ = try await FoundationSongAlphabetSeek.lowerBound(letter: "Z") { offset in
+                .init(
+                    startIndex: offset, totalCount: 100,
+                    items: [
+                        .init(id: "one", title: "Alpha", subtitle: "", kind: .track, duration: nil)
+                    ])
+            }
+            XCTFail("Ignored offset must not appear to be a valid title range")
+        } catch { XCTAssertEqual(error as? FoundationLibraryError, .unavailable) }
+    }
+
+    func testSongAlphabetCancellationCannotPublishATarget() async throws {
+        let source = SongAlphabetFixture(names: ["Alpha", "Zulu"])
+        do {
+            _ = try await FoundationSongAlphabetSeek.lowerBound(letter: "Z") { offset in
+                if offset != 0 { throw CancellationError() }
+                return await source.read(offset)
+            }
+            XCTFail("Cancelled seek returned a target")
+        } catch is CancellationError {}
+    }
+
     func testPlayerSurfaceExpandsOnlyMeasuredVisibleBarIntoFinalPlayerBounds() {
         let bounds = CGRect(x: 0, y: 0, width: 390, height: 844)
         let bar = CGRect(x: 12, y: 720, width: 366, height: 56)
@@ -418,4 +491,33 @@ final class FoundationPresentationTests: XCTestCase {
         XCTAssertNil(tracks.nextStartIndex)
     }
 
+}
+
+private actor SongAlphabetFixture {
+    let total: Int
+    let split: Int
+    let names: [String]?
+    private(set) var reads: [Int] = []
+
+    init(total: Int, split: Int) {
+        self.total = total
+        self.split = split
+        names = nil
+    }
+    init(names: [String]) {
+        self.names = names
+        total = names.count
+        split = 0
+    }
+
+    func read(_ offset: Int) -> FoundationSongAlphabetSeek.Probe {
+        reads.append(offset)
+        guard offset < total else { return .init(startIndex: offset, totalCount: total, items: []) }
+        let title = names.map { $0[offset] } ?? (offset < split ? "Alpha" : "Zulu")
+        return .init(
+            startIndex: offset, totalCount: total,
+            items: [
+                .init(id: "song-\(offset)", title: title, subtitle: "", kind: .track, duration: nil)
+            ])
+    }
 }

@@ -11,7 +11,10 @@ if not info_path.exists():
     info_path = app / "Contents/Info.plist"
 info = plistlib.loads(info_path.read_bytes())
 assert info["CFBundleIdentifier"] == "com.chameleonenterprise.velacanto"
-assert info["CFBundleDisplayName"] == "Velacanto"
+expected_display_name = os.environ.get("VELACANTO_APP_DISPLAY_NAME", "VelaCanto Alpha")
+assert expected_display_name in ("VelaCanto Alpha", "VelaCanto")
+assert info["CFBundleDisplayName"] == expected_display_name
+assert info["CFBundleName"] == expected_display_name
 assert info["CFBundleShortVersionString"] == "0.4.0"
 assert info["CFBundleVersion"] == os.environ.get("VELACANTO_BUILD_NUMBER", "124")
 assert info["ITSAppUsesNonExemptEncryption"] is False

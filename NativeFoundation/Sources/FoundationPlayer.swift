@@ -43,8 +43,11 @@ final class FoundationPlayer: ObservableObject {
         guard enabled != shuffleEnabled else { return }
         shuffleEnabled = enabled
         if enabled {
-            let prefixCount = selectedIndex.map { $0 + 1 } ?? 0
-            queue = Array(queue.prefix(prefixCount)) + upcoming.shuffled()
+            let prefixCount =
+                selectedEntryID.flatMap { id in rawQueue.firstIndex { $0.id == id }.map { $0 + 1 } }
+                ?? 0
+            rawQueue =
+                Array(rawQueue.prefix(prefixCount)) + rawQueue.dropFirst(prefixCount).shuffled()
         }
         sessionChanged.send()
     }
@@ -56,7 +59,7 @@ final class FoundationPlayer: ObservableObject {
 
     func removeUpcoming(_ id: UUID) {
         guard upcoming.contains(where: { $0.id == id }) else { return }
-        queue.removeAll { $0.id == id }
+        rawQueue.removeAll { $0.id == id }
         sessionChanged.send()
     }
 
@@ -75,24 +78,93 @@ final class FoundationPlayer: ObservableObject {
             destination.flatMap { target in remaining.firstIndex { $0.id == target } }
             ?? remaining.endIndex
         remaining.insert(contentsOf: moved, at: insertion)
-        queue = history + queue.filter { $0.id == selectedEntryID } + remaining
+        let liveIDs = Set(live.map(\.id))
+        var reordered = remaining.makeIterator()
+        rawQueue = rawQueue.map { liveIDs.contains($0.id) ? reordered.next()! : $0 }
         sessionChanged.send()
     }
 
     func restoreSession(_ snapshot: FoundationPlaybackSnapshot) {
         guard snapshot.isValid else { return }
         discardSelection()
-        queue = snapshot.entries.map(\.entry)
-        selectedEntryID = snapshot.selectedEntryID
+        selectedEntryID = nil
+        rawQueue = snapshot.entries.map(\.entry)
+        selectedEntryID = visibleSelection(
+            rawQueue.first { $0.id == snapshot.selectedEntryID }, in: projectedEntries(rawQueue))
         shuffleEnabled = snapshot.shuffleEnabled
         repeatMode = snapshot.repeatMode
         state = selectedEntryID == nil ? .idle : .paused
         sessionChanged.send()
     }
 
+    @Published private var rawQueue: [FoundationQueueEntry] = [] {
+        didSet {
+            observeTrackCopies(rawQueue.map(\.item))
+            refreshTrackVisibility()
+        }
+    }
+    private var projectTracks: ([FoundationItem]) -> [FoundationItem] = { $0 }
+    private var observeTrackCopies: ([FoundationItem]) -> Void = { _ in }
     @Published private(set) var queue: [FoundationQueueEntry] = []
-    @Published private(set) var selectedEntryID: UUID?
-    @Published private(set) var state: State = .idle
+    var persistedQueue: [FoundationQueueEntry] { rawQueue }
+
+    func configureTrackProjection(
+        project: @escaping ([FoundationItem]) -> [FoundationItem],
+        observe: @escaping ([FoundationItem]) -> Void = { _ in }
+    ) {
+        projectTracks = project
+        observeTrackCopies = observe
+        observe(rawQueue.map(\.item))
+        refreshTrackVisibility()
+    }
+
+    func refreshTrackVisibility() {
+        let visible = projectedEntries(rawQueue)
+        let visibleIDs = Set(visible.map(\.id))
+        let projection = rawQueue.filter { visibleIDs.contains($0.id) || $0.id == selectedEntryID }
+        if projection != queue { queue = projection }
+    }
+
+    private func projectedEntries(_ entries: [FoundationQueueEntry]) -> [FoundationQueueEntry] {
+        let items = entries.map { entry in
+            var item = entry.item
+            item.playlistEntryID = entry.id.uuidString
+            return item
+        }
+        let ids = Set(projectTracks(items).compactMap(\.playlistEntryID))
+        return entries.filter { ids.contains($0.id.uuidString) }
+    }
+
+    private func visibleSelection(
+        _ requested: FoundationQueueEntry?, in entries: [FoundationQueueEntry]
+    ) -> UUID? {
+        guard let requested else { return nil }
+        if entries.contains(where: { $0.id == requested.id }) { return requested.id }
+        guard let key = FoundationAlbumTrackPolicy.key(for: requested.item) else { return nil }
+        return entries.first { FoundationAlbumTrackPolicy.key(for: $0.item) == key }?.id
+    }
+    @Published private(set) var selectedEntryID: UUID? {
+        didSet { refreshTrackVisibility() }
+    }
+    @Published private(set) var state: State = .idle {
+        didSet { publishPlaybackProtection() }
+    }
+    private var protectionRevision: UInt = 0
+    private var playbackProtectionChanged: ((Bool, UInt) -> Void)?
+
+    func observePlaybackProtection(_ changed: @escaping (Bool, UInt) -> Void) {
+        playbackProtectionChanged = changed
+        publishPlaybackProtection()
+    }
+
+    private func publishPlaybackProtection() {
+        protectionRevision &+= 1
+        let protected =
+            wantsPlayback && state != .failed && state != .ended
+            && (state == .loading || state == .waiting || playTask != nil)
+        playbackProtectionChanged?(protected, protectionRevision)
+    }
+
     @Published private(set) var errorMessage: String?
     @Published private(set) var elapsed: Double = 0
     @Published private(set) var duration: Double = 0
@@ -128,7 +200,9 @@ final class FoundationPlayer: ObservableObject {
     private let makeItem: (URL) -> AVPlayerItem
     private let activateSession: () async throws -> Void
     private let deactivateSession: () async throws -> Void
-    private(set) var playTask: Task<Void, Never>?
+    private(set) var playTask: Task<Void, Never>? {
+        didSet { publishPlaybackProtection() }
+    }
     private(set) var sessionTask: Task<Void, Never>?
     private var playRequest: UInt64 = 0
     // AVAudioSession is process-wide; retiring account owners must finish before a new owner activates.
@@ -140,7 +214,9 @@ final class FoundationPlayer: ObservableObject {
     private var itemObservation: NSKeyValueObservation?
     private var notifications: [NSObjectProtocol] = []
     private var timeObserver: Any?
-    @Published private(set) var wantsPlayback = false
+    @Published private(set) var wantsPlayback = false {
+        didSet { publishPlaybackProtection() }
+    }
 
     convenience init(
         library: any FoundationLibrary,
@@ -319,18 +395,19 @@ final class FoundationPlayer: ObservableObject {
         #endif
         guard items.allSatisfy({ $0.kind == .track }) else { return }
         discardSelection()
-        queue = items.map { FoundationQueueEntry(item: $0) }
         selectedEntryID = nil
+        rawQueue = items.map { FoundationQueueEntry(item: $0) }
         state = .idle
-        guard queue.indices.contains(selectedIndex) else {
+        guard rawQueue.indices.contains(selectedIndex),
+            let selected = visibleSelection(rawQueue[selectedIndex], in: projectedEntries(rawQueue))
+        else {
             sessionChanged.send()
             return
         }
-        let selected = queue[selectedIndex].id
         if shuffleEnabled {
-            queue =
-                Array(queue.prefix(selectedIndex + 1))
-                + Array(queue.dropFirst(selectedIndex + 1)).shuffled()
+            let prefixCount = (rawQueue.firstIndex { $0.id == selected } ?? 0) + 1
+            rawQueue =
+                Array(rawQueue.prefix(prefixCount)) + rawQueue.dropFirst(prefixCount).shuffled()
         }
         select(selected)
     }
@@ -338,9 +415,15 @@ final class FoundationPlayer: ObservableObject {
     /// Extend the queue without replacing the selected occurrence or native item.
     func enqueue(_ items: [FoundationItem], position: QueuePosition) {
         guard !items.isEmpty, items.allSatisfy({ $0.kind == .track }) else { return }
-        let entries = items.map { FoundationQueueEntry(item: $0) }
-        let insertion = position == .next ? selectedIndex.map { $0 + 1 } ?? 0 : queue.endIndex
-        queue.insert(contentsOf: entries, at: insertion)
+        observeTrackCopies(items)
+        let entries = projectedEntries(items.map { FoundationQueueEntry(item: $0) })
+        guard !entries.isEmpty else { return }
+        let insertion =
+            position == .next
+            ? selectedEntryID.flatMap { id in rawQueue.firstIndex { $0.id == id }.map { $0 + 1 } }
+                ?? 0
+            : rawQueue.endIndex
+        rawQueue.insert(contentsOf: entries, at: insertion)
         if selectedEntryID == nil { select(entries[0].id) }
         sessionChanged.send()
     }
@@ -544,7 +627,13 @@ final class FoundationPlayer: ObservableObject {
         let previous = Self.lastSessionOperation
         let activate = activateSession
         let task = Task { [weak self] in
+            #if DEBUG
+                FoundationTrace.event("audioSession.previous.wait")
+            #endif
             await previous?.value
+            #if DEBUG
+                FoundationTrace.event("audioSession.previous.completed")
+            #endif
             defer {
                 if self?.playRequest == request { self?.playTask = nil }
             }
@@ -553,7 +642,13 @@ final class FoundationPlayer: ObservableObject {
                 guard self?.generation == selectionGeneration, self?.wantsPlayback == true else {
                     return
                 }
+                #if DEBUG
+                    FoundationTrace.event("audioSession.activation.started")
+                #endif
                 try await activate()
+                #if DEBUG
+                    FoundationTrace.event("audioSession.activation.completed")
+                #endif
                 try Task.checkCancellation()
                 guard let self, self.generation == selectionGeneration,
                     self.playRequest == request, self.wantsPlayback,
@@ -902,6 +997,8 @@ struct FoundationPlaybackSnapshot: Codable {
         let genres: [Reference]
         let isFavorite: Bool?
         let playCount: Int
+        var trackNumber: Int? = nil
+        var discNumber: Int? = nil
 
         init(_ entry: FoundationQueueEntry) {
             id = entry.id
@@ -915,6 +1012,8 @@ struct FoundationPlaybackSnapshot: Codable {
             genres = entry.item.genres.map(Reference.init)
             isFavorite = entry.item.isFavorite
             playCount = entry.item.playCount
+            trackNumber = entry.item.trackNumber
+            discNumber = entry.item.discNumber
         }
 
         var entry: FoundationQueueEntry {
@@ -924,7 +1023,8 @@ struct FoundationPlaybackSnapshot: Codable {
                     id: itemID, title: title, subtitle: subtitle, kind: .track,
                     duration: duration, primaryImageTag: primaryImageTag, isFavorite: isFavorite,
                     album: album?.reference, artist: artist?.reference,
-                    genres: genres.map(\.reference), playCount: playCount))
+                    genres: genres.map(\.reference), playCount: playCount,
+                    trackNumber: trackNumber, discNumber: discNumber))
         }
     }
     let version: Int
@@ -935,7 +1035,7 @@ struct FoundationPlaybackSnapshot: Codable {
 
     @MainActor init(player: FoundationPlayer) {
         version = 1
-        entries = player.queue.map(Entry.init)
+        entries = player.persistedQueue.map(Entry.init)
         selectedEntryID = player.selectedEntryID
         shuffleEnabled = player.shuffleEnabled
         repeatMode = player.repeatMode

@@ -158,10 +158,14 @@ final class FoundationDownloadsTests: XCTestCase {
             Set((first.items + second.items).map(\.id)), ["ready", "album", "artist", "playlist"])
         XCTAssertEqual(
             manager.localSearch(query: "fixture", kind: .track).items.map(\.id), ["ready"])
+        XCTAssertEqual(
+            Set(manager.localCatalogItems().map(\.id)), ["ready", "album", "artist", "playlist"])
+        XCTAssertEqual(manager.localCatalogItems(kind: .track).map(\.id), ["ready"])
         XCTAssertTrue(manager.localSearch(query: " ").items.isEmpty)
         XCTAssertTrue(manager.localSearch(query: "synthetic", startIndex: Int.max).items.isEmpty)
         _ = await manager.clearAccount()
         XCTAssertTrue(manager.localSearch(query: "synthetic").items.isEmpty)
+        XCTAssertTrue(manager.localCatalogItems().isEmpty)
     }
 
     func testIncompleteRefreshPreservesLastCompleteMembershipAndPublishesOnlyChanges() throws {
@@ -1673,6 +1677,84 @@ final class FoundationDownloadsTests: XCTestCase {
         XCTAssertNotEqual(replacement.url, lease.url)
         XCTAssertTrue(FileManager.default.fileExists(atPath: replacement.url.path))
         await replacement.release()
+        _ = await manager.clearAccount()
+    }
+
+    func testCollectionTransferProjectionUsesCurrentPreferenceAndKeepsCanonicalOccurrences()
+        async throws
+    {
+        var first = item("first")
+        first.album = .init(id: "album", title: "Album")
+        first.trackNumber = 1
+        first.discNumber = 1
+        var alternate = item("alternate")
+        alternate.album = first.album
+        alternate.trackNumber = first.trackNumber
+        alternate.discNumber = first.discNumber
+        var next = item("next")
+        next.album = first.album
+        next.discNumber = first.discNumber
+        next.title = "Next Song"
+        next.trackNumber = 2
+        for kind in [FoundationItem.Kind.album, .playlist] {
+            for showDuplicates in [false, true] {
+                let source = item(kind.rawValue, kind: kind)
+                let library = DownloadsLibrary(tracks: [first, first, alternate, next])
+                let manager = FoundationDownloads(
+                    scope: "fixture", library: library, root: try root(), transfer: transfer,
+                    monitorConnectivity: false,
+                    projectTracks: { items, albumID in
+                        FoundationAlbumTrackPolicy.visibleTracks(
+                            items, albumID: albumID, showDuplicates: showDuplicates)
+                    })
+                manager.download(source)
+                manager.updateConnectivity(isAllowed: true)
+                try await waitUntil { manager.owners.first?.state == .ready }
+                let expected =
+                    showDuplicates
+                    ? ["first", "first", "alternate", "next"] : ["first", "first", "next"]
+                XCTAssertEqual(
+                    manager.owners.first?.tracks.map(\.id), ["first", "first", "alternate", "next"])
+                XCTAssertEqual(manager.browseTracks(for: source).map(\.id), expected)
+                XCTAssertEqual(manager.isReady(alternate), showDuplicates)
+                XCTAssertTrue(manager.isReady(first))
+                XCTAssertTrue(manager.isReady(next))
+                _ = await manager.clearAccount()
+            }
+        }
+    }
+
+    func testDownloadedVisibilityToggleDoesNotDeleteRetainedPhysicalCopies() async throws {
+        var first = item("first")
+        first.album = .init(id: "album", title: "Album")
+        first.trackNumber = 1
+        var alternate = item("alternate")
+        alternate.album = first.album
+        alternate.trackNumber = first.trackNumber
+        alternate.discNumber = first.discNumber
+        var showDuplicates = true
+        let manager = FoundationDownloads(
+            scope: "fixture", library: DownloadsLibrary(tracks: [first, alternate]),
+            root: try root(),
+            transfer: transfer, monitorConnectivity: false,
+            projectTracks: { items, albumID in
+                FoundationAlbumTrackPolicy.visibleTracks(
+                    items, albumID: albumID, showDuplicates: showDuplicates)
+            })
+        manager.updateConnectivity(isAllowed: true)
+        let album = item("album", kind: .album)
+        manager.download(album)
+        try await waitUntil { manager.owners.first?.state == .ready }
+        let bytes = manager.storageBytes
+        showDuplicates = false
+        XCTAssertEqual(manager.downloadedSongs.map(\.id), ["first"])
+        XCTAssertEqual(manager.localCatalogItems(kind: .track).map(\.id), ["first"])
+        XCTAssertEqual(manager.browseTracks(for: album).map(\.id), ["first"])
+        XCTAssertEqual(manager.owners.first?.tracks.count, 2)
+        XCTAssertTrue(manager.isReady(alternate))
+        XCTAssertEqual(manager.storageBytes, bytes)
+        showDuplicates = true
+        XCTAssertEqual(manager.downloadedSongs.map(\.id), ["first", "alternate"])
         _ = await manager.clearAccount()
     }
 

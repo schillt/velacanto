@@ -19,6 +19,11 @@ This supersedes the earlier requirement to publish every task branch and open a
 PR into alpha. Preserve existing branches and historical PR evidence; do not
 force-push, rewrite history or delete unintegrated work during this transition.
 
+Owner naming decision (2026-10-11): spell the product **VelaCanto**. Completed
+integrated alpha builds display **VelaCanto Alpha**, replacing the Siri Test label
+on the next build. Preserve internal targets, bundle IDs and stored-data identities.
+See the product-naming section of docs/development-workflow.md.
+
 Before editing, compare the fetched alpha guide, applicable nested guides, current
 owner instructions and the issue contract. Check that board workflow descriptions
 agree. Report material conflicts before dependent work; never replace a dirty
@@ -50,6 +55,12 @@ work. Apply `docs/engineering-rubric.md` to future reviews without inventing gra
 Subagents are authorized for independent, bounded tasks without asking for each
 assignment. Delegate when it enables useful parallel progress; simple tasks can
 remain with one agent. Delegation does not expand scope or count as acceptance.
+
+Owner instruction (2026-10-13): create a fresh subagent for each distinct topic or
+issue. Do not reuse an agent from another topic by assigning unrelated work through
+a follow-up. Follow-ups may clarify or continue that agent's original task. When
+agent capacity is exhausted, finish work with the primary agent or wait for a new
+agent slot; do not repurpose an older agent to bypass the boundary.
 
 - **Implementation agent:** implements one assigned issue per isolated worktree,
   writes meaningful focused tests and hands off exact commits and limitations.
@@ -248,6 +259,23 @@ branch strategy if continued development is necessary. Hotfixes use a focused PR
 from current main, then reconcile the accepted fix locally and publish it to alpha
 before further release promotion. No routine cherry-pick-only divergence between
 shared branches.
+
+## Playback protection
+
+Read [Playback and Now Playing protection](docs/playback-protection.md) before
+changing playback, Now Playing, shared catalog/artwork loading, caching or async
+ownership. This owner-established contract applies even when the visible change
+is on a browsing screen. Only playback and Now Playing receive preferential
+admission; all browsing screens remain equal and publish independently. Audio
+must never depend on optional content or its admission queue. Preserve protected
+capacity, shared-request promotion, cancellation and recoverable artwork.
+
+Shared loading changes require affected regression checks and exact-candidate
+physical playback acceptance; untouched player files do not exempt them. Record
+initial acceptance separately from exhaustive validation and root-cause proof.
+Silent playback with persistent loading is a P1 acceptance blocker. Use the
+document's verification matrix and diagnostic boundaries; do not mask stalls with
+speculative retries, transport replacement, cache purges or global serialization.
 
 ## Quality, privacy and completion
 

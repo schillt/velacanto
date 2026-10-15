@@ -25,15 +25,30 @@ actor FoundationArtworkCache {
         let load: @Sendable (FoundationItem, Int) async throws -> Data?
         var waiters: [UUID: CheckedContinuation<FoundationCurrentArtwork.Result?, Error>]
         var task: Task<Void, Never>?
+        var playback = false
     }
     nonisolated let scope: String
     private let now: @Sendable () -> Date
     private let limits: Limits
     private let disk: FoundationArtworkDisk
+    private let networkAdmission: FoundationNetworkAdmission?
+    private var protectedWorkers: Set<UUID> = []
     private var entries: [Key: Entry] = [:]
     private var failures: [Key: Date] = [:]
     private var activeTasks: [UUID: Task<Void, Never>] = [:]
     private var jobs: [Key: Job] = [:]
+    private var persisting: Set<UUID> = []
+    private var pendingImages:
+        [Key: (id: UUID, image: FoundationCurrentArtwork.Result, expiry: Date)] = [:]
+    #if DEBUG
+        private var persistenceBarrier: (@Sendable () async -> Void)?
+
+        func setPersistenceBarrier(_ barrier: @escaping @Sendable () async -> Void) {
+            persistenceBarrier = barrier
+        }
+
+        private func waitBeforePersistence() async { await persistenceBarrier?() }
+    #endif
     private var queue: [Key] = []
     private var revisions: [String: Revision] = [:]
     private struct Revision {
@@ -41,15 +56,23 @@ actor FoundationArtworkCache {
         let tag: String
         let expiry: Date
     }
+    private struct PreviewJob {
+        let id: UUID
+        let task: Task<Void, Never>
+        var waiters: [UUID: CheckedContinuation<FoundationCurrentArtwork.Result?, Error>]
+    }
+    private var previews: [Key: PreviewJob] = [:]
     private var clock: UInt = 0
     private var live = true
     private var active = 0
 
     init(
         scope: String, root: URL? = nil, limits: Limits = Limits(),
+        networkAdmission: FoundationNetworkAdmission? = nil,
         now: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.now = now
+        self.networkAdmission = networkAdmission
         self.scope = Self.digest(scope)
         self.limits = limits
         let root =
@@ -63,6 +86,7 @@ actor FoundationArtworkCache {
 
     deinit {
         for task in activeTasks.values { task.cancel() }
+        for job in previews.values { job.task.cancel() }
         let disk = disk
         Task { _ = await disk.invalidate(removeFiles: false) }
     }
@@ -74,8 +98,16 @@ actor FoundationArtworkCache {
     nonisolated static func key(_ item: FoundationItem, pixels: Int) -> Key {
         let item = item.catalogArtworkItem
         return Key(
-            identity: digest("\(item.kind)\0\(item.id)\0\(item.primaryImageTag ?? "")"),
-            pixels: pixels <= 160 ? 160 : 640)
+            identity: digest("\(item.artworkCacheBase)\0\(item.primaryImageTag ?? "")"),
+            pixels: pixels <= 160 ? 160 : (pixels <= 640 ? 640 : (pixels <= 1280 ? 1280 : 2048)))
+    }
+
+    /// Completed loads accept only equal/larger renditions; previews may include smaller ones.
+    nonisolated static func renditionCandidates(_ key: Key, allowsSmaller: Bool) -> [Key] {
+        [key]
+            + [2048, 1280, 640, 160].filter {
+                $0 != key.pixels && ($0 > key.pixels || allowsSmaller)
+            }.map { Key(identity: key.identity, pixels: $0) }
     }
 
     /// Missing tags mean unknown revision, not a new revision. Explicit tags never alias.
@@ -83,7 +115,7 @@ actor FoundationArtworkCache {
         -> (key: Key, item: FoundationItem)
     {
         let key = Self.key(item, pixels: pixels)
-        let base = Self.digest("\(item.kind)\0\(item.id)")
+        let base = Self.digest(item.artworkCacheBase)
         revisions = revisions.filter { $0.value.expiry > now() }
         if let tag = item.primaryImageTag, !tag.isEmpty {
             if let revision = revisions[base], revision.identity == key.identity {
@@ -126,10 +158,7 @@ actor FoundationArtworkCache {
         let key = await resolvedArtwork(item.catalogArtworkItem, pixels: pixels).key
         try Task.checkCancellation()
         guard live else { throw CancellationError() }
-        for candidate in [
-            key, Key(identity: key.identity, pixels: 640),
-            Key(identity: key.identity, pixels: 160),
-        ] {
+        for candidate in Self.renditionCandidates(key, allowsSmaller: true) {
             if var entry = entries[candidate], entry.expiry > now() {
                 clock &+= 1
                 entry.access = clock
@@ -137,15 +166,79 @@ actor FoundationArtworkCache {
                 return entry.result
             }
         }
-        guard let record = await disk.read(key, allowsSmaller: true) else { return nil }
-        let decoded = await Task.detached(priority: .utility) {
-            FoundationCurrentArtwork.decode(record.data, maximumPixels: record.key.pixels)
-        }.value
+        for candidate in Self.renditionCandidates(key, allowsSmaller: true) {
+            if let pending = pendingImages[candidate], pending.expiry > now() {
+                return pending.image
+            }
+        }
+        guard previews[key] != nil || previews.count < max(1, limits.pendingKeys) else {
+            return nil
+        }
+        let waiter = UUID()
+        let result = try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                if var job = previews[key] {
+                    job.waiters[waiter] = continuation
+                    previews[key] = job
+                } else {
+                    let id = UUID()
+                    let disk = disk
+                    let task = Task.detached(priority: .utility) { [weak self] in
+                        let record = await disk.read(key, allowsSmaller: true)
+                        let decoded =
+                            Task.isCancelled
+                            ? nil
+                            : record.flatMap {
+                                FoundationCurrentArtwork.decode(
+                                    $0.data, maximumPixels: $0.key.pixels)
+                            }
+                        await self?.finishPreview(key: key, id: id, record: record, result: decoded)
+                    }
+                    previews[key] = PreviewJob(
+                        id: id, task: task, waiters: [waiter: continuation])
+                }
+            }
+        } onCancel: {
+            Task { await self.cancelPreview(key: key, waiter: waiter) }
+        }
         try Task.checkCancellation()
-        guard live else { throw CancellationError() }
-        // Keep the original rendition key; a preview must not masquerade as an upgrade.
-        if let decoded { remember(decoded, key: record.key, expiry: record.record.expiry) }
-        return decoded
+        return result
+    }
+
+    private func finishPreview(
+        key: Key, id: UUID, record: FoundationArtworkDisk.CachedRecord?,
+        result: FoundationCurrentArtwork.Result?
+    ) {
+        guard let job = previews[key], job.id == id else { return }
+        previews.removeValue(forKey: key)
+        if live, let record, let result {
+            remember(result, key: record.key, expiry: record.record.expiry)
+        }
+        for waiter in job.waiters.values {
+            if live {
+                waiter.resume(returning: result)
+            } else {
+                waiter.resume(throwing: CancellationError())
+            }
+        }
+    }
+
+    private func cancelPreview(key: Key, waiter: UUID) {
+        guard var job = previews[key], let continuation = job.waiters.removeValue(forKey: waiter)
+        else { return }
+        continuation.resume(throwing: CancellationError())
+        if job.waiters.isEmpty {
+            job.task.cancel()
+            previews.removeValue(forKey: key)
+        } else {
+            previews[key] = job
+        }
+    }
+
+    /// Only an explicit user retry bypasses negative caching for this artwork identity.
+    func clearFailures(for item: FoundationItem) async {
+        let key = await resolvedArtwork(item.catalogArtworkItem, pixels: 640).key
+        failures = failures.filter { $0.key.identity != key.identity }
     }
 
     func result(
@@ -160,13 +253,16 @@ actor FoundationArtworkCache {
         try Task.checkCancellation()
         guard live else { throw CancellationError() }
         let now = now()
-        for candidate in [key, Key(identity: key.identity, pixels: 640)] {
+        for candidate in Self.renditionCandidates(key, allowsSmaller: false) {
             if var entry = entries[candidate], entry.expiry > now {
                 clock &+= 1
                 entry.access = clock
                 entries[candidate] = entry
                 return entry.result
             }
+        }
+        for candidate in Self.renditionCandidates(key, allowsSmaller: false) {
+            if let pending = pendingImages[candidate], pending.expiry > now { return pending.image }
         }
         let id = UUID()
         // Offline readers never join a pending remote fetch. A disk read remains local.
@@ -175,7 +271,9 @@ actor FoundationArtworkCache {
         }
         failures = failures.filter { $0.value > now }
         if failures[key] != nil { return nil }
-        guard jobs[key] != nil || jobs.count < max(1, limits.pendingKeys) else { return nil }
+        let playback = FoundationRequestIntent.isPlayback
+        let pendingLimit = max(1, limits.pendingKeys - (playback ? 0 : 1))
+        guard jobs[key] != nil || jobs.count < pendingLimit else { return nil }
         #if DEBUG
             let context = FoundationTrace.context
             let scopedLoad: @Sendable (FoundationItem, Int) async throws -> Data? = {
@@ -187,13 +285,28 @@ actor FoundationArtworkCache {
         #else
             let scopedLoad = load
         #endif
+        if playback, var job = jobs[key], !job.playback {
+            job.playback = true
+            jobs[key] = job
+            // Queued jobs carry intent into their worker; only an existing worker can
+            // already be waiting at network admission and require external promotion.
+            if job.task != nil {
+                protectedWorkers.insert(job.id)
+                await networkAdmission?.promoteArtwork(job.id)
+                if jobs[key]?.id != job.id { await networkAdmission?.finishArtwork(job.id) }
+            }
+            try Task.checkCancellation()
+            guard live else { throw CancellationError() }
+        }
         let result = try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 if var job = jobs[key] {
                     job.waiters[id] = continuation
                     jobs[key] = job
                 } else {
-                    jobs[key] = Job(item: item, load: scopedLoad, waiters: [id: continuation])
+                    jobs[key] = Job(
+                        item: item, load: scopedLoad, waiters: [id: continuation],
+                        playback: playback)
                     queue.append(key)
                 }
                 pump()
@@ -207,55 +320,111 @@ actor FoundationArtworkCache {
 
     private func pump() {
         while live, active < max(1, limits.concurrentLoads), !queue.isEmpty {
-            let key = queue.removeFirst()
+            let protectedIndex = queue.firstIndex { jobs[$0]?.playback == true }
+            let browseLimit = max(1, limits.concurrentLoads - 1)
+            guard protectedIndex != nil || active - protectedWorkers.count < browseLimit else {
+                return
+            }
+            let key = queue.remove(at: protectedIndex ?? queue.startIndex)
             guard var job = jobs[key] else { continue }
             let jobID = job.id
             let item = job.item
             let load = job.load
+            let playback = job.playback
+            if playback { protectedWorkers.insert(jobID) }
             let disk = disk
             let now = now
             active += 1
+            #if DEBUG
+                let timing = FoundationLoadTiming(.artwork)
+            #endif
             job.task = Task.detached(priority: .utility) { [weak self] in
                 var outcome: Result<(FoundationCurrentArtwork.Result, Date)?, Error>
+                var write: (Data, Date)?
                 do {
                     try Task.checkCancellation()
-                    if let record = await disk.read(key),
-                        let result = FoundationCurrentArtwork.decode(
-                            record.data, maximumPixels: key.pixels)
-                    {
-                        outcome = .success((result, record.expiry))
-                    } else if let data = try await load(item, key.pixels),
-                        let result = FoundationCurrentArtwork.decode(
-                            data, maximumPixels: key.pixels)
-                    {
-                        try Task.checkCancellation()
-                        let expiry = now().addingTimeInterval(
-                            item.primaryImageTag?.isEmpty == false ? 30 * 86_400 : 86_400)
-                        await disk.write(data, key: key, expiry: expiry)
-                        outcome = .success((result, expiry))
+                    #if DEBUG
+                        timing.record(.cacheReadStarted)
+                    #endif
+                    let record = await disk.read(key)
+                    #if DEBUG
+                        timing.record(.cacheReadFinished)
+                    #endif
+                    #if DEBUG
+                        timing.record(.decodeStarted)
+                    #endif
+                    let local = record.flatMap {
+                        FoundationCurrentArtwork.decode($0.data, maximumPixels: key.pixels)
+                    }
+                    #if DEBUG
+                        timing.record(.decodeFinished)
+                    #endif
+                    if let record, let local {
+                        outcome = .success((local, record.expiry))
                     } else {
-                        outcome = .success(nil)
+                        #if DEBUG
+                            timing.record(.requestStarted)
+                        #endif
+                        let data = try await FoundationRequestIntent.$artworkJob.withValue(jobID) {
+                            try await FoundationRequestIntent.$isPlayback.withValue(playback) {
+                                try await load(item, key.pixels)
+                            }
+                        }
+                        #if DEBUG
+                            timing.record(.responseReceived)
+                            timing.record(.decodeStarted)
+                        #endif
+                        let result = data.flatMap {
+                            FoundationCurrentArtwork.decode($0, maximumPixels: key.pixels)
+                        }
+                        #if DEBUG
+                            timing.record(.decodeFinished)
+                        #endif
+                        if let result, let data {
+                            let expiry = now().addingTimeInterval(
+                                item.primaryImageTag?.isEmpty == false ? 30 * 86_400 : 86_400)
+                            write = (data, expiry)
+                            outcome = .success((result, expiry))
+                        } else {
+                            outcome = .success(nil)
+                        }
                     }
                     try Task.checkCancellation()
                 } catch {
                     outcome = .failure(error)
                 }
-                await self?.finish(key: key, jobID: jobID, outcome: outcome)
+                let didPublish =
+                    await self?.publish(
+                        key: key, jobID: jobID, outcome: outcome, persists: write != nil) ?? false
+                #if DEBUG
+                    if didPublish { timing.record(.published) }
+                #endif
+                if didPublish, let (data, expiry) = write {
+                    #if DEBUG
+                        await self?.waitBeforePersistence()
+                    #endif
+                    if !Task.isCancelled {
+                        #if DEBUG
+                            timing.record(.persistStarted)
+                        #endif
+                        await disk.write(data, key: key, expiry: expiry)
+                        #if DEBUG
+                            timing.record(.persistFinished)
+                        #endif
+                    }
+                }
+                await self?.completeWorker(jobID)
             }
             jobs[key] = job
             activeTasks[jobID] = job.task
         }
     }
 
-    private func finish(
-        key: Key, jobID: UUID, outcome: Result<(FoundationCurrentArtwork.Result, Date)?, Error>
-    ) {
-        active -= 1
-        activeTasks.removeValue(forKey: jobID)
-        guard let job = jobs[key], job.id == jobID else {
-            pump()
-            return
-        }
+    private func publish(
+        key: Key, jobID: UUID, outcome: Result<(FoundationCurrentArtwork.Result, Date)?, Error>,
+        persists: Bool
+    ) -> Bool {
+        guard let job = jobs[key], job.id == jobID else { return false }
         jobs.removeValue(forKey: key)
         if live, case .success(let value) = outcome, let (result, expiry) = value {
             remember(result, key: key, expiry: expiry)
@@ -280,7 +449,28 @@ actor FoundationArtworkCache {
                 waiter.resume(throwing: CancellationError())
             }
         }
+        let didPublish = live && !Task.isCancelled
+        if didPublish, persists, case .success(let value) = outcome, let (image, expiry) = value {
+            persisting.insert(jobID)
+            pendingImages[key] = (jobID, image, expiry)
+        }
+        return didPublish
+    }
+
+    private func completeWorker(_ id: UUID) {
+        protectedWorkers.remove(id)
+        if let networkAdmission { Task { await networkAdmission.finishArtwork(id) } }
+        active -= 1
+        activeTasks.removeValue(forKey: id)
+        persisting.remove(id)
+        pendingImages = pendingImages.filter { $0.value.id != id }
         pump()
+    }
+
+    /// Explicit durability boundary for cache retirement and storage accounting.
+    func flushPersistence() async {
+        let tasks = persisting.compactMap { activeTasks[$0] }
+        for task in tasks { await task.value }
     }
 
     private func cancel(key: Key, waiter: UUID) {
@@ -303,7 +493,10 @@ actor FoundationArtworkCache {
 
     private func remember(_ result: FoundationCurrentArtwork.Result, key: Key, expiry: Date) {
         clock &+= 1
-        entries[key] = Entry(result: result, expiry: expiry, access: clock)
+        let entry = Entry(result: result, expiry: expiry, access: clock)
+        // A view may use an oversized hero without flushing every reusable thumbnail.
+        guard entry.cost <= max(0, limits.memoryBytes) else { return }
+        entries[key] = entry
         while entries.values.reduce(0, { $0 + $1.cost }) > max(0, limits.memoryBytes),
             let oldest = entries.min(by: { $0.value.access < $1.value.access })?.key
         {
@@ -313,12 +506,19 @@ actor FoundationArtworkCache {
 
     func invalidate(removeDisk: Bool) async -> Bool {
         live = false
+        for job in previews.values {
+            job.task.cancel()
+            for waiter in job.waiters.values { waiter.resume(throwing: CancellationError()) }
+        }
+        previews.removeAll()
         entries.removeAll()
+        pendingImages.removeAll()
         failures.removeAll()
         revisions.removeAll()
         queue.removeAll()
+        let draining = removeDisk ? [] : persisting.compactMap { activeTasks[$0] }
         let tasks = Array(activeTasks.values)
-        for task in tasks { task.cancel() }
+        for (id, task) in activeTasks where removeDisk || !persisting.contains(id) { task.cancel() }
         for job in jobs.values {
             job.task?.cancel()
             for waiter in job.waiters.values { waiter.resume(throwing: CancellationError()) }
@@ -328,6 +528,8 @@ actor FoundationArtworkCache {
             job.waiters.removeAll()
             return job
         }
+        // Retaining disk cache drains only already-published writes, never pending downloads.
+        for task in draining { await task.value }
         let cleared = await disk.invalidate(removeFiles: removeDisk)
         for task in tasks { await task.value }
         return cleared
@@ -348,6 +550,7 @@ actor FoundationArtworkCache {
 
     /// Separate physical cache files from transient decoded-image memory.
     func storageUsage() async -> (memory: Int64, disk: Int64?) {
+        await flushPersistence()
         guard live else { return (0, nil) }
         let bytes = await disk.storageBytes()
         guard live else { return (0, nil) }
@@ -355,7 +558,8 @@ actor FoundationArtworkCache {
     }
 
     func usage() async -> (memory: Int, disk: Int, active: Int, pending: Int) {
-        (entries.values.reduce(0, { $0 + $1.cost }), await disk.bytes(), active, jobs.count)
+        await flushPersistence()
+        return (entries.values.reduce(0, { $0 + $1.cost }), await disk.bytes(), active, jobs.count)
     }
 }
 
@@ -371,6 +575,8 @@ private actor FoundationArtworkDisk {
     private var live = true
     private let lease: UUID
     private let registration: Task<Void, Never>
+    private var lastReadMaintenance: Date?
+    private var touches: [URL: Date] = [:]
 
     init(directory: URL, limit: Int, now: @escaping @Sendable () -> Date) {
         self.directory = directory
@@ -466,8 +672,8 @@ private actor FoundationArtworkDisk {
     func read(_ key: FoundationArtworkCache.Key, allowsSmaller: Bool) async -> CachedRecord? {
         await registration.value
         guard live, (try? prepare()) != nil else { return nil }
-        var candidates = [key, FoundationArtworkCache.Key(identity: key.identity, pixels: 640)]
-        if allowsSmaller { candidates.append(.init(identity: key.identity, pixels: 160)) }
+        let candidates = FoundationArtworkCache.renditionCandidates(
+            key, allowsSmaller: allowsSmaller)
         for candidate in candidates {
             let file = url(candidate)
             guard
@@ -483,18 +689,28 @@ private actor FoundationArtworkDisk {
                 try? FileManager.default.removeItem(at: file)
                 continue
             }
-            try? FileManager.default.setAttributes(
-                [.modificationDate: Date()], ofItemAtPath: file.path)
-            trim()
+            if touches[file].map({ now().timeIntervalSince($0) >= 30 }) ?? true {
+                try? FileManager.default.setAttributes(
+                    [.modificationDate: now()], ofItemAtPath: file.path)
+                if touches.count >= 256 { touches.removeAll(keepingCapacity: true) }
+                touches[file] = now()
+            }
+            maintainAfterRead()
             return CachedRecord(key: candidate, record: record)
         }
-        trim()
+        maintainAfterRead()
         return nil
+    }
+
+    private func maintainAfterRead() {
+        guard lastReadMaintenance.map({ now().timeIntervalSince($0) >= 30 }) ?? true else { return }
+        lastReadMaintenance = now()
+        trim()
     }
 
     func write(_ data: Data, key: FoundationArtworkCache.Key, expiry: Date) async {
         await registration.value
-        guard live, limit > 0, (try? prepare()) != nil else { return }
+        guard live, !Task.isCancelled, limit > 0, (try? prepare()) != nil else { return }
         let encoder = PropertyListEncoder()
         encoder.outputFormat = .binary
         guard let encoded = try? encoder.encode(Record(data: data, expiry: expiry)),

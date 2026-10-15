@@ -6,6 +6,302 @@ import XCTest
 @testable import VelacantoFoundation
 
 final class FoundationArtworkCacheTests: XCTestCase {
+    func testArtistLogoContrastRespondsToAppearanceAndPreservesReadableOriginals() throws {
+        func logo(_ white: CGFloat, alpha: CGFloat = 1) throws -> CGImage {
+            let context = try XCTUnwrap(
+                CGContext(
+                    data: nil, width: 32, height: 32, bitsPerComponent: 8, bytesPerRow: 128,
+                    space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+            context.setFillColor(
+                CGColor(
+                    colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!,
+                    components: [white, white, white, alpha])!)
+            context.fill(CGRect(x: 12, y: 4, width: 8, height: 24))
+            return try XCTUnwrap(context.makeImage())
+        }
+        let black = try logo(0)
+        let white = try logo(1)
+        XCTAssertEqual(
+            FoundationArtistLogoContrast.presentation(for: black, dark: true), .originalOnLight)
+        XCTAssertEqual(
+            FoundationArtistLogoContrast.presentation(for: black, dark: false), .original)
+        XCTAssertEqual(FoundationArtistLogoContrast.presentation(for: white, dark: true), .original)
+        XCTAssertEqual(
+            FoundationArtistLogoContrast.presentation(for: white, dark: false), .originalOnDark)
+        let gray = try logo(0.5)
+        XCTAssertEqual(
+            FoundationArtistLogoContrast.presentation(for: gray, dark: true), .original)
+        XCTAssertEqual(
+            FoundationArtistLogoContrast.presentation(for: gray, dark: false), .original)
+        let opaqueContext = try XCTUnwrap(
+            CGContext(
+                data: nil, width: 32, height: 32, bitsPerComponent: 8, bytesPerRow: 128,
+                space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        opaqueContext.setFillColor(
+            CGColor(
+                colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!, components: [0.5, 0.5, 0.5, 1])!
+        )
+        opaqueContext.fill(CGRect(x: 0, y: 0, width: 32, height: 32))
+        let opaque = try XCTUnwrap(opaqueContext.makeImage())
+        XCTAssertEqual(
+            FoundationArtistLogoContrast.presentation(for: opaque, dark: true), .original)
+        XCTAssertEqual(
+            FoundationArtistLogoContrast.presentation(for: opaque, dark: false), .original)
+        let translucent = try logo(1, alpha: 0.3)
+        XCTAssertNotEqual(
+            FoundationArtistLogoContrast.presentation(for: translucent, dark: false), .text)
+        let empty = try logo(0, alpha: 0)
+        XCTAssertEqual(FoundationArtistLogoContrast.presentation(for: empty, dark: true), .text)
+    }
+
+    func testArtistLogoRetainsColorsAndChecksTheLocalBackdropRegion() throws {
+        func image(width: Int, height: Int, draw: (CGContext) -> Void) throws -> CGImage {
+            let context = try XCTUnwrap(
+                CGContext(
+                    data: nil, width: width, height: height,
+                    bitsPerComponent: 8, bytesPerRow: width * 4,
+                    space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+            draw(context)
+            return try XCTUnwrap(context.makeImage())
+        }
+        func logo(_ color: CGColor) throws -> CGImage {
+            try image(width: 32, height: 32) { context in
+                context.setFillColor(color)
+                context.fill(CGRect(x: 8, y: 4, width: 16, height: 24))
+            }
+        }
+        let colorful = try logo(CGColor(red: 0.8, green: 0.1, blue: 0.2, alpha: 1))
+        XCTAssertEqual(
+            FoundationArtistLogoContrast.presentation(for: colorful, dark: false), .original)
+        let opaqueDesign = try image(width: 32, height: 32) { context in
+            context.setFillColor(CGColor(gray: 1, alpha: 1))
+            context.fill(CGRect(x: 0, y: 0, width: 32, height: 32))
+            context.setFillColor(CGColor(red: 0.8, green: 0.1, blue: 0.2, alpha: 1))
+            context.fill(CGRect(x: 8, y: 4, width: 16, height: 24))
+        }
+        XCTAssertEqual(
+            FoundationArtistLogoContrast.presentation(for: opaqueDesign, dark: false), .original)
+        XCTAssertEqual(
+            FoundationArtistLogoContrast.presentation(for: opaqueDesign, dark: true), .original)
+        let background = try image(width: 200, height: 100) { context in
+            context.setFillColor(CGColor(gray: 1, alpha: 1))
+            context.fill(CGRect(x: 0, y: 0, width: 100, height: 100))
+            context.setFillColor(CGColor(gray: 0, alpha: 1))
+            context.fill(CGRect(x: 100, y: 0, width: 100, height: 100))
+        }
+        func region(_ x: CGFloat) -> FoundationArtistLogoContrast.Surface {
+            .init(
+                size: CGSize(width: 200, height: 100),
+                logoFrame: CGRect(x: x, y: 0, width: 100, height: 100),
+                frostStart: 1, frostEnd: 1, fadeStart: 1)
+        }
+        let white = try logo(CGColor(gray: 1, alpha: 1))
+        XCTAssertEqual(
+            FoundationArtistLogoContrast.presentation(
+                for: white, dark: true, backdrop: background, surface: region(0)), .originalOnDark)
+        XCTAssertEqual(
+            FoundationArtistLogoContrast.presentation(
+                for: white, dark: true, backdrop: background, surface: region(100)), .original)
+        let gold = try logo(CGColor(red: 1, green: 0.8, blue: 0.05, alpha: 1))
+        XCTAssertEqual(
+            FoundationArtistLogoContrast.presentation(
+                for: gold, dark: true, backdrop: background, surface: region(0)), .originalOnDark)
+        XCTAssertEqual(
+            FoundationArtistLogoContrast.presentation(
+                for: gold, dark: true, backdrop: background, surface: region(100)), .original)
+        let frosted = FoundationArtistLogoContrast.Surface(
+            size: CGSize(width: 200, height: 100),
+            logoFrame: CGRect(x: 0, y: 0, width: 100, height: 100),
+            frostStart: 0, frostEnd: 0.001, fadeStart: 1)
+        XCTAssertEqual(
+            FoundationArtistLogoContrast.presentation(
+                for: white, dark: true, backdrop: background, surface: frosted), .original)
+        XCTAssertEqual(
+            FoundationArtistLogoContrast.presentation(
+                for: white, dark: false, backdrop: background, surface: frosted), .originalOnDark)
+        XCTAssertEqual(
+            FoundationArtistLogoContrast.presentation(
+                for: white, dark: true, backdrop: background, surface: frosted,
+                reduceTransparency: true), .original)
+    }
+
+    func testLogoSupportPreservesColoredArtworkAndRespondsToIncreasedContrast() throws {
+        let context = try XCTUnwrap(
+            CGContext(
+                data: nil, width: 32, height: 32, bitsPerComponent: 8, bytesPerRow: 128,
+                space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        context.setFillColor(CGColor(red: 1, green: 0.8, blue: 0.05, alpha: 1))
+        context.fill(CGRect(x: 8, y: 4, width: 16, height: 24))
+        let gold = try XCTUnwrap(context.makeImage())
+        let decision = FoundationArtistLogoContrast.decision(
+            for: gold, dark: false, increasedContrast: true)
+        XCTAssertEqual(decision.presentation, .originalOnDark)
+        XCTAssertEqual(FoundationArtistLogoContrast.supportTint(dark: true), 0.12)
+        XCTAssertEqual(FoundationArtistLogoContrast.supportTint(dark: false), 0.96)
+        XCTAssertEqual(
+            FoundationArtistLogoContrast.supportOpacity(reduceTransparency: true), 1)
+    }
+
+    func testMixedLogoRemainsOriginalWhenNoSurfacePassesCoverage() throws {
+        let context = try XCTUnwrap(
+            CGContext(
+                data: nil, width: 32, height: 32, bitsPerComponent: 8, bytesPerRow: 128,
+                space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        context.setFillColor(CGColor(gray: 0, alpha: 1))
+        context.fill(CGRect(x: 8, y: 4, width: 8, height: 24))
+        context.setFillColor(CGColor(gray: 1, alpha: 1))
+        context.fill(CGRect(x: 16, y: 4, width: 8, height: 24))
+        let logo = try XCTUnwrap(context.makeImage())
+        let decision = FoundationArtistLogoContrast.decision(for: logo, dark: true)
+        XCTAssertTrue([.originalOnLight, .originalOnDark].contains(decision.presentation))
+        XCTAssertEqual(decision.reason, "Original retained with best local support")
+    }
+
+    func testOverviewForegroundUsesMeasuredBackdropAndFrostInsteadOfAppearanceAlone() throws {
+        let context = try XCTUnwrap(
+            CGContext(
+                data: nil, width: 200, height: 100, bitsPerComponent: 8, bytesPerRow: 800,
+                space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        context.setFillColor(CGColor(gray: 1, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: 100, height: 100))
+        context.setFillColor(CGColor(gray: 0, alpha: 1))
+        context.fill(CGRect(x: 100, y: 0, width: 100, height: 100))
+        let backdrop = try XCTUnwrap(context.makeImage())
+        func surface(_ x: CGFloat, frost: Double = 1) -> FoundationArtistLogoContrast.Surface {
+            .init(
+                size: CGSize(width: 200, height: 100),
+                logoFrame: CGRect(x: x, y: 0, width: 100, height: 100),
+                frostStart: frost, frostEnd: frost == 1 ? 1 : 0.001, fadeStart: 1)
+        }
+        XCTAssertFalse(
+            FoundationArtistLogoContrast.prefersLightText(
+                backdrop: backdrop, surface: surface(0), dark: true, reduceTransparency: false))
+        XCTAssertTrue(
+            FoundationArtistLogoContrast.prefersLightText(
+                backdrop: backdrop, surface: surface(100), dark: false, reduceTransparency: false))
+        XCTAssertTrue(
+            FoundationArtistLogoContrast.prefersLightText(
+                backdrop: backdrop, surface: surface(0, frost: 0), dark: true,
+                reduceTransparency: true))
+        XCTAssertFalse(
+            FoundationArtistLogoContrast.prefersLightText(
+                backdrop: nil, surface: nil, dark: false, reduceTransparency: false))
+    }
+
+    func testArtistBackdropLeavesMeasuredControlsClearAcrossHeroLayouts() {
+        for (height, controls) in [(CGFloat(600), CGFloat(320)), (900, 390), (480, 400)] {
+            let profile = FoundationArtistBackdropProfile(
+                height: height, controlsBottom: controls, increasedContrast: false)
+            XCTAssertGreaterThanOrEqual(
+                profile.start * Double(height), Double(controls + 10) - 0.001)
+            XCTAssertEqual(
+                FoundationArtistBackdropProfile.eased(
+                    Double(controls / height), from: profile.start, to: profile.blurEnd), 0)
+            XCTAssertLessThanOrEqual(profile.start, profile.blurEnd)
+            XCTAssertLessThanOrEqual(profile.blurEnd, profile.frostEnd)
+            XCTAssertLessThan(profile.fadeStart, 1)
+        }
+        for height: CGFloat in [0, .nan, .infinity] {
+            let profile = FoundationArtistBackdropProfile(
+                height: height, controlsBottom: nil, increasedContrast: false)
+            XCTAssertEqual(profile.start, 1)
+            XCTAssertEqual(
+                FoundationArtistBackdropProfile.eased(1, from: profile.start, to: profile.blurEnd),
+                0)
+        }
+    }
+
+    func testMacArtistFadeFeathersFromControlsMidpointWhileMobileKeepsItsBoundary() {
+        let mobile = FoundationArtistBackdropProfile(
+            height: 700, controlsBottom: 400, increasedContrast: false, overviewTop: 440)
+        let desktop = FoundationArtistBackdropProfile(
+            height: 700, controlsBottom: 400, increasedContrast: false,
+            overviewTop: 440, controlsMidpoint: 360)
+        XCTAssertEqual(mobile.start * 700, 410, accuracy: 0.001)
+        XCTAssertFalse(mobile.smoothPageFade)
+        XCTAssertEqual(desktop.start * 700, 360, accuracy: 0.001)
+        XCTAssertTrue(desktop.smoothPageFade)
+        XCTAssertGreaterThan(
+            desktop.readingEnd - desktop.readingStart,
+            mobile.readingEnd - mobile.readingStart)
+        XCTAssertEqual(
+            FoundationArtistBackdropProfile.eased(
+                desktop.start, from: desktop.start, to: desktop.frostEnd), 0)
+        XCTAssertLessThan(
+            FoundationArtistBackdropProfile.eased(
+                desktop.start + 0.001, from: desktop.start, to: desktop.frostEnd), 0.001)
+    }
+
+    func testArtistReadingFadeProtectsControlsAndReachesOverviewAcrossLayouts() {
+        for (height, controls, overview) in [
+            (CGFloat(680), CGFloat(350), CGFloat(480)), (900, 390, 430), (1200, 400, 850),
+        ] {
+            let profile = FoundationArtistBackdropProfile(
+                height: height, controlsBottom: controls, increasedContrast: false,
+                overviewTop: overview)
+            XCTAssertGreaterThanOrEqual(profile.readingStart, profile.start)
+            XCTAssertEqual(
+                FoundationArtistBackdropProfile.eased(
+                    Double(controls / height), from: profile.readingStart, to: profile.readingEnd),
+                0)
+            XCTAssertEqual(
+                FoundationArtistBackdropProfile.eased(
+                    Double(overview / height), from: profile.readingStart, to: profile.readingEnd),
+                1, accuracy: 0.001)
+        }
+        let pending = FoundationArtistBackdropProfile(
+            height: 700, controlsBottom: 350, increasedContrast: false)
+        XCTAssertEqual(pending.readingOpacity, 0)
+    }
+
+    func testOverviewSamplingUsesBackdropMaterialStrength() throws {
+        let context = try XCTUnwrap(
+            CGContext(
+                data: nil, width: 20, height: 20, bitsPerComponent: 8, bytesPerRow: 80,
+                space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        context.setFillColor(CGColor(gray: 1, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: 20, height: 20))
+        let image = try XCTUnwrap(context.makeImage())
+        var region = FoundationArtistLogoContrast.Surface(
+            size: CGSize(width: 20, height: 20),
+            logoFrame: CGRect(x: 0, y: 0, width: 20, height: 20),
+            frostStart: 0, frostEnd: 0.001, fadeStart: 1, frostOpacity: 0)
+        XCTAssertFalse(
+            FoundationArtistLogoContrast.prefersLightText(
+                backdrop: image, surface: region, dark: true, reduceTransparency: false))
+        region.readingStart = 0
+        region.readingEnd = 0.001
+        region.readingOpacity = 0.72
+        XCTAssertTrue(
+            FoundationArtistLogoContrast.prefersLightText(
+                backdrop: image, surface: region, dark: true, reduceTransparency: false))
+        region.readingOpacity = 0
+        region.frostOpacity = 1
+        XCTAssertTrue(
+            FoundationArtistLogoContrast.prefersLightText(
+                backdrop: image, surface: region, dark: true, reduceTransparency: false))
+    }
+
+    func testPreviewFailureRecoveryHonorsCancellationAndAccountFailures() {
+        for error: FoundationLibraryError in [.network, .unavailable, .invalidResponse] {
+            XCTAssertTrue(FoundationArtworkLoadRecovery.canAttemptTarget(after: error))
+        }
+        for error: FoundationLibraryError in [
+            .cancelled, .authentication, .credentials, .secureConnection, .invalidServer,
+        ] {
+            XCTAssertFalse(FoundationArtworkLoadRecovery.canAttemptTarget(after: error))
+        }
+        XCTAssertFalse(
+            FoundationArtworkLoadRecovery.canAttemptTarget(after: CancellationError()))
+    }
+
     private func item(
         _ id: String = "album", tag: String? = "v1", kind: FoundationItem.Kind = .album
     )
@@ -13,6 +309,110 @@ final class FoundationArtworkCacheTests: XCTestCase {
     {
         FoundationItem(
             id: id, title: "", subtitle: "", kind: kind, duration: nil, primaryImageTag: tag)
+    }
+
+    func testArtistArtworkRevisionChangesPreserveUnchangedSiblingRoleIdentities() throws {
+        var original = item("artist", tag: "portrait-v1", kind: .artist)
+        original.logoImageTag = "logo-v1"
+        original.backdropImageTag = "backdrop-v1"
+        let roles: [FoundationItem.ArtworkRole] = [.primary, .logo, .backdrop]
+        for changedRole in roles {
+            var revised = original
+            switch changedRole {
+            case .primary: revised.primaryImageTag = "portrait-v2"
+            case .logo: revised.logoImageTag = "logo-v2"
+            case .backdrop: revised.backdropImageTag = "backdrop-v2"
+            }
+            for inspectedRole in roles {
+                let before = try XCTUnwrap(original.artworkItem(for: inspectedRole))
+                let after = try XCTUnwrap(revised.artworkItem(for: inspectedRole))
+                let beforeKey = FoundationArtworkCache.key(before, pixels: 640)
+                let afterKey = FoundationArtworkCache.key(after, pixels: 640)
+                if inspectedRole == changedRole {
+                    XCTAssertNotEqual(beforeKey, afterKey)
+                } else {
+                    XCTAssertEqual(beforeKey, afterKey)
+                }
+            }
+        }
+    }
+
+    func testArtistHydrationDoesNotMaskRefreshedInputArtworkRevisionsOrScope() throws {
+        var input = item("artist", tag: "portrait-v1", kind: .artist)
+        input.logoImageTag = "logo-v1"
+        input.backdropImageTag = "backdrop-v1"
+        var detail = input
+        detail.title = "Hydrated Artist"
+        let hydration = FoundationArtistBrandingMetadata(
+            scope: "account-a", inputRevision: input.artistBrandingRevision, detail: detail)
+        XCTAssertEqual(hydration.resolved(for: input, scope: "account-a")?.title, "Hydrated Artist")
+        XCTAssertNil(hydration.resolved(for: input, scope: "account-b"))
+        for role in [FoundationItem.ArtworkRole.primary, .logo, .backdrop] {
+            var refreshed = input
+            switch role {
+            case .primary: refreshed.primaryImageTag = "portrait-v2"
+            case .logo: refreshed.logoImageTag = "logo-v2"
+            case .backdrop: refreshed.backdropImageTag = "backdrop-v2"
+            }
+            XCTAssertEqual(refreshed.sharedArtworkIdentity, input.sharedArtworkIdentity)
+            XCTAssertNotEqual(refreshed.artistBrandingRevision, input.artistBrandingRevision)
+            XCTAssertNil(hydration.resolved(for: refreshed, scope: "account-a"))
+        }
+        var missingLogo = input
+        missingLogo.logoImageTag = nil
+        XCTAssertNil(hydration.resolved(for: missingLogo, scope: "account-a"))
+    }
+
+    func testArtistRolesHaveSeparateCacheAndRevisionIdentities() async throws {
+        var artist = item("artist", tag: "portrait-v1", kind: .artist)
+        artist.logoImageTag = "logo-v1"
+        artist.backdropImageTag = "backdrop-v1"
+        let logo = try XCTUnwrap(artist.artworkItem(for: .logo))
+        let backdrop = try XCTUnwrap(artist.artworkItem(for: .backdrop))
+        XCTAssertEqual(logo.resolvedArtworkRole, .logo)
+        XCTAssertEqual(backdrop.resolvedArtworkRole, .backdrop)
+        XCTAssertEqual(logo.primaryImageTag, "logo-v1")
+        XCTAssertNotEqual(logo.sharedArtworkIdentity, artist.sharedArtworkIdentity)
+        XCTAssertNotEqual(logo.sharedArtworkIdentity, backdrop.sharedArtworkIdentity)
+        let keys = Set(
+            [artist, logo, backdrop].map { FoundationArtworkCache.key($0, pixels: 640) })
+        XCTAssertEqual(keys.count, 3)
+
+        let root = root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let cache = FoundationArtworkCache(scope: "synthetic-artist", root: root)
+        let data = try image()
+        for projection in [artist, logo, backdrop] {
+            _ = try await cache.result(for: projection, pixels: 640, allowsNetwork: true) { _, _ in
+                data
+            }
+        }
+        var untaggedPortrait = artist
+        untaggedPortrait.primaryImageTag = nil
+        let cachedPortrait = try await cache.cachedResult(for: untaggedPortrait, pixels: 640)
+        let cachedLogo = try await cache.cachedResult(for: logo, pixels: 640)
+        XCTAssertNotNil(cachedPortrait)
+        XCTAssertNotNil(cachedLogo)
+        XCTAssertNotEqual(cachedPortrait?.revision, cachedLogo?.revision)
+        _ = await cache.invalidate(removeDisk: true)
+    }
+
+    func testArtistBrandingAbsentOrEmptyTagsKeepsTextFallbackAndLegacyDecode() throws {
+        var artist = item("artist", tag: nil, kind: .artist)
+        XCTAssertNil(artist.artworkItem(for: .logo))
+        XCTAssertNil(artist.artworkItem(for: .backdrop))
+        artist.logoImageTag = ""
+        XCTAssertNil(artist.artworkItem(for: .logo))
+        let legacy = Data(
+            #"{"id":"artist","title":"Synthetic Artist","subtitle":"","kind":"artist","genres":[],"playCount":0}"#
+                .utf8)
+        let decoded = try JSONDecoder().decode(FoundationItem.self, from: legacy)
+        XCTAssertEqual(decoded.resolvedArtworkRole, .primary)
+        XCTAssertNil(decoded.logoImageTag)
+        XCTAssertEqual(
+            FoundationArtworkCache.key(decoded, pixels: 640).identity,
+            FoundationArtworkCache.digest("artist\0artist\0"))
+        XCTAssertNil(item().artworkItem(for: .logo))
     }
 
     func testStorageMetricsSeparateOwnedArtworkDiskFromMemoryAndOtherAccounts() async throws {
@@ -51,14 +451,15 @@ final class FoundationArtworkCacheTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: target.path))
     }
 
-    private func image() throws -> Data {
+    private func image(width: Int = 640, height: Int = 320) throws -> Data {
         let context = try XCTUnwrap(
             CGContext(
-                data: nil, width: 640, height: 320, bitsPerComponent: 8, bytesPerRow: 2560,
+                data: nil, width: width, height: height, bitsPerComponent: 8,
+                bytesPerRow: width * 4,
                 space: CGColorSpaceCreateDeviceRGB(),
                 bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
         context.setFillColor(CGColor(red: 0.5, green: 0.2, blue: 0.1, alpha: 1))
-        context.fill(CGRect(x: 0, y: 0, width: 640, height: 320))
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
         let data = NSMutableData()
         let destination = try XCTUnwrap(
             CGImageDestinationCreateWithData(
@@ -278,11 +679,118 @@ final class FoundationArtworkCacheTests: XCTestCase {
         XCTAssertEqual(count, 1)
     }
 
+    func testNowPlayingPromotesCoalescedArtworkWaitingForNetworkAdmission() async throws {
+        let root = root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let admission = FoundationNetworkAdmission(limit: 3)
+        await admission.updatePlaybackProtection(true, revision: 1)
+        let browsePermit = try await admission.acquire()
+        let cache = FoundationArtworkCache(
+            scope: "synthetic-promoted", root: root, networkAdmission: admission)
+        let album = item()
+        let probe = ArtworkCacheProbe(data: try image())
+        let load: @Sendable (FoundationItem, Int) async throws -> Data? = { item, pixels in
+            let permit = try await admission.acquire()
+            let data = try await probe.load(item, pixels)
+            await admission.release(permit)
+            return data
+        }
+        let browse = Task {
+            try await cache.result(for: album, pixels: 640, allowsNetwork: true, load: load)
+        }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while await admission.pendingCount != 1 {
+            guard ContinuousClock.now < deadline else { throw FoundationLibraryError.unavailable }
+            await Task.yield()
+        }
+        let current = Task {
+            try await FoundationRequestIntent.$isPlayback.withValue(true) {
+                try await cache.result(for: album, pixels: 640, allowsNetwork: true, load: load)
+            }
+        }
+        try await probe.waitForCount(1)
+        let currentResult = try await current.value
+        let browseResult = try await browse.value
+        XCTAssertEqual(currentResult?.id, browseResult?.id)
+        let count = await probe.count
+        XCTAssertEqual(count, 1)
+        // Protected artwork finished while the ordinary permit was still held.
+        await admission.release(browsePermit)
+        _ = await cache.invalidate(removeDisk: false)
+    }
+
+    func testNowPlayingHasPendingCapacityWhenBrowsingBudgetIsFull() async throws {
+        let root = root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let cache = FoundationArtworkCache(
+            scope: "synthetic-pending", root: root,
+            limits: .init(concurrentLoads: 2, pendingKeys: 3))
+        let held = ArtworkCacheProbe(data: try image(), held: true)
+        let ready = ArtworkCacheProbe(data: try image())
+        let firstItem = item("first")
+        let secondItem = item("second")
+        let currentItem = item("current")
+        let first = Task {
+            try await cache.result(
+                for: firstItem, pixels: 640, allowsNetwork: true, load: held.load)
+        }
+        try await held.waitForCount(1)
+        let second = Task {
+            try await cache.result(
+                for: secondItem, pixels: 640, allowsNetwork: true, load: ready.load)
+        }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while await cache.usage().pending != 2 {
+            guard ContinuousClock.now < deadline else { throw FoundationLibraryError.unavailable }
+            await Task.yield()
+        }
+        let refusedBrowse = try await cache.result(
+            for: item("excess"), pixels: 640, allowsNetwork: true, load: ready.load)
+        XCTAssertNil(refusedBrowse)
+        let current = try await FoundationRequestIntent.$isPlayback.withValue(true) {
+            try await cache.result(
+                for: currentItem, pixels: 640, allowsNetwork: true, load: ready.load)
+        }
+        XCTAssertNotNil(current)
+        await held.release()
+        _ = try await first.value
+        _ = try await second.value
+        _ = await cache.invalidate(removeDisk: false)
+    }
+
+    func testNowPlayingUsesReservedArtworkWorkerWhileBrowseLoadIsHeld() async throws {
+        let root = root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let cache = FoundationArtworkCache(
+            scope: "synthetic-reserved", root: root, limits: .init(concurrentLoads: 2))
+        let held = ArtworkCacheProbe(data: try image(), held: true)
+        let ready = ArtworkCacheProbe(data: try image())
+        let firstItem = item("first")
+        let currentItem = item("current")
+        let first = Task {
+            try await cache.result(
+                for: firstItem, pixels: 640, allowsNetwork: true, load: held.load)
+        }
+        try await held.waitForCount(1)
+        let current = Task {
+            try await FoundationRequestIntent.$isPlayback.withValue(true) {
+                try await cache.result(
+                    for: currentItem, pixels: 640, allowsNetwork: true, load: ready.load)
+            }
+        }
+        try await ready.waitForCount(1)
+        let result = try await current.value
+        XCTAssertNotNil(result)
+        await held.release()
+        _ = try await first.value
+        _ = await cache.invalidate(removeDisk: false)
+    }
+
     func testFetchConcurrencyAndQueuedCancellationAreBounded() async throws {
         let root = root()
         defer { try? FileManager.default.removeItem(at: root) }
         let cache = FoundationArtworkCache(
-            scope: "synthetic", root: root, limits: .init(concurrentLoads: 2))
+            scope: "synthetic", root: root, limits: .init(concurrentLoads: 3))
         let probe = ArtworkCacheProbe(data: try image(), held: true)
         var tasks: [Task<FoundationCurrentArtwork.Result?, Error>] = []
         for index in 0..<6 {
@@ -303,6 +811,43 @@ final class FoundationArtworkCacheTests: XCTestCase {
         let usage = await cache.usage()
         XCTAssertEqual(usage.active, 0)
         XCTAssertEqual(usage.pending, 0)
+    }
+
+    func testDecodedArtworkPublishesWhilePersistenceIsHeldAndRetirementRemovesIt() async throws {
+        let root = root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let cache = FoundationArtworkCache(
+            scope: "synthetic-held-persistence", root: root, limits: .init(memoryBytes: 0))
+        let barrier = ArtworkCacheProbe(data: Data(), held: true)
+        let artwork = item()
+        await cache.setPersistenceBarrier { _ = try? await barrier.load(artwork, 160) }
+        let probe = ArtworkCacheProbe(data: try image())
+        let ready = expectation(description: "Decoded image publishes before persistence")
+        let work = Task {
+            let image = try await cache.result(
+                for: artwork, pixels: 160, allowsNetwork: true, load: probe.load)
+            ready.fulfill()
+            return image
+        }
+        try await barrier.waitForCount(1)
+        await fulfillment(of: [ready], timeout: 2)
+        let image = try await work.value
+        XCTAssertNotNil(image)
+        // An oversized/uncached decoded result remains reusable while its write is pending.
+        let reused = try await cache.result(
+            for: artwork, pixels: 160, allowsNetwork: true, load: probe.load)
+        XCTAssertEqual(image?.id, reused?.id)
+        let reads = await probe.count
+        XCTAssertEqual(reads, 1)
+        let retired = Task { await cache.invalidate(removeDisk: true) }
+        await barrier.release()
+        let cleared = await retired.value
+        XCTAssertTrue(cleared)
+        let restored = FoundationArtworkCache(scope: "synthetic-held-persistence", root: root)
+        let absent = try await restored.result(
+            for: artwork, pixels: 160, allowsNetwork: false, load: probe.load)
+        XCTAssertNil(absent)
+        _ = await restored.invalidate(removeDisk: true)
     }
 
     func testInvalidationRejectsLateBytesAndNoDiskResurrection() async throws {
@@ -367,6 +912,102 @@ final class FoundationArtworkCacheTests: XCTestCase {
         let restoredCount = await probe.count
         XCTAssertEqual(restoredCount, 1)
     }
+    @MainActor
+    func testFastArtworkSkipsPreviewAndSlowArtworkShowsLocalFallback() async throws {
+        let full = try XCTUnwrap(FoundationCurrentArtwork.decode(image(), maximumPixels: 640))
+        let preview = try XCTUnwrap(FoundationCurrentArtwork.decode(image(), maximumPixels: 160))
+        var published: [UUID] = []
+        let fast = try await FoundationArtworkPresentation.load(
+            target: { full },
+            cached: {
+                XCTFail("Fast artwork must not read or display a preview")
+                return preview
+            }, previewDelay: .seconds(30), onPreview: { published.append($0.id) })
+        XCTAssertEqual(fast?.id, full.id)
+        XCTAssertTrue(published.isEmpty)
+
+        let probe = ArtworkCacheProbe(data: full.data, held: true)
+        let artwork = item()
+        let slow = Task {
+            try await FoundationArtworkPresentation.load(
+                target: {
+                    _ = try await probe.load(artwork, 640)
+                    return full
+                }, cached: { preview }, previewDelay: .milliseconds(1)
+            ) { published.append($0.id) }
+        }
+        try await probe.waitForCount(1)
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while published.isEmpty, ContinuousClock.now < deadline { await Task.yield() }
+        XCTAssertEqual(published, [preview.id])
+        await probe.release()
+        let final = try await slow.value
+        XCTAssertEqual(final?.id, full.id)
+    }
+
+    @MainActor
+    func testTargetFailurePreservesLocalPreviewButSecurityFailureDoesNotReadIt() async throws {
+        let preview = try XCTUnwrap(FoundationCurrentArtwork.decode(image(), maximumPixels: 160))
+        var published: [UUID] = []
+        let missing = try await FoundationArtworkPresentation.load(
+            target: { nil }, cached: { preview }, previewDelay: .seconds(30),
+            onPreview: { published.append($0.id) })
+        XCTAssertNil(missing)
+        XCTAssertEqual(published, [preview.id])
+        for error: FoundationLibraryError in [.network, .authentication] {
+            published = []
+            do {
+                _ = try await FoundationArtworkPresentation.load(
+                    target: { throw error },
+                    cached: {
+                        if error == .authentication {
+                            XCTFail("Security failure must not read fallback")
+                        }
+                        return preview
+                    }, previewDelay: .seconds(30), onPreview: { published.append($0.id) })
+                XCTFail("The target failure must remain actionable")
+            } catch let caught as FoundationLibraryError { XCTAssertEqual(caught, error) }
+            XCTAssertEqual(published.count, error == .network ? 1 : 0)
+        }
+    }
+
+    func testExplicitArtworkRetryBypassesOnlyAffectedFailure() async throws {
+        let root = root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let cache = FoundationArtworkCache(scope: "synthetic-retry", root: root)
+        let invalid = ArtworkCacheProbe(data: Data("invalid".utf8))
+        for id in ["a", "b"] {
+            _ = try await cache.result(
+                for: item(id), pixels: 640, allowsNetwork: true, load: invalid.load)
+        }
+        await cache.clearFailures(for: item("a"))
+        let valid = ArtworkCacheProbe(data: try image())
+        let retried = try await cache.result(
+            for: item("a"), pixels: 640, allowsNetwork: true, load: valid.load)
+        let suppressed = try await cache.result(
+            for: item("b"), pixels: 640, allowsNetwork: true, load: valid.load)
+        XCTAssertNotNil(retried)
+        XCTAssertNil(suppressed)
+        let count = await valid.count
+        XCTAssertEqual(count, 1)
+        _ = await cache.invalidate(removeDisk: true)
+    }
+
+    func testOversizedHeroDoesNotFlushReusableThumbnail() async throws {
+        let root = root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let cache = FoundationArtworkCache(
+            scope: "synthetic-admission", root: root, limits: .init(memoryBytes: 100_000))
+        let probe = ArtworkCacheProbe(data: try image())
+        let thumbnail = try await cache.result(
+            for: item("small"), pixels: 160, allowsNetwork: true, load: probe.load)
+        _ = try await cache.result(
+            for: item("hero"), pixels: 640, allowsNetwork: true, load: probe.load)
+        let retained = try await cache.cachedResult(for: item("small"), pixels: 160)
+        XCTAssertEqual(retained?.id, thumbnail?.id)
+        _ = await cache.invalidate(removeDisk: true)
+    }
+
     func testUntaggedExpiryAndBoundedFailureSuppression() async throws {
         let root = root()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -560,6 +1201,7 @@ final class FoundationArtworkCacheTests: XCTestCase {
             _ = try await cache.result(
                 for: item(id), pixels: 160, allowsNetwork: true, load: probe.load)
         }
+        await cache.flushPersistence()
         let directory = root.appendingPathComponent(cache.scope)
         for file in try FileManager.default.contentsOfDirectory(
             at: directory, includingPropertiesForKeys: nil)
@@ -571,6 +1213,7 @@ final class FoundationArtworkCacheTests: XCTestCase {
             for: item("one"), pixels: 160, allowsNetwork: true, load: probe.load)
         _ = try await cache.result(
             for: item("three"), pixels: 160, allowsNetwork: true, load: probe.load)
+        await cache.flushPersistence()
         let one = FoundationArtworkCache.key(item("one"), pixels: 160)
         let two = FoundationArtworkCache.key(item("two"), pixels: 160)
         XCTAssertTrue(
@@ -598,6 +1241,82 @@ final class FoundationArtworkCacheTests: XCTestCase {
             _ = await cache.invalidate(removeDisk: true)
         }
     #endif
+
+    func testLogoPreviewUpgradesWithoutAliasingPrimaryOrBackdrop() async throws {
+        let root = root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let cache = FoundationArtworkCache(scope: "logo-upgrade", root: root)
+        var artist = item("artist", kind: .artist)
+        artist.logoImageTag = "logo-v1"
+        let logo = try XCTUnwrap(artist.artworkItem(for: .logo))
+        XCTAssertEqual(FoundationArtworkCache.key(logo, pixels: 1280).pixels, 1280)
+        XCTAssertEqual(FoundationArtworkCache.key(artist, pixels: 1280).pixels, 1280)
+        let probe = ArtworkCacheProbe(data: try image(width: 1280, height: 640))
+        let preview = try await cache.result(
+            for: logo, pixels: 640, allowsNetwork: true, load: probe.load)
+        XCTAssertEqual(preview?.image.width, 640)
+        let upgraded = try await cache.result(
+            for: logo, pixels: 1280, allowsNetwork: true, load: probe.load)
+        XCTAssertEqual(upgraded?.image.width, 1280)
+        let calls = await probe.count
+        XCTAssertEqual(calls, 2)
+    }
+
+    func testBackdropHighResolutionUpgradesWarmAndColdPreviews() async throws {
+        let root = root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        var artist = item("artist", tag: "portrait", kind: .artist)
+        artist.backdropImageTag = "backdrop"
+        let backdrop = try XCTUnwrap(artist.artworkItem(for: .backdrop))
+        XCTAssertEqual(FoundationArtworkCache.key(backdrop, pixels: 2048).pixels, 2048)
+        XCTAssertEqual(FoundationArtworkCache.key(artist, pixels: 2048).pixels, 2048)
+        let probe = ArtworkCacheProbe(data: try image(width: 2048, height: 1024))
+        let warm = FoundationArtworkCache(scope: "synthetic-upgrade", root: root)
+        let preview = try await warm.result(
+            for: backdrop, pixels: 640, allowsNetwork: true, load: probe.load)
+        XCTAssertEqual(preview?.image.width, 640)
+        let warmPreview = try await warm.cachedResult(for: backdrop, pixels: 2048)
+        XCTAssertEqual(warmPreview?.image.width, 640)
+        let upgraded = try await warm.result(
+            for: backdrop, pixels: 2048, allowsNetwork: true, load: probe.load)
+        XCTAssertEqual(upgraded?.image.width, 2048)
+        let warmLoads = await probe.count
+        XCTAssertEqual(warmLoads, 2)
+        _ = await warm.invalidate(removeDisk: true)
+
+        let seed = FoundationArtworkCache(scope: "synthetic-upgrade", root: root)
+        _ = try await seed.result(for: backdrop, pixels: 160, allowsNetwork: true, load: probe.load)
+        _ = await seed.invalidate(removeDisk: false)
+        let cold = FoundationArtworkCache(scope: "synthetic-upgrade", root: root)
+        let coldPreview = try await cold.cachedResult(for: backdrop, pixels: 2048)
+        XCTAssertEqual(coldPreview?.image.width, 160)
+        let coldUpgrade = try await cold.result(
+            for: backdrop, pixels: 2048, allowsNetwork: true, load: probe.load)
+        XCTAssertEqual(coldUpgrade?.image.width, 2048)
+        let coldLoads = await probe.count
+        XCTAssertEqual(coldLoads, 4)
+        _ = await cold.invalidate(removeDisk: false)
+        let offline = FoundationArtworkCache(scope: "synthetic-upgrade", root: root)
+        let retained = try await offline.result(for: backdrop, pixels: 2048, allowsNetwork: false) {
+            _, _ in
+            XCTFail("Offline high-resolution hit must not request artwork")
+            return nil
+        }
+        XCTAssertEqual(retained?.image.width, 2048)
+        _ = await offline.invalidate(removeDisk: true)
+    }
+
+    func testExplicitBackdropDecodeDoesNotRaiseDefaultPlaybackArtworkResolution() throws {
+        let data = try image(width: 2048, height: 1024)
+        XCTAssertEqual(FoundationCurrentArtwork.decode(data)?.image.width, 640)
+        XCTAssertEqual(
+            FoundationCurrentArtwork.decode(data, maximumPixels: 2048)?.image.width, 2048)
+        XCTAssertNil(FoundationCurrentArtwork.decode(data, maximumPixels: 2049))
+        XCTAssertNil(
+            FoundationCurrentArtwork.decode(
+                Data(repeating: 0, count: FoundationCurrentArtwork.maximumBytes + 1),
+                maximumPixels: 2048))
+    }
 
 }
 

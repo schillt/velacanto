@@ -10,6 +10,8 @@ struct FoundationSearchView<Profile: View>: View {
     @FocusState private var searchFocused: Bool
     @State private var searchExpanded = false
     @State private var cancelledActivation: Int?
+    @State private var openedItem: FoundationItem?
+    @State private var openedCategory: FoundationSearchCategorySelection?
     let library: any FoundationLibrary
     @ObservedObject var player: FoundationPlayer
     @ObservedObject var genres: FoundationBrowseModel
@@ -25,10 +27,33 @@ struct FoundationSearchView<Profile: View>: View {
                 genreGrid
             } else {
                 FoundationSearchOverview(
-                    query: term, library: library, player: player, isActive: isActive
+                    query: term, library: library, player: player, isActive: isActive,
+                    openedItem: $openedItem, openCategory: { openedCategory = $0 }
                 )
                 .id(term + (connectivity.localOnly ? "-local" : "-online"))
             }
+        }
+        // The destination owner survives replacement of query-scoped result models.
+        .foundationCollectionDestination(
+            item: $openedItem, library: library, player: player, isActive: isActive
+        )
+        .navigationDestination(
+            isPresented: Binding(
+                get: { openedCategory != nil },
+                set: { if !$0 { openedCategory = nil } })
+        ) {
+            if let category = openedCategory {
+                FoundationSearchCategory(
+                    title: category.title, query: term, kind: category.kind,
+                    library: library, player: player, isActive: isActive,
+                    initialPage: category.page, initialLocalOnly: category.localOnly,
+                    musicContext: category.musicContext,
+                    initialIncompleteCoverage: category.incompleteCoverage)
+            }
+        }
+        .onChange(of: query) { _, _ in
+            openedItem = nil
+            openedCategory = nil
         }
         #if os(macOS)
             .foundationHeader("Search", profile: profile)
@@ -145,10 +170,9 @@ struct FoundationSearchView<Profile: View>: View {
     }
 
     private var genreGrid: some View {
-        FoundationGenreIndex(genres: genres, library: library, player: player, isActive: isActive) {
-            _ in
-            try await library.searchGenres()
-        }
+        FoundationGenreIndex(
+            genres: genres, library: library, player: player, isActive: isActive,
+            openItem: { openedItem = $0 }, loader: { _ in try await library.searchGenres() })
     }
 }
 
@@ -160,6 +184,7 @@ struct FoundationGenreIndex: View {
     let library: any FoundationLibrary
     @ObservedObject var player: FoundationPlayer
     let isActive: Bool
+    var openItem: ((FoundationItem) -> Void)? = nil
     let loader: (Int) async throws -> FoundationPage
     @EnvironmentObject private var actions: FoundationLibraryActions
     @State private var isVisible = false
@@ -192,12 +217,12 @@ struct FoundationGenreIndex: View {
                     ForEach(Array(visibleGenres.enumerated()), id: \.offset) { _, genre in
                         FoundationGenreCard(
                             genre: genre, library: library,
-                            isActive: isActive && isVisible, open: { openedGenre = genre }
+                            isActive: isActive && isVisible, open: { openGenre(genre) }
                         )
                         .contextMenu {
                             FoundationItemMenu(
                                 item: genre, actions: actions, initialFavorite: nil,
-                                open: { openedGenre = genre })
+                                open: { openGenre(genre) })
                         }
                     }
                 }
@@ -225,18 +250,9 @@ struct FoundationGenreIndex: View {
         }
         .onAppear { isVisible = true }
         .onDisappear { isVisible = false }
-        .navigationDestination(
-            isPresented: Binding(get: { openedGenre != nil }, set: { if !$0 { openedGenre = nil } })
-        ) {
-            if let genre = openedGenre {
-                FoundationGenreView(
-                    genre: genre, library: library, player: player, isActive: isActive
-                )
-                #if os(iOS)
-                    .toolbar(.visible, for: .navigationBar)
-                #endif
-            }
-        }
+        .foundationCollectionDestination(
+            item: $openedGenre, library: library, player: player, isActive: isActive
+        )
         .onChange(of: connectivity.successfulRetryRevision) { _, _ in
             guard isActive, isVisible else { return }
             genres.request(.refresh)
@@ -253,6 +269,10 @@ struct FoundationGenreIndex: View {
                 await genres.refreshVisible(allowsNetwork: !connectivity.localOnly, using: loader)
             #endif
         }
+    }
+
+    private func openGenre(_ item: FoundationItem) {
+        if let openItem { openItem(item) } else { openedGenre = item }
     }
 
     private func reloadGenres(_ request: FoundationBrowseModel.Request) {
@@ -314,6 +334,15 @@ struct FoundationGenreCard: View {
 }
 
 /// Small sequential result sections share local and remote catalog identities.
+private struct FoundationSearchCategorySelection {
+    let title: String
+    let kind: FoundationItem.Kind
+    let page: FoundationPage
+    let localOnly: Bool
+    var musicContext: FoundationMusicSearchContext? = nil
+    var incompleteCoverage = false
+}
+
 private struct FoundationSearchOverview: View {
     @EnvironmentObject private var downloads: FoundationDownloads
     @EnvironmentObject private var actions: FoundationLibraryActions
@@ -326,14 +355,61 @@ private struct FoundationSearchOverview: View {
     @StateObject private var albums = FoundationBrowseModel()
     @StateObject private var songs = FoundationBrowseModel()
     @StateObject private var playlists = FoundationBrowseModel()
+    @StateObject private var genreResults = FoundationBrowseModel()
     @State private var isVisible = false
+    @State private var collectionOperationOwner = UUID()
     @State private var revision = 0
-    @State private var openedItem: FoundationItem?
+    @State private var rawDirect: [FoundationSearchResolver.DirectSection] = []
+    @State private var rawRelated: [FoundationSearchResolver.RelatedSection] = []
+    @State private var rawDiscovery: [FoundationItem] = []
+    @State private var playlistContents: FoundationPlaylistContentPage?
+    @State private var playlistMusicContext = FoundationMusicSearchContext()
+    @State private var playlistContentError: FoundationLibraryError?
+    @State private var isResolving = false
+    @State private var resolutionID = UUID()
+    @State private var resolvedRevision: Int?
+    @State private var hasPartialFailure = false
+    @Binding var openedItem: FoundationItem?
+    let openCategory: (FoundationSearchCategorySelection) -> Void
 
     private var sections: [(title: String, kind: FoundationItem.Kind, model: FoundationBrowseModel)]
     {
-        [("Songs", .track, songs), ("Albums", .album, albums), ("Artists", .artist, artists)]
-            + (connectivity.localOnly ? [("Playlists", .playlist, playlists)] : [])
+        [
+            ("Songs", .track, songs), ("Albums", .album, albums), ("Artists", .artist, artists),
+            ("Playlists", .playlist, playlists), ("Genres", .genre, genreResults),
+        ]
+    }
+
+    private var displaySections: [FoundationSearchResolver.DisplaySection] {
+        FoundationSearchResolver.displaySections(
+            direct: rawDirect.map { section in
+                .init(
+                    kind: section.kind,
+                    page: .init(
+                        items: projected(section.page.items),
+                        nextStartIndex: section.page.nextStartIndex),
+                    includesFuzzyMatches: section.includesFuzzyMatches, error: section.error)
+            },
+            related: rawRelated.map { section in
+                .init(role: section.role, source: section.source, items: projected(section.items))
+            }, query: query)
+    }
+
+    private var discovery: [FoundationItem] {
+        let shown = Set(
+            displaySections.flatMap { $0.items.prefix(5) }.map { $0.kind.rawValue + ":" + $0.id })
+        return projected(rawDiscovery).filter { !shown.contains($0.kind.rawValue + ":" + $0.id) }
+    }
+
+    private func projected(_ items: [FoundationItem]) -> [FoundationItem] {
+        actions.visibleTracks(
+            items, isAvailable: { !connectivity.localOnly || downloads.isReady($0) })
+    }
+
+    private func rawCategoryItems(_ kind: FoundationItem.Kind) -> [FoundationItem] {
+        FoundationSearchResolver.displaySections(
+            direct: rawDirect, related: rawRelated, query: query
+        ).first { $0.kind == kind }?.items ?? []
     }
 
     var body: some View {
@@ -348,29 +424,63 @@ private struct FoundationSearchOverview: View {
                     Text("Searching downloaded music and saved collections.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
-                ForEach(sections, id: \.title) { section in
-                    if !section.model.items.isEmpty || section.model.errorMessage != nil {
-                        resultSection(section.title, kind: section.kind, model: section.model)
+                ForEach(displaySections, id: \.role) { section in
+                    if let kind = section.kind,
+                        let source = sections.first(where: { $0.kind == kind })
+                    {
+                        resultSection(
+                            displayTitle(section.role), kind: kind,
+                            model: source.model, items: section.items,
+                            rawItems: rawCategoryItems(kind))
+                    } else {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("Top Results").font(.title2.bold()).frame(minHeight: 44)
+                            resultRows(section.items, showsItemType: true)
+                        }
                     }
                 }
-                if sections.contains(where: { $0.model.isLoading }) {
+                if let playlistContents,
+                    !playlistContents.items.isEmpty || playlistContents.hasIncompleteCoverage
+                {
+                    playlistContentSection(playlistContents)
+                }
+                if let error = playlistContentError {
+                    Text(error.localizedDescription).foregroundStyle(.red)
+                    Button("Retry playlist search", action: retrySearch)
+                }
+                ForEach(sections, id: \.title) { section in
+                    if let error = section.model.errorMessage, !section.model.hasConnectionIssue {
+                        Text(error).foregroundStyle(.red)
+                        Button("Retry search", action: retrySearch)
+                    }
+                }
+                if hasPartialFailure {
+                    Text("Some related or close matches could not be loaded.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Button("Retry search", action: retrySearch)
+                }
+                if isResolving || sections.contains(where: { $0.model.isLoading }) {
                     FoundationLoadingPlaceholder()
                 }
-                if sections.allSatisfy({ $0.model.loaded && $0.model.items.isEmpty }) {
+                if !isResolving, displaySections.isEmpty,
+                    sections.allSatisfy({
+                        $0.model.loaded && $0.model.items.isEmpty && $0.model.errorMessage == nil
+                    })
+                {
                     Text("No results found.").foregroundStyle(.secondary)
                 }
+                if !discovery.isEmpty { discoveryCarousel }
             }.padding(.horizontal).padding(.bottom)
         }
+        .environment(\.foundationCollectionOperationOwner, collectionOperationOwner)
         .onAppear { isVisible = true }
         .onDisappear {
             isVisible = false
-            actions.cancelQueueAddition()
+            actions.cancelQueueAdditionOwned(by: collectionOperationOwner)
         }
-        .foundationCollectionDestination(
-            item: $openedItem, library: library, player: player, isActive: isActive
-        )
         .onChange(of: connectivity.successfulRetryRevision) { _, _ in
             for section in sections { section.model.request(.refresh) }
+            resolvedRevision = nil
         }
         .onReceive(downloads.objectWillChange) {
             if connectivity.localOnly { revision += 1 }
@@ -390,37 +500,187 @@ private struct FoundationSearchOverview: View {
         }
     }
 
+    private func retrySearch() {
+        for section in sections { section.model.request(.refresh) }
+        revision += 1
+    }
+
     private func loadSections() async {
-        // The parent gives local and online searches separate view/model identities.
-        // Keep each load tied to that source so downloaded metadata cannot reconcile favorites.
+        // A single query snapshot owns both direct and relationship results.
+        guard resolvedRevision != revision else { return }
         let localOnly = connectivity.localOnly
-        for section in sections {
-            guard !Task.isCancelled, connectivity.localOnly == localOnly else { return }
-            if localOnly {
-                section.model.request(.refresh)
-                await section.model.loadPending { offset in
-                    downloads.localSearch(
-                        query: query, kind: section.kind, startIndex: offset, limit: 5)
+        let identity = UUID()
+        resolutionID = identity
+        isResolving = true
+        defer { if resolutionID == identity { isResolving = false } }
+        let resolver: FoundationSearchResolver
+        if localOnly {
+            resolver = FoundationSearchResolver(localSearch: { query, kind, limit in
+                await downloads.localSearch(query: query, kind: kind, startIndex: 0, limit: limit)
+            })
+        } else {
+            resolver = FoundationSearchResolver(library: library)
+        }
+        do {
+            let result = try await resolver.resolve(query: query)
+            try Task.checkCancellation()
+            guard connectivity.localOnly == localOnly, resolutionID == identity else { return }
+            for section in sections {
+                guard let direct = result.direct.first(where: { $0.kind == section.kind }) else {
+                    continue
                 }
-            } else {
-                section.model.configureFavoriteObservations(actions)
-                await section.model.loadPending { offset in
-                    try await library.search(
-                        query: query, kind: section.kind, startIndex: offset, limit: 5)
+                if localOnly {
+                    section.model.request(.refresh)
+                } else {
+                    section.model.configureFavoriteObservations(actions)
                 }
+                await section.model.loadPending { _ in
+                    if let error = direct.error { throw error }
+                    return direct.page
+                }
+                try Task.checkCancellation()
+            }
+            actions.observeTrackCopies(
+                result.direct.flatMap { $0.page.items } + result.related.flatMap(\.items)
+                    + result.discovery)
+            rawDirect = result.direct
+            rawRelated = result.related
+            rawDiscovery = result.discovery
+            playlistContents = result.playlistContents
+            playlistMusicContext = result.musicContext
+            playlistContentError = result.playlistContentError
+            hasPartialFailure = result.failures.contains {
+                if case .direct = $0 { return false }
+                return true
+            }
+            resolvedRevision = revision
+        } catch {
+            // Resolver cancellation never publishes an obsolete query snapshot.
+            return
+        }
+    }
+
+    private func displayTitle(_ role: FoundationSearchResolver.DisplaySection.Role) -> String {
+        switch role {
+        case .top: "Top Results"
+        case .relatedSongs: "Related Songs"
+        case .relatedArtists: "Related Artists"
+        case .relatedAlbums: "Related Albums"
+        case .relatedPlaylists: "Playlists"
+        case .relatedGenres: "Genres"
+        }
+    }
+
+    private var discoveryCarousel: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("You May Also Like").font(.title2.bold()).accessibilityAddTraits(.isHeader)
+            ScrollView(.horizontal) {
+                LazyHStack(alignment: .top, spacing: 16) {
+                    ForEach(Array(discovery.enumerated()), id: \.offset) { index, item in
+                        FoundationCollectionCard(
+                            item: item, library: library, player: player,
+                            isActive: isActive && isVisible,
+                            showsTrackArtwork: true, subtitleOverride: typedSubtitle(for: item),
+                            open: {
+                                if item.kind == .track {
+                                    playResult(discovery, index: index)
+                                } else {
+                                    openedItem = item
+                                }
+                            }, navigate: { openedItem = $0 }
+                        ).frame(width: 150)
+                    }
+                }.scrollTargetLayout()
+            }
+            .scrollIndicators(.hidden)
+            .scrollTargetBehavior(.viewAligned)
+            .foundationMacShelfUnderlap(horizontalInset: 0, contentInset: 0)
+        }
+    }
+
+    private func playlistContentSection(_ page: FoundationPlaylistContentPage) -> some View {
+        let title = "Playlists with “" + query + "”"
+        return VStack(alignment: .leading, spacing: 12) {
+            Button {
+                openCategory(
+                    .init(
+                        title: title, kind: .playlist,
+                        page: .init(items: page.items, nextStartIndex: page.nextStartIndex),
+                        localOnly: false, musicContext: playlistMusicContext,
+                        incompleteCoverage: page.hasIncompleteCoverage
+                            || page.partialFailureCount > 0))
+            } label: {
+                HStack(spacing: 6) {
+                    Text(title).font(.title2.bold())
+                    Image(systemName: "chevron.right").font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                }.frame(minHeight: 44)
+            }.buttonStyle(.plain).accessibilityLabel("See all " + title)
+            resultRows(page.items)
+            if page.hasIncompleteCoverage {
+                Text("More playlists or tracks may contain matching music.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            if page.partialFailureCount > 0 {
+                Text("Some playlists could not be checked.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
         }
     }
 
+    private func resultRows(_ items: [FoundationItem], showsItemType: Bool = false) -> some View {
+        ForEach(Array(items.prefix(5).enumerated()), id: \.offset) { index, item in
+            FoundationLibraryItemRow(
+                item: item, library: library, isActive: isActive && isVisible,
+                open: { openedItem = item },
+                play: item.kind == .track ? { playResult(items, index: index) } : nil,
+                player: player, showsTrackArtwork: true, navigate: { openedItem = $0 },
+                subtitleOverride: showsItemType
+                    ? typedSubtitle(for: item) : relatedSubtitle(for: item))
+        }
+    }
+
+    private func typedSubtitle(for item: FoundationItem) -> String {
+        let type: String =
+            switch item.kind {
+            case .track: "Song"
+            case .album: "Album"
+            case .artist: "Artist"
+            case .playlist: "Playlist"
+            case .genre: "Genre"
+            }
+        return item.subtitle.isEmpty ? type : type + " · " + item.subtitle
+    }
+
+    private func relatedSubtitle(for item: FoundationItem) -> String? {
+        guard item.kind == .track else { return nil }
+        let artist = item.subtitle.isEmpty ? (item.artist?.title ?? "") : item.subtitle
+        let parts = [item.album?.title ?? "", artist].filter { !$0.isEmpty }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    private func playResult(_ items: [FoundationItem], index: Int) {
+        guard items.indices.contains(index), items[index].kind == .track else { return }
+        let selected = items[index]
+        let ready = items.filter {
+            $0.kind == .track && (!connectivity.localOnly || downloads.isReady($0))
+        }
+        guard let selectedIndex = ready.firstIndex(where: { $0.id == selected.id }) else { return }
+        player.setQueue(ready, selectedIndex: selectedIndex)
+    }
+
     private func resultSection(
-        _ title: String, kind: FoundationItem.Kind, model: FoundationBrowseModel
+        _ title: String, kind: FoundationItem.Kind, model: FoundationBrowseModel,
+        items: [FoundationItem], rawItems: [FoundationItem]
     ) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            if model.nextStartIndex != nil {
-                NavigationLink {
-                    FoundationSearchCategory(
-                        title: title, query: query, kind: kind,
-                        library: library, player: player, isActive: isActive)
+            if model.nextStartIndex != nil || items.count > 5 {
+                Button {
+                    openCategory(
+                        .init(
+                            title: title, kind: kind,
+                            page: .init(items: rawItems, nextStartIndex: model.nextStartIndex),
+                            localOnly: connectivity.localOnly))
                 } label: {
                     HStack(spacing: 6) {
                         Text(title).font(.title2.bold())
@@ -431,37 +691,7 @@ private struct FoundationSearchOverview: View {
             } else {
                 Text(title).font(.title2.bold()).frame(minHeight: 44)
             }
-            ForEach(Array(model.items.prefix(5).enumerated()), id: \.offset) { index, item in
-                FoundationLibraryItemRow(
-                    item: item, library: library, isActive: isActive && isVisible,
-                    open: { openedItem = item },
-                    play: item.kind == .track
-                        ? {
-                            guard let selection = model.trackQueue(selecting: index) else { return }
-                            if connectivity.localOnly {
-                                guard downloads.isReady(selection.items[selection.index]) else {
-                                    return
-                                }
-                                let ready = selection.items.filter { downloads.isReady($0) }
-                                let index = selection.items.prefix(selection.index).filter {
-                                    downloads.isReady($0)
-                                }.count
-                                player.setQueue(ready, selectedIndex: index)
-                            } else {
-                                player.setQueue(selection.items, selectedIndex: selection.index)
-                            }
-
-                        } : nil, player: player, showsTrackArtwork: true,
-                    navigate: { openedItem = $0 })
-            }
-            if let error = model.errorMessage, !model.hasConnectionIssue {
-                Text(error).foregroundStyle(.red)
-                Button("Retry") {
-                    guard !connectivity.localOnly else { return }
-                    model.request(model.retryRequest)
-                    revision += 1
-                }.disabled(connectivity.localOnly)
-            }
+            resultRows(items)
         }
     }
 }
@@ -475,16 +705,32 @@ private struct FoundationSearchCategory: View {
     let library: any FoundationLibrary
     @ObservedObject var player: FoundationPlayer
     let isActive: Bool
+    let initialPage: FoundationPage
+    let initialLocalOnly: Bool
+    var musicContext: FoundationMusicSearchContext? = nil
+    var initialIncompleteCoverage = false
+    @State private var contentCoverage = false
     @StateObject private var results = FoundationBrowseModel()
 
     var body: some View {
         FoundationCatalogView(
             title: title, model: results, library: library, player: player,
-            isActive: isActive, showsTrackArtwork: true
+            isActive: isActive, showsTrackArtwork: true,
+            coverageMessage: musicContext != nil && (contentCoverage || initialIncompleteCoverage)
+                ? "More playlists or tracks may contain matching music." : nil
         ) { offset in
+            if offset == 0, connectivity.localOnly == initialLocalOnly { return initialPage }
             if connectivity.localOnly {
+                if musicContext != nil { return .init(items: [], nextStartIndex: nil) }
                 return downloads.localSearch(
                     query: query, kind: kind, startIndex: offset, limit: 50)
+            }
+            if let musicContext {
+                let page = try await library.playlistsContainingMusic(
+                    context: musicContext, startIndex: offset)
+                try Task.checkCancellation()
+                contentCoverage = page.hasIncompleteCoverage || page.partialFailureCount > 0
+                return .init(items: page.items, nextStartIndex: page.nextStartIndex)
             }
             return try await library.search(query: query, kind: kind, startIndex: offset, limit: 50)
         }
@@ -506,6 +752,15 @@ private struct FoundationSearchCategory: View {
     }
 
     private func installLocalResults() {
-        results.installSnapshot(downloads.localSearchItems(query: query, kind: kind))
+        guard musicContext == nil else {
+            results.installSnapshot([])
+            return
+        }
+        let current = downloads.localCatalogItems(kind: kind)
+        let seedIdentities = Set(initialLocalOnly ? initialPage.items.map(\.id) : [])
+        let matches =
+            downloads.localSearchItems(query: query, kind: kind)
+            + current.filter { seedIdentities.contains($0.id) }
+        results.installSnapshot(FoundationSearchResolver.ranked(matches, query: query))
     }
 }

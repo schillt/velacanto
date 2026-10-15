@@ -75,6 +75,33 @@
         }
     }
 
+    /// Debug-only monotonic milestones. No URLs, catalog identities or content enter these events.
+    struct FoundationLoadTiming: Sendable {
+        @TaskLocal static var current: FoundationLoadTiming?
+        enum Category: String { case artwork, catalog, snapshot }
+        enum Stage: String {
+            case cacheReadStarted, cacheReadFinished, requestStarted, responseReceived
+            case decodeStarted, decodeFinished, published, persistStarted, persistFinished
+        }
+        private let category: Category
+        private let operation = UUID().uuidString
+        private let started = ContinuousClock.now
+        private let context: String
+
+        init(_ category: Category) {
+            self.category = category
+            context = FoundationTrace.fields
+        }
+
+        func record(_ stage: Stage) {
+            let elapsed = started.duration(to: .now).components
+            let milliseconds = elapsed.seconds * 1000 + elapsed.attoseconds / 1_000_000_000_000_000
+            FoundationJournal.shared.record(
+                "timing category=\(category.rawValue) operation=\(operation) stage=\(stage.rawValue) elapsedMs=\(milliseconds) \(context)"
+            )
+        }
+    }
+
     enum FoundationTraceOrigin: String, Sendable { case library, home, new, search, nowPlaying }
     enum FoundationTracePage: String, Sendable {
         case catalog, tracks, shelf, genreIndex, artwork, nowPlayingArtwork

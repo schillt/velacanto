@@ -10,6 +10,29 @@ final class FoundationPlayerTests: XCTestCase {
     private let track = FoundationItem(
         id: "synthetic", title: "", subtitle: "", kind: .track, duration: nil)
 
+    func testPlaybackProtectionFollowsLoadingPauseFailureAndStop() async throws {
+        let resources = PlaybackResourceProbe()
+        let player = FoundationPlayer(
+            resolve: { _ in throw URLError(.unknown) },
+            resolveResource: { _ in try await resources.resolve() },
+            makeItem: { _ in AVPlayerItem(asset: AVMutableComposition()) },
+            activateSession: {}, deactivateSession: {}, startPlayback: { _ in })
+        var observed: [(Bool, UInt)] = []
+        player.observePlaybackProtection { observed.append(($0, $1)) }
+        XCTAssertEqual(observed.last?.0, false)
+        player.setQueue([track], selectedIndex: 0)
+        try await resources.waitForCalls(1)
+        XCTAssertEqual(observed.last?.0, true)
+        player.pause()
+        XCTAssertEqual(observed.last?.0, false)
+        await resources.fail(0)
+        await player.selectionTask?.value
+        XCTAssertEqual(observed.last?.0, false)
+        player.stop()
+        XCTAssertEqual(observed.last?.0, false)
+        XCTAssertEqual(observed.map(\.1), observed.map(\.1).sorted())
+    }
+
     func testStreamingPolicyChangePreservesPendingAndInstalledLocalResource() async throws {
         let resources = PlaybackResourceProbe()
         let player = FoundationPlayer(
@@ -313,12 +336,20 @@ final class FoundationPlayerTests: XCTestCase {
             makeItem: { _ in AVPlayerItem(asset: AVMutableComposition()) },
             activateSession: { try await session.run("activate") }, deactivateSession: {},
             startPlayback: { _ in starts += 1 })
+        var protected = false
+        player.observePlaybackProtection {
+            protected = $0
+            _ = $1
+        }
         player.setQueue([track], selectedIndex: 0)
         await session.waitForCalls(1)
         let activation = player.playTask
+        XCTAssertTrue(protected)
         player.pause()
+        XCTAssertFalse(protected)
         await session.finish(0)
         await activation?.value
+        XCTAssertFalse(protected)
         XCTAssertEqual(starts, 0)
         XCTAssertFalse(player.wantsPlayback)
         XCTAssertEqual(player.state, .paused)

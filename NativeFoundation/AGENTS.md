@@ -36,6 +36,24 @@ editing and account-owned original-file downloads are implemented in alpha.
 Local-library indexing, new providers and playback reporting remain deferred or
 unimplemented. Keep implementation distinct from physical/server acceptance.
 
+## Playback and shared loading guardrails
+
+Read and follow [Playback and Now Playing protection](../docs/playback-protection.md).
+Only playback and Now Playing are privileged. Explicit collection Play resolution
+is playback work; queue additions and every browsing screen remain ordinary.
+Keep AVPlayer/audio-session ownership independent of optional loading. Preserve
+cached/independent publication and bounded parallel browsing.
+
+Changes to shared artwork or catalog components must preserve reserved worker and
+pending capacity, promotion of coalesced requests, detached-task intent, cancellation
+cleanup and account retirement. Keep current artwork sharp during upgrades, reset
+identity before resolution comparisons, and retain defined missing-image recovery.
+Use existing player intent/state/pending activation to drive protection; do not
+create another player or state machine. Test protected work against held and
+saturated ordinary work through production seams, then complete affected physical
+audio acceptance before claiming the runtime change accepted. Documentation-only
+edits do not require new builds or device installs.
+
 ## Verification and delivery
 
 Root scripts/build.sh targets this project and its current test suite. Compiler
@@ -56,7 +74,7 @@ Passing synthetic tests is not physical streaming or TestFlight acceptance.
 
 ## Identity and privacy
 
-Product Velacanto; bundle com.chameleonenterprise.velacanto. Keep the rebuilt
+Product VelaCanto; completed alpha display name VelaCanto Alpha; bundle com.chameleonenterprise.velacanto. Keep the rebuilt
 Keychain format/protections; fresh sign-in is allowed, no legacy migration.
 Detailed diagnostics/test injection are internal DEBUG-only. Never log server
 origins, credentials, headers, media names or account/item IDs. Retain original

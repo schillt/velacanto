@@ -1,5 +1,9 @@
 import SwiftUI
 
+#if os(macOS)
+    import AppKit
+#endif
+
 #if DEBUG
     #if os(iOS)
         import UIKit
@@ -46,12 +50,8 @@ struct FoundationSettingsView: View {
                 }
                 #if os(macOS)
                     accountSections
-                    if let signInAgain {
-                        Section {
-                            Button("Sign In Again…", action: signInAgain)
-                        }
-                    }
                 #endif
+                librarySection
                 Section("Storage") {
                     NavigationLink {
                         FoundationDownloadManagementView()
@@ -64,21 +64,15 @@ struct FoundationSettingsView: View {
                         Label("Cached Media", systemImage: "photo.stack")
                     }
                 }
-                Section("Playback") {
-                    #if os(iOS)
+                #if os(iOS)
+                    Section("Playback") {
                         Button("Playback Settings", systemImage: "gearshape") {
                             if let url = URL(string: UIApplication.openSettingsURLString) {
                                 UIApplication.shared.open(url)
                             }
                         }
-                    #else
-                        Toggle(
-                            "Allow Cellular Streaming",
-                            isOn: Binding(
-                                get: { preferences.allowsCellularStreaming },
-                                set: { preferences.setAllowsCellularStreaming($0) }))
-                    #endif
-                }
+                    }
+                #endif
                 #if DEBUG
                     FoundationJournalSection { text in
                         diagnosticSnapshot = FoundationJournalSnapshot(text: text)
@@ -132,7 +126,12 @@ struct FoundationSettingsView: View {
             }
         #endif
         #if os(macOS)
-            .frame(minWidth: 460, idealWidth: 520, minHeight: 520)
+            .toolbarTitleDisplayMode(.inline)
+            .toolbarBackground(.bar, for: .windowToolbar)
+            .toolbarBackgroundVisibility(.visible, for: .windowToolbar)
+            .frame(
+                minWidth: 520, idealWidth: 560, maxWidth: .infinity,
+                minHeight: 600, idealHeight: 680, maxHeight: .infinity)
         #endif
     }
 
@@ -173,7 +172,10 @@ struct FoundationSettingsView: View {
             Text("Saved credentials are protected in Keychain and are not displayed here.")
                 .font(.caption).foregroundStyle(.secondary)
         }
-        Section("Music Libraries") {
+    }
+
+    private var librarySection: some View {
+        Section("Library") {
             if let librarySelection {
                 FoundationMusicLibrarySettingsRow(selection: librarySelection)
             } else {
@@ -181,6 +183,15 @@ struct FoundationSettingsView: View {
                 Text("Library selection is unavailable for this connection.")
                     .font(.caption).foregroundStyle(.secondary)
             }
+            Toggle(
+                "Show Duplicate Album Tracks",
+                isOn: Binding(
+                    get: { preferences.showDuplicateAlbumTracks },
+                    set: { preferences.setShowDuplicateAlbumTracks($0) })
+            )
+            .accessibilityIdentifier("FoundationShowDuplicateAlbumTracks")
+            Text("Show extra album copies with the same disc, track number, and title.")
+                .font(.caption).foregroundStyle(.secondary)
         }
     }
 
@@ -652,6 +663,53 @@ private struct FoundationLicensesView: View {
 #endif
 
 #if os(macOS)
+    /// Apply native inline chrome after the Settings scene's preference-style setup.
+    private struct FoundationMacSettingsWindowChrome: NSViewRepresentable {
+        func makeNSView(context: Context) -> FoundationMacSettingsWindowChromeView {
+            FoundationMacSettingsWindowChromeView()
+        }
+
+        func updateNSView(_ view: FoundationMacSettingsWindowChromeView, context: Context) {
+            view.scheduleStyleUpdate()
+        }
+    }
+
+    private final class FoundationMacSettingsWindowChromeView: NSView {
+        private var updatePending = false
+        #if DEBUG
+            private weak var loggedWindow: NSWindow?
+        #endif
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            scheduleStyleUpdate()
+        }
+
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+        func scheduleStyleUpdate() {
+            guard !updatePending, let window else { return }
+            updatePending = true
+            DispatchQueue.main.async { [weak self, weak window] in
+                guard let self else { return }
+                self.updatePending = false
+                guard let window, self.window === window else { return }
+                #if DEBUG
+                    let originalStyle = window.toolbarStyle.rawValue
+                #endif
+                window.toolbarStyle = .unified
+                #if DEBUG
+                    if self.loggedWindow !== window {
+                        self.loggedWindow = window
+                        FoundationTrace.event(
+                            "settings window-toolbar before=\(originalStyle) after=\(window.toolbarStyle.rawValue)"
+                        )
+                    }
+                #endif
+            }
+        }
+    }
+
     /// The app owns one native settings window, independent of catalog navigation.
     struct FoundationMacSettingsRoot: View {
         @ObservedObject var model: FoundationAppModel
@@ -681,7 +739,14 @@ private struct FoundationLicensesView: View {
                     ProgressView("Preparing account…")
                 }
             }
-            .frame(minWidth: 520, idealWidth: 560, minHeight: 600, idealHeight: 680)
+            .background {
+                FoundationMacSettingsWindowChrome().frame(width: 0, height: 0)
+            }
+            .frame(
+                minWidth: 520, idealWidth: 560, maxWidth: .infinity,
+                minHeight: 600, idealHeight: 680, maxHeight: .infinity
+            )
+            .background(.background)
         }
     }
 #endif

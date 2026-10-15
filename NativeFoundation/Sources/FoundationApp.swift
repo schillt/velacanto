@@ -47,7 +47,11 @@ enum FoundationSignOutPolicy {
 
 @main
 struct VelacantoFoundationApp: App {
-    @StateObject private var model = FoundationAppModel()
+    #if os(iOS)
+        @UIApplicationDelegateAdaptor(FoundationCarPlayApplicationDelegate.self) private
+            var carPlayDelegate
+    #endif
+    @StateObject private var model = FoundationAppRuntime.model
 
     var body: some Scene {
         WindowGroup {
@@ -84,12 +88,40 @@ struct VelacantoFoundationApp: App {
                 FoundationMacSettingsRoot(model: model)
             }
             .defaultSize(width: 520, height: 640)
+            .windowToolbarStyle(.unified)
         #endif
     }
 }
 
+/// Every application entry point uses this owner; readiness never creates a second player.
+@MainActor
+enum FoundationAppRuntime {
+    static let model = FoundationAppModel()
+}
+
 @MainActor
 final class FoundationAppModel: ObservableObject {
+    enum Readiness: Equatable {
+        case ready, signedOut, unavailable, cancelled
+    }
+
+    private let prepareCaches: @MainActor () async -> Bool
+    private let restoreAccount: (@MainActor (FoundationAppModel) -> Void)?
+    private var startupTask: Task<Void, Never>?
+    private var startupGeneration = 0
+
+    init(
+        prepareCaches: (@MainActor () async -> Bool)? = nil,
+        restoreAccount: (@MainActor (FoundationAppModel) -> Void)? = nil
+    ) {
+        self.prepareCaches =
+            prepareCaches ?? {
+                await FoundationDisposableCachePolicy.shared.prepare(
+                    version: FoundationDisposableCachePolicy.currentVersion)
+            }
+        self.restoreAccount = restoreAccount
+    }
+
     @Published private(set) var library: FoundationJellyfinLibrary?
     @Published private(set) var browseLibrary: FoundationJellyfinLibrary?
     @Published private(set) var librarySelection: FoundationMusicLibrarySelection?
@@ -128,6 +160,7 @@ final class FoundationAppModel: ObservableObject {
     private var mediaSession: MediaSession<FoundationNowPlaying>?
 
     isolated deinit {
+        startupTask?.cancel()
         FoundationAlphabetAccountLifecycle.retire(library)
         librarySelection?.invalidate()
         if let cache = library?.artworkCache {
@@ -142,16 +175,25 @@ final class FoundationAppModel: ObservableObject {
         currentArtwork?.invalidate()
     }
 
+    /// Starts one retained preparation task, independently of a phone window's lifetime.
     func restore() {
         guard !restored else { return }
         restored = true
         #if DEBUG
-            guard !ProcessInfo.processInfo.arguments.contains("-foundationTesting") else { return }
+            if restoreAccount == nil,
+                ProcessInfo.processInfo.arguments.contains("-foundationTesting")
+            {
+                return
+            }
         #endif
-        Task { [weak self] in
-            let prepared = await FoundationDisposableCachePolicy.shared.prepare(
-                version: FoundationDisposableCachePolicy.currentVersion)
-            guard let self else { return }
+        let epoch = accountEpoch
+        let generation = startupGeneration
+        let prepare = prepareCaches
+        startupTask = Task { [weak self] in
+            let prepared = await prepare()
+            guard !Task.isCancelled, let self,
+                self.startupGeneration == generation, self.accountEpoch == epoch
+            else { return }
             self.cachesReady = prepared
             self.isPreparingCaches = false
             guard prepared else {
@@ -159,15 +201,44 @@ final class FoundationAppModel: ObservableObject {
                     "Disposable caches could not be cleared. Retry to open your library."
                 return
             }
-            self.restoreCredentials()
+            if let restoreAccount = self.restoreAccount {
+                restoreAccount(self)
+            } else {
+                self.restoreCredentials()
+            }
         }
     }
 
+    /// A cancelled caller cannot cancel another surface's shared account restoration.
+    func ensureReady() async -> Readiness {
+        guard !Task.isCancelled else { return .cancelled }
+        restore()
+        let generation = startupGeneration
+        await startupTask?.value
+        guard !Task.isCancelled, startupGeneration == generation else { return .cancelled }
+        if isPreparingCaches || !cachesReady || isCleaningDownloads { return .unavailable }
+        if library != nil, player != nil { return .ready }
+        return credentialError == nil ? .signedOut : .unavailable
+    }
+
     func retryCachePreparation() {
+        startupGeneration += 1
+        startupTask?.cancel()
+        startupTask = nil
         restored = false
         isPreparingCaches = true
         credentialError = nil
         restore()
+    }
+
+    /// Retire suspended startup work together with an account's local ownership.
+    func invalidateAccountReadiness() {
+        accountEpoch += 1
+        startupGeneration += 1
+        startupTask?.cancel()
+        startupTask = nil
+        restored = true
+        isPreparingCaches = false
     }
 
     private func restoreCredentials() {
@@ -268,7 +339,8 @@ final class FoundationAppModel: ObservableObject {
         currentRetainedArtworkIdentity = nil
         let retiringCache = library?.artworkCache
         let retiringPages = library?.catalogPageCache
-        let cache = FoundationArtworkCache(scope: sourceScope)
+        let admission = FoundationNetworkAdmission()
+        let cache = FoundationArtworkCache(scope: sourceScope, networkAdmission: admission)
         let pages = FoundationCatalogPageCache(scope: sourceScope)
         let epoch = accountEpoch
         Task { [weak self] in
@@ -290,7 +362,8 @@ final class FoundationAppModel: ObservableObject {
         }
         librarySelection?.invalidate()
         let library = FoundationJellyfinLibrary(
-            session: session, artworkCache: cache, catalogPageCache: pages)
+            session: session, artworkCache: cache, catalogPageCache: pages,
+            networkAdmission: admission)
         let selectionStore = FoundationMusicLibraryStore(scope: sourceScope)
         let savedSelection: FoundationMusicLibraryChoice?
         let selectionReadFailed: Bool
@@ -313,17 +386,35 @@ final class FoundationAppModel: ObservableObject {
                 guard let self, self.accountEpoch == epoch else { return }
                 self.browseLibrary = library.scoped(to: id, available: available)
             })
-        self.actions = FoundationLibraryActions(sourceScope: sourceScope) { item, favorite in
-            try await library.setFavorite(for: item, isFavorite: favorite)
-        }
+        self.actions = FoundationLibraryActions(
+            sourceScope: sourceScope,
+            trackPreferences: playbackPreferences,
+            mutateFavorite: { item, favorite in
+                try await library.setFavorite(for: item, isFavorite: favorite)
+            })
         self.library = library
         let downloads = FoundationDownloads(
-            scope: sourceScope, library: library, monitorConnectivity: false)
+            scope: sourceScope, library: library, monitorConnectivity: false,
+            observeTracks: { [weak self] items, albumID in
+                self?.actions?.observeTrackCopies(items, albumID: albumID)
+            },
+            projectTracks: { [weak self] items, albumID in
+                guard let actions = self?.actions else { return [] }
+                return actions.visibleTracks(
+                    items, albumID: albumID,
+                    isAvailable: { item in
+                        self?.connectivity?.localOnly != true
+                            || self?.downloads?.isReady(item) == true
+                    })
+            })
         self.downloads = downloads
         let connectivity = FoundationConnectivity {
             _ = try await library.songs(startIndex: 0)
         }
         self.connectivity = connectivity
+        self.actions?.configureTrackAvailability { [weak connectivity, weak downloads] item in
+            connectivity?.localOnly != true || downloads?.isReady(item) == true
+        }
         let preferences = playbackPreferences
         downloads.setAllowsCellular(preferences.allowsCellularDownloads)
         self.player = FoundationPlayer(
@@ -333,6 +424,9 @@ final class FoundationAppModel: ObservableObject {
                     for: item, allowsRemoteFallback: !connectivity.localOnly)
             }, makeItem: { preferences.makePlayerItem(for: $0) },
             reportingAllowed: { !connectivity.localOnly })
+        player?.observePlaybackProtection { protected, revision in
+            Task { await admission.updatePlaybackProtection(protected, revision: revision) }
+        }
         currentArtworkLocalOnly = connectivity.localOnly
         connectivity.objectWillChange.sink { [weak self, weak downloads, weak connectivity] in
             Task { @MainActor in
@@ -342,6 +436,7 @@ final class FoundationAppModel: ObservableObject {
                 if connectivity.localOnly { self.player?.suspendReporting() }
                 if self.currentArtworkLocalOnly != connectivity.localOnly {
                     self.currentArtworkLocalOnly = connectivity.localOnly
+                    self.actions?.refreshTrackVisibility()
                     self.currentArtwork?.refreshRetainedArtwork()
                 }
                 downloads.updateConnectivity(
@@ -358,6 +453,14 @@ final class FoundationAppModel: ObservableObject {
             }
         }.store(in: &policySubscriptions)
         if let player = self.player {
+            if let actions = self.actions {
+                player.configureTrackProjection(
+                    project: { [weak actions] in actions?.visibleTracks($0) ?? [] },
+                    observe: { [weak actions] in actions?.observeTrackCopies($0) })
+                actions.$trackVisibilityRevision.dropFirst().sink { [weak player] _ in
+                    player?.refreshTrackVisibility()
+                }.store(in: &policySubscriptions)
+            }
             let store = FoundationPlaybackSessionStore(scope: sourceScope)
             do {
                 if let snapshot = try store.load() { player.restoreSession(snapshot) }
@@ -376,6 +479,7 @@ final class FoundationAppModel: ObservableObject {
                     if let local = await downloads.retainedArtwork(for: item) { return local }
                     return try await library.cachedArtworkResult(for: item, size: 640)?.data
                 },
+                prepareRetry: { item in await library.retryArtwork(for: item) },
                 load: { item in
                     if let local = await downloads.retainedArtwork(for: item) { return local }
                     return try await library.artworkResult(
@@ -407,7 +511,6 @@ final class FoundationAppModel: ObservableObject {
     func signOut() {
         guard let session = library?.session else { return }
         player?.stop()
-        let epoch = accountEpoch
         let attempt = FoundationSignOutPolicy.begin {
             // Keep the captured session until this bounded attempt completes.
             Task.detached(priority: .userInitiated) {
@@ -431,6 +534,8 @@ final class FoundationAppModel: ObservableObject {
                 + "Jellyfin may have ended the session."
             return
         }
+        invalidateAccountReadiness()
+        let epoch = accountEpoch
         FoundationAlphabetAccountLifecycle.retire(library)
         let retiringCache = library?.artworkCache
         let retiringPages = library?.catalogPageCache
@@ -563,6 +668,7 @@ struct FoundationRootView: View {
                 .id(ObjectIdentifier(actions))
                 .task(id: "\(connectivity.localOnly)-\(connectivity.successfulRetryRevision)") {
                     guard !connectivity.localOnly else { return }
+                    if connectivity.successfulRetryRevision > 0 { artwork.retryMissingArtwork() }
                     await model.librarySelection?.validateSavedChoice()
                 }
             } else if model.isCleaningDownloads {
@@ -571,7 +677,7 @@ struct FoundationRootView: View {
                 FoundationSignInView(model: model)
             }
         }
-        .task { model.restore() }
+        .task { _ = await model.ensureReady() }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {
                 model.playbackPreferences.refresh()
@@ -640,7 +746,7 @@ struct FoundationSignInView: View {
                 #if os(macOS)
                     .navigationTitle("Sign In")
                 #else
-                    .navigationTitle("Velacanto")
+                    .navigationTitle("VelaCanto")
                 #endif
                 #if os(iOS)
                     .navigationBarTitleDisplayMode(.inline)
@@ -697,7 +803,7 @@ struct FoundationSignInView: View {
                 VStack(spacing: 10) {
                     Image(systemName: "music.note").font(.system(size: 36))
                         .foregroundStyle(.tint)
-                    Text("Sign in to Velacanto").font(.largeTitle.bold())
+                    Text("Sign in to VelaCanto").font(.largeTitle.bold())
                     Text("Connect your Jellyfin account to listen to your music.")
                         .foregroundStyle(.secondary).multilineTextAlignment(.center)
                 }
@@ -721,7 +827,7 @@ struct FoundationSignInView: View {
                             .font(.largeTitle)
                             .foregroundStyle(.tint)
                             .accessibilityHidden(true)
-                        Text("Your music, in Velacanto.")
+                        Text("Your music, in VelaCanto.")
                             .font(.largeTitle.bold())
                             .accessibilityAddTraits(.isHeader)
                         Text("Connect to your Jellyfin server to browse your library and listen.")

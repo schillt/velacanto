@@ -19,9 +19,12 @@ struct FoundationPlaylistPage: Sendable {
 }
 
 enum FoundationPlaylistError: Error, LocalizedError, Equatable {
-    case tooLarge, changed, ambiguousMemberships, alreadyPresent, partialAddition, emptyAlbum
+    case tooLarge, changed, ambiguousMemberships, alreadyPresent, partialAddition, emptyAlbum,
+        readOnly
     var errorDescription: String? {
         switch self {
+        case .readOnly:
+            "This playlist is read-only for this account."
         case .tooLarge:
             "This playlist is too large to verify changes here. Manage it on the server."
         case .changed:
@@ -109,8 +112,10 @@ enum FoundationPlaylistMutation {
         throw FoundationPlaylistError.tooLarge
     }
 
+    @MainActor
     static func remove(
-        playlistID: String, entry: FoundationPlaylistEntry, library: any FoundationLibrary
+        playlistID: String, entry: FoundationPlaylistEntry, library: any FoundationLibrary,
+        allowsRemoval: @MainActor () -> Bool = { true }
     ) async throws {
         let before = try await FoundationPlaylistSnapshot.load(id: playlistID, library: library)
         guard !FoundationPlaylistSnapshot.hasAmbiguousMemberships(before) else {
@@ -126,6 +131,7 @@ enum FoundationPlaylistMutation {
         let siblingIDs = Set(
             before.filter { $0.item.id == entry.item.id && $0.mutationID != entry.mutationID }.map(
                 \.mutationID))
+        guard allowsRemoval() else { throw FoundationPlaylistError.changed }
         try await library.removeEntry(from: playlistID, entryID: entry.mutationID)
         let after = try await FoundationPlaylistSnapshot.load(id: playlistID, library: library)
         let remainingIDs = Set(after.map(\.mutationID))
@@ -179,9 +185,13 @@ enum FoundationPlaylistMutation {
         throw FoundationPlaylistError.tooLarge
     }
 
-    static func add(playlistID: String, source: FoundationItem, library: any FoundationLibrary)
-        async throws -> Addition
-    {
+    @MainActor
+    static func add(
+        playlistID: String, source: FoundationItem, library: any FoundationLibrary,
+        projectTracks: @MainActor ([FoundationItem], String?) -> [FoundationItem] = { items, _ in
+            items
+        }
+    ) async throws -> Addition {
         let tracks = try await sourceTracks(source, library: library)
         let permission = try await library.playlistPermissions(id: playlistID)
         guard permission.canEdit else { throw FoundationLibraryError.authentication }
@@ -189,8 +199,9 @@ enum FoundationPlaylistMutation {
         guard !FoundationPlaylistSnapshot.hasAmbiguousMemberships(snapshot) else {
             throw FoundationPlaylistError.ambiguousMemberships
         }
+        let visibleTracks = projectTracks(tracks, source.kind == .album ? source.id : nil)
         var knownIDs = Set(snapshot.map { $0.item.id })
-        let pending = tracks.filter {
+        let pending = visibleTracks.filter {
             library.supportsRepeatedPlaylistTracks || knownIDs.insert($0.id).inserted
         }
         guard !pending.isEmpty else { throw FoundationPlaylistError.alreadyPresent }
@@ -204,6 +215,9 @@ enum FoundationPlaylistMutation {
                 let batch = Array(pending[offset..<min(offset + 100, pending.count)])
                 let expected = snapshot.reduce(into: [String: Int]()) {
                     $0[$1.item.id, default: 0] += 1
+                }
+                guard projectTracks(batch, source.kind == .album ? source.id : nil) == batch else {
+                    throw FoundationPlaylistError.changed
                 }
                 attemptedWrite = true
                 try await library.addTracks(to: playlistID, tracks: batch)
@@ -223,7 +237,8 @@ enum FoundationPlaylistMutation {
                 snapshot = refreshed
             }
             try Task.checkCancellation()
-            return Addition(added: pending.count, alreadyPresent: tracks.count - pending.count)
+            return Addition(
+                added: pending.count, alreadyPresent: visibleTracks.count - pending.count)
         } catch {
             if error is CancellationError { throw error }
             if attemptedWrite { throw FoundationPlaylistError.partialAddition }
@@ -237,6 +252,40 @@ enum FoundationPlaylistMutation {
 @MainActor
 final class FoundationPlaylistChanges: ObservableObject {
     @Published private(set) var revisions: [String: Int] = [:]
+    private var projectTracks: @MainActor ([FoundationItem], String?) -> [FoundationItem]
+    private var observeTracks: @MainActor ([FoundationItem], String?) -> Void = { _, _ in }
+
+    init(
+        projectTracks: @escaping @MainActor ([FoundationItem], String?) -> [FoundationItem] = {
+            items, _ in items
+        }
+    ) {
+        self.projectTracks = projectTracks
+    }
+
+    func configureTrackProjection(
+        _ projection: @escaping @MainActor ([FoundationItem], String?) -> [FoundationItem],
+        observe: @escaping @MainActor ([FoundationItem], String?) -> Void = { _, _ in }
+    ) {
+        projectTracks = projection
+        observeTracks = observe
+    }
+
+    func observe(_ items: [FoundationItem], albumID: String? = nil) {
+        observeTracks(items, albumID)
+    }
+
+    /// Project display only; retain the original occurrence for server mutations.
+    func visibleEntries(_ entries: [FoundationPlaylistEntry]) -> [FoundationPlaylistEntry] {
+        let items = projectTracks(
+            entries.map { entry in
+                var item = entry.item
+                item.playlistEntryID = entry.mutationID
+                return item
+            }, nil)
+        let occurrences = Set(items.compactMap(\.playlistEntryID))
+        return entries.filter { occurrences.contains($0.mutationID) }
+    }
 
     func revision(for id: String) -> Int { revisions[id, default: 0] }
 
@@ -245,7 +294,11 @@ final class FoundationPlaylistChanges: ObservableObject {
     {
         do {
             let result = try await FoundationPlaylistMutation.add(
-                playlistID: playlistID, source: source, library: library)
+                playlistID: playlistID, source: source, library: library,
+                projectTracks: { items, albumID in
+                    self.observeTracks(items, albumID)
+                    return self.projectTracks(items, albumID)
+                })
             invalidate(playlistID)
             return result
         } catch {
@@ -258,6 +311,26 @@ final class FoundationPlaylistChanges: ObservableObject {
             }
             throw error
         }
+    }
+
+    /// Remove the selected server membership, never every occurrence of the song.
+    func remove(playlistID: String, track: FoundationItem, library: any FoundationLibrary)
+        async throws
+    {
+        guard track.kind == .track, let entryID = track.playlistEntryID, !entryID.isEmpty else {
+            throw FoundationPlaylistError.changed
+        }
+        try Task.checkCancellation()
+        let permissions = try await library.playlistPermissions(id: playlistID)
+        try Task.checkCancellation()
+        guard permissions.canEdit else { throw FoundationPlaylistError.readOnly }
+        guard !projectTracks([track], nil).isEmpty else { throw FoundationPlaylistError.changed }
+        // Reconcile after a possibly sent write, including failed or cancelled confirmation.
+        defer { invalidate(playlistID) }
+        try await FoundationPlaylistMutation.remove(
+            playlistID: playlistID,
+            entry: .init(id: entryID, mutationID: entryID, item: track), library: library,
+            allowsRemoval: { !self.projectTracks([track], nil).isEmpty })
     }
 
     private func invalidate(_ id: String) {
@@ -273,7 +346,7 @@ enum FoundationPlaylistName {
     }
 }
 
-/// A sheet owns its operation. Cancellation never claims the server rolled back a write.
+/// The presenting view owns its operation. Cancellation never claims a server rollback.
 @MainActor
 final class FoundationPlaylistOperation: ObservableObject {
     @Published private(set) var isPending = false
@@ -418,6 +491,8 @@ private struct FoundationPlaylistCreate: View {
 }
 
 struct FoundationPlaylistEditor: View {
+    @EnvironmentObject private var changes: FoundationPlaylistChanges
+    @EnvironmentObject private var preferences: FoundationPlaybackPreferences
     @EnvironmentObject private var connectivity: FoundationConnectivity
     @EnvironmentObject private var downloads: FoundationDownloads
     let playlist: FoundationItem
@@ -436,6 +511,8 @@ struct FoundationPlaylistEditor: View {
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
+        let _ = preferences.showDuplicateAlbumTracks
+        let visibleEntries = changes.visibleEntries(entries)
         NavigationStack {
             List {
                 Section("Playlist") {
@@ -469,7 +546,7 @@ struct FoundationPlaylistEditor: View {
                 }
                 Section("Tracks") {
                     if let membershipMessage { Text(membershipMessage).font(.caption) }
-                    ForEach(Array(entries.prefix(visibleCount))) { entry in
+                    ForEach(Array(visibleEntries.prefix(visibleCount))) { entry in
                         HStack {
                             VStack(alignment: .leading) {
                                 Text(entry.item.title)
@@ -481,8 +558,20 @@ struct FoundationPlaylistEditor: View {
                                 guard !connectivity.localOnly else { return }
                                 operation.run {
                                     guard !connectivity.localOnly else { throw CancellationError() }
+                                    guard
+                                        changes.visibleEntries([entry]).contains(where: {
+                                            $0.mutationID == entry.mutationID
+                                        })
+                                    else {
+                                        throw FoundationPlaylistError.changed
+                                    }
                                     try await FoundationPlaylistMutation.remove(
-                                        playlistID: playlist.id, entry: entry, library: library)
+                                        playlistID: playlist.id, entry: entry, library: library,
+                                        allowsRemoval: {
+                                            changes.visibleEntries([entry]).contains(where: {
+                                                $0.mutationID == entry.mutationID
+                                            })
+                                        })
                                     downloads.reconcilePlaylists()
                                     try await refresh()
                                 }
@@ -491,7 +580,7 @@ struct FoundationPlaylistEditor: View {
                                     || !membershipEditable)
                         }
                     }
-                    if visibleCount < entries.count {
+                    if visibleCount < visibleEntries.count {
                         Button("Load More") { visibleCount += 100 }
                     }
                     Text("Add tracks from a song’s Actions menu.").font(.caption)
@@ -550,6 +639,7 @@ struct FoundationPlaylistEditor: View {
             let snapshot = try await FoundationPlaylistSnapshot.load(
                 id: playlist.id, library: library)
             try Task.checkCancellation()
+            changes.observe(snapshot.map(\.item))
             entries = snapshot
             visibleCount = 100
             membershipEditable = !FoundationPlaylistSnapshot.hasAmbiguousMemberships(snapshot)
@@ -620,7 +710,7 @@ struct FoundationPlaylistPicker: View {
 
 }
 
-private struct FoundationPlaylistStatus: View {
+struct FoundationPlaylistStatus: View {
     @ObservedObject var operation: FoundationPlaylistOperation
     var body: some View {
         if operation.isPending {

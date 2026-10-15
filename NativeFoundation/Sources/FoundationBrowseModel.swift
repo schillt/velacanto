@@ -1,9 +1,21 @@
+import Combine
 import SwiftUI
 
 @MainActor
 final class FoundationBrowseModel: ObservableObject {
     enum Request { case initial, refresh, more }
+    @Published private(set) var rawItems: [FoundationItem] = [] {
+        didSet {
+            favoriteActions?.observeTrackCopies(rawItems)
+            refreshTrackProjection()
+        }
+    }
     @Published private(set) var items: [FoundationItem] = []
+    private func refreshTrackProjection() {
+        let projected = favoriteActions?.visibleTracks(rawItems) ?? rawItems
+        if projected != items { items = projected }
+    }
+    private var trackProjectionObservation: AnyCancellable?
     @Published private(set) var nextStartIndex: Int?
     @Published private(set) var isLoading = false
     @Published private(set) var errorCategory: FoundationLibraryError?
@@ -22,6 +34,11 @@ final class FoundationBrowseModel: ObservableObject {
     private var pendingRequest = Request.initial
     private(set) var retryRequest = Request.initial
 
+    var hasFreshCachedContent: Bool {
+        usesCachedFreshness
+            && (lastRefreshAttempt.map { now().timeIntervalSince($0) < refreshInterval } ?? false)
+    }
+    private let usesCachedFreshness: Bool
     private var pageCache: FoundationCatalogPageCache?
     private var cacheKey: String?
     private var restoredCache = false
@@ -42,13 +59,21 @@ final class FoundationBrowseModel: ObservableObject {
         _ actions: FoundationLibraryActions, knownFavorites: Bool = false
     ) {
         favoriteActions = actions
+        actions.observeTrackCopies(rawItems)
+        trackProjectionObservation = actions.$trackVisibilityRevision.dropFirst().sink {
+            [weak self] _ in
+            self?.refreshTrackProjection()
+        }
+        refreshTrackProjection()
         observesFavoriteMembership = knownFavorites
     }
 
     init(
         refreshInterval: TimeInterval = 60, now: @escaping () -> Date = { Date() },
-        catalogLimits: FoundationCatalogBudget = FoundationCatalogBudget()
+        catalogLimits: FoundationCatalogBudget = FoundationCatalogBudget(),
+        usesCachedFreshness: Bool = false
     ) {
+        self.usesCachedFreshness = usesCachedFreshness
         self.catalogLimits = catalogLimits
         self.catalogBudget = catalogLimits
         self.refreshInterval = refreshInterval
@@ -62,12 +87,12 @@ final class FoundationBrowseModel: ObservableObject {
         cacheKey = key
     }
 
-    /// Catalog indexes have unique items; collection track lists keep occurrence identity.
+    /// Catalog indexes have unique rawItems; collection track lists keep occurrence identity.
     func configureCatalogPagination(sortByTitle: Bool = false) {
         guard !deduplicatesCatalogItems || sortsCatalogByTitle != sortByTitle else { return }
         deduplicatesCatalogItems = true
         sortsCatalogByTitle = sortByTitle
-        items = uniqueCatalogItems(items)
+        rawItems = uniqueCatalogItems(rawItems)
     }
 
     private func uniqueCatalogItems(_ candidates: [FoundationItem]) -> [FoundationItem] {
@@ -91,7 +116,14 @@ final class FoundationBrowseModel: ObservableObject {
     private func restoreCache() async {
         guard !restoredCache, let pageCache, let cacheKey else { return }
         let owner = revision
+        #if DEBUG
+            let cacheTiming = FoundationLoadTiming(.snapshot)
+            cacheTiming.record(.cacheReadStarted)
+        #endif
         let record = await pageCache.read(cacheKey)
+        #if DEBUG
+            cacheTiming.record(.cacheReadFinished)
+        #endif
         guard !Task.isCancelled, revision == owner else { return }
         restoredCache = true
         guard !loaded, let record else { return }
@@ -103,10 +135,15 @@ final class FoundationBrowseModel: ObservableObject {
             catalogBudget.retainedBytes += cost.bytes
         }
         cachedRawPrefix = Array(record.page.items.prefix(200))
-        items = deduplicatesCatalogItems ? uniqueCatalogItems(record.page.items) : record.page.items
+        rawItems =
+            deduplicatesCatalogItems ? uniqueCatalogItems(record.page.items) : record.page.items
         nextStartIndex = record.page.nextStartIndex
         loaded = true
         isRetainedSnapshot = true
+        if usesCachedFreshness { lastRefreshAttempt = record.savedAt }
+        #if DEBUG
+            cacheTiming.record(.published)
+        #endif
     }
 
     /// Build only from already-loaded songs; preserve repeated occurrences.
@@ -128,10 +165,11 @@ final class FoundationBrowseModel: ObservableObject {
         writePermit.revoke()
         revision = UUID()
         cachedRawPrefix = []
-        items = deduplicatesCatalogItems ? uniqueCatalogItems(snapshot) : snapshot
+        rawItems = deduplicatesCatalogItems ? uniqueCatalogItems(snapshot) : snapshot
         nextStartIndex = nil
         loaded = complete
         isRetainedSnapshot = true
+        lastRefreshAttempt = nil
         isLoading = false
         errorMessage = nil
         errorCategory = nil
@@ -146,7 +184,7 @@ final class FoundationBrowseModel: ObservableObject {
         writePermit.revoke()
         revision = UUID()
         cachedRawPrefix = []
-        items = []
+        rawItems = []
         nextStartIndex = nil
         loaded = false
         isRetainedSnapshot = false
@@ -248,7 +286,10 @@ final class FoundationBrowseModel: ObservableObject {
     func refreshVisible(
         allowsNetwork: Bool, using loader: (Int) async throws -> FoundationPage
     ) async {
-        await loadPending(allowsNetwork: allowsNetwork, using: loader)
+        // A replacement visible owner must retain its initial demand until any
+        // abandoned request unwinds, rather than sleeping through an empty page.
+        await loadPending(
+            allowsNetwork: allowsNetwork, waitForInitialLoad: true, using: loader)
         guard allowsNetwork, pageCache != nil, errorMessage == nil else { return }
         while !Task.isCancelled {
             do { try await Task.sleep(for: .seconds(max(1, refreshInterval))) } catch { return }
@@ -319,8 +360,17 @@ final class FoundationBrowseModel: ObservableObject {
                     catalogBudget.requestedPages += 1
                 }
             }
+            #if DEBUG
+                let timing = FoundationLoadTiming(.catalog)
+            #endif
             let page = try await withTaskCancellationHandler {
-                try await loader(offset)
+                #if DEBUG
+                    try await FoundationLoadTiming.$current.withValue(timing) {
+                        try await loader(offset)
+                    }
+                #else
+                    try await loader(offset)
+                #endif
             } onCancel: {
                 permit.revoke()
             }
@@ -363,7 +413,7 @@ final class FoundationBrowseModel: ObservableObject {
             }
             if offset == 0 {
                 // Keep only this destination's previous membership, not account-wide guesses.
-                favoriteRefreshCandidates = knownFavorites ? items : []
+                favoriteRefreshCandidates = knownFavorites ? rawItems : []
                 favoriteRefreshRead = favoriteRead
             }
             if case .more = request {
@@ -371,12 +421,12 @@ final class FoundationBrowseModel: ObservableObject {
                     cachedRawPrefix.append(
                         contentsOf: page.items.prefix(200 - cachedRawPrefix.count))
                 }
-                items =
+                rawItems =
                     deduplicatesCatalogItems
-                    ? uniqueCatalogItems(items + page.items) : items + page.items
+                    ? uniqueCatalogItems(rawItems + page.items) : rawItems + page.items
             } else {
                 cachedRawPrefix = Array(page.items.prefix(200))
-                items = deduplicatesCatalogItems ? uniqueCatalogItems(page.items) : page.items
+                rawItems = deduplicatesCatalogItems ? uniqueCatalogItems(page.items) : page.items
             }
             nextStartIndex = page.nextStartIndex
             loaded = true
@@ -385,7 +435,7 @@ final class FoundationBrowseModel: ObservableObject {
                 actions.observeFavorites(
                     in: page.items, knownFavorites: knownFavorites, read: favoriteRead)
                 if knownFavorites, page.nextStartIndex == nil, let read = favoriteRefreshRead {
-                    let membership = Set(items.map { $0.kind.rawValue + ":" + $0.id })
+                    let membership = Set(rawItems.map { $0.kind.rawValue + ":" + $0.id })
                     let removed = favoriteRefreshCandidates.compactMap { item -> FoundationItem? in
                         guard !membership.contains(item.kind.rawValue + ":" + item.id) else {
                             return nil
@@ -399,20 +449,29 @@ final class FoundationBrowseModel: ObservableObject {
                     favoriteRefreshRead = nil
                 }
             }
+            #if DEBUG
+                timing.record(.published)
+            #endif
             if let pageCache, let cacheKey {
+                #if DEBUG
+                    timing.record(.persistStarted)
+                #endif
                 // Persist a bounded prefix; preserve the next offset so truncated pages stay usable.
                 let limit = 200
                 let retained =
                     deduplicatesCatalogItems
-                    ? cachedRawPrefix : Array(items.prefix(limit))
+                    ? cachedRawPrefix : Array(rawItems.prefix(limit))
                 // Cache raw entries so duplicate suppression never changes server offsets.
                 let next =
                     deduplicatesCatalogItems
                     ? (rawEnd > limit ? limit : nextStartIndex)
-                    : (items.count > limit ? retained.count : nextStartIndex)
+                    : (rawItems.count > limit ? retained.count : nextStartIndex)
                 await pageCache.write(
                     FoundationPage(items: retained, nextStartIndex: next), key: cacheKey,
                     permit: permit)
+                #if DEBUG
+                    timing.record(.persistFinished)
+                #endif
             }
             #if DEBUG
                 FoundationJournal.shared.record(

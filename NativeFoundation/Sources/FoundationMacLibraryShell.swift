@@ -1,14 +1,107 @@
 import SwiftUI
 
 #if os(macOS)
+
+    struct FoundationMacScrolledHeaderPreference: PreferenceKey {
+        static let defaultValue: [String: Bool] = [:]
+        static func reduce(value: inout [String: Bool], nextValue: () -> [String: Bool]) {
+            value.merge(nextValue(), uniquingKeysWith: { _, newest in newest })
+        }
+    }
+
+    enum FoundationMacLayout {
+        static let sidebarRowHeight: CGFloat = 36
+        static let catalogHorizontalInset: CGFloat = 24
+        static let minimumSidebarWidth: CGFloat = 170
+        // Includes the fixed transport groups, shell margins and a usable artwork/title area.
+        static let minimumDetailWidth: CGFloat = 480
+        static let minimumInspectorWidth: CGFloat = 280
+        static let maximumInspectorWidth: CGFloat = 460
+        static let minimumWindowWidth: CGFloat = 760
+        static var minimumSplitWidth: CGFloat { minimumSidebarWidth + minimumDetailWidth }
+        static var minimumInspectingWindowWidth: CGFloat {
+            minimumSplitWidth + minimumInspectorWidth
+        }
+    }
+
+    /// Fixed icon geometry keeps bitmap and symbol destinations aligned in compact native rows.
+    struct FoundationMacSidebarLabelStyle: LabelStyle {
+        func makeBody(configuration: Configuration) -> some View {
+            HStack(spacing: 10) {
+                configuration.icon.frame(width: 20, height: 20)
+                configuration.title
+            }
+        }
+    }
+
+    struct FoundationMacNavigationItem: Hashable {
+        let item: FoundationItem
+        let headerOwnerID = UUID().uuidString
+
+        static func == (lhs: Self, rhs: Self) -> Bool { lhs.headerOwnerID == rhs.headerOwnerID }
+        func hash(into hasher: inout Hasher) {
+            hasher.combine(headerOwnerID)
+        }
+    }
+
+    @MainActor
+    final class FoundationMacNavigation: ObservableObject {
+        @Published var path: [FoundationMacNavigationItem] = []
+
+        func open(_ item: FoundationItem) { path.append(.init(item: item)) }
+        func returnToRoot() { path.removeAll() }
+    }
+
+    private struct FoundationMacNavigationKey: EnvironmentKey {
+        static let defaultValue: FoundationMacNavigation? = nil
+    }
+
+    private struct FoundationMacHeaderOwnerKey: EnvironmentKey {
+        static let defaultValue = ""
+    }
+
+    extension EnvironmentValues {
+        var foundationMacHeaderOwnerID: String {
+            get { self[FoundationMacHeaderOwnerKey.self] }
+            set { self[FoundationMacHeaderOwnerKey.self] = newValue }
+        }
+        var foundationMacNavigation: FoundationMacNavigation? {
+            get { self[FoundationMacNavigationKey.self] }
+            set { self[FoundationMacNavigationKey.self] = newValue }
+        }
+    }
     import AppKit
 #endif
 
 #if os(macOS)
 
+    /// Each visible detail route owns its vertical scroll chrome, independent of content type.
+    private struct FoundationMacScrollChrome: ViewModifier {
+        @Environment(\.foundationMacHeaderOwnerID) private var ownerID
+        @State private var scrolled = false
+        @State private var visible = false
+
+        func body(content: Content) -> some View {
+            content
+                .scrollEdgeEffectHidden(true, for: .top)
+                .onScrollGeometryChange(for: Bool.self) { geometry in
+                    geometry.contentOffset.y + geometry.contentInsets.top > 1
+                } action: { _, value in
+                    scrolled = value
+                }
+                .preference(
+                    key: FoundationMacScrolledHeaderPreference.self,
+                    value: [ownerID: visible && scrolled]
+                )
+                .onChange(of: ownerID) { _, _ in scrolled = false }
+                .onAppear { visible = true }
+                .onDisappear { visible = false }
+        }
+    }
+
     /// Native presentation only. The caller owns loading, playback and destination content.
     struct FoundationMacLibraryShell<
-        Content: View, MiniPlayer: View, LibrarySidebar: View, Profile: View
+        Content: View, MiniPlayer: View, LibrarySidebar: View, Profile: View, Destination: View
     >: View {
         @Environment(\.foundationReduceTransparency) private var reduceTransparency
         @Environment(\.foundationReduceMotion) private var reduceMotion
@@ -17,38 +110,55 @@ import SwiftUI
         let searchActivation: Int
         let libraryNavigationID: String
         let navigationRevision: Int
+        @ObservedObject var navigation: FoundationMacNavigation
         @FocusState private var searchFocused: Bool
         @State private var columnVisibility = NavigationSplitViewVisibility.all
         @State private var sidebarWidth: CGFloat = 230
+        @State private var headerScrollByItem: [String: Bool] = [:]
+        private var rootHeaderOwnerID: String {
+            "root-\(selection.rawValue)-\(libraryNavigationID)-\(navigationRevision)"
+        }
+        private var headerScrolled: Bool {
+            let owner = navigation.path.last?.headerOwnerID ?? rootHeaderOwnerID
+            return headerScrollByItem[owner] ?? false
+        }
         @Binding var playbackInset: CGFloat
         let showsMiniPlayer: Bool
-        @ScaledMetric(relativeTo: .body) private var homeIconSize = 18.0
+        private let homeIconSize: CGFloat = 18
         private let content: (FoundationDestination) -> Content
         private let miniPlayer: () -> MiniPlayer
         private let librarySidebar: () -> LibrarySidebar
         private let profile: () -> Profile
+        private let activateSearch: () -> Void
+        private let destination: (FoundationItem) -> Destination
 
         init(
             selection: Binding<FoundationDestination>,
             searchQuery: Binding<String>, searchActivation: Int, libraryNavigationID: String,
-            navigationRevision: Int, playbackInset: Binding<CGFloat>,
+            navigationRevision: Int, navigation: FoundationMacNavigation,
+            playbackInset: Binding<CGFloat>,
             showsMiniPlayer: Bool,
             @ViewBuilder content: @escaping (FoundationDestination) -> Content,
             @ViewBuilder miniPlayer: @escaping () -> MiniPlayer,
             @ViewBuilder librarySidebar: @escaping () -> LibrarySidebar,
-            @ViewBuilder profile: @escaping () -> Profile
+            @ViewBuilder profile: @escaping () -> Profile,
+            @ViewBuilder destination: @escaping (FoundationItem) -> Destination,
+            activateSearch: @escaping () -> Void
         ) {
             _selection = selection
             _searchQuery = searchQuery
             self.searchActivation = searchActivation
             self.libraryNavigationID = libraryNavigationID
             self.navigationRevision = navigationRevision
+            self.navigation = navigation
             _playbackInset = playbackInset
             self.showsMiniPlayer = showsMiniPlayer
             self.content = content
             self.miniPlayer = miniPlayer
             self.librarySidebar = librarySidebar
             self.profile = profile
+            self.activateSearch = activateSearch
+            self.destination = destination
         }
 
         var body: some View {
@@ -64,20 +174,28 @@ import SwiftUI
                                 selection = destination
                             } label: {
                                 Label {
-                                    Text(destination.title)
+                                    Text(destination.title).font(.system(size: 14)).lineLimit(1)
                                 } icon: {
                                     if destination == .home {
                                         destination.icon.resizable().scaledToFit()
                                             .frame(width: homeIconSize, height: homeIconSize)
                                     } else {
                                         destination.icon.symbolVariant(
-                                            selection == destination ? .fill : .none)
+                                            selection == destination ? .fill : .none
+                                        )
+                                        .font(.system(size: 18))
                                     }
                                 }
-                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .labelStyle(FoundationMacSidebarLabelStyle())
+                                .frame(
+                                    maxWidth: .infinity,
+                                    minHeight: FoundationMacLayout.sidebarRowHeight,
+                                    alignment: .leading
+                                )
                                 .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
+                            .listRowInsets(EdgeInsets(top: 0, leading: 8, bottom: 0, trailing: 8))
                             .foregroundStyle(
                                 selection == destination ? Color.accentColor : Color.primary
                             )
@@ -88,40 +206,69 @@ import SwiftUI
                     librarySidebar()
                 }
                 .listStyle(.sidebar)
+                .environment(\.defaultMinListRowHeight, FoundationMacLayout.sidebarRowHeight)
+                .labelStyle(.titleAndIcon)
                 .accessibilityLabel("Main navigation")
                 .safeAreaInset(edge: .bottom, spacing: 0) {
-                    profile().padding(10)
+                    profile()
+                        .frame(maxWidth: .infinity)
+                        .background {
+                            if reduceTransparency {
+                                RoundedRectangle(cornerRadius: 16).fill(.background)
+                            }
+                        }
+                        .glassEffect(
+                            reduceTransparency ? .identity : .regular.interactive(),
+                            in: .rect(cornerRadius: 16)
+                        )
+                        .padding(10)
                 }
-                .navigationTitle("Velacanto")
-                .navigationSplitViewColumnWidth(min: 170, ideal: 230, max: 280)
+                .navigationTitle("VelaCanto")
+                .navigationSplitViewColumnWidth(
+                    min: FoundationMacLayout.minimumSidebarWidth, ideal: 230, max: 280
+                )
                 .onGeometryChange(for: CGFloat.self) {
                     $0.size.width
                 } action: {
                     sidebarWidth = $0
                 }
             } detail: {
-                NavigationStack {
+                NavigationStack(path: $navigation.path) {
                     content(selection)
+                        .modifier(FoundationMacScrollChrome())
+                        .environment(\.foundationMacHeaderOwnerID, rootHeaderOwnerID)
+                        .navigationDestination(for: FoundationMacNavigationItem.self) { route in
+                            destination(route.item)
+                                .modifier(FoundationMacScrollChrome())
+                                .environment(\.foundationMacHeaderOwnerID, route.headerOwnerID)
+                        }
                 }
                 .scrollClipDisabled()
                 .scrollEdgeEffectStyle(.soft, for: .top)
                 .id("\(selection.rawValue)-\(libraryNavigationID)-\(navigationRevision)")
-                .frame(minWidth: 560)
+                .frame(minWidth: FoundationMacLayout.minimumDetailWidth)
             }
             // Native split navigation can retain promoted detail destinations across a
             // detail-stack identity change. Recreate that navigation owner on activation.
             .id(navigationRevision)
             .searchable(text: $searchQuery, placement: .sidebar, prompt: "Search music")
             .searchFocused($searchFocused)
-            .onChange(of: searchActivation) { _, _ in searchFocused = true }
+            .onChange(of: searchActivation, initial: true) { _, activation in
+                if selection == .search, activation > 0 { searchFocused = true }
+            }
             .onChange(of: searchQuery) { _, _ in
-                if selection != .search { selection = .search }
+                activateSearch()
             }
             .animation(
                 reduceMotion ? nil : .spring(response: 0.46, dampingFraction: 0.9),
                 value: columnVisibility
             )
-            .frame(minWidth: 760, minHeight: 480)
+            .frame(minWidth: FoundationMacLayout.minimumSplitWidth, minHeight: 480)
+            .onPreferenceChange(FoundationMacScrolledHeaderPreference.self) {
+                headerScrollByItem = $0
+            }
+            .toolbarBackground(.ultraThinMaterial, for: .windowToolbar)
+            // Keep native window geometry stable; the noninteractive overlay reveals frost on scroll.
             .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
             .overlay(alignment: .top) {
                 GeometryReader { geometry in
@@ -129,12 +276,18 @@ import SwiftUI
                         .frame(height: geometry.safeAreaInsets.top + 32)
                         .mask {
                             LinearGradient(
-                                colors: [.black, .black, .clear],
-                                startPoint: .top, endPoint: .bottom)
+                                stops: (0...32).map { step in
+                                    let progress = Double(step) / 32
+                                    let eased = progress * progress * (3 - 2 * progress)
+                                    return .init(
+                                        color: .black.opacity(1 - eased), location: progress)
+                                }, startPoint: .top, endPoint: .bottom)
                         }
                         .offset(y: -geometry.safeAreaInsets.top)
                 }
                 .padding(.leading, columnVisibility == .detailOnly ? 0 : sidebarWidth)
+                .opacity(headerScrolled ? 1 : 0)
+                .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: headerScrolled)
                 .allowsHitTesting(false)
             }
             // Anchor to the split shell, outside destinations promoted by native navigation.
@@ -196,21 +349,12 @@ import SwiftUI
 
     private struct FoundationMacTransportClearance: ViewModifier {
         @Environment(\.foundationMacTransportBottomInset) private var inset
-        @Environment(\.foundationMacUsesShellToolbar) private var usesShellToolbar
-        @Environment(\.foundationMacToolbarTrailingReserve) private var toolbarReserve
         func body(content: Content) -> some View {
             content
                 .safeAreaInset(edge: .bottom, spacing: 0) {
                     Color.clear.frame(height: inset)
                 }
                 .scrollClipDisabled()
-                .toolbar {
-                    if usesShellToolbar && toolbarReserve > 0 {
-                        ToolbarItem(placement: .primaryAction) {
-                            FoundationMacToolbarClearance()
-                        }.sharedBackgroundVisibility(.hidden)
-                    }
-                }
         }
     }
 
@@ -223,7 +367,7 @@ import SwiftUI
         }
     }
 
-    /// A native toolbar view reserves the open inspector footprint without a button.
+    /// Reserve the measured difference between content and complete shell widths.
     private struct FoundationMacToolbarSpacer: NSViewRepresentable {
         let width: CGFloat
         func makeNSView(context: Context) -> FoundationMacToolbarSpacerView {
@@ -246,13 +390,14 @@ import SwiftUI
     }
 
     enum FoundationMacLibraryRoute: Equatable {
-        case overview, favorites, albums, artists, songs, genres, playlists, downloads
+        case overview, pinned, favorites, albums, artists, songs, genres, playlists, downloads
         case playlist(FoundationItem)
         case item(FoundationItem)
 
         var identity: String {
             switch self {
             case .overview: "overview"
+            case .pinned: "pinned"
             case .favorites: "favorites"
             case .albums: "albums"
             case .artists: "artists"
@@ -344,7 +489,8 @@ import SwiftUI
                     Button {
                         player.previous()
                     } label: {
-                        FoundationMacPlaybackGlyph(kind: .previous).frame(width: 36, height: 36)
+                        FoundationMacPlaybackGlyph(kind: .previous).frame(width: 44, height: 44)
+                            .contentShape(Rectangle())
                             .foregroundStyle(Color.white).opacity(item == nil ? 0.35 : 1)
                     }
                     .disabled(item == nil).help("Previous track (⌘←)")
@@ -353,7 +499,8 @@ import SwiftUI
                         player.togglePlayback()
                     } label: {
                         FoundationMacPlaybackGlyph(kind: player.wantsPlayback ? .pause : .play)
-                            .frame(width: 36, height: 36)
+                            .frame(width: 44, height: 44)
+                            .contentShape(Rectangle())
                             .foregroundStyle(Color.white).opacity(item == nil ? 0.35 : 1)
                     }
                     .disabled(item == nil)
@@ -362,7 +509,8 @@ import SwiftUI
                     Button {
                         player.next()
                     } label: {
-                        FoundationMacPlaybackGlyph(kind: .next).frame(width: 36, height: 36)
+                        FoundationMacPlaybackGlyph(kind: .next).frame(width: 44, height: 44)
+                            .contentShape(Rectangle())
                             .foregroundStyle(Color.white)
                             .opacity(item == nil || !player.canAdvance ? 0.35 : 1)
                     }
@@ -398,7 +546,7 @@ import SwiftUI
                     } else {
                         Image(nsImage: NSApplication.shared.applicationIconImage)
                             .resizable().scaledToFit().frame(width: 44, height: 44)
-                            .accessibilityLabel("Velacanto — Nothing playing")
+                            .accessibilityLabel("VelaCanto — Nothing playing")
                     }
                 }
                 .frame(maxWidth: .infinity, minHeight: 48)
@@ -406,7 +554,7 @@ import SwiftUI
                     player: player, lyricsEnabled: lyricsEnabled,
                     lyricsSelected: lyricsSelected, queueSelected: queueSelected,
                     toggleLyrics: toggleLyrics, toggleQueue: toggleQueue
-                ).frame(width: 156)
+                ).frame(width: 184)
             }
             .padding(.horizontal, 10).padding(.vertical, 2)
         }
@@ -473,20 +621,22 @@ import SwiftUI
         var body: some View {
             HStack(spacing: 8) {
                 Button(action: toggleLyrics) {
-                    Image(systemName: "quote.bubble").frame(width: 32, height: 36)
+                    Image(systemName: "quote.bubble").frame(width: 40, height: 44)
+                        .contentShape(Rectangle())
                 }
                 .disabled(!lyricsEnabled)
                 .foregroundStyle(lyricsSelected ? Color.accentColor : Color.primary)
                 .help("Lyrics (⇧⌘L)").accessibilityLabel("Show lyrics")
                 .accessibilityAddTraits(lyricsSelected ? .isSelected : [])
                 Button(action: toggleQueue) {
-                    Image(systemName: "list.bullet").frame(width: 32, height: 36)
+                    Image(systemName: "list.bullet").frame(width: 40, height: 44)
+                        .contentShape(Rectangle())
                 }
                 .disabled(player.queue.isEmpty)
                 .foregroundStyle(queueSelected ? Color.accentColor : Color.primary)
                 .help("Queue (⇧⌘Q)").accessibilityLabel("Show queue")
                 .accessibilityAddTraits(queueSelected ? .isSelected : [])
-                FoundationAirPlayPicker(player: player).frame(width: 32, height: 36)
+                FoundationAirPlayPicker(player: player).frame(width: 40, height: 44)
                 volumeButton
             }
             .buttonStyle(.plain)
@@ -526,7 +676,8 @@ import SwiftUI
                 volumeExpanded.toggle()
             } label: {
                 Image(systemName: player.playerVolume == 0 ? "speaker.slash" : "speaker.wave.2")
-                    .frame(width: 32, height: 36)
+                    .frame(width: 40, height: 44)
+                    .contentShape(Rectangle())
             }
             .help(volumeExpanded ? "Hide volume" : "Show volume")
             .accessibilityLabel(volumeExpanded ? "Hide volume" : "Show volume")
@@ -724,7 +875,8 @@ private struct FoundationMacShelfUnderlap: ViewModifier {
                 .background(FoundationMacCarouselWheelRouting())
                 .contentMargins(.horizontal, contentInset, for: .scrollContent)
                 .padding(.horizontal, -horizontalInset)
-                .ignoresSafeArea(.container, edges: .horizontal)
+                // Overflow is visual; the viewport still starts inside the detail column.
+                .scrollClipDisabled()
         #else
             content
         #endif
