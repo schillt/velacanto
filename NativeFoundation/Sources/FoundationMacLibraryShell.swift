@@ -11,6 +11,7 @@ import SwiftUI
 
     enum FoundationMacLayout {
         static let sidebarRowHeight: CGFloat = 36
+        static let transportContentHeight: CGFloat = 48
         static let catalogHorizontalInset: CGFloat = 24
         static let minimumSidebarWidth: CGFloat = 170
         // Includes the fixed transport groups, shell margins and a usable artwork/title area.
@@ -212,16 +213,19 @@ import SwiftUI
                 .safeAreaInset(edge: .bottom, spacing: 0) {
                     profile()
                         .frame(maxWidth: .infinity)
+                        .padding(10)
+                        // A pane samples the scrolling rows behind it without adding
+                        // the floating control's rounded refraction/highlight border.
                         .background {
                             if reduceTransparency {
-                                RoundedRectangle(cornerRadius: 16).fill(.background)
+                                Rectangle().fill(.background)
+                            } else {
+                                Rectangle().fill(.regularMaterial)
                             }
                         }
-                        .glassEffect(
-                            reduceTransparency ? .identity : .regular.interactive(),
-                            in: .rect(cornerRadius: 16)
-                        )
-                        .padding(10)
+                        .overlay(alignment: .top) {
+                            Divider().allowsHitTesting(false)
+                        }
                 }
                 .navigationTitle("VelaCanto")
                 .navigationSplitViewColumnWidth(
@@ -324,10 +328,6 @@ import SwiftUI
         static let defaultValue = CGFloat.zero
     }
 
-    private struct FoundationMacToolbarTrailingReserveKey: EnvironmentKey {
-        static let defaultValue = CGFloat.zero
-    }
-
     private struct FoundationMacUsesShellToolbarKey: EnvironmentKey {
         static let defaultValue = false
     }
@@ -336,10 +336,6 @@ import SwiftUI
         var foundationMacUsesShellToolbar: Bool {
             get { self[FoundationMacUsesShellToolbarKey.self] }
             set { self[FoundationMacUsesShellToolbarKey.self] = newValue }
-        }
-        var foundationMacToolbarTrailingReserve: CGFloat {
-            get { self[FoundationMacToolbarTrailingReserveKey.self] }
-            set { self[FoundationMacToolbarTrailingReserveKey.self] = newValue }
         }
         var foundationMacTransportBottomInset: CGFloat {
             get { self[FoundationMacTransportBottomInsetKey.self] }
@@ -356,37 +352,6 @@ import SwiftUI
                 }
                 .scrollClipDisabled()
         }
-    }
-
-    struct FoundationMacToolbarClearance: View {
-        @Environment(\.foundationMacToolbarTrailingReserve) private var width
-        var body: some View {
-            FoundationMacToolbarSpacer(width: width)
-                .frame(width: width, height: 28).fixedSize()
-                .accessibilityHidden(true)
-        }
-    }
-
-    /// Reserve the measured difference between content and complete shell widths.
-    private struct FoundationMacToolbarSpacer: NSViewRepresentable {
-        let width: CGFloat
-        func makeNSView(context: Context) -> FoundationMacToolbarSpacerView {
-            let view = FoundationMacToolbarSpacerView()
-            view.setContentHuggingPriority(.required, for: .horizontal)
-            view.setContentCompressionResistancePriority(.required, for: .horizontal)
-            return view
-        }
-        func updateNSView(_ view: FoundationMacToolbarSpacerView, context: Context) {
-            view.reservedWidth = width
-        }
-    }
-
-    private final class FoundationMacToolbarSpacerView: NSView {
-        var reservedWidth = CGFloat.zero {
-            didSet { invalidateIntrinsicContentSize() }
-        }
-        override var intrinsicContentSize: NSSize { NSSize(width: reservedWidth, height: 28) }
-        override func hitTest(_ point: NSPoint) -> NSView? { nil }
     }
 
     enum FoundationMacLibraryRoute: Equatable {
@@ -491,7 +456,6 @@ import SwiftUI
                     } label: {
                         FoundationMacPlaybackGlyph(kind: .previous).frame(width: 44, height: 44)
                             .contentShape(Rectangle())
-                            .foregroundStyle(Color.white).opacity(item == nil ? 0.35 : 1)
                     }
                     .disabled(item == nil).help("Previous track (⌘←)")
                     .accessibilityLabel("Previous")
@@ -501,7 +465,6 @@ import SwiftUI
                         FoundationMacPlaybackGlyph(kind: player.wantsPlayback ? .pause : .play)
                             .frame(width: 44, height: 44)
                             .contentShape(Rectangle())
-                            .foregroundStyle(Color.white).opacity(item == nil ? 0.35 : 1)
                     }
                     .disabled(item == nil)
                     .accessibilityLabel(player.wantsPlayback ? "Pause" : "Play")
@@ -511,45 +474,26 @@ import SwiftUI
                     } label: {
                         FoundationMacPlaybackGlyph(kind: .next).frame(width: 44, height: 44)
                             .contentShape(Rectangle())
-                            .foregroundStyle(Color.white)
-                            .opacity(item == nil || !player.canAdvance ? 0.35 : 1)
                     }
                     .disabled(item == nil || !player.canAdvance)
                     .help("Next track (⌘→)").accessibilityLabel("Next")
                 }
                 .buttonStyle(.plain)
-                .foregroundStyle(Color.white)
+                .foregroundStyle(.primary)
                 .frame(width: 156, alignment: .leading)
                 Group {
                     if let item {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Button {
-                                let menu = FoundationMacTrackMenu(item: item, navigate: navigate)
-                                withExtendedLifetime(menu) { menu.show() }
-                            } label: {
-                                HStack(spacing: 10) {
-                                    artwork().frame(width: 32, height: 32)
-                                        .clipShape(RoundedRectangle(cornerRadius: 6))
-                                    VStack(alignment: .leading, spacing: 3) {
-                                        Text(item.title).font(.callout.weight(.medium)).lineLimit(1)
-                                        Text(state == .playing ? item.subtitle : state.label)
-                                            .font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                                    }
-                                }
-                            }
-                            .buttonStyle(.plain)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .disabled(item.relatedAlbum == nil && item.relatedArtist == nil)
-                            .accessibilityLabel("View album or artist")
-                            FoundationMacPlaybackTimeline(player: player)
-                        }
+                        FoundationMacPlaybackTimeline(
+                            player: player, item: item, state: state, navigate: navigate,
+                            artwork: artwork
+                        )
                     } else {
                         Image(nsImage: NSApplication.shared.applicationIconImage)
                             .resizable().scaledToFit().frame(width: 44, height: 44)
                             .accessibilityLabel("VelaCanto — Nothing playing")
                     }
                 }
-                .frame(maxWidth: .infinity, minHeight: 48)
+                .frame(maxWidth: .infinity, minHeight: FoundationMacLayout.transportContentHeight)
                 FoundationMacTransportTools(
                     player: player, lyricsEnabled: lyricsEnabled,
                     lyricsSelected: lyricsSelected, queueSelected: queueSelected,
@@ -685,52 +629,35 @@ import SwiftUI
         }
     }
 
+    /// Match the native symbol foreground treatment used by the surrounding glass controls.
+    /// Let Button render disabled states instead of dimming the glyph a second time.
     private struct FoundationMacPlaybackGlyph: View {
         enum Kind { case previous, play, pause, next }
         let kind: Kind
 
-        @ViewBuilder var body: some View {
+        private var symbol: String {
             switch kind {
-            case .play:
-                FoundationMacRoundedPlayShape().frame(width: 14, height: 17)
-            case .pause:
-                HStack(spacing: 4) {
-                    RoundedRectangle(cornerRadius: 1.5).frame(width: 3.5, height: 16)
-                    RoundedRectangle(cornerRadius: 1.5).frame(width: 3.5, height: 16)
-                }
-            case .previous, .next:
-                HStack(spacing: -1) {
-                    FoundationMacRoundedPlayShape().frame(width: 9, height: 15)
-                    FoundationMacRoundedPlayShape().frame(width: 9, height: 15)
-                }.rotationEffect(.degrees(kind == .previous ? 180 : 0))
+            case .previous: "backward.fill"
+            case .play: "play.fill"
+            case .pause: "pause.fill"
+            case .next: "forward.fill"
             }
         }
-    }
 
-    private struct FoundationMacRoundedPlayShape: Shape {
-        func path(in rect: CGRect) -> Path {
-            let radius = min(2, rect.width / 6)
-            var path = Path()
-            path.move(to: CGPoint(x: radius, y: radius / 2))
-            path.addLine(to: CGPoint(x: rect.width - radius, y: rect.midY - radius / 2))
-            path.addQuadCurve(
-                to: CGPoint(x: rect.width - radius, y: rect.midY + radius / 2),
-                control: CGPoint(x: rect.width + radius / 2, y: rect.midY))
-            path.addLine(to: CGPoint(x: radius, y: rect.height - radius / 2))
-            path.addQuadCurve(
-                to: CGPoint(x: 0, y: rect.height - radius),
-                control: CGPoint(x: 0, y: rect.height + radius / 2))
-            path.addLine(to: CGPoint(x: 0, y: radius))
-            path.addQuadCurve(
-                to: CGPoint(x: radius, y: radius / 2),
-                control: CGPoint(x: 0, y: -radius / 2))
-            path.closeSubpath()
-            return path
+        var body: some View {
+            Image(systemName: symbol)
+                .symbolRenderingMode(.monochrome)
+                .font(.system(size: 17, weight: .semibold))
+                .accessibilityHidden(true)
         }
     }
 
-    struct FoundationMacPlaybackTimeline: View {
+    struct FoundationMacPlaybackTimeline<Artwork: View>: View {
         @ObservedObject var player: FoundationPlayer
+        let item: FoundationItem
+        let state: FoundationPlayer.State
+        let navigate: (FoundationItem) -> Void
+        @ViewBuilder let artwork: () -> Artwork
         @Environment(\.foundationReduceMotion) private var reduceMotion
         @State private var scrubbing = false
         @State private var hovering = false
@@ -743,51 +670,83 @@ import SwiftUI
         private var currentPosition: Double { scrubbing ? position : player.elapsed }
 
         var body: some View {
-            ZStack {
-                GeometryReader { geometry in
-                    ZStack(alignment: .leading) {
-                        Capsule().fill(Color.white.opacity(0.25))
-                        Capsule().fill(Color.white)
-                            .frame(width: geometry.size.width * progress)
+            HStack(spacing: 10) {
+                ZStack(alignment: .bottom) {
+                    Button(action: showTrackMenu) {
+                        artwork().frame(
+                            width: FoundationMacLayout.transportContentHeight,
+                            height: FoundationMacLayout.transportContentHeight
+                        )
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        .scaleEffect(showsDetails ? 0.75 : 1, anchor: .top)
                     }
-                    .frame(height: 3)
-                    .frame(maxHeight: .infinity)
-                }
-                .allowsHitTesting(false).accessibilityHidden(true)
-                .opacity(showsDetails ? 0 : 1)
-                HStack(spacing: 8) {
-                    Text(time(currentPosition)).frame(width: 38, alignment: .leading)
-                        .opacity(showsDetails ? 1 : 0).accessibilityHidden(!showsDetails)
-                    Slider(
-                        value: Binding(
-                            get: { min(currentPosition, max(0, player.duration)) },
-                            set: { position = $0 }),
-                        in: 0...max(1, player.duration),
-                        onEditingChanged: { editing in
-                            if editing {
-                                position = player.elapsed
-                                entryID = player.selectedEntryID
-                                scrubbing = true
-                            } else {
-                                if scrubbing, let entryID {
-                                    player.seek(to: position, entryID: entryID)
-                                }
-                                scrubbing = false
-                                entryID = nil
-                            }
-                        }
+                    .buttonStyle(.plain)
+                    .frame(
+                        width: FoundationMacLayout.transportContentHeight,
+                        height: FoundationMacLayout.transportContentHeight, alignment: .top
                     )
-                    .disabled(player.selectedEntryID == nil || player.duration <= 0)
-                    .tint(.white)
-                    .focused($focused)
-                    // Keep the native slider focusable and accessible while its visual
-                    // handle is hidden beneath the progress-line presentation.
-                    .opacity(showsDetails ? 1 : 0.001)
-                    .accessibilityLabel("Playback position")
-                    .accessibilityValue("\(time(player.elapsed)) of \(time(player.duration))")
-                    Text(time(player.duration)).frame(width: 38, alignment: .trailing)
-                        .opacity(showsDetails ? 1 : 0).accessibilityHidden(!showsDetails)
+                    .contentShape(Rectangle())
+                    .disabled(!canNavigate)
+                    .accessibilityLabel("View album or artist")
+                    .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: showsDetails)
+                    Text(time(currentPosition))
+                        .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                        .opacity(showsDetails ? 1 : 0).accessibilityHidden(true)
+                        .allowsHitTesting(false)
                 }
+                VStack(alignment: .leading, spacing: 2) {
+                    Button(action: showTrackMenu) {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(item.title).font(.callout.weight(.medium)).lineLimit(1)
+                            Text(state == .playing ? item.subtitle : state.label)
+                                .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain).disabled(!canNavigate)
+                    .accessibilityLabel("View album or artist")
+                    timeline
+                }
+            }
+            .frame(height: FoundationMacLayout.transportContentHeight)
+            .onChange(of: player.selectedEntryID) { _, _ in
+                scrubbing = false
+                entryID = nil
+            }
+        }
+
+        private var timeline: some View {
+            HStack(spacing: 8) {
+                // The native slider and its reserved duration space never change geometry
+                // on hover. Only the artwork presentation reveals the elapsed time.
+                Slider(
+                    value: Binding(
+                        get: { min(currentPosition, max(0, player.duration)) },
+                        set: { position = $0 }),
+                    in: 0...max(1, player.duration),
+                    onEditingChanged: { editing in
+                        if editing {
+                            position = player.elapsed
+                            entryID = player.selectedEntryID
+                            scrubbing = true
+                        } else {
+                            if scrubbing, let entryID {
+                                player.seek(to: position, entryID: entryID)
+                            }
+                            scrubbing = false
+                            entryID = nil
+                        }
+                    }
+                )
+                .disabled(player.selectedEntryID == nil || player.duration <= 0)
+                .tint(.primary)
+                .sliderThumbVisibility(showsDetails ? .visible : .hidden)
+                .focused($focused)
+                .accessibilityLabel("Playback position")
+                .accessibilityValue("\(time(player.elapsed)) of \(time(player.duration))")
+                Text(time(player.duration)).frame(width: 44, alignment: .trailing)
+                    .opacity(showsDetails ? 1 : 0).accessibilityHidden(true)
             }
             .frame(height: 14)
             .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
@@ -796,16 +755,13 @@ import SwiftUI
                 if $0 { keyboardFocused = false }
             }
             .onChange(of: focused) { _, focused in keyboardFocused = focused && !hovering }
-            .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: showsDetails)
-            .onChange(of: player.selectedEntryID) { _, _ in
-                scrubbing = false
-                entryID = nil
-            }
         }
 
-        private var progress: CGFloat {
-            guard player.duration > 0, currentPosition.isFinite else { return 0 }
-            return CGFloat(min(1, max(0, currentPosition / player.duration)))
+        private var canNavigate: Bool { item.relatedAlbum != nil || item.relatedArtist != nil }
+
+        private func showTrackMenu() {
+            let menu = FoundationMacTrackMenu(item: item, navigate: navigate)
+            withExtendedLifetime(menu) { menu.show() }
         }
 
         private func time(_ value: Double) -> String {

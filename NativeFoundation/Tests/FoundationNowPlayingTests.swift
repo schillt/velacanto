@@ -21,7 +21,8 @@ final class FoundationNowPlayingTests: XCTestCase {
             bridge.invalidate()
             player.stop()
         }
-        player.setQueue([track, track], selectedIndex: 1)
+        player.enqueue([track, track], position: .last)
+        player.select(player.queue[1].id)
         await player.selectionTask?.value
         await player.playTask?.value
         await bridge.updateTask?.value

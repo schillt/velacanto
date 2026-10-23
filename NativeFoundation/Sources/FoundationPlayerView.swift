@@ -519,17 +519,24 @@ struct FoundationPlayerView: View {
 private struct FoundationQueueView: View {
     @ObservedObject var player: FoundationPlayer
     @Binding var isPresented: Bool
+    var showsTitle = true
     let openItem: (FoundationItem) -> Void
 
     @EnvironmentObject private var connectivity: FoundationConnectivity
     @EnvironmentObject private var downloads: FoundationDownloads
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
+    @State private var hasAnchoredOnOpen = false
+
+    private enum ScrollTarget: Hashable {
+        case current
+    }
+
     var body: some View {
         let upcoming = player.upcoming
         VStack(spacing: 0) {
             HStack {
-                Text("Queue").font(.headline)
+                if showsTitle { Text("Queue").font(.headline) }
                 Spacer()
                 Button {
                     player.setShuffle(!player.shuffleEnabled)
@@ -560,6 +567,7 @@ private struct FoundationQueueView: View {
                     history: player.history,
                     current: player.queue.first(where: { $0.id == player.selectedEntryID }),
                     upcoming: upcoming,
+                    dynamicTypeSize: dynamicTypeSize,
                     move: { id, boundary in
                         guard isPresented else { return }
                         player.reorderUpcoming([id], before: boundary)
@@ -573,40 +581,60 @@ private struct FoundationQueueView: View {
                             .foregroundStyle(.white).tint(.white)
                     }
                 )
-                .id(dynamicTypeSize)
                 .modifier(FoundationQueueFixtureIdentifier(kind: "list", entryID: nil))
                 .clipped()
                 .mask { FoundationPlayerContentFade() }
             #else
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 8) {
-                        if !player.history.isEmpty {
-                            queueHeading("History")
-                            ForEach(player.history) { row($0) }
+                GeometryReader { geometry in
+                    ScrollViewReader { proxy in
+                        ScrollView {
+                            LazyVStack(alignment: .leading, spacing: 8) {
+                                if !player.history.isEmpty {
+                                    queueHeading("History")
+                                    ForEach(player.history) { row($0) }
+                                }
+                                LazyVStack(alignment: .leading, spacing: 8) {
+                                    if let current = player.queue.first(where: {
+                                        $0.id == player.selectedEntryID
+                                    }) {
+                                        queueHeading("Now Playing")
+                                        row(current)
+                                    }
+                                    queueHeading("Up Next")
+                                    ForEach(upcoming) { row($0, canReorder: true) }
+                                        .reorderable()
+                                }
+                                // Keep the heading below the queue's existing 24-point fade.
+                                .padding(.top, 24)
+                                // Keep the opening heading at the top even with a short Up Next.
+                                .frame(minHeight: geometry.size.height, alignment: .top)
+                                .id(ScrollTarget.current)
+                            }
+                            .reorderContainer(
+                                for: FoundationQueueEntry.self, isEnabled: isPresented
+                            ) { difference in
+                                let boundary: UUID?
+                                switch difference.destination.position {
+                                case .before(let id): boundary = id
+                                case .end: boundary = nil
+                                }
+                                player.reorderUpcoming(difference.sources, before: boundary)
+                            }
+                            .padding(.horizontal, 16)
+                            .padding(.bottom, 12)
                         }
-                        if let current = player.queue.first(where: {
-                            $0.id == player.selectedEntryID
-                        }) {
-                            queueHeading("Now Playing")
-                            row(current)
+                        .scrollContentBackground(.hidden)
+                        .onGeometryChange(for: CGSize.self) {
+                            $0.size
+                        } action: { size in
+                            guard !hasAnchoredOnOpen, size.width > 0, size.height > 0 else {
+                                return
+                            }
+                            hasAnchoredOnOpen = true
+                            proxy.scrollTo(ScrollTarget.current, anchor: .top)
                         }
-                        queueHeading("Up Next")
-                        ForEach(upcoming) { row($0, canReorder: true) }
-                            .reorderable()
                     }
-                    .reorderContainer(for: FoundationQueueEntry.self, isEnabled: isPresented) {
-                        difference in
-                        let boundary: UUID?
-                        switch difference.destination.position {
-                        case .before(let id): boundary = id
-                        case .end: boundary = nil
-                        }
-                        player.reorderUpcoming(difference.sources, before: boundary)
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.bottom, 12)
                 }
-                .scrollContentBackground(.hidden)
                 .modifier(FoundationQueueFixtureIdentifier(kind: "list", entryID: nil))
                 .clipped()
                 .mask { FoundationPlayerContentFade() }
@@ -964,6 +992,7 @@ extension EnvironmentValues {
         @ObservedObject var player: FoundationPlayer
         let library: any FoundationLibrary
         let mode: Mode
+        let queuePresentation: Int
         @Environment(\.foundationReduceTransparency) private var reduceTransparency
         @EnvironmentObject private var connectivity: FoundationConnectivity
         @State private var lyrics: FoundationLyricsPresentation?
@@ -972,26 +1001,32 @@ extension EnvironmentValues {
         var body: some View {
             VStack(spacing: 0) {
                 if mode == .queue {
-                    FoundationQueueView(player: player, isPresented: .constant(true)) {
+                    // Inspectors can retain content after closing; reset only on a queue opening.
+                    FoundationQueueView(
+                        player: player, isPresented: .constant(true), showsTitle: false
+                    ) {
                         relatedItem = $0
                     }
+                    .id(queuePresentation)
                 } else if connectivity.localOnly {
                     ContentUnavailableView(
                         "Lyrics unavailable offline", systemImage: "quote.bubble")
                 } else if let lyrics {
                     FoundationLyricsView(
                         item: lyrics.entry.item, entryID: lyrics.entry.id,
-                        library: library, player: player, model: lyrics.model)
+                        library: library, player: player, model: lyrics.model,
+                        followsAppearance: true)
                 } else {
                     ContentUnavailableView("Select a track for lyrics", systemImage: "quote.bubble")
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // The native inspector owns its adaptive sidebar material. A second
+            // edge-to-edge glass surface adds refraction highlights around the panel.
             .background {
                 if reduceTransparency { Rectangle().fill(.background) }
             }
-            .glassEffect(reduceTransparency ? .identity : .clear, in: .rect)
-            .ignoresSafeArea(.container, edges: .top)
+            // Keep readable content below the native inspector toolbar title.
             .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
             .task(
                 id:

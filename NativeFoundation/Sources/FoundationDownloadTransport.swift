@@ -10,15 +10,18 @@ struct FoundationDownloadSource: Sendable {
 
 enum FoundationDownloadError: Error, LocalizedError, Equatable {
     case unsupported, permission, response, incomplete, storage, cleanup, cancelled, network
+    case conversionCleanup
 
     var errorDescription: String? {
         switch self {
-        case .unsupported: "This original file cannot be downloaded for native playback."
+        case .unsupported: "This download quality is not available for this file or server."
         case .permission: "The server did not allow this download."
         case .response: "The download response could not be verified."
         case .incomplete: "The downloaded file is incomplete or cannot be played."
         case .storage: "The download could not be saved. Check available storage and retry."
         case .cleanup: "An incomplete download could not be removed. Retry storage cleanup."
+        case .conversionCleanup:
+            "The server conversion could not be closed safely. The download was not saved."
         case .cancelled: "Download cancelled."
         case .network:
             "The download could not finish on the allowed connection. Retry when connected."

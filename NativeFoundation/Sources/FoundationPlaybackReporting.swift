@@ -9,6 +9,7 @@ struct FoundationPlaybackReport: Sendable, Equatable {
     let itemID: String
     let position: Double
     let paused: Bool
+    var source: FoundationPlaybackSource? = nil
 }
 
 /// One account's best-effort reporting. Audio never awaits this owner. One request is
@@ -19,7 +20,7 @@ final class FoundationPlaybackReporting {
     static let maximumPending = 32
     private let send: @Sendable (FoundationPlaybackReport) async throws -> Void
     private let now: () -> TimeInterval
-    private var current: (id: UUID, itemID: String)?
+    private var current: (id: UUID, itemID: String, source: FoundationPlaybackSource?)?
     private var lastProgress: TimeInterval = 0
     private var lastPaused = false
     private(set) var pending: [FoundationPlaybackReport] = []
@@ -35,9 +36,9 @@ final class FoundationPlaybackReporting {
         self.send = send
     }
 
-    func begin(itemID: String, position: Double) {
+    func begin(itemID: String, position: Double, source: FoundationPlaybackSource? = nil) {
         guard active, current == nil, pending.count <= Self.maximumPending - 2 else { return }
-        current = (UUID(), itemID)
+        current = (UUID(), itemID, source)
         lastProgress = now()
         lastPaused = false
         append(.start, position: position, paused: false)
@@ -82,7 +83,8 @@ final class FoundationPlaybackReporting {
         pending.append(
             .init(
                 kind: kind, occurrenceID: current.id, itemID: current.itemID,
-                position: position.isFinite ? max(0, position) : 0, paused: paused))
+                position: position.isFinite ? max(0, position) : 0, paused: paused,
+                source: current.source))
         startWorker()
     }
 
@@ -102,5 +104,101 @@ final class FoundationPlaybackReporting {
                 }
             }
         }
+    }
+}
+
+/// Best-effort HLS session cleanup, independent of audio and listening reports.
+/// Operations must use a finite transport timeout. Never retains more than one
+/// active operation and 32 pending operations; it does not retry dropped work.
+actor FoundationHLSCleanup {
+    static let maximumPending = 32
+    static let maximumPendingAge: TimeInterval = 10
+
+    private struct Job: Sendable {
+        let key: String
+        let admitted: TimeInterval
+        let operation: @Sendable () async -> Void
+    }
+
+    private let now: @Sendable () -> TimeInterval
+    private var pending: [Job] = []
+    private var activeKey: String?
+    private(set) var overflowDrops = 0
+    private(set) var expiredDrops = 0
+    private(set) var task: Task<Void, Never>?
+    var pendingCount: Int { pending.count }
+
+    init(now: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
+        self.now = now
+    }
+
+    func enqueue(key: String, operation: @escaping @Sendable () async -> Void) {
+        discardExpired()
+        guard activeKey != key, !pending.contains(where: { $0.key == key }) else { return }
+        guard task != nil else {
+            start(Job(key: key, admitted: now(), operation: operation))
+            return
+        }
+        guard pending.count < Self.maximumPending else {
+            overflowDrops += 1
+            #if DEBUG
+                FoundationJournal.shared.record("player.hls.cleanup event=dropped reason=capacity")
+            #endif
+            return
+        }
+        pending.append(Job(key: key, admitted: now(), operation: operation))
+    }
+
+    private func discardExpired() {
+        let instant = now()
+        let previous = pending.count
+        pending.removeAll { instant - $0.admitted >= Self.maximumPendingAge }
+        let dropped = previous - pending.count
+        if dropped > 0 {
+            expiredDrops += dropped
+            #if DEBUG
+                FoundationJournal.shared.record(
+                    "player.hls.cleanup event=dropped reason=expired count=\(dropped)")
+            #endif
+        }
+    }
+
+    private func start(_ job: Job) {
+        activeKey = job.key
+        task = Task {
+            await job.operation()
+            self.completed()
+        }
+    }
+
+    private func completed() {
+        activeKey = nil
+        task = nil
+        discardExpired()
+        guard !pending.isEmpty else { return }
+        start(pending.removeFirst())
+    }
+}
+
+/// Owns one exact server job, distinct from queue and listening occurrences.
+/// Releasing a native resource never waits for the cleanup request to finish.
+actor FoundationHLSLease {
+    private let owner: FoundationHLSCleanup
+    private let key: String
+    private var operation: (@Sendable () async -> Void)?
+
+    init(
+        owner: FoundationHLSCleanup, key: String,
+        operation: @escaping @Sendable () async -> Void
+    ) {
+        self.owner = owner
+        self.key = key
+        self.operation = operation
+    }
+
+    func release() async {
+        guard let operation else { return }
+        self.operation = nil
+        await owner.enqueue(key: key, operation: operation)
     }
 }

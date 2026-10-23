@@ -589,6 +589,188 @@ final class FoundationPlaylistTests: XCTestCase {
         XCTAssertEqual(restoredBatches.last, [PlaylistAlbumFixture.id(2)])
     }
 
+    @MainActor
+    func testBulkRemovalUsesStableMembershipsAndOnlyTwoSnapshots() async throws {
+        let fixture = PlaylistBulkRemovalFixture(count: 205)
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            try await fixture.response(request)
+        }
+        let original = try await FoundationPlaylistSnapshot.load(id: playlistID, library: library)
+        await fixture.resetCounts()
+        let changes = FoundationPlaylistChanges()
+        // Keep the unselected first occurrence of the same song as the second entry.
+        let selected = [original[1], original[100], original[201]].map {
+            FoundationPlaylistEntry(
+                id: "stale-offset:" + $0.id, mutationID: $0.mutationID, item: $0.item)
+        }
+        try await changes.remove(playlistID: playlistID, entries: selected, library: library)
+        let remaining = await fixture.membershipIDs
+        XCTAssertEqual(remaining.count, 202)
+        XCTAssertTrue(remaining.contains("entry-0"))
+        XCTAssertFalse(remaining.contains("entry-1"))
+        let reads = await fixture.snapshotReads
+        let permissions = await fixture.permissionReads
+        let writes = await fixture.removalRequests
+        XCTAssertEqual(reads, 6)  // Three pages before and three after, not per selected song.
+        XCTAssertEqual(permissions, 2)
+        XCTAssertEqual(writes, ["entry-1", "entry-100", "entry-201"])
+        XCTAssertEqual(changes.revision(for: playlistID), 1)
+    }
+
+    @MainActor
+    func testBulkRemovalReadOnlyAndHiddenSelectionsNeverWrite() async throws {
+        let fixture = PlaylistBulkRemovalFixture(count: 3, canEdit: false)
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            try await fixture.response(request)
+        }
+        let entries = try await FoundationPlaylistSnapshot.load(id: playlistID, library: library)
+        await fixture.resetCounts()
+        let changes = FoundationPlaylistChanges()
+        do {
+            try await changes.remove(playlistID: playlistID, entries: entries, library: library)
+            XCTFail("Read-only selection must not be mutated")
+        } catch { XCTAssertEqual(error as? FoundationPlaylistError, .readOnly) }
+        let writes = await fixture.removalRequests
+        let reads = await fixture.snapshotReads
+        XCTAssertTrue(writes.isEmpty)
+        XCTAssertEqual(reads, 0)
+        XCTAssertEqual(changes.revision(for: playlistID), 0)
+
+        let editable = PlaylistBulkRemovalFixture(count: 3)
+        let editableLibrary = FoundationJellyfinLibrary(session: session) { request in
+            try await editable.response(request)
+        }
+        let projected = FoundationPlaylistChanges { _, _ in [] }
+        do {
+            try await projected.remove(
+                playlistID: playlistID, entries: entries, library: editableLibrary)
+            XCTFail("Hidden tracks must not be manageable")
+        } catch { XCTAssertEqual(error as? FoundationPlaylistError, .changed) }
+        let hiddenWrites = await editable.removalRequests
+        XCTAssertTrue(hiddenWrites.isEmpty)
+    }
+
+    @MainActor
+    func testBulkRemovalRejectsStaleSongPairingAndDuplicateSelection() async throws {
+        let fixture = PlaylistBulkRemovalFixture(count: 3)
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            try await fixture.response(request)
+        }
+        let entries = try await FoundationPlaylistSnapshot.load(id: playlistID, library: library)
+        let changes = FoundationPlaylistChanges()
+        let stale = FoundationPlaylistEntry(
+            id: entries[0].id, mutationID: entries[0].mutationID, item: entries[2].item)
+        do {
+            try await changes.remove(playlistID: playlistID, entries: [stale], library: library)
+            XCTFail("An entry ID must still identify the selected song")
+        } catch { XCTAssertEqual(error as? FoundationPlaylistError, .changed) }
+        do {
+            try await changes.remove(
+                playlistID: playlistID, entries: [entries[0], entries[0]], library: library)
+            XCTFail("Duplicate membership selection must not send duplicate deletes")
+        } catch { XCTAssertEqual(error as? FoundationPlaylistError, .changed) }
+        let writes = await fixture.removalRequests
+        XCTAssertTrue(writes.isEmpty)
+    }
+
+    @MainActor
+    func testBulkRemovalPartialWriteInvalidatesWithoutRetry() async throws {
+        let fixture = PlaylistBulkRemovalFixture(count: 3, failRemoval: 2)
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            try await fixture.response(request)
+        }
+        let entries = try await FoundationPlaylistSnapshot.load(id: playlistID, library: library)
+        let changes = FoundationPlaylistChanges()
+        do {
+            try await changes.remove(playlistID: playlistID, entries: entries, library: library)
+            XCTFail("A partial removal must not claim success")
+        } catch { XCTAssertEqual(error as? FoundationPlaylistError, .partialRemoval) }
+        let writes = await fixture.removalRequests
+        let remaining = await fixture.membershipIDs
+        XCTAssertEqual(writes, ["entry-0", "entry-1"])
+        XCTAssertEqual(remaining, ["entry-1", "entry-2"])
+        XCTAssertEqual(changes.revision(for: playlistID), 1)
+    }
+
+    @MainActor
+    func testBulkRemovalCancellationAfterSentWriteInvalidatesAndStops() async throws {
+        let fixture = PlaylistBulkRemovalFixture(count: 3, cancelAfterRemoval: true)
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            try await fixture.response(request)
+        }
+        let entries = try await FoundationPlaylistSnapshot.load(id: playlistID, library: library)
+        let changes = FoundationPlaylistChanges()
+        do {
+            try await changes.remove(playlistID: playlistID, entries: entries, library: library)
+            XCTFail("Cancellation cannot claim rollback")
+        } catch { XCTAssertEqual(error as? FoundationLibraryError, .cancelled) }
+        let writes = await fixture.removalRequests
+        let remaining = await fixture.membershipIDs
+        XCTAssertEqual(writes, ["entry-0"])
+        XCTAssertEqual(remaining, ["entry-1", "entry-2"])
+        XCTAssertEqual(changes.revision(for: playlistID), 1)
+    }
+
+    @MainActor
+    func testBulkRemovalRejectsLostUnselectedMembership() async throws {
+        let fixture = PlaylistBulkRemovalFixture(count: 3, removeUnselected: true)
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            try await fixture.response(request)
+        }
+        let entries = try await FoundationPlaylistSnapshot.load(id: playlistID, library: library)
+        let changes = FoundationPlaylistChanges()
+        do {
+            try await changes.remove(
+                playlistID: playlistID, entries: [entries[0]], library: library)
+            XCTFail("Removal must preserve unselected memberships")
+        } catch { XCTAssertEqual(error as? FoundationPlaylistError, .partialRemoval) }
+        XCTAssertEqual(changes.revision(for: playlistID), 1)
+    }
+
+    @MainActor
+    func testBulkAdditionUsesOneActionForMultipleSelectedSongs() async throws {
+        let fixture = PlaylistAlbumFixture(count: 102, existing: [1])
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            try await fixture.response(request)
+        }
+        let selected = (1...102).map {
+            FoundationItem(
+                id: PlaylistAlbumFixture.id($0), title: "Track", subtitle: "", kind: .track,
+                duration: 10)
+        }
+        let changes = FoundationPlaylistChanges()
+        let result = try await changes.add(
+            playlistID: playlistID, tracks: selected + [selected[1]], library: library)
+        XCTAssertEqual(result.added, 101)
+        XCTAssertEqual(result.alreadyPresent, 2)
+        let batches = await fixture.batches
+        XCTAssertEqual(batches.map(\.count), [100, 1])
+        XCTAssertEqual(batches.flatMap { $0 }, (2...102).map(PlaylistAlbumFixture.id))
+        XCTAssertEqual(changes.revision(for: playlistID), 1)
+    }
+
+    @MainActor
+    func testBulkAdditionProjectsHiddenCopiesBeforeAnyWrite() async throws {
+        let fixture = PlaylistAlbumFixture(count: 3)
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            try await fixture.response(request)
+        }
+        let selected = (1...3).map {
+            FoundationItem(
+                id: PlaylistAlbumFixture.id($0), title: "Track", subtitle: "", kind: .track,
+                duration: 10)
+        }
+        let changes = FoundationPlaylistChanges { items, _ in
+            items.filter { $0.id != PlaylistAlbumFixture.id(2) }
+        }
+        let result = try await changes.add(
+            playlistID: playlistID, tracks: selected, library: library)
+        XCTAssertEqual(result.added, 2)
+        let batches = await fixture.batches
+        XCTAssertEqual(
+            batches.flatMap { $0 }, [PlaylistAlbumFixture.id(1), PlaylistAlbumFixture.id(3)])
+    }
+
     private static func response(_ request: URLRequest, status: Int = 200) -> HTTPURLResponse {
         HTTPURLResponse(
             url: request.url!, statusCode: status, httpVersion: "HTTP/1.1", headerFields: nil)!
@@ -700,6 +882,74 @@ private actor PlaylistAlbumFixture {
         }
         return (
             Data(json.utf8),
+            HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil)!
+        )
+    }
+}
+
+private actor PlaylistBulkRemovalFixture {
+    private var members: [(membership: String, song: String)]
+    let canEdit: Bool
+    let failRemoval: Int?
+    let cancelAfterRemoval: Bool
+    let removeUnselected: Bool
+    private(set) var snapshotReads = 0
+    private(set) var permissionReads = 0
+    private(set) var removalRequests: [String] = []
+    var membershipIDs: [String] { members.map(\.membership) }
+
+    init(
+        count: Int, canEdit: Bool = true, failRemoval: Int? = nil,
+        cancelAfterRemoval: Bool = false, removeUnselected: Bool = false
+    ) {
+        self.canEdit = canEdit
+        self.failRemoval = failRemoval
+        self.cancelAfterRemoval = cancelAfterRemoval
+        self.removeUnselected = removeUnselected
+        members = (0..<count).map { index in
+            ("entry-\(index)", PlaylistAlbumFixture.id(index == 1 ? 0 : index))
+        }
+    }
+
+    func resetCounts() {
+        snapshotReads = 0
+        permissionReads = 0
+        removalRequests = []
+    }
+
+    func response(_ request: URLRequest) throws -> (Data, HTTPURLResponse) {
+        let url = request.url!
+        let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        let data: Data
+        if url.path.contains("/Users/"), url.path.hasPrefix("/Playlists") {
+            permissionReads += 1
+            data = Data(
+                "{\"UserId\":\"00000000000000000000000000000003\",\"CanEdit\":\(canEdit)}".utf8)
+        } else if url.path == "/Items/00000000000000000000000000000001" {
+            permissionReads += 1
+            data = Data(
+                #"{"Id":"00000000000000000000000000000001","Type":"Playlist","Name":"Fixture"}"#
+                    .utf8)
+        } else if request.httpMethod == "DELETE" {
+            let id = query.first { $0.name == "entryIds" }!.value!
+            removalRequests.append(id)
+            if removalRequests.count == failRemoval { throw URLError(.networkConnectionLost) }
+            members.removeAll { $0.membership == id }
+            if removeUnselected, !members.isEmpty { members.removeLast() }
+            if cancelAfterRemoval { throw CancellationError() }
+            data = Data()
+        } else {
+            snapshotReads += 1
+            let offset = Int(query.first { $0.name == "startIndex" }?.value ?? "0") ?? 0
+            let rows = members.dropFirst(offset).prefix(100).map {
+                ["Id": $0.song, "Type": "Audio", "PlaylistItemId": $0.membership]
+            }
+            data = try JSONSerialization.data(withJSONObject: [
+                "Items": rows, "StartIndex": offset, "TotalRecordCount": members.count,
+            ])
+        }
+        return (
+            data,
             HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil)!
         )
     }

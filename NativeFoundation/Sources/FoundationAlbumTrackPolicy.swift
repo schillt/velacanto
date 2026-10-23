@@ -3,6 +3,31 @@ import Foundation
 /// Album presentation and explicit album playback share this reversible metadata projection.
 /// Callers retain the original catalog items; this never removes files or changes playlist membership.
 enum FoundationAlbumTrackPolicy {
+    enum DiscHeading: Equatable {
+        case disc(Int)
+        case unspecified
+    }
+
+    /// Presentation boundaries only: preserve provider order and the flat playback indices.
+    /// Do not guess a disc for untagged tracks, even alongside explicitly tagged discs.
+    static func discHeadings(for tracks: [FoundationItem]) -> [Int: DiscHeading] {
+        let discs = tracks.map { item -> Int? in
+            guard let disc = item.discNumber, disc > 0 else { return nil }
+            return disc
+        }
+        let knownDiscs = Set(discs.compactMap { $0 })
+        guard knownDiscs.count > 1 || knownDiscs.contains(where: { $0 > 1 }) else {
+            return [:]
+        }
+        var headings: [Int: DiscHeading] = [:]
+        for (index, disc) in discs.enumerated() {
+            if index == 0 || disc != discs[index - 1] {
+                headings[index] = disc.map(DiscHeading.disc) ?? .unspecified
+            }
+        }
+        return headings
+    }
+
     struct Key: Hashable {
         let album: String
         let disc: Int

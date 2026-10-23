@@ -1,4 +1,4 @@
-# Velacanto agent guide
+# VelaCanto agent guide
 
 ## Authority and current product
 
@@ -31,13 +31,23 @@ checkout's instructions to make them appear current. Explicit owner instructions
 take precedence, but a scoped exception does not permanently change the default
 workflow. Record its scope and reconcile shared documentation.
 
-Velacanto 0.4.0 development follows the 0.3.5 and 0.3.0 (108) Foundation line.
-Read `docs/0.4-development-record.md` and `docs/0.4-plan.md` for the current
-integrated checkpoint and outstanding gates. The maintained
-app is `NativeFoundation/VelacantoFoundation.xcodeproj`, scheme
-`VelacantoFoundation`, product `Velacanto`. Read `NativeFoundation/AGENTS.md`,
-ADR 0012/0013 and `docs/0.3.5-acceptance.md`. Build 107 remains rejected. Historical
-0.3.0 freeze documents do not disable the scoped 0.3.5 features. Never restore old
+Current release work targets **0.5.0 — Alpha Preview**, candidate build 216,
+from accepted local build 215. Read `docs/0.5.0-acceptance.md`,
+`docs/0.5.0-release-notes.md` and `docs/0.5.0-testflight-notes.md` for current scope,
+known limits and separate publication/distribution gates. The 0.4 development
+record remains chronological evidence, not a current feature exclusion list.
+The owner authorizes accepted integration to alpha and preparation for TestFlight;
+beta/main promotion remains separate. Defer unfinished scope to the next milestone
+without converting incomplete checks into passes. “Preview” does not require a
+preview branch.
+
+The maintained app is `NativeFoundation/VelacantoFoundation.xcodeproj`, scheme
+`VelacantoFoundation`, product `Velacanto`; display name VelaCanto Alpha.
+Read the nested guide, ADR 0012/0013 and playback contract before implementation.
+Native CarPlay, HLS streaming, quality/download options, playlist management and
+modern Mac credentials are now implemented. Historical plans marking them excluded
+or DEBUG-only are superseded for current source. Preserve internal bundle/storage
+identities and retained work. Build 107 remains rejected; never restore legacy
 controllers to satisfy superseded plans.
 
 The historical 0.3.5 exception authorized PR #174 into alpha after passing checks,
@@ -201,7 +211,7 @@ private data solely because a broad scanner matches them. Review matches locally
 before reporting, without copying their contents into public evidence. HTTPS
 protects transit; it does not establish safe endpoint logging or local retention.
 
-The current LICENSE makes Velacanto public-source proprietary software, not an
+The current LICENSE makes VelaCanto public-source proprietary software, not an
 open-source-licensed app. Check the candidate LICENSE and third-party notices;
 do not change licensing, grant rights or describe dependencies as covered by the
 app's license without authorization.

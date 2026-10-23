@@ -7,6 +7,137 @@ final class FoundationLibraryActionsTests: XCTestCase {
     private let album = FoundationItem(
         id: "synthetic", title: "Synthetic", subtitle: "", kind: .album, duration: nil)
 
+    func testPlaybackCommitGateRunsImmediatelyBeforeReplacingQueue() async throws {
+        for shouldAllow in [false, true] {
+            let gate = CollectionGate()
+            let library = makeCollectionLibrary { request in
+                await gate.hold()
+                return selfContainedResponse(
+                    request,
+                    items: "{\"Id\":\"00000000000000000000000000000002\",\"Type\":\"Audio\"}")
+            }
+            let prior = FoundationItem(
+                id: "prior", title: "Prior", subtitle: "", kind: .track, duration: nil)
+            let player = FoundationPlayer(resolve: { _ in throw CancellationError() })
+            player.setQueue([prior], selectedIndex: 0)
+            let priorID = player.selectedEntryID
+            let actions = makeCollectionActions()
+            var checks = 0
+            actions.play(
+                collectionItem, shuffled: false, library: library, player: player,
+                shouldCommit: {
+                    checks += 1
+                    XCTAssertEqual(player.selectedEntryID, priorID)
+                    return shouldAllow
+                })
+            let preparation = try XCTUnwrap(actions.queueTask)
+            try await gate.waitUntilStarted()
+            XCTAssertEqual(checks, 0)
+            await gate.release()
+            await preparation.value
+            XCTAssertEqual(checks, 1)
+            XCTAssertEqual(player.selectedEntryID == priorID, !shouldAllow)
+            XCTAssertEqual(
+                player.queue.last?.item.id,
+                shouldAllow ? "00000000000000000000000000000002" : "prior")
+            player.stop()
+        }
+    }
+
+    #if os(iOS)
+        func testSiriPauseCancelsOwnedCollectionAndRejectsItsLateRead() async throws {
+            let gate = CollectionGate()
+            let priorRead = CollectionGate()
+            let library = makeCollectionLibrary { request in
+                await gate.hold()
+                return selfContainedResponse(
+                    request,
+                    items: "{\"Id\":\"00000000000000000000000000000002\",\"Type\":\"Audio\"}")
+            }
+            let player = FoundationPlayer(resolve: { _ in
+                await priorRead.hold()
+                throw CancellationError()
+            })
+            defer { Task { await priorRead.release() } }
+            let prior = FoundationItem(
+                id: "prior", title: "Prior", subtitle: "", kind: .track, duration: nil)
+            player.setQueue([prior], selectedIndex: 0)
+            try await priorRead.waitUntilStarted()
+            let priorID = player.selectedEntryID
+            let actions = makeCollectionActions()
+            let owner = UUID()
+            var cancellations = 0
+            let commandGuard = FoundationSiriCommandGuard(player: player) {
+                cancellations += 1
+                actions.cancelQueueAdditionOwned(by: owner)
+            }
+            actions.play(
+                collectionItem, shuffled: false, library: library, player: player, owner: owner,
+                shouldCommit: {
+                    guard commandGuard.isCurrent else { return false }
+                    commandGuard.disarm()
+                    return true
+                })
+            let preparation = try XCTUnwrap(actions.queueTask)
+            try await gate.waitUntilStarted()
+            player.pause()
+            XCTAssertEqual(cancellations, 1)
+            XCTAssertTrue(preparation.isCancelled)
+            await gate.release()
+            await preparation.value
+            XCTAssertEqual(player.selectedEntryID, priorID)
+            XCTAssertEqual(player.queue.map(\.item.id), ["prior"])
+            XCTAssertFalse(player.wantsPlayback)
+            player.stop()
+        }
+    #endif
+
+    func testRetiringCompletedCollectionOwnerRemovesOnlyItsStaleRetry() async {
+        let responses = CollectionResponses()
+        let library = makeCollectionLibrary { _ in
+            _ = await responses.next()
+            throw Failure.synthetic
+        }
+        let player = FoundationPlayer(resolve: { _ in throw CancellationError() })
+        let actions = makeCollectionActions()
+        let owner = UUID()
+        actions.play(
+            collectionItem, shuffled: false, library: library, player: player, owner: owner)
+        await actions.queueTask?.value
+        XCTAssertTrue(actions.canRetryQueueAddition)
+        actions.cancelQueueAdditionOwned(by: UUID())
+        XCTAssertTrue(actions.canRetryQueueAddition)
+        actions.cancelQueueAdditionOwned(by: owner)
+        XCTAssertFalse(actions.canRetryQueueAddition)
+        actions.retryQueueAddition()
+        let calls = await responses.count()
+        XCTAssertEqual(calls, 1)
+        XCTAssertNotNil(actions.queueErrorMessage)
+    }
+
+    func testPlaybackCommitGateRejectsRetiredAccountAfterDelayedRead() async throws {
+        let gate = CollectionGate()
+        let library = makeCollectionLibrary { request in
+            await gate.hold()
+            return selfContainedResponse(
+                request, items: "{\"Id\":\"00000000000000000000000000000002\",\"Type\":\"Audio\"}")
+        }
+        let player = FoundationPlayer(resolve: { _ in throw CancellationError() })
+        let actions = makeCollectionActions()
+        var accountIsCurrent = true
+        actions.play(
+            collectionItem, shuffled: false, library: library, player: player,
+            shouldCommit: { accountIsCurrent })
+        let preparation = try XCTUnwrap(actions.queueTask)
+        try await gate.waitUntilStarted()
+        accountIsCurrent = false
+        await gate.release()
+        await preparation.value
+        XCTAssertTrue(player.queue.isEmpty)
+        XCTAssertNil(player.selectedEntryID)
+        player.stop()
+    }
+
     func testOnlyExplicitPlayCarriesProtectedIntentAcrossCollectionPages() async throws {
         for startsPlayback in [true, false] {
             let responses = CollectionResponses()
@@ -114,7 +245,8 @@ final class FoundationLibraryActionsTests: XCTestCase {
                 let player = FoundationPlayer(resolve: { _ in throw CancellationError() })
                 let track = FoundationItem(
                     id: "synthetic-track", title: "", subtitle: "", kind: .track, duration: nil)
-                player.setQueue([track, track, track, track], selectedIndex: 1)
+                player.enqueue([track, track, track, track], position: .last)
+                player.select(player.queue[1].id)
                 await player.selectionTask?.value
                 let actions = FoundationLibraryActions(
                     sourceScope: "synthetic", read: { _ in nil }, write: { _, _ in },

@@ -1,4 +1,4 @@
-# Velacanto rebuilt-app contract
+# VelaCanto rebuilt-app contract
 
 Read root AGENTS.md, ADR 0012 and ADR 0013. This directory is the sole maintained
 application; the legacy app code/targets are removed. Internal Foundation names
@@ -7,14 +7,13 @@ old controllers. Use the exact assigned base; never edit another worktree.
 
 ## Release boundary
 
-0.4.0 development builds on the 0.3.5 and accepted 0.3.0 (108) Foundation line.
-Read `docs/0.4-development-record.md` and `docs/0.4-plan.md` for current integrated
-features and pending acceptance; 0.3.5 documents below are historical evidence.
-The historical 0.3.0 freeze remains documented in ADR 0013; it does not disable the independently
-implemented 0.3.5 features. Build 107 remains rejected. Read
-`docs/0.3.5-release-notes.md`, `docs/0.3.5-known-issues.md` and
-`docs/0.3.5-acceptance.md` for current scope and evidence limits. Never restore
-legacy controllers or change playback/network ownership during cosmetic cleanup.
+Current candidate is **0.5.0 (216), Alpha Preview**, packaging accepted build 215
+runtime with release metadata changes. Read `docs/0.5.0-acceptance.md` and the
+0.5.0 release/TestFlight notes before relying on historical scope exclusions.
+Alpha publication, exact-candidate hosted checks, signed distribution, Apple
+processing and tester availability must be recorded separately. Beta/main
+promotion is not implied. Earlier 0.3/0.4 documents retain historical evidence;
+build 107 remains rejected. Preserve accepted runtime during release preparation.
 
 ## Product
 
@@ -32,9 +31,14 @@ bridge forwards commands and metadata. Views must not create players, activate t
 audio session, restore system volume or trigger catalog/artwork work on redraw.
 Lyrics and artwork retain explicit cancellation and stale-result protection.
 Collection Shuffle, persistent shuffle/repeat, paused queue restoration, playlist
-editing and account-owned original-file downloads are implemented in alpha.
-Local-library indexing, new providers and playback reporting remain deferred or
-unimplemented. Keep implementation distinct from physical/server acceptance.
+management and account-owned Original/AAC downloads are implemented. Remote playback
+uses HLS; native HLS offline assets remain unimplemented. iOS quality selectors
+live in system Settings; Mac streaming is Original. Native CarPlay browsing,
+playback and view-only queue selection are implemented; queue editing stays off
+CarPlay. Basic Siri/system control support does not imply Apple Intelligence.
+Bounded Jellyfin playback reporting is implemented; live-server acceptance remains
+open. Local-library indexing and new providers remain deferred or unimplemented.
+Keep implementation distinct from physical/server acceptance.
 
 ## Playback and shared loading guardrails
 

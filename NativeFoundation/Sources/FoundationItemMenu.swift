@@ -5,6 +5,8 @@ struct FoundationItemMenu: View {
     let item: FoundationItem
     @ObservedObject var actions: FoundationLibraryActions
     let initialFavorite: Bool?
+    /// Detail pages with a primary Favorite control can omit its duplicate menu action.
+    var showsFavoriteAction = true
     var open: (() -> Void)?
     var play: (() -> Void)?
 
@@ -21,7 +23,7 @@ struct FoundationItemMenu: View {
 
     var body: some View {
         Section {
-            if item.kind != .genre {
+            if showsFavoriteAction, item.kind != .genre {
                 let favorite = actions.favoriteState(for: item, initial: initialFavorite)
                 Button(
                     favorite == true ? "Unfavorite" : "Favorite",

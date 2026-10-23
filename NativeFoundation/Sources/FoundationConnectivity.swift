@@ -15,6 +15,15 @@ final class FoundationConnectivity: ObservableObject {
     @Published private(set) var usesWiFiOrWired = false
     @Published private(set) var usesCellular = false
     var isConnected: Bool { status == .available }
+    var streamingPath: FoundationStreamingPath {
+        guard isLive else { return FoundationStreamingPath() }
+        return FoundationStreamingPath(
+            isAvailable: observation?.status == .available,
+            usesWiFiOrWired: observation?.wifi ?? false,
+            usesCellular: observation?.cellular ?? false,
+            isExpensive: observation?.expensive ?? false,
+            isConstrained: observation?.constrained ?? false)
+    }
     private var monitor: NWPathMonitor?
     private var settleTask: Task<Void, Never>?
     private var generation: UInt = 0
@@ -26,6 +35,8 @@ final class FoundationConnectivity: ObservableObject {
         let status: Status
         let wifi: Bool
         let cellular: Bool
+        let expensive: Bool
+        let constrained: Bool
     }
 
     init(
@@ -48,8 +59,12 @@ final class FoundationConnectivity: ObservableObject {
                 }
                 let wifi = path.usesInterfaceType(.wifi) || path.usesInterfaceType(.wiredEthernet)
                 let cellular = path.usesInterfaceType(.cellular)
+                let expensive = path.isExpensive
+                let constrained = path.isConstrained
                 Task { @MainActor [weak self] in
-                    self?.update(status: status, wifiOrWired: wifi, cellular: cellular)
+                    self?.update(
+                        status: status, wifiOrWired: wifi, cellular: cellular,
+                        expensive: expensive, constrained: constrained)
                 }
             }
             monitor.start(queue: DispatchQueue(label: "Velacanto.Connectivity"))
@@ -61,11 +76,21 @@ final class FoundationConnectivity: ObservableObject {
         settleTask?.cancel()
     }
 
-    func update(status: Status, wifiOrWired: Bool, cellular: Bool) {
+    func update(
+        status: Status, wifiOrWired: Bool, cellular: Bool,
+        expensive: Bool = false, constrained: Bool = false
+    ) {
         guard isLive else { return }
-        let next = Observation(status: status, wifi: wifiOrWired, cellular: cellular)
+        let next = Observation(
+            status: status, wifi: wifiOrWired, cellular: cellular,
+            expensive: expensive, constrained: constrained)
         guard observation != next else { return }
+        let connectionChanged =
+            observation?.status != status || observation?.wifi != wifiOrWired
+            || observation?.cellular != cellular
         observation = next
+        // Cost-only updates affect the next resource without restarting path settling or retries.
+        guard connectionChanged else { return }
         generation &+= 1
         settleTask?.cancel()
         usesWiFiOrWired = wifiOrWired

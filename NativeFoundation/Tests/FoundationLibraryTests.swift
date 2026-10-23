@@ -1,4 +1,5 @@
 import Foundation
+import JellyfinAPI
 import XCTest
 
 @testable import VelacantoFoundation
@@ -2315,6 +2316,639 @@ final class FoundationLibraryTests: XCTestCase {
         let count = await recorder.requests.count
         XCTAssertEqual(count, 2)
     }
+
+    #if DEBUG
+        func testHLSComparisonNegotiatesAndRetiresOnlyItsServerSession() async throws {
+            let recorder = Recorder()
+            let itemID = self.itemID
+            let deviceID = session.deviceID
+            let library = FoundationJellyfinLibrary(session: session) { request in
+                await recorder.append(request)
+                if request.httpMethod == "DELETE" { return (Data(), Self.response(request)) }
+                let body = """
+                    {"PlaySessionId":"server-session-a","MediaSources":[{"Id":"source-a",
+                    "SupportsTranscoding":true,"TranscodingSubProtocol":"hls",
+                    "TranscodingUrl":"/audio/\(itemID)/master.m3u8?MediaSourceId=source-a&PlaySessionId=server-session-a&DeviceId=\(deviceID)&AudioBitrate=192000"}]}
+                    """
+                return (Data(body.utf8), Self.response(request))
+            }
+            let item = FoundationItem(
+                id: itemID, title: "Synthetic", subtitle: "", kind: .track, duration: nil)
+            let cleanupLoad: FoundationJellyfinLibrary.Load = { request in
+                await recorder.append(request)
+                return (Data(), Self.response(request))
+            }
+            let resource = try await FoundationJellyfinLibrary.$hlsCleanupLoad.withValue(
+                cleanupLoad
+            ) {
+                try await FoundationJellyfinLibrary.$hlsOriginalPreferred.withValue(false) {
+                    try await library.playbackResource(for: item)
+                }
+            }
+            XCTAssertEqual(resource.source.delivery, .hlsAAC)
+            XCTAssertEqual(resource.source.serverSessionID, "server-session-a")
+            XCTAssertEqual(resource.source.mediaSourceID, "source-a")
+            XCTAssertEqual(resource.url.path, "/proxy/jellyfin/audio/\(itemID)/master.m3u8")
+            let query = URLComponents(url: resource.url, resolvingAgainstBaseURL: false)!
+                .queryItems!
+            XCTAssertTrue(query.contains(.init(name: "AudioBitrate", value: "192000")))
+            XCTAssertTrue(query.contains(.init(name: "ApiKey", value: "synthetic-token")))
+            await resource.release()
+            await resource.release()
+            for _ in 0..<100 {
+                if await recorder.requests.count >= 2 { break }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            let requests = await recorder.requests
+            XCTAssertEqual(requests.count, 2)
+            let body = try XCTUnwrap(
+                JSONSerialization.jsonObject(with: XCTUnwrap(requests[0].httpBody))
+                    as? [String: Any])
+            XCTAssertEqual(body["EnableDirectPlay"] as? Bool, false)
+            XCTAssertEqual(body["EnableDirectStream"] as? Bool, false)
+            XCTAssertEqual(body["AllowAudioStreamCopy"] as? Bool, false)
+            XCTAssertEqual(body["AutoOpenLiveStream"] as? Bool, false)
+            let profile = try XCTUnwrap(body["DeviceProfile"] as? [String: Any])
+            XCTAssertEqual(profile["MusicStreamingTranscodingBitrate"] as? Int, 320_000)
+            let transcode = try XCTUnwrap(
+                (profile["TranscodingProfiles"] as? [[String: Any]])?.first)
+            XCTAssertEqual(transcode["Protocol"] as? String, "hls")
+            XCTAssertEqual(transcode["AudioCodec"] as? String, "aac")
+            XCTAssertEqual(requests[1].httpMethod, "DELETE")
+            XCTAssertEqual(requests[1].url?.path, "/proxy/jellyfin/Videos/ActiveEncodings")
+            let cleanup = URLComponents(url: requests[1].url!, resolvingAgainstBaseURL: false)!
+                .queryItems!
+            XCTAssertTrue(cleanup.contains(.init(name: "playSessionId", value: "server-session-a")))
+            XCTAssertTrue(cleanup.contains(.init(name: "deviceId", value: session.deviceID)))
+        }
+
+        func testMP3CopyMasterPreservesLimitsAndRefusesIncompatibleSource() throws {
+            let raw =
+                "/audio/\(itemID)/master.m3u8?AudioCodec=mp3&SegmentContainer=ts&AudioBitrate=320000&PlaySessionId=session-a&RequireAvc=false"
+            let audio = MediaStream(
+                bitDepth: 16, bitRate: 256_000, channels: 2, codec: "mp3", index: 0,
+                sampleRate: 44_100, type: .audio)
+            let result = try FoundationJellyfinLibrary.hlsMP3CopyMaster(raw, audio: audio)
+            XCTAssertEqual(result.queryItems?.first { $0.name == "AudioCodec" }?.value, "copy")
+            XCTAssertEqual(
+                result.string,
+                raw.replacingOccurrences(of: "AudioCodec=mp3", with: "AudioCodec=copy"))
+            for suffix in [
+                "&AudioSampleRate=44100&AudioChannels=2&MaxAudioChannels=2&MaxAudioBitDepth=16",
+                "&AllowAudioStreamCopy=true&EnableAutoStreamCopy=true&AudioStreamIndex=0",
+                "&EnableAudioVbrEncoding=false&TranscodingMaxAudioChannels=2",
+                "&EnableAudioVbrEncoding=true&TranscodingMaxAudioChannels=6",
+            ] {
+                let preserved = try FoundationJellyfinLibrary.hlsMP3CopyMaster(
+                    raw + suffix, audio: audio)
+                XCTAssertEqual(
+                    preserved.string,
+                    (raw + suffix).replacingOccurrences(
+                        of: "AudioCodec=mp3", with: "AudioCodec=copy"))
+            }
+            for invalid in [
+                raw.replacingOccurrences(of: "320000", with: "128000"),
+                raw.replacingOccurrences(of: "AudioCodec=mp3", with: "AudioCodec=aac"),
+                raw.replacingOccurrences(of: "SegmentContainer=ts", with: "SegmentContainer=mp4"),
+                raw + "&AudioBitrate=320000", raw + "&AudioCodec=copy",
+                raw + "&AllowAudioStreamCopy=false", raw + "&EnableAutoStreamCopy=false",
+                raw + "&AudioSampleRate=48000", raw + "&AudioChannels=1",
+                raw + "&MaxAudioChannels=1", raw + "&MaxAudioBitDepth=8",
+                raw + "&AudioStreamIndex=1", raw + "&AudioUnknownLimit=1",
+                raw + "&AudioBitDepth=invalid", raw + "&MaxStreamingBitrate=128000",
+                raw + "&EnableAudioVbrEncoding=invalid", raw + "&EnableAudioVbrEncoding=",
+                raw + "&EnableAudioVbrEncoding=true&enableaudiovbrencoding=false",
+                raw + "&TranscodingMaxAudioChannels=1",
+                raw + "&TranscodingMaxAudioChannels=invalid",
+                raw + "&TranscodingMaxAudioChannels=2&transcodingmaxaudiochannels=2",
+            ] {
+                XCTAssertThrowsError(
+                    try FoundationJellyfinLibrary.hlsMP3CopyMaster(invalid, audio: audio))
+            }
+            var unknown = audio
+            unknown.bitRate = nil
+            XCTAssertThrowsError(
+                try FoundationJellyfinLibrary.hlsMP3CopyMaster(raw, audio: unknown))
+            unknown = audio
+            unknown.sampleRate = nil
+            XCTAssertThrowsError(
+                try FoundationJellyfinLibrary.hlsMP3CopyMaster(
+                    raw + "&AudioSampleRate=44100", audio: unknown))
+        }
+
+        func testMP3CopyPlaylistRejectsEncodingAndUnsafeVariants() throws {
+            let identity =
+                "MediaSourceId=source-a&PlaySessionId=session-a&DeviceId=\(session.deviceID)"
+            let valid = "main.m3u8?\(identity)&AudioCodec=copy&SegmentContainer=ts"
+            func resolve(_ child: String, suffix: String = "") throws -> URL {
+                try FoundationJellyfinLibrary.hlsMP3CopyURL(
+                    Data("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=320000\n\(child)\n\(suffix)".utf8),
+                    itemID: itemID, sourceID: "source-a", serverSession: "session-a",
+                    base: session.serverURL, token: session.accessToken, deviceID: session.deviceID)
+            }
+            let url = try resolve(valid)
+            XCTAssertEqual(url.path, "/proxy/jellyfin/audio/\(itemID)/main.m3u8")
+            let query = URLComponents(url: url, resolvingAgainstBaseURL: false)!.queryItems!
+            XCTAssertEqual(query.filter { $0.name == "ApiKey" }.count, 1)
+            for invalid in [
+                valid.replacingOccurrences(of: "AudioCodec=copy", with: "AudioCodec=mp3"),
+                valid.replacingOccurrences(of: "SegmentContainer=ts", with: "SegmentContainer=mp4"),
+                valid + "&AudioCodec=copy", valid + "&PlaySessionId=another-session",
+                "https://other.invalid/" + valid, "../" + valid,
+                valid.replacingOccurrences(of: "main.m3u8", with: "%6dain.m3u8"),
+            ] { XCTAssertThrowsError(try resolve(invalid)) }
+            XCTAssertThrowsError(
+                try resolve(valid, suffix: "#EXT-X-STREAM-INF:BANDWIDTH=1\n\(valid)"))
+            XCTAssertThrowsError(
+                try resolve(valid, suffix: "#EXT-X-MEDIA:TYPE=AUDIO,URI=\"other.m3u8\""))
+        }
+
+        func testOriginalPreferredHLSSelectsCopyOrAACBeforeNegotiation() async throws {
+            for (codec, bitrate, depth, expectedCopy) in [
+                ("mp3", 256_000, 16, true), ("aac", 256_000, 16, true),
+                ("flac", 9_216_000, 24, true), ("alac", 4_608_000, 24, true),
+                ("opus", 192_000, 16, false), ("pcm_s24le", 4_608_000, 24, false),
+                ("flac", 50_000_001, 24, false), ("flac", 0, 24, false),
+                ("flac", 4_608_000, 32, false),
+            ] {
+                let recorder = Recorder()
+                let itemID = self.itemID
+                let deviceID = session.deviceID
+                let container = expectedCopy && codec != "mp3" ? "mp4" : "ts"
+                let outputCodec = expectedCopy ? codec : "aac"
+                let limit = expectedCopy ? 50_000_000 : 320_000
+                let profileJSON = codec == "aac" ? ",\"Profile\":\"LC\"" : ""
+                let audio = """
+                    {"Type":"Audio","Codec":"\(codec)"\(profileJSON),"Index":0,"BitDepth":\(depth),
+                    "BitRate":\(bitrate),"SampleRate":44100,"Channels":2}
+                    """
+                let library = FoundationJellyfinLibrary(session: session) { request in
+                    await recorder.append(request)
+                    if request.url?.path.hasSuffix("/Items/\(itemID)") == true {
+                        return (
+                            Data(
+                                """
+                                {"Id":"\(itemID)","Type":"Audio","MediaSources":[{"Id":"source-a",
+                                "Protocol":"File","MediaStreams":[\(audio)]}]}
+                                """.utf8), Self.response(request)
+                        )
+                    }
+                    if request.httpMethod == "GET" {
+                        return (
+                            Data(
+                                """
+                                #EXTM3U
+                                #EXT-X-STREAM-INF:BANDWIDTH=\(limit)
+                                main.m3u8?MediaSourceId=source-a&PlaySessionId=session-a&DeviceId=\(deviceID)&AudioCodec=copy&SegmentContainer=\(container)&AudioBitrate=\(limit)&AudioStreamIndex=0
+                                """.utf8), Self.response(request)
+                        )
+                    }
+                    return (
+                        Data(
+                            """
+                            {"PlaySessionId":"session-a","MediaSources":[{"Id":"source-a",
+                            "MediaStreams":[\(audio)],"SupportsTranscoding":true,"TranscodingSubProtocol":"hls",
+                            "TranscodingUrl":"/audio/\(itemID)/master.m3u8?MediaSourceId=source-a&PlaySessionId=session-a&DeviceId=\(deviceID)&AudioCodec=\(outputCodec)&SegmentContainer=\(container)&AudioBitrate=\(limit)&EnableAudioVbrEncoding=false&TranscodingMaxAudioChannels=2&AudioStreamIndex=0"}]}
+                            """.utf8), Self.response(request)
+                    )
+                }
+                let cleanup: FoundationJellyfinLibrary.Load = { request in
+                    await recorder.append(request)
+                    return (Data(), Self.response(request))
+                }
+                let item = FoundationItem(
+                    id: itemID, title: "Synthetic", subtitle: "", kind: .track, duration: nil)
+                let resource = try await FoundationJellyfinLibrary.$hlsCleanupLoad
+                    .withValue(cleanup) {
+                        try await FoundationJellyfinLibrary.$hlsOriginalPreferred.withValue(
+                            true
+                        ) {
+                            try await library.playbackResource(for: item)
+                        }
+                    }
+                XCTAssertEqual(resource.source.delivery, expectedCopy ? .hlsCopy : .hlsAAC)
+                XCTAssertTrue(
+                    resource.url.path.hasSuffix(expectedCopy ? "/main.m3u8" : "/master.m3u8"))
+                await resource.release()
+                for _ in 0..<100 {
+                    if await recorder.requests.contains(where: { $0.httpMethod == "DELETE" }) {
+                        break
+                    }
+                    try await Task.sleep(for: .milliseconds(10))
+                }
+                let requests = await recorder.requests
+                XCTAssertEqual(requests.filter { $0.httpMethod == "DELETE" }.count, 1)
+                XCTAssertEqual(
+                    requests.filter { $0.httpMethod == "GET" }.count, expectedCopy ? 2 : 1)
+                if expectedCopy {
+                    let master = try XCTUnwrap(
+                        requests.first {
+                            $0.httpMethod == "GET" && $0.url?.path.hasSuffix("/master.m3u8") == true
+                        })
+                    let query = try XCTUnwrap(
+                        URLComponents(
+                            url: try XCTUnwrap(master.url), resolvingAgainstBaseURL: false)?
+                            .queryItems)
+                    for (name, value) in [
+                        ("AudioCodec", "copy"), ("SegmentContainer", container),
+                        ("AudioBitrate", String(limit)), ("EnableAudioVbrEncoding", "false"),
+                        ("TranscodingMaxAudioChannels", "2"),
+                    ] {
+                        XCTAssertEqual(query.filter { $0.name == name }.map(\.value), [value])
+                    }
+                }
+                let posted = try XCTUnwrap(requests.first { $0.httpMethod == "POST" })
+                let body = try XCTUnwrap(
+                    JSONSerialization.jsonObject(
+                        with: XCTUnwrap(posted.httpBody)) as? [String: Any])
+                XCTAssertEqual(body["AllowAudioStreamCopy"] as? Bool, expectedCopy)
+                XCTAssertEqual(body["MediaSourceId"] as? String, "source-a")
+                XCTAssertEqual(body["AudioStreamIndex"] as? Int, 0)
+                let profile = try XCTUnwrap(body["DeviceProfile"] as? [String: Any])
+                XCTAssertEqual(profile["MaxStreamingBitrate"] as? Int, limit)
+                let transcode = try XCTUnwrap(
+                    (profile["TranscodingProfiles"] as? [[String: Any]])?.first)
+                XCTAssertEqual(transcode["AudioCodec"] as? String, outputCodec)
+                XCTAssertEqual(transcode["Container"] as? String, container)
+            }
+        }
+
+        func testMP3CopyPreflightBypassesAdmissionAndCleansUpFailureOrCancellation() async throws {
+            for cancel in [false, true] {
+                let recorder = Recorder()
+                let gate = FoundationAlphabetTestGate()
+                let admission = FoundationNetworkAdmission(limit: 2)
+                let held = try await admission.acquire()
+                let itemID = self.itemID
+                let deviceID = session.deviceID
+                let library = FoundationJellyfinLibrary(
+                    session: session,
+                    load: { request in
+                        await recorder.append(request)
+                        if request.url?.path.hasSuffix("/Items/\(itemID)") == true {
+                            return (
+                                Data(
+                                    """
+                                    {"Id":"\(itemID)","Type":"Audio","MediaSources":[{"Id":"source-a",
+                                    "Protocol":"File","MediaStreams":[{"Type":"Audio","Codec":"mp3",
+                                    "Index":0,"BitRate":256000,"SampleRate":44100,"Channels":2}]}]}
+                                    """.utf8), Self.response(request)
+                            )
+                        }
+                        if request.httpMethod == "GET" {
+                            await gate.suspend()
+                            if !cancel { throw URLError(.timedOut) }
+                            return (
+                                Data(
+                                    "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=320000\nmain.m3u8?MediaSourceId=source-a&PlaySessionId=session-a&DeviceId=\(deviceID)&AudioCodec=copy&SegmentContainer=ts&AudioBitrate=320000\n"
+                                        .utf8), Self.response(request)
+                            )
+                        }
+                        let body = """
+                            {"PlaySessionId":"session-a","MediaSources":[{"Id":"source-a",
+                            "MediaStreams":[{"Type":"Audio","Codec":"mp3","Index":0,"BitRate":256000,"SampleRate":44100,"Channels":2}],
+                            "SupportsTranscoding":true,"TranscodingSubProtocol":"hls",
+                            "TranscodingUrl":"/audio/\(itemID)/master.m3u8?MediaSourceId=source-a&PlaySessionId=session-a&DeviceId=\(deviceID)&AudioCodec=mp3&SegmentContainer=ts&AudioBitrate=320000&EnableAudioVbrEncoding=false&TranscodingMaxAudioChannels=2&RequireAvc=false"}]}
+                            """
+                        return (Data(body.utf8), Self.response(request))
+                    }, networkAdmission: admission)
+                let cleanup: FoundationJellyfinLibrary.Load = { request in
+                    await recorder.append(request)
+                    return (Data(), Self.response(request))
+                }
+                let item = FoundationItem(
+                    id: itemID, title: "Synthetic", subtitle: "", kind: .track, duration: nil)
+                let preparation = Task {
+                    try await FoundationJellyfinLibrary.$hlsCleanupLoad.withValue(cleanup) {
+                        try await FoundationJellyfinLibrary.$hlsOriginalPreferred.withValue(
+                            true
+                        ) {
+                            try await library.playbackResource(for: item)
+                        }
+                    }
+                }
+                // The held ordinary slot must not block the master preflight.
+                // Poll finitely so an admission regression fails rather than hanging the suite.
+                for _ in 0..<100 {
+                    if await recorder.requests.contains(where: {
+                        $0.httpMethod == "GET" && $0.url?.path.hasSuffix("/master.m3u8") == true
+                    }) {
+                        break
+                    }
+                    try await Task.sleep(for: .milliseconds(10))
+                }
+                let entered = await recorder.requests.contains(where: {
+                    $0.httpMethod == "GET" && $0.url?.path.hasSuffix("/master.m3u8") == true
+                })
+                XCTAssertTrue(entered)
+                if entered { await gate.entered() }
+                await admission.release(held)
+                if cancel { preparation.cancel() }
+                await gate.release()
+                do {
+                    let resource = try await preparation.value
+                    await resource.release()
+                    XCTFail("Failed or cancelled preparation must not publish a resource")
+                } catch {
+                    XCTAssertEqual(
+                        FoundationLibraryError.category(error), cancel ? .cancelled : .network)
+                }
+                for _ in 0..<100 {
+                    if await recorder.requests.contains(where: { $0.httpMethod == "DELETE" }) {
+                        break
+                    }
+                    try await Task.sleep(for: .milliseconds(10))
+                }
+                let requests = await recorder.requests
+                XCTAssertEqual(requests.filter { $0.httpMethod == "DELETE" }.count, 1)
+            }
+        }
+
+        func testOriginalPreferredAACRequiresKnownProfileAndLosslessMetadata() {
+            var audio = MediaStream(
+                bitDepth: 24, bitRate: 2_304_000, channels: 2, codec: "aac", index: 0,
+                sampleRate: 48_000, type: .audio)
+            for profile in [nil, "xHE-AAC", "unknown"] {
+                audio.profile = profile
+                XCTAssertNil(FoundationJellyfinLibrary.hlsCopyCodec(audio))
+            }
+            for profile in ["LC", "HE-AAC", "HE-AACv2"] {
+                audio.profile = profile
+                XCTAssertEqual(FoundationJellyfinLibrary.hlsCopyCodec(audio), "aac")
+            }
+            audio.codec = "flac"
+            audio.bitDepth = nil
+            XCTAssertNil(FoundationJellyfinLibrary.hlsCopyCodec(audio))
+            audio.bitDepth = 24
+            audio.bitRate = nil
+            XCTAssertNil(FoundationJellyfinLibrary.hlsCopyCodec(audio))
+        }
+
+        func testHLSCopyChildCannotLowerNegotiatedBitrateBelowSource() throws {
+            let audio = MediaStream(
+                bitDepth: 24, bitRate: 9_216_000, channels: 2, codec: "flac", index: 0,
+                sampleRate: 192_000, type: .audio)
+            let identity =
+                "MediaSourceId=source-a&PlaySessionId=session-a&DeviceId=\(session.deviceID)"
+            for limit in [320_000, 50_000_000] {
+                let data = Data(
+                    """
+                    #EXTM3U
+                    #EXT-X-STREAM-INF:BANDWIDTH=\(limit)
+                    main.m3u8?\(identity)&AudioCodec=copy&SegmentContainer=mp4&AudioBitrate=\(limit)
+                    """.utf8)
+                if limit < 9_216_000 {
+                    XCTAssertThrowsError(
+                        try FoundationJellyfinLibrary.hlsCopyURL(
+                            data, container: "mp4", audio: audio, codec: "flac", itemID: itemID,
+                            sourceID: "source-a", serverSession: "session-a",
+                            base: session.serverURL,
+                            token: session.accessToken, deviceID: session.deviceID))
+                } else {
+                    XCTAssertNoThrow(
+                        try FoundationJellyfinLibrary.hlsCopyURL(
+                            data, container: "mp4", audio: audio, codec: "flac", itemID: itemID,
+                            sourceID: "source-a", serverSession: "session-a",
+                            base: session.serverURL,
+                            token: session.accessToken, deviceID: session.deviceID))
+                }
+            }
+        }
+
+        func testOriginalPreferredMetadataCancellationDoesNotNegotiate() async throws {
+            for quality in FoundationStreamingQuality.allCases {
+                let recorder = Recorder()
+                let gate = FoundationAlphabetTestGate()
+                let itemID = self.itemID
+                let library = FoundationJellyfinLibrary(
+                    session: session, streamingQuality: { quality },
+                    load: { request in
+                        await recorder.append(request)
+                        await gate.suspend()
+                        return (
+                            Data(
+                                """
+                                {"Id":"\(itemID)","Type":"Audio","MediaSources":[{"Id":"source-a",
+                                "Protocol":"File","MediaStreams":[{"Type":"Audio","Codec":"mp3",
+                                "Index":0,"BitRate":256000,"SampleRate":44100,"Channels":2}]}]}
+                                """.utf8), Self.response(request)
+                        )
+                    })
+                let item = FoundationItem(
+                    id: itemID, title: "Synthetic", subtitle: "", kind: .track, duration: nil)
+                let preparation = Task {
+                    try await FoundationJellyfinLibrary.$hlsOriginalPreferred.withValue(true) {
+                        try await library.playbackResource(for: item)
+                    }
+                }
+                await gate.entered()
+                preparation.cancel()
+                await gate.release()
+                do {
+                    let resource = try await preparation.value
+                    await resource.release()
+                    XCTFail("Cancelled metadata cannot negotiate or publish")
+                } catch { XCTAssertEqual(FoundationLibraryError.category(error), .cancelled) }
+                let requests = await recorder.requests
+                XCTAssertEqual(requests.count, 1)
+                XCTAssertEqual(requests.first?.httpMethod, "GET")
+            }
+        }
+
+        func testOriginalPreferredRejectsNegotiatedSourceDriftAndCleansSession() async throws {
+            for quality in FoundationStreamingQuality.allCases {
+                for drift in ["identity", "codec", "bitrate", "index"] {
+                    let recorder = Recorder()
+                    let itemID = self.itemID
+                    let deviceID = session.deviceID
+                    let library = FoundationJellyfinLibrary(
+                        session: session, streamingQuality: { quality },
+                        load: { request in
+                            await recorder.append(request)
+                            if request.httpMethod == "GET" {
+                                return (
+                                    Data(
+                                        """
+                                        {"Id":"\(itemID)","Type":"Audio","MediaSources":[{"Id":"source-a",
+                                        "Protocol":"File","MediaStreams":[{"Type":"Audio","Codec":"mp3",
+                                        "Index":0,"BitRate":256000,"SampleRate":44100,"Channels":2}]}]}
+                                        """.utf8), Self.response(request)
+                                )
+                            }
+                            let identity = drift == "identity" ? "source-b" : "source-a"
+                            let codec = drift == "codec" ? "aac" : "mp3"
+                            let bitrate = drift == "bitrate" ? 128_000 : 256_000
+                            let index = drift == "index" ? 1 : 0
+                            return (
+                                Data(
+                                    """
+                                    {"PlaySessionId":"session-a","MediaSources":[{"Id":"\(identity)",
+                                    "MediaStreams":[{"Type":"Audio","Codec":"\(codec)","Index":\(index),"BitRate":\(bitrate),"SampleRate":44100,"Channels":2}],
+                                    "SupportsTranscoding":true,"TranscodingSubProtocol":"hls",
+                                    "TranscodingUrl":"/audio/\(itemID)/master.m3u8?MediaSourceId=\(identity)&PlaySessionId=session-a&DeviceId=\(deviceID)&AudioCodec=mp3&SegmentContainer=ts&AudioBitrate=320000"}]}
+                                    """.utf8), Self.response(request)
+                            )
+                        })
+                    let cleanup: FoundationJellyfinLibrary.Load = { request in
+                        await recorder.append(request)
+                        return (Data(), Self.response(request))
+                    }
+                    let item = FoundationItem(
+                        id: itemID, title: "Synthetic", subtitle: "", kind: .track, duration: nil)
+                    do {
+                        _ = try await FoundationJellyfinLibrary.$hlsCleanupLoad.withValue(
+                            cleanup
+                        ) {
+                            try await FoundationJellyfinLibrary.$hlsOriginalPreferred.withValue(
+                                true
+                            ) {
+                                try await library.playbackResource(for: item)
+                            }
+                        }
+                        XCTFail("Changed negotiated source must not publish")
+                    } catch { XCTAssertEqual(error as? FoundationLibraryError, .unavailable) }
+                    for _ in 0..<100 {
+                        if await recorder.requests.contains(where: { $0.httpMethod == "DELETE" }) {
+                            break
+                        }
+                        try await Task.sleep(for: .milliseconds(10))
+                    }
+                    let requests = await recorder.requests
+                    XCTAssertEqual(requests.filter { $0.httpMethod == "GET" }.count, 1)
+                    XCTAssertEqual(requests.filter { $0.httpMethod == "POST" }.count, 1)
+                    XCTAssertEqual(requests.filter { $0.httpMethod == "DELETE" }.count, 1)
+                }
+            }
+        }
+
+        func testFixedAACRejectsContradictoryServerURLAndCleansOnlyItsSession() async throws {
+            for flag in ["AllowAudioStreamCopy", "EnableAutoStreamCopy", "Static"] {
+                let recorder = Recorder()
+                let itemID = itemID
+                let deviceID = session.deviceID
+                let audio = """
+                    {"Type":"Audio","Codec":"mp3","Index":0,"BitRate":256000,"SampleRate":44100,"Channels":2}
+                    """
+                let library = FoundationJellyfinLibrary(
+                    session: session, streamingQuality: { .aac128 },
+                    load: { request in
+                        await recorder.append(request)
+                        if request.httpMethod == "GET" {
+                            return (
+                                Data(
+                                    """
+                                    {"Id":"\(itemID)","Type":"Audio","MediaSources":[{"Id":"source-a",
+                                    "Protocol":"File","MediaStreams":[\(audio)]}]}
+                                    """.utf8), Self.response(request)
+                            )
+                        }
+                        return (
+                            Data(
+                                """
+                                {"PlaySessionId":"session-a","MediaSources":[{"Id":"source-a",
+                                "MediaStreams":[\(audio)],"SupportsTranscoding":true,"TranscodingSubProtocol":"hls",
+                                "TranscodingUrl":"/audio/\(itemID)/master.m3u8?MediaSourceId=source-a&PlaySessionId=session-a&DeviceId=\(deviceID)&AudioCodec=aac&SegmentContainer=ts&AudioBitrate=128000&AudioStreamIndex=0&\(flag)=true"}]}
+                                """.utf8), Self.response(request)
+                        )
+                    })
+                let cleanup: FoundationJellyfinLibrary.Load = { request in
+                    await recorder.append(request)
+                    return (Data(), Self.response(request))
+                }
+                let item = FoundationItem(
+                    id: itemID, title: "Synthetic", subtitle: "", kind: .track, duration: nil)
+                do {
+                    let resource = try await FoundationJellyfinLibrary.$hlsCleanupLoad.withValue(
+                        cleanup
+                    ) {
+                        try await library.playbackResource(for: item)
+                    }
+                    await resource.release()
+                    XCTFail("Contradictory fixed policy must never publish a resource")
+                } catch {
+                    XCTAssertEqual(error as? FoundationLibraryError, .invalidResponse)
+                }
+                for _ in 0..<100 {
+                    if await recorder.requests.contains(where: { $0.httpMethod == "DELETE" }) {
+                        break
+                    }
+                    try await Task.sleep(for: .milliseconds(10))
+                }
+                let requests = await recorder.requests
+                XCTAssertEqual(requests.map(\.httpMethod), ["GET", "POST", "DELETE"])
+                let cleanupRequest = try XCTUnwrap(requests.last)
+                XCTAssertEqual(cleanupRequest.url?.path, "/proxy/jellyfin/Videos/ActiveEncodings")
+                let query = try XCTUnwrap(
+                    URLComponents(
+                        url: try XCTUnwrap(cleanupRequest.url), resolvingAgainstBaseURL: false)?
+                        .queryItems)
+                XCTAssertEqual(
+                    query.filter { $0.name.lowercased() == "playsessionid" }.map(\.value),
+                    ["session-a"])
+                XCTAssertEqual(
+                    query.filter { $0.name.lowercased() == "deviceid" }.map(\.value), [deviceID])
+                XCTAssertFalse(requests.contains { $0.url?.path.hasSuffix("/universal") == true })
+            }
+        }
+
+        func testHLSComparisonAcceptsEquivalentGUIDRouteSpellings() throws {
+            let compact = "00112233445566778899aabbccddeeff"
+            let guid = "00112233-4455-6677-8899-AABBCCDDEEFF"
+            for (requested, returned) in [(compact, guid), (guid, compact)] {
+                let url = try FoundationJellyfinLibrary.hlsURL(
+                    "/audio/\(returned)/master.m3u8?MediaSourceId=source-a&PlaySessionId=session-a&DeviceId=\(session.deviceID)",
+                    itemID: requested, sourceID: "source-a", serverSession: "session-a",
+                    base: session.serverURL, token: session.accessToken, deviceID: session.deviceID)
+                XCTAssertEqual(url.path, "/proxy/jellyfin/audio/\(returned)/master.m3u8")
+            }
+        }
+
+        func testHLSComparisonRejectsUnsafeOrMismatchedNegotiatedURL() throws {
+            let route = "/audio/\(itemID)/master.m3u8"
+            let identities =
+                "?MediaSourceId=source-a&PlaySessionId=session-a&DeviceId=\(session.deviceID)"
+            for raw in [
+                "https://other.invalid" + route + identities,
+                "//other.invalid" + route + identities,
+                "/audio/../master.m3u8" + identities,
+                "/audio/00000000-0000-0000-0000-000000000002/master.m3u8" + identities,
+                "/audio/00000000--0000-0000-0000-000000000001/master.m3u8" + identities,
+                "/audio/%30" + itemID.dropFirst() + "/master.m3u8" + identities,
+                "/audio//" + itemID + "/master.m3u8" + identities,
+                "audio/" + itemID + "/master.m3u8" + identities,
+                route + identities + "&PlaySessionId=session-b",
+                route + "?MediaSourceId=source-b&PlaySessionId=session-a",
+                route + "?MediaSourceId=source-a",
+                route + identities + "&DeviceId=another-device",
+                route + identities + "#fragment",
+            ] {
+                XCTAssertThrowsError(
+                    try FoundationJellyfinLibrary.hlsURL(
+                        raw, itemID: itemID, sourceID: "source-a", serverSession: "session-a",
+                        base: session.serverURL, token: session.accessToken,
+                        deviceID: session.deviceID))
+            }
+        }
+
+        func testHLSComparisonDoesNotSilentlyFallbackWhenDenied() async throws {
+            let recorder = Recorder()
+            let library = FoundationJellyfinLibrary(session: session) { request in
+                await recorder.append(request)
+                return (Data(#"{"MediaSources":[]}"#.utf8), Self.response(request))
+            }
+            let item = FoundationItem(
+                id: itemID, title: "Synthetic", subtitle: "", kind: .track, duration: nil)
+            do {
+                _ = try await FoundationJellyfinLibrary.$hlsOriginalPreferred.withValue(false) {
+                    try await library.playbackResource(for: item)
+                }
+                XCTFail("Expected unavailable")
+            } catch { XCTAssertEqual(error as? FoundationLibraryError, .unavailable) }
+            let count = await recorder.requests.count
+            XCTAssertEqual(count, 1)
+        }
+
+    #endif
 
     func testPlaybackURLUsesNoTransportAndPreservesBasePath() async throws {
         let recorder = Recorder()

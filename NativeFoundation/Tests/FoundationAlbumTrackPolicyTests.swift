@@ -223,7 +223,8 @@ final class FoundationAlbumTrackPolicyTests: XCTestCase {
         let source = FoundationPlayer(resolve: { _ in throw CancellationError() })
         source.configureTrackProjection(
             project: { actions.visibleTracks($0) }, observe: { actions.observeTrackCopies($0) })
-        source.setQueue([copy, first, next], selectedIndex: 2)
+        source.setQueue([copy, first, next], selectedIndex: 0)
+        source.select(try XCTUnwrap(source.queue.first { $0.item.id == next.id }).id)
         XCTAssertEqual(source.queue.map { $0.item.id }, [first.id, next.id])
         XCTAssertEqual(source.queue.first { $0.id == source.selectedEntryID }?.item.id, next.id)
         source.setShuffle(true)
@@ -245,6 +246,83 @@ final class FoundationAlbumTrackPolicyTests: XCTestCase {
         XCTAssertNil(restored.selectionTask)
         source.stop()
         restored.stop()
+    }
+
+    @MainActor
+    func testTappedDuplicateUsesOnlySuffixAndNeverCreatesUnplayedHistory() async throws {
+        for canonicalAfterTap in [false, true] {
+            for shuffled in [false, true] {
+                let actions = FoundationLibraryActions(
+                    sourceScope: "synthetic", read: { _ in nil }, write: { _, _ in },
+                    mutateFavorite: { _, _ in })
+                let canonical = item("canonical")
+                let copy = item("copy")
+                let preceding = item("preceding", title: "Preceding", track: 2)
+                let next = item("next", title: "Next", track: 3)
+                actions.observeTrackCopies([canonical])
+                let source = FoundationPlayer(resolve: { _ in throw CancellationError() })
+                source.configureTrackProjection(
+                    project: { actions.visibleTracks($0) },
+                    observe: { actions.observeTrackCopies($0) })
+                source.setShuffle(shuffled)
+                let album =
+                    canonicalAfterTap
+                    ? [preceding, copy, canonical, next] : [canonical, copy, next]
+                source.setQueue(album, selectedIndex: 1)
+                await source.selectionTask?.value
+                let selected = try XCTUnwrap(source.queue.first { $0.id == source.selectedEntryID })
+                XCTAssertEqual(selected.item.id, canonicalAfterTap ? canonical.id : copy.id)
+                XCTAssertTrue(source.history.isEmpty)
+                XCTAssertEqual(source.persistedQueue.first?.id, selected.id)
+                XCTAssertEqual(
+                    Set(source.persistedQueue.map(\.item.id)),
+                    canonicalAfterTap
+                        ? Set([copy.id, canonical.id, next.id]) : Set([copy.id, next.id]))
+                XCTAssertEqual(source.upcoming.map(\.item.id), [next.id])
+                let snapshot = FoundationPlaybackSnapshot(player: source)
+                let restored = FoundationPlayer(resolve: { _ in throw CancellationError() })
+                restored.configureTrackProjection(
+                    project: { actions.visibleTracks($0) },
+                    observe: { actions.observeTrackCopies($0) })
+                restored.restoreSession(snapshot)
+                XCTAssertEqual(restored.selectedEntryID, selected.id)
+                XCTAssertTrue(restored.history.isEmpty)
+                source.stop()
+                restored.stop()
+            }
+        }
+    }
+
+    func testDiscHeadingsLeaveSingleDiscAndUntaggedAlbumsUnchanged() {
+        for discs: [Int?] in [[], [nil, nil], [1, 1], [nil, 1], [0, -1]] {
+            let tracks = discs.enumerated().map { item("track-\($0.offset)", disc: $0.element) }
+            XCTAssertTrue(FoundationAlbumTrackPolicy.discHeadings(for: tracks).isEmpty)
+        }
+    }
+
+    func testDiscHeadingsUseMetadataBoundariesAfterDuplicateProjection() {
+        let first = item("first", track: 1, disc: 1)
+        let duplicate = item("duplicate", track: 1, disc: 1)
+        let next = item("next", track: 2, disc: 1)
+        let secondDisc = item("second-disc", track: 1, disc: 2)
+        let tracks = FoundationAlbumTrackPolicy.visibleTracks(
+            [first, duplicate, next, secondDisc], showDuplicates: false)
+        XCTAssertEqual(tracks, [first, next, secondDisc])
+        XCTAssertEqual(
+            FoundationAlbumTrackPolicy.discHeadings(for: tracks), [0: .disc(1), 2: .disc(2)])
+        XCTAssertEqual(tracks.map(\.trackNumber), [1, 2, 1])
+    }
+
+    func testDiscHeadingsKeepUnknownAndNoncontiguousDiscRunsWithoutReordering() {
+        let discs: [Int?] = [2, 2, nil, 0, 3, 2]
+        let tracks = discs.enumerated().map { item("track-\($0.offset)", disc: $0.element) }
+        XCTAssertEqual(
+            FoundationAlbumTrackPolicy.discHeadings(for: tracks),
+            [0: .disc(2), 2: .unspecified, 4: .disc(3), 5: .disc(2)])
+        XCTAssertEqual(
+            FoundationAlbumTrackPolicy.discHeadings(for: [item("partial", disc: 2)]),
+            [0: .disc(2)])
+        XCTAssertEqual(tracks.map(\.discNumber), discs)
     }
 
     private func item(

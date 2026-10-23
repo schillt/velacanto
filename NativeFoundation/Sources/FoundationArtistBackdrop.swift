@@ -68,17 +68,21 @@ struct FoundationArtistBackdrop: View {
         GeometryReader { geometry in
             ZStack {
                 tint
-                photo(size: geometry.size)
-                if !reduceTransparency {
-                    photo(size: geometry.size).blur(radius: 6, opaque: true)
-                        .mask { ramp(from: profile.start, to: profile.blurEnd) }
-                    photo(size: geometry.size).blur(radius: 18, opaque: true)
-                        .mask {
-                            ramp(
-                                from: profile.start + (profile.blurEnd - profile.start) * 0.35,
-                                to: profile.frostEnd)
-                        }
-                }
+                #if os(macOS)
+                    macArtwork(size: geometry.size)
+                #else
+                    photo(size: geometry.size)
+                    if !reduceTransparency {
+                        photo(size: geometry.size).blur(radius: 6, opaque: true)
+                            .mask { ramp(from: profile.start, to: profile.blurEnd) }
+                        photo(size: geometry.size).blur(radius: 18, opaque: true)
+                            .mask {
+                                ramp(
+                                    from: profile.start + (profile.blurEnd - profile.start) * 0.35,
+                                    to: profile.frostEnd)
+                            }
+                    }
+                #endif
                 Group {
                     if reduceTransparency {
                         tint
@@ -115,6 +119,41 @@ struct FoundationArtistBackdrop: View {
         .accessibilityHidden(true)
         .allowsHitTesting(false)
     }
+
+    #if os(macOS)
+        private func macArtwork(size: CGSize) -> some View {
+            ZStack {
+                if let image {
+                    ZStack {
+                        let photo = Image(decorative: image, scale: 1).resizable().scaledToFill()
+                            .frame(width: size.width, height: size.height).clipped()
+                        photo
+                        if !reduceTransparency {
+                            photo.blur(radius: 6, opaque: true)
+                                .mask { ramp(from: profile.start, to: profile.blurEnd) }
+                            photo.blur(radius: 18, opaque: true)
+                                .mask {
+                                    ramp(
+                                        from: profile.start
+                                            + (profile.blurEnd - profile.start) * 0.35,
+                                        to: profile.frostEnd)
+                                }
+                        }
+                    }
+                    .frame(width: size.width, height: size.height)
+                    // One opacity transition over the combined photo layers avoids
+                    // unequal fades through their different vertical feather masks.
+                    .compositingGroup()
+                    .id(ObjectIdentifier(image))
+                    .transition(.opacity)
+                }
+            }
+            .frame(width: size.width, height: size.height).clipped()
+            .animation(
+                reduceMotion || image == nil ? nil : .easeOut(duration: 0.3),
+                value: image.map(ObjectIdentifier.init))
+        }
+    #endif
 
     private func photo(size: CGSize) -> some View {
         ZStack {

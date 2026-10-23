@@ -66,6 +66,188 @@ final class FoundationDownloadsTests: XCTestCase {
         }
     }
 
+    func testDownloadQualityPreferenceDefaultsPersistsAndRejectsUnknownValues() throws {
+        let name = "DownloadQuality-" + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
+        defer { defaults.removePersistentDomain(forName: name) }
+        let preferences = FoundationPlaybackPreferences(defaults: defaults)
+        XCTAssertEqual(preferences.downloadQuality, .original)
+        for quality in FoundationDownloadQuality.allCases {
+            preferences.setDownloadQuality(quality)
+            XCTAssertEqual(
+                FoundationPlaybackPreferences(defaults: defaults).downloadQuality, quality)
+        }
+        defaults.set("future-value", forKey: FoundationPlaybackPreferences.downloadQualityKey)
+        preferences.refresh()
+        XCTAssertEqual(preferences.downloadQuality, .original)
+        XCTAssertTrue(preferences.allowsCellularStreaming)
+    }
+
+    func testConvertedOwnerSnapshotsQualityAndPublishesActualRenditionWithoutReplacingReadyFile()
+        async throws
+    {
+        let root = try root()
+        let track = item("converted")
+        let library = DownloadsLibrary(tracks: [track])
+        var quality = FoundationDownloadQuality.aac128
+        let manager = FoundationDownloads(
+            scope: "converted", library: library, root: root,
+            transfer: { _, _, _, _ in XCTFail("AAC intent must not use Original transport") },
+            monitorConnectivity: false,
+            convertedTransfer: Self.syntheticConvertedTransfer,
+            requestedQuality: { quality })
+        manager.download(track)
+        quality = .aac320  // An existing owner keeps the original intent, even before starting.
+        XCTAssertEqual(manager.owners.first?.requestedQuality, .aac128)
+        manager.updateConnectivity(isAllowed: true)
+        try await waitUntil { manager.isReady(track) }
+        let directory = FoundationDownloadStorage.directory(scope: "converted", root: root)
+        let manifest = try FoundationDownloadStorage.load(directory: directory)
+        let file = try XCTUnwrap(manifest.files[track.id])
+        XCTAssertEqual(manifest.owners.first?.requestedQuality, .aac128)
+        XCTAssertEqual(file.convertedRendition?.codec, "aac")
+        XCTAssertEqual(file.convertedRendition?.duration, 1)
+        XCTAssertEqual(
+            file.digest,
+            try FoundationDownloadStorage.digest(
+                directory.appendingPathComponent(file.name)))
+        let requests = await library.requestedQualities
+        XCTAssertEqual(requests, [.aac128])
+        manager.download(track)
+        try await waitUntil { manager.owners.first?.state == .ready }
+        let reused = try FoundationDownloadStorage.load(directory: directory)
+        XCTAssertEqual(reused.files[track.id]?.name, file.name)
+        let afterReuse = await library.requestedQualities
+        XCTAssertEqual(afterReuse, [.aac128])
+        _ = await manager.clearAccount()
+    }
+
+    func testCancelledConvertedOwnerRetainsQualityAcrossRetry() async throws {
+        let track = item("retry-converted")
+        let library = DownloadsLibrary(tracks: [track])
+        let gate = DownloadGate()
+        await library.setConversionGate(gate)
+        var quality = FoundationDownloadQuality.aac192
+        let manager = FoundationDownloads(
+            scope: "retry-converted", library: library, root: try root(),
+            monitorConnectivity: false, convertedTransfer: Self.syntheticConvertedTransfer,
+            requestedQuality: { quality })
+        manager.updateConnectivity(isAllowed: true)
+        manager.download(track)
+        try await waitUntilAsync { await gate.started }
+        manager.cancel(ownerID: "track:" + track.id)
+        quality = .aac320
+        await gate.resume()
+        // A subsequent retry retains the cancelled owner's choice. The old proposal
+        // cannot publish because its cancelled worker must pass ownership checks.
+        manager.retry(ownerID: "track:" + track.id)
+        try await waitUntil { manager.isReady(track) }
+        XCTAssertEqual(manager.owners.first?.requestedQuality, .aac192)
+        let qualities = await library.requestedQualities
+        XCTAssertTrue(qualities.allSatisfy { $0 == .aac192 })
+        _ = await manager.clearAccount()
+    }
+
+    func testRetiredAccountRejectsLateConvertedCompletionAndRemovesStagedBytes() async throws {
+        let root = try root()
+        let track = item("late-converted")
+        let gate = DownloadGate()
+        let manager = FoundationDownloads(
+            scope: "late-converted", library: DownloadsLibrary(tracks: [track]), root: root,
+            monitorConnectivity: false,
+            convertedTransfer: { proposal, target, cellular, progress in
+                await gate.wait()  // Deliberately ignores cancellation to emulate a late result.
+                return try await Self.syntheticConvertedTransfer(
+                    proposal, target, cellular, progress)
+            }, requestedQuality: { .aac128 })
+        manager.updateConnectivity(isAllowed: true)
+        manager.download(track)
+        try await waitUntilAsync { await gate.started }
+        let cleanup = Task { await manager.clearAccount() }
+        for _ in 0..<10 { await Task.yield() }
+        await gate.resume()
+        let removed = await cleanup.value
+        XCTAssertTrue(removed)
+        XCTAssertFalse(manager.isReady(track))
+        XCTAssertTrue(manager.owners.isEmpty)
+        let directory = FoundationDownloadStorage.directory(scope: "late-converted", root: root)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
+    }
+
+    func testFailedConvertedCleanupDoesNotPublishOrLeavePartialFile() async throws {
+        let root = try root()
+        let track = item("failed-converted")
+        let manager = FoundationDownloads(
+            scope: "failed-converted", library: DownloadsLibrary(tracks: [track]), root: root,
+            monitorConnectivity: false,
+            convertedTransfer: { _, target, _, _ in
+                try Data("unpublished bytes".utf8).write(to: target)
+                throw FoundationDownloadError.conversionCleanup
+            }, requestedQuality: { .aac128 })
+        manager.updateConnectivity(isAllowed: true)
+        manager.download(track)
+        try await waitUntil { manager.owners.first?.state == .failed }
+        XCTAssertFalse(manager.isReady(track))
+        let directory = FoundationDownloadStorage.directory(scope: "failed-converted", root: root)
+        let saved = try FoundationDownloadStorage.load(directory: directory)
+        XCTAssertTrue(saved.files.isEmpty)
+        let remaining = try FileManager.default.contentsOfDirectory(
+            at: directory, includingPropertiesForKeys: nil)
+        XCTAssertFalse(remaining.contains { $0.lastPathComponent.hasPrefix("stage-") })
+        XCTAssertEqual(saved.owners.first?.requestedQuality, .aac128)
+        _ = await manager.clearAccount()
+    }
+
+    private nonisolated static var syntheticConvertedTransfer: FoundationDownloads.ConvertedTransfer
+    {
+        { _, target, _, progress in
+            let data = Data("inspected synthetic AAC".utf8)
+            try data.write(to: target)
+            progress(Int64(data.count), nil)
+            return FoundationVerifiedConvertedDownload(
+                bytes: Int64(data.count), digest: try FoundationDownloadStorage.digest(target),
+                rendition: .init(
+                    container: "m4a", codec: "aac", sampleRate: 48_000,
+                    channels: 2, duration: 1))
+        }
+    }
+
+    func testPersistedDownloadQualitySurvivesRetryAndReusesExistingVerifiedFile() async throws {
+        let root = try root()
+        let directory = FoundationDownloadStorage.directory(scope: "quality-fixture", root: root)
+        try FoundationDownloadStorage.prepare(directory)
+        let track = item("quality-track")
+        let fileURL = directory.appendingPathComponent("existing.m4a")
+        let original = Data("verified original fixture".utf8)
+        try original.write(to: fileURL)
+        let file = FoundationDownloadManifest.File(
+            name: "existing.m4a", bytes: Int64(original.count),
+            digest: try FoundationDownloadStorage.digest(fileURL))
+        var manifest = FoundationDownloadManifest()
+        manifest.owners = [
+            .init(
+                id: "track:quality-track", item: FoundationStoredDownloadItem(track),
+                tracks: [FoundationStoredDownloadItem(track)], paused: true, expanded: true,
+                requestedQuality: .aac128)
+        ]
+        manifest.files = [track.id: file]
+        try FoundationDownloadStorage.save(manifest, directory: directory)
+        let manager = FoundationDownloads(
+            scope: "quality-fixture", library: DownloadsLibrary(tracks: [track]), root: root,
+            transfer: { _, _, _, _ in XCTFail("Existing ready bytes must not be replaced") },
+            monitorConnectivity: false)
+        try await waitUntil { !manager.isLoading }
+        XCTAssertTrue(manager.isReady(track))
+        XCTAssertEqual(manager.owners.first?.requestedQuality, .aac128)
+        manager.download(track)  // Existing ownership is retry, not a new quality snapshot.
+        manager.setAllowsCellular(false)  // A normal manifest save must retain quality.
+        let saved = try FoundationDownloadStorage.load(directory: directory)
+        XCTAssertEqual(saved.owners.first?.requestedQuality, .aac128)
+        XCTAssertEqual(saved.files[track.id]?.name, "existing.m4a")
+        XCTAssertEqual(try Data(contentsOf: fileURL), original)
+        manager.invalidate()
+    }
+
     func testTrackDownloadDiscoversRelatedCollectionsAcrossColdOfflineRelaunch() async throws {
         var first = item("first")
         first.album = .init(id: "album", title: "Synthetic album")
@@ -1104,6 +1286,48 @@ final class FoundationDownloadsTests: XCTestCase {
         _ = await manager.clearAccount()
     }
 
+    func testAutoStreamingDoesNotSampleQualityOrNetworkForRetainedLocalPlayback() async throws {
+        let track = item("track")
+        let directory = try root()
+        let original = FoundationDownloads(
+            scope: "fixture", library: DownloadsLibrary(tracks: [track]), root: directory,
+            transfer: transfer, monitorConnectivity: false)
+        original.updateConnectivity(isAllowed: true)
+        original.download(track)
+        try await waitUntil { original.isReady(track) }
+        original.invalidate()
+        let remote = FoundationJellyfinLibrary(
+            session: FoundationSession(
+                serverURL: URL(string: "https://example.invalid/")!, accessToken: "synthetic-token",
+                userID: "00000000000000000000000000000002",
+                deviceID: "00000000-0000-0000-0000-000000000003"),
+            streamingQuality: {
+                XCTFail("Retained local audio must not sample Auto streaming quality")
+                return .auto
+            },
+            load: { _ in
+                XCTFail("Retained local audio must not negotiate a remote stream")
+                throw FoundationLibraryError.unavailable
+            })
+        let restored = FoundationDownloads(
+            scope: "fixture", library: remote, root: directory,
+            transfer: { _, _, _, _ in
+                XCTFail("Streaming quality must not replace an existing download")
+                throw FoundationLibraryError.unavailable
+            }, monitorConnectivity: false)
+        try await waitUntil { !restored.isLoading }
+        restored.updateConnectivity(isAllowed: false)
+        for allowsFallback in [false, true] {
+            let resource = try await restored.playbackResource(
+                for: track, allowsRemoteFallback: allowsFallback)
+            XCTAssertTrue(resource.url.isFileURL)
+            XCTAssertEqual(try Data(contentsOf: resource.url), Data("synthetic audio".utf8))
+            await resource.release()
+        }
+        let cleared = await restored.clearAccount()
+        XCTAssertTrue(cleared)
+    }
+
     func testLocalOnlyResolverRevalidatesMissingFileWithoutStartingRemoteRequest() async throws {
         let track = item("track")
         let library = DownloadsLibrary(tracks: [track])
@@ -1781,6 +2005,27 @@ final class FoundationDownloadsTests: XCTestCase {
 }
 
 private actor DownloadsLibrary: FoundationLibrary {
+    private var conversionGate: DownloadGate?
+    private(set) var requestedQualities: [FoundationDownloadQuality] = []
+    func setConversionGate(_ gate: DownloadGate) { conversionGate = gate }
+    func downloadPreparation(for item: FoundationItem, quality: FoundationDownloadQuality)
+        async throws -> FoundationDownloadPreparation
+    {
+        if quality == .original { return .original(try await downloadSource(for: item)) }
+        requestedQualities.append(quality)
+        if let gate = conversionGate {
+            conversionGate = nil
+            await gate.wait()
+        }
+        let plan = try FoundationDownloadConversionPlan(
+            quality: quality, duration: 1, sourceID: "fixture-source", audioStreamIndex: 0)
+        let base = URL(string: "https://example.invalid")!
+        let request = URLRequest(url: base)
+        return .converted(
+            .init(
+                request: request, cleanupRequest: request, plan: plan,
+                base: base, itemID: item.id, deviceID: "fixture-device"))
+    }
     private var tracks: [FoundationItem]
     private var fails = false
     private var playlistPageSize: Int?

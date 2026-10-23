@@ -365,7 +365,7 @@ final class FoundationLibraryActions: ObservableObject {
 
     func play(
         _ item: FoundationItem, shuffled: Bool, library: any FoundationLibrary,
-        player: FoundationPlayer, owner: UUID? = nil
+        player: FoundationPlayer, owner: UUID? = nil, shouldCommit: (() -> Bool)? = nil
     ) {
         guard active, !isQueueLoading else { return }
         playbackPreparation = player.sessionChanged.sink { [weak self] in
@@ -373,9 +373,12 @@ final class FoundationLibraryActions: ObservableObject {
         }
         retryQueueAdditionAction = { [weak self, weak player] in
             guard let player else { return }
-            self?.play(item, shuffled: shuffled, library: library, player: player, owner: owner)
+            self?.play(
+                item, shuffled: shuffled, library: library, player: player, owner: owner,
+                shouldCommit: shouldCommit)
         }
         loadCollection(item, library: library, operation: .playback, owner: owner) { items in
+            guard shouldCommit?() ?? true else { return }
             player.setQueue(shuffled ? items.shuffled() : items, selectedIndex: 0)
         }
     }

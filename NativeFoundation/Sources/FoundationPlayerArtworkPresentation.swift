@@ -1186,6 +1186,7 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
         let history: [FoundationQueueEntry]
         let current: FoundationQueueEntry?
         let upcoming: [FoundationQueueEntry]
+        let dynamicTypeSize: DynamicTypeSize
         let move: (UUID, UUID?) -> Void
         let row: (FoundationQueueEntry, Bool) -> Row
 
@@ -1210,13 +1211,15 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
                 listSection.contentInsets.trailing = 16
                 return listSection
             }
-            let view = UICollectionView(frame: .zero, collectionViewLayout: layout)
+            let view = QueueCollectionView(frame: .zero, collectionViewLayout: layout)
+            view.didLayout = { [weak coordinator] in coordinator?.anchorOnOpenIfNeeded() }
             view.backgroundColor = .clear
             view.overrideUserInterfaceStyle = .dark
             view.alwaysBounceVertical = true
             view.alwaysBounceHorizontal = false
             view.isDirectionalLockEnabled = true
-            view.contentInset = UIEdgeInsets(top: 0, left: 0, bottom: 12, right: 0)
+            // Match the queue mask's top fade, keeping the opening heading fully readable.
+            view.contentInset = UIEdgeInsets(top: 24, left: 0, bottom: 12, right: 0)
             view.register(UICollectionViewListCell.self, forCellWithReuseIdentifier: "queue-row")
             view.register(
                 QueueHeader.self,
@@ -1236,8 +1239,11 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
         func updateUIView(_ view: UICollectionView, context: Context) {
             let coordinator = context.coordinator
             let incoming = [history, current.map { [$0] } ?? [], upcoming]
+            let needsReload =
+                incoming != coordinator.sections
+                || dynamicTypeSize != coordinator.parent.dynamicTypeSize
             coordinator.parent = self
-            guard incoming != coordinator.sections else { return }
+            guard needsReload else { return }
             // A playback advance, removal, or shuffle invalidates this drag's boundaries.
             coordinator.cancelMovement()
             coordinator.sections = incoming
@@ -1257,6 +1263,8 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
             var parent: FoundationQueueReorderList
             var sections: [[FoundationQueueEntry]]
             weak var collectionView: UICollectionView?
+            private var needsOpeningAnchor = true
+            private let openingEntryID: UUID?
             private var movingID: UUID?
             private var dragMembership: [[UUID]]?
             private var fingerOffset = CGPoint.zero
@@ -1264,7 +1272,29 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
 
             init(parent: FoundationQueueReorderList) {
                 self.parent = parent
+                openingEntryID = parent.current?.id
                 sections = [parent.history, parent.current.map { [$0] } ?? [], parent.upcoming]
+            }
+
+            func anchorOnOpenIfNeeded() {
+                guard needsOpeningAnchor, let collectionView,
+                    collectionView.bounds.width > 0, collectionView.bounds.height > 0
+                else { return }
+                // Capture the occurrence at creation; playback updates never request another jump.
+                let section =
+                    sections[1].first?.id == openingEntryID && openingEntryID != nil ? 1 : 2
+                guard
+                    let heading = collectionView.collectionViewLayout
+                        .layoutAttributesForSupplementaryView(
+                            ofKind: UICollectionView.elementKindSectionHeader,
+                            at: IndexPath(item: 0, section: section))
+                else { return }
+                needsOpeningAnchor = false
+                let top = heading.frame.minY - collectionView.adjustedContentInset.top
+                // Provide only the missing trailing extent when the remaining queue is short.
+                collectionView.contentInset.bottom = max(
+                    12, top + collectionView.bounds.height - collectionView.contentSize.height)
+                collectionView.setContentOffset(CGPoint(x: 0, y: top), animated: false)
             }
 
             func numberOfSections(in collectionView: UICollectionView) -> Int { 3 }
@@ -1404,6 +1434,15 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
                     movingID = nil
                     dragMembership = nil
                 }
+            }
+        }
+
+        final class QueueCollectionView: UICollectionView {
+            var didLayout: (() -> Void)?
+
+            override func layoutSubviews() {
+                super.layoutSubviews()
+                didLayout?()
             }
         }
 

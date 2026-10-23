@@ -77,6 +77,10 @@
         private var searchTask: Task<Void, Never>?
         private var searchResponse: SearchResponse?
         private var searchTemplate: CPSearchTemplate?
+        private var rootSearchTemplate: CPListTemplate?
+        private var searchOptionsTemplate: CPListTemplate?
+        private var searchOrigin: CPTemplate?
+        private var lastContentTab: CPTemplate?
         private var searchContext: Context?
         private var searchQueryID = UUID()
         private var searchQuery = ""
@@ -118,6 +122,21 @@
             FoundationAppRuntime.model.objectWillChange.sink { [weak self] in
                 self?.scheduleReconciliation()
             }.store(in: &subscriptions)
+            NotificationCenter.default.publisher(for: FoundationSiriPlayback.didRequestPlayback)
+                .sink { [weak self] notification in
+                    guard let self, let context = self.context, self.isCurrent(context),
+                        let player = notification.object as? FoundationPlayer,
+                        player === context.player
+                    else { return }
+                    self.showNowPlaying(context)
+                }.store(in: &subscriptions)
+            NotificationCenter.default.publisher(for: FoundationSiriAuthorization.didChange)
+                .sink { [weak self] _ in
+                    guard let self, let context = self.context, self.isCurrent(context) else {
+                        return
+                    }
+                    self.reprojectCaches(context)
+                }.store(in: &subscriptions)
             prepare()
         }
 
@@ -169,6 +188,10 @@
             searchTemplate?.delegate = nil
             searchTemplate = nil
             searchContext = nil
+            rootSearchTemplate = nil
+            searchOptionsTemplate = nil
+            searchOrigin = nil
+            lastContentTab = nil
             searchQueryID = UUID()
             searchQuery = ""
             searchSnapshot = nil
@@ -312,18 +335,11 @@
             let library = makeList("Library", context: context)
             library.tabTitle = "Library"
             library.tabImage = symbol("music.note.house.fill")
-            let search = makeList("Search", context: context)
+            let search = makeList("Search", context: context, includesPins: false)
             search.tabSystemItem = .search
-            let searchRow = CPListItem(
-                text: "Search Music", detailText: "Find music in your library",
-                image: navigationSymbol("magnifyingglass"))
-            searchRow.handler = { [weak self, weak search] _, completion in
-                defer { completion() }
-                guard let self, let search, self.isCurrent(context), self.isRetained(search)
-                else { return }
-                self.openSearch(context)
-            }
-            setBodySections([CPListSection(items: [searchRow])], for: search)
+            rootSearchTemplate = search
+            configureSearchOptions(search, context: context)
+            lastContentTab = library
             let templates = Array(
                 [home, new, library, search].prefix(CPTabBarTemplate.maximumTabCount))
             let tabs = CPTabBarTemplate(templates: templates)
@@ -459,7 +475,9 @@
             ]
             let elements = routes.map {
                 CPListImageRowItemCondensedElement(
-                    image: navigationSymbol($0.1), imageShape: .roundedRectangle, title: $0.0,
+                    image: Self.libraryCategorySymbol(
+                        $0.1, traits: interfaceController?.carTraitCollection ?? .current),
+                    imageShape: .roundedRectangle, title: $0.0,
                     subtitle: nil, accessorySymbolName: nil)
             }
             let row = CPListImageRowItem(
@@ -562,49 +580,234 @@
             template.trailingNavigationBarButtons = buttons
         }
 
-        private func openSearch(_ context: Context) {
-            guard isCurrent(context) else { return }
-            if let existing = searchTemplate, isRetained(existing),
-                let controller = interfaceController
+        /// Native controls remain usable without a provider lookup, including at zero list capacity.
+        static func configureSearchOptions(
+            _ template: CPListTemplate, keyboardLimited: Bool, siriAuthorized: Bool,
+            typeSearch: @escaping () -> Void, close: @escaping () -> Void
+        ) {
+            template.assistantCellConfiguration =
+                siriAuthorized
+                ? CPAssistantCellConfiguration(
+                    position: .top, visibility: .always, assistantAction: .playMedia)
+                : nil
+            let closeButton: CPBarButton
+            if let image = UIImage(systemName: "chevron.backward") {
+                closeButton = CPBarButton(image: image) { _ in close() }
+            } else {
+                closeButton = CPBarButton(title: "Back") { _ in close() }
+            }
+            closeButton.accessibilityLabel = "Back"
+            template.leadingNavigationBarButtons = []
+            template.backButton = closeButton
+            template.trailingNavigationBarButtons = []
+            let row = CPListItem(
+                text: "Type to Search", detailText: "Find music in your library",
+                image: UIImage(systemName: "keyboard"))
+            row.handler = { _, completion in
+                defer { completion() }
+                typeSearch()
+            }
+            var rows = keyboardLimited ? [] : [row]
+            if !siriAuthorized {
+                let guidance = CPListItem(
+                    text: "Enable Siri on iPhone", detailText: "Open VelaCanto Profile & Settings.")
+                guidance.isEnabled = false
+                rows.append(guidance)
+            }
+            template.updateSections(
+                CPListTemplate.maximumItemCount == 0 || CPListTemplate.maximumSectionCount == 0
+                    ? []
+                    : [CPListSection(items: Array(rows.prefix(CPListTemplate.maximumItemCount)))])
+            template.emptyViewTitleVariants = [
+                keyboardLimited ? "Use Siri to Find Music" : "Search Music"
+            ]
+            template.emptyViewSubtitleVariants = [
+                keyboardLimited
+                    ? "Typing is unavailable on this display right now."
+                    : "Ask Siri to play music, or type a search."
+            ]
+        }
+
+        /// Identity is essential: returning from search never rebuilds or resets a browse route.
+        static func searchReturnTarget(
+            origin: CPTemplate?, lastContentTab: CPTemplate?,
+            stack: [CPTemplate], tabs: [CPTemplate]
+        ) -> CPTemplate? {
+            if let origin,
+                stack.contains(where: { $0 === origin })
+                    || tabs.contains(where: { $0 === origin })
             {
-                guard !isNavigating else { return }
-                isNavigating = true
-                controller.pop(to: existing, animated: true) { [weak self] success, _ in
-                    guard let self, self.isCurrent(context) else { return }
-                    self.isNavigating = false
-                    if success { self.pruneRetiredTemplates() }
-                }
+                return origin
+            }
+            if let lastContentTab, tabs.contains(where: { $0 === lastContentTab }) {
+                return lastContentTab
+            }
+            return tabs.first ?? stack.first
+        }
+
+        private var keyboardLimited: Bool {
+            sessionConfiguration?.limitedUserInterfaces.contains(.keyboard) ?? true
+        }
+
+        private func configureSearchOptions(_ template: CPListTemplate, context: Context) {
+            Self.configureSearchOptions(
+                template, keyboardLimited: keyboardLimited,
+                siriAuthorized: FoundationSiriAuthorization.isAuthorized,
+                typeSearch: { [weak self, weak template] in
+                    guard let self, let template, self.isCurrent(context),
+                        self.visibleList === template, !self.keyboardLimited
+                    else { return }
+                    self.searchOptionsTemplate = template
+                    if template === self.rootSearchTemplate {
+                        self.searchOrigin = self.lastContentTab
+                    }
+                    self.openKeyboardSearch(context)
+                },
+                close: { [weak self, weak template] in
+                    guard let self, let template, self.isCurrent(context),
+                        self.visibleList === template
+                    else { return }
+                    if template === self.rootSearchTemplate {
+                        self.searchOrigin = self.lastContentTab
+                    }
+                    self.closeSearch(context)
+                })
+        }
+
+        private func openSearch(_ context: Context) {
+            guard isCurrent(context), let controller = interfaceController, !isNavigating else {
                 return
             }
-            if let controller = interfaceController, controller.templates.count > 1 {
-                guard !isNavigating else { return }
-                isNavigating = true
-                controller.popToRootTemplate(animated: false) { [weak self] success, _ in
-                    guard let self, self.isCurrent(context) else { return }
-                    self.isNavigating = false
-                    if success {
-                        self.pruneRetiredTemplates()
-                        self.openSearch(context)
-                    } else {
-                        self.showMessage("The search screen is unavailable.")
-                    }
+            if let existing = searchOptionsTemplate, isRetained(existing),
+                existing !== rootSearchTemplate
+                    || (controller.rootTemplate as? CPTabBarTemplate)?.selectedTemplate === existing
+            {
+                if visibleList === existing { return }
+                returnFromSearch(to: existing, context: context)
+                return
+            }
+            let template = makeList("Search", context: context, includesPins: false)
+            configureSearchOptions(template, context: context)
+            let origin = controller.topTemplate
+            push(template, context: context) { [weak self] success in
+                guard let self, success, self.isCurrent(context) else { return }
+                self.searchOptionsTemplate = template
+                self.searchOrigin = origin
+            }
+        }
+
+        private func closeSearch(_ context: Context) {
+            guard isCurrent(context), let controller = interfaceController else { return }
+            let tabs = (controller.rootTemplate as? CPTabBarTemplate)?.templates ?? []
+            guard
+                let target = Self.searchReturnTarget(
+                    origin: searchOrigin, lastContentTab: lastContentTab,
+                    stack: controller.templates, tabs: tabs)
+            else { return }
+            returnFromSearch(to: target, context: context)
+        }
+
+        enum SearchReturnStep: Equatable { case done, selectTab, popToRoot, popOne, unavailable }
+
+        /// A tab-bar container is not a legal pop(to:) destination. Use the native
+        /// root operation for tabs, and single-level pops for retained browse pages.
+        static func searchReturnStep(
+            target: CPTemplate, root: CPTemplate, top: CPTemplate?,
+            stack: [CPTemplate], tabs: [CPTemplate]
+        ) -> SearchReturnStep {
+            if tabs.contains(where: { $0 === target }) {
+                return top === root || tabs.contains(where: { $0 === top }) || stack.count <= 1
+                    ? .selectTab : .popToRoot
+            }
+            if top === target { return .done }
+            guard stack.contains(where: { $0 === target }), stack.count > 1 else {
+                return .unavailable
+            }
+            return .popOne
+        }
+
+        private func returnFromSearch(to target: CPTemplate, context: Context) {
+            guard isCurrent(context), let controller = interfaceController, !isNavigating else {
+                return
+            }
+            isNavigating = true
+            returnFromSearch(
+                to: target, context: context, controller: controller,
+                remainingPops: controller.templates.count)
+        }
+
+        private func returnFromSearch(
+            to target: CPTemplate, context: Context, controller: CPInterfaceController,
+            remainingPops: Int
+        ) {
+            guard isCurrent(context), interfaceController === controller else { return }
+            let tabs = controller.rootTemplate as? CPTabBarTemplate
+            let step = Self.searchReturnStep(
+                target: target, root: controller.rootTemplate, top: controller.topTemplate,
+                stack: controller.templates, tabs: tabs?.templates ?? [])
+            switch step {
+            case .done, .selectTab:
+                if step == .selectTab { tabs?.select(target) }
+                isNavigating = false
+                pruneRetiredTemplates()
+            case .unavailable:
+                isNavigating = false
+                showMessage("The previous screen is unavailable.")
+            case .popToRoot, .popOne:
+                guard remainingPops > 0 else {
+                    isNavigating = false
+                    return
                 }
+                let completion: (Bool, Error?) -> Void = { [weak self] success, _ in
+                    guard let self, self.isCurrent(context),
+                        self.interfaceController === controller
+                    else { return }
+                    guard success else {
+                        self.isNavigating = false
+                        self.showMessage("The previous screen is unavailable.")
+                        return
+                    }
+                    self.returnFromSearch(
+                        to: target, context: context, controller: controller,
+                        remainingPops: remainingPops - 1)
+                }
+                if step == .popToRoot {
+                    controller.popToRootTemplate(animated: true, completion: completion)
+                } else {
+                    controller.popTemplate(animated: true, completion: completion)
+                }
+            }
+        }
+
+        private func openKeyboardSearch(_ context: Context) {
+            guard isCurrent(context), !keyboardLimited else { return }
+            if let template = searchTemplate, isRetained(template) {
+                returnFromSearch(to: template, context: context)
                 return
             }
             let template = CPSearchTemplate()
             template.delegate = self
+            // Set ownership before the push: CarPlay can ask for initial rows during presentation.
+            searchTemplate = template
+            searchContext = context
             push(template, context: context) { [weak self] success in
-                guard let self, success, self.isCurrent(context) else {
+                guard let self, self.isCurrent(context) else {
                     template.delegate = nil
                     return
                 }
-                self.searchTemplate = template
-                self.searchContext = context
-                self.searchQueryID = UUID()
-                self.searchQuery = ""
-                self.searchSnapshot = nil
-                self.requestedSearchResultsID = nil
+                if !success, self.searchTemplate === template { self.clearSearchOwnership() }
+                if success, self.keyboardLimited, let options = self.searchOptionsTemplate,
+                    self.isRetained(options)
+                {
+                    self.returnFromSearch(to: options, context: context)
+                }
             }
+        }
+
+        static func searchRows(_ items: [CPListItem], budget: Int) -> [CPListItem] {
+            guard budget > 0 else { return [] }
+            // CPSearchTemplate owns its native Cancel/X and search-field layout.
+            return Array(items.prefix(budget))
         }
 
         func searchTemplate(
@@ -627,7 +830,15 @@
             artworkTasks[searchID]?.cancel()
             artworkTasks[searchID] = nil
             rowArtwork[searchID] = []
-            let response = SearchResponse(completionHandler)
+            let response = SearchResponse { [weak self] items in
+                guard let self, self.searchTemplate === searchTemplate,
+                    self.isCurrent(context)
+                else {
+                    completionHandler([])
+                    return
+                }
+                completionHandler(Self.searchRows(items, budget: self.nativeItemBudget))
+            }
             searchResponse = response
             let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
             searchQuery = query
@@ -701,8 +912,9 @@
         ) {
             defer { completionHandler() }
             guard self.searchTemplate === searchTemplate, let context = searchContext,
-                isCurrent(context), let media = item.userInfo as? FoundationItem
+                isCurrent(context), interfaceController?.topTemplate === searchTemplate
             else { return }
+            guard let media = item.userInfo as? FoundationItem else { return }
             open(media, context: context)
         }
 
@@ -728,6 +940,14 @@
             else { return }
             requestedSearchResultsID = nil
             let template = makeList("Search Results", context: context)
+            template.backButton =
+                CPBarButton(image: symbol("chevron.backward")) { [weak self, weak template] _ in
+                    guard let self, let template, self.isCurrent(context),
+                        self.visibleList === template
+                    else { return }
+                    self.closeSearch(context)
+                }
+            template.backButton?.accessibilityLabel = "Back"
             renderSearchResults(
                 snapshot, offset: 0, in: template, context: context, queryID: queryID)
             push(template, context: context)
@@ -1549,6 +1769,13 @@
                 !isReprojecting
             else { return }
             reprojectCaches(context)
+            if limitedUserInterfaces.contains(.keyboard), let searchTemplate,
+                interfaceController?.topTemplate === searchTemplate, let searchOptionsTemplate,
+                isRetained(searchOptionsTemplate)
+            {
+                // A vehicle restriction is authoritative; never infer motion or start Siri automatically.
+                returnFromSearch(to: searchOptionsTemplate, context: context)
+            }
         }
 
         private func reprojectCaches(_ context: Context) {
@@ -1563,6 +1790,14 @@
                 applySections(template)
             }
             updateQueue(context)
+            if let rootSearchTemplate {
+                configureSearchOptions(rootSearchTemplate, context: context)
+            }
+            if let searchOptionsTemplate, searchOptionsTemplate !== rootSearchTemplate,
+                isRetained(searchOptionsTemplate)
+            {
+                configureSearchOptions(searchOptionsTemplate, context: context)
+            }
             isReprojecting = false
             if let visible = visibleList {
                 // This notification changes presentation only; never start a provider artwork read.
@@ -1576,6 +1811,12 @@
             guard let context, isCurrent(context),
                 interfaceController?.rootTemplate === tabBarTemplate
             else { return }
+            if selectedTemplate !== rootSearchTemplate {
+                lastContentTab = selectedTemplate
+            } else {
+                searchOptionsTemplate = rootSearchTemplate
+                searchOrigin = lastContentTab
+            }
             for (id, task) in artworkTasks where id != ObjectIdentifier(selectedTemplate) {
                 task.cancel()
                 artworkTasks[id] = nil
@@ -1609,6 +1850,10 @@
             sectionOffsets[id] = nil
             lists[id] = nil
             if queueTemplate === template { queueTemplate = nil }
+            if searchOptionsTemplate === template {
+                searchOptionsTemplate = nil
+                searchOrigin = nil
+            }
         }
 
         private func pruneRetiredTemplates() {
@@ -1640,6 +1885,12 @@
 
         func templateDidAppear(_ template: CPTemplate, animated: Bool) {
             guard let context, isCurrent(context) else { return }
+            if template === searchTemplate, keyboardLimited, let searchOptionsTemplate,
+                isRetained(searchOptionsTemplate)
+            {
+                returnFromSearch(to: searchOptionsTemplate, context: context)
+                return
+            }
             if let list = template as? CPListTemplate {
                 startArtwork(list, context: context)
             } else if let list = visibleList {
@@ -1711,6 +1962,49 @@
 
         private func symbol(_ name: String) -> UIImage {
             UIImage(systemName: name) ?? UIImage()
+        }
+
+        /// Condensed Library tiles resize artwork to the element's expected canvas.
+        /// Render the symbol at that size rather than stretching its intrinsic raster.
+        static func libraryCategorySymbol(_ name: String, traits: UITraitCollection) -> UIImage {
+            let size = CPListImageRowItemCondensedElement.maximumImageSize
+            let configuration = UIImage.SymbolConfiguration(
+                pointSize: min(size.width, size.height) * 0.6, weight: .regular)
+            let source = UIImage(systemName: name, withConfiguration: configuration) ?? UIImage()
+            return insetNavigationImage(source, size: size, traits: traits)
+        }
+
+        static func insetNavigationImage(
+            _ source: UIImage, size: CGSize, traits: UITraitCollection
+        ) -> UIImage {
+            guard size.width > 0, size.height > 0,
+                source.size.width > 0, source.size.height > 0
+            else { return source }
+            let scale = max(1, traits.displayScale)
+            let format = UIGraphicsImageRendererFormat()
+            format.scale = scale
+            let available = CGRect(origin: .zero, size: size).insetBy(
+                dx: size.width * 0.2, dy: size.height * 0.2)
+            let factor = min(
+                available.width / source.size.width, available.height / source.size.height)
+            let fitted = CGSize(
+                width: source.size.width * factor, height: source.size.height * factor)
+            let rect = CGRect(
+                x: (size.width - fitted.width) / 2, y: (size.height - fitted.height) / 2,
+                width: fitted.width, height: fitted.height)
+            let asset = UIImageAsset()
+            for style in [UIUserInterfaceStyle.light, .dark] {
+                let variantTraits = UITraitCollection { value in
+                    value.userInterfaceStyle = style
+                    value.displayScale = scale
+                }
+                let foreground = UIColor.label.resolvedColor(with: variantTraits)
+                let image = UIGraphicsImageRenderer(size: size, format: format).image { _ in
+                    source.withTintColor(foreground, renderingMode: .alwaysOriginal).draw(in: rect)
+                }
+                asset.register(image, with: variantTraits)
+            }
+            return asset.image(with: traits)
         }
 
         /// List/grid images are rendered as original artwork by CarPlay, so register

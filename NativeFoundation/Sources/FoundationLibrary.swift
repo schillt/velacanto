@@ -433,6 +433,8 @@ protocol FoundationLibrary: Sendable {
     func cachedArtworkResult(for item: FoundationItem, size: Int) async throws
         -> FoundationCurrentArtwork.Result?
     func downloadSource(for item: FoundationItem) async throws -> FoundationDownloadSource
+    func downloadPreparation(for item: FoundationItem, quality: FoundationDownloadQuality)
+        async throws -> FoundationDownloadPreparation
     var supportsPlaylistManagement: Bool { get }
     var supportsRepeatedPlaylistTracks: Bool { get }
     func playlistPermissions(id: String) async throws -> FoundationPlaylistPermissions
@@ -482,6 +484,7 @@ protocol FoundationLibrary: Sendable {
     func albums(genreID: String, startIndex: Int) async throws -> FoundationPage
     func setFavorite(for item: FoundationItem, isFavorite: Bool) async throws
     func playbackURL(for item: FoundationItem) async throws -> URL
+    func playbackResource(for item: FoundationItem) async throws -> FoundationPlaybackResource
     func artwork(for item: FoundationItem) async throws -> Data?
     func artwork(for item: FoundationItem, size: Int) async throws -> Data?
     func downloadArtwork(for item: FoundationItem, size: Int, allowsCellular: Bool) async throws
@@ -491,6 +494,10 @@ protocol FoundationLibrary: Sendable {
 }
 
 extension FoundationLibrary {
+    func playbackResource(for item: FoundationItem) async throws -> FoundationPlaybackResource {
+        FoundationPlaybackResource(url: try await playbackURL(for: item))
+    }
+
     func retryArtwork(for item: FoundationItem) async {}
     func invalidateItemDetails(for item: FoundationItem) async {}
     func reportPlayback(_ event: FoundationPlaybackReport) async throws {}
@@ -518,6 +525,12 @@ extension FoundationLibrary {
 
     func downloadSource(for item: FoundationItem) async throws -> FoundationDownloadSource {
         throw FoundationDownloadError.unsupported
+    }
+    func downloadPreparation(for item: FoundationItem, quality: FoundationDownloadQuality)
+        async throws -> FoundationDownloadPreparation
+    {
+        guard quality == .original else { throw FoundationDownloadError.unsupported }
+        return .original(try await downloadSource(for: item))
     }
     var supportsPlaylistManagement: Bool { false }
     var supportsRepeatedPlaylistTracks: Bool { false }
@@ -693,6 +706,13 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
     typealias Load = @Sendable (URLRequest) async throws -> (Data, URLResponse)
     let session: FoundationSession
     private let load: Load
+    private let streamingQuality: @Sendable () async -> FoundationStreamingQuality
+    private let hlsCleanup = FoundationHLSCleanup()
+    #if DEBUG
+        @TaskLocal static var hlsCleanupLoad: Load?
+        // Internal fixture seam only; persisted comparison preferences have no authority.
+        @TaskLocal static var hlsOriginalPreferred = true
+    #endif
     private let alphabetMemo = FoundationAlphabetCapabilityMemo()
     private let artistDetailMemo = FoundationArtistDetailMemo()
     let artworkCache: FoundationArtworkCache?
@@ -745,8 +765,23 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
         catalogPageCache: FoundationCatalogPageCache? = nil,
         networkAdmission: FoundationNetworkAdmission = FoundationNetworkAdmission()
     ) {
+        self.init(
+            session: session, streamingQuality: { .original }, load: load,
+            artworkCache: artworkCache, catalogPageCache: catalogPageCache,
+            networkAdmission: networkAdmission)
+    }
+
+    init(
+        session: FoundationSession,
+        streamingQuality: @escaping @Sendable () async -> FoundationStreamingQuality,
+        load: @escaping Load = nativeLoad,
+        artworkCache: FoundationArtworkCache? = nil,
+        catalogPageCache: FoundationCatalogPageCache? = nil,
+        networkAdmission: FoundationNetworkAdmission = FoundationNetworkAdmission()
+    ) {
         self.session = session
         self.load = load
+        self.streamingQuality = streamingQuality
         self.artworkCache = artworkCache
         self.networkAdmission = networkAdmission
         self.catalogPageCache = catalogPageCache
@@ -1534,6 +1569,82 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
             expectedBytes: Int64(size))
     }
 
+    func downloadPreparation(for item: FoundationItem, quality: FoundationDownloadQuality)
+        async throws -> FoundationDownloadPreparation
+    {
+        if quality == .original { return .original(try await downloadSource(for: item)) }
+        return .converted(try await convertedDownloadProposal(for: item, quality: quality))
+    }
+
+    /// Fresh authorization and source checks, before starting this transfer's conversion.
+    func convertedDownloadProposal(for item: FoundationItem, quality: FoundationDownloadQuality)
+        async throws -> FoundationDownloadConversionProposal
+    {
+        guard item.kind == .track, Self.validID(item.id), quality.aacBitrate != nil else {
+            throw FoundationDownloadError.unsupported
+        }
+        // Fresh account and item reads, not saved catalog or session policy snapshots.
+        // There is still a check-to-transfer revocation window: the progressive route
+        // does not atomically enforce the Download policy at its own request boundary.
+        let user = try await send(Paths.getUserByID(userID: session.userID))
+        try Task.checkCancellation()
+        guard user.id == session.userID, let policy = user.policy,
+            policy.isDisabled == false, policy.enableMediaPlayback == true,
+            policy.enableContentDownloading == true, policy.enableAudioPlaybackTranscoding == true
+        else { throw FoundationDownloadError.permission }
+        let metadata = try await send(Paths.getItem(itemID: item.id, userID: session.userID))
+        try Task.checkCancellation()
+        guard metadata.id == item.id, metadata.type == .audio, metadata.canDownload == true else {
+            throw FoundationDownloadError.permission
+        }
+        guard let sources = metadata.mediaSources, sources.count == 1, let source = sources.first,
+            source.protocol == .file, source.isRemote != true, source.isInfiniteStream != true,
+            source.requiresOpening != true, source.requiresClosing != true,
+            (source.requiredHTTPHeaders ?? [:]).isEmpty,
+            let sourceID = source.id,
+            let streams = source.mediaStreams ?? metadata.mediaStreams,
+            streams.filter({ $0.type == .audio }).count == 1,
+            let audio = streams.first(where: { $0.type == .audio }), let index = audio.index,
+            let ticks = source.runTimeTicks ?? metadata.runTimeTicks, ticks > 0
+        else { throw FoundationDownloadError.unsupported }
+        if let sourceTicks = source.runTimeTicks, let itemTicks = metadata.runTimeTicks,
+            abs(Double(sourceTicks) - Double(itemTicks)) > 10_000_000
+        {
+            throw FoundationDownloadError.unsupported
+        }
+        let plan = try FoundationDownloadConversionPlan(
+            quality: quality, duration: Double(ticks) / 10_000_000,
+            sourceID: sourceID, audioStreamIndex: index)
+        let query = try plan.queryItems(deviceID: session.deviceID).map { ($0.name, $0.value) }
+        let endpoint = Request<Data>(
+            path: "/Audio/\(item.id)/stream.m4a", method: "GET", query: query)
+        var request = URLRequest(url: try Self.url(endpoint, base: session.serverURL))
+        request.httpMethod = "GET"
+        guard
+            plan.accepts(
+                request, base: session.serverURL, itemID: item.id, deviceID: session.deviceID)
+        else { throw FoundationDownloadError.response }
+        let safe = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+        guard !session.accessToken.isEmpty,
+            session.accessToken.unicodeScalars.allSatisfy({ safe.contains($0) })
+        else { throw FoundationDownloadError.permission }
+        request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
+        request.setValue(
+            "MediaBrowser Client=\"Velacanto Native\", Device=\"Apple\", DeviceId=\"\(session.deviceID)\", Version=\"1\", Token=\"\(session.accessToken)\"",
+            forHTTPHeaderField: "Authorization")
+        var cleanupRequest = request
+        cleanupRequest.url = try Self.url(
+            Request<Data>(
+                path: "/Videos/ActiveEncodings", method: "DELETE",
+                query: [
+                    ("deviceId", session.deviceID), ("playSessionId", plan.sessionID.uuidString),
+                ]), base: session.serverURL)
+        cleanupRequest.httpMethod = "DELETE"
+        return FoundationDownloadConversionProposal(
+            request: request, cleanupRequest: cleanupRequest, plan: plan,
+            base: session.serverURL, itemID: item.id, deviceID: session.deviceID)
+    }
+
     func reportPlayback(_ event: FoundationPlaybackReport) async throws {
         try Task.checkCancellation()
         guard Self.validID(event.itemID), event.position.isFinite, event.position >= 0,
@@ -1548,12 +1659,18 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
             _ = try await responseData(
                 Paths.reportPlaybackStopped(
                     .init(
-                        itemID: event.itemID, playSessionID: event.occurrenceID.uuidString,
+                        itemID: event.itemID, mediaSourceID: event.source?.mediaSourceID,
+                        playSessionID: event.source?.serverSessionID
+                            ?? event.occurrenceID.uuidString,
                         positionTicks: ticks)))
         } else {
             let body = PlaybackStateInfo(
                 isPaused: event.paused, itemID: event.itemID,
-                playSessionID: event.occurrenceID.uuidString, positionTicks: ticks)
+                mediaSourceID: event.source?.mediaSourceID,
+                playMethod: event.source?.delivery == .hlsAAC
+                    ? .transcode : (event.source?.delivery == .hlsCopy ? .directStream : nil),
+                playSessionID: event.source?.serverSessionID ?? event.occurrenceID.uuidString,
+                positionTicks: ticks)
             if event.kind == .start {
                 _ = try await responseData(Paths.reportPlaybackStart(body))
             } else {
@@ -1562,6 +1679,523 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
         }
     }
 
+    func playbackResource(for item: FoundationItem) async throws -> FoundationPlaybackResource {
+        let quality = await streamingQuality().resolved(for: FoundationStreamingPath())
+        #if DEBUG
+            return try await hlsResource(
+                for: item, quality: quality, resolveMetadata: Self.hlsOriginalPreferred)
+        #else
+            return try await hlsResource(for: item, quality: quality)
+        #endif
+    }
+
+    private func hlsResource(
+        for item: FoundationItem, quality: FoundationStreamingQuality, resolveMetadata: Bool = true
+    ) async throws -> FoundationPlaybackResource {
+        try Task.checkCancellation()
+        guard item.kind == .track, Self.validID(item.id) else {
+            throw FoundationLibraryError.unavailable
+        }
+        var selectedSource: MediaSourceInfo?
+        var selectedAudio: MediaStream?
+        var copyCodec: String?
+        var container = "ts"
+        if resolveMetadata {
+            let metadataData = try await responseData(
+                Paths.getItem(itemID: item.id, userID: session.userID), loadOverride: load)
+            try Task.checkCancellation()
+            let metadata = try Self.decodePlaybackMetadata(metadataData)
+            guard metadata.id == item.id, metadata.type == .audio,
+                let sources = metadata.mediaSources, sources.count == 1,
+                let source = sources.first, let identity = source.id, !identity.isEmpty,
+                source.protocol == .file, source.isRemote != true,
+                source.isInfiniteStream != true, source.requiresOpening != true,
+                source.requiresClosing != true, (source.requiredHTTPHeaders ?? [:]).isEmpty,
+                let streams = source.mediaStreams ?? metadata.mediaStreams
+            else { throw FoundationLibraryError.unavailable }
+            let audio = streams.filter { $0.type == .audio }
+            guard audio.count == 1, audio[0].isExternal != true,
+                let index = audio[0].index, index >= 0
+            else { throw FoundationLibraryError.unavailable }
+            selectedSource = source
+            selectedAudio = audio[0]
+            copyCodec = quality == .original ? Self.hlsCopyCodec(audio[0]) : nil
+            if let copyCodec { container = copyCodec == "mp3" ? "ts" : "mp4" }
+            #if DEBUG
+                FoundationJournal.shared.record(
+                    "player.hls.selection delivery=\(copyCodec == nil ? "aac" : "copy") "
+                        + "reason=\(quality == .original ? Self.hlsCopyReason(audio[0]) : "fixedQuality")"
+                )
+            #endif
+        }
+        let copyOnly = copyCodec != nil
+        let bitrate = copyOnly ? 50_000_000 : (quality.aacBitrate ?? 320_000)
+        let profile = DeviceProfile(
+            directPlayProfiles: [], maxStreamingBitrate: bitrate,
+            musicStreamingTranscodingBitrate: bitrate,
+            transcodingProfiles: [
+                TranscodingProfile(
+                    protocol: .hls, audioCodec: copyCodec ?? "aac",
+                    container: container,
+                    context: .streaming, type: .audio)
+            ])
+        let info: PlaybackInfoResponse
+        do {
+            info = try await send(
+                Paths.getPostedPlaybackInfo(
+                    itemID: item.id,
+                    PlaybackInfoDto(
+                        allowAudioStreamCopy: copyOnly, audioStreamIndex: selectedAudio?.index,
+                        deviceProfile: profile,
+                        enableDirectPlay: false, enableDirectStream: false,
+                        enableTranscoding: true,
+                        isAutoOpenLiveStream: false, maxStreamingBitrate: bitrate,
+                        mediaSourceID: selectedSource?.id, userID: session.userID)))
+        } catch {
+            #if DEBUG
+                FoundationJournal.shared.record(
+                    "player.hls.negotiation outcome=failed stage=response decode=\(error is DecodingError ? 1 : 0)"
+                )
+            #endif
+            throw error
+        }
+        #if DEBUG
+            FoundationJournal.shared.record(
+                "player.hls.negotiation outcome=decoded error=\(info.errorCode == nil ? 0 : 1) "
+                    + "session=\(info.playSessionID?.isEmpty == false ? 1 : 0) sources=\(info.mediaSources?.count ?? 0)"
+            )
+        #endif
+        #if DEBUG
+            for source in (info.mediaSources ?? []).prefix(4) {
+                FoundationJournal.shared.record(
+                    "player.hls.source transcode=\(source.isSupportsTranscoding == true ? 1 : 0) "
+                        + "hls=\(source.transcodingSubProtocol == .hls ? 1 : 0) "
+                        + "opening=\(source.requiresOpening == true ? 1 : 0) closing=\(source.requiresClosing == true ? 1 : 0) "
+                        + "headers=\((source.requiredHTTPHeaders ?? [:]).count) "
+                        + "identity=\(source.id?.isEmpty == false ? 1 : 0) url=\(source.transcodingURL == nil ? 0 : 1)"
+                )
+            }
+        #endif
+        guard info.errorCode == nil,
+            let serverSession = info.playSessionID, !serverSession.isEmpty,
+            let source = info.mediaSources?.first(where: {
+                $0.isSupportsTranscoding == true && $0.transcodingSubProtocol == .hls
+                    && $0.requiresOpening != true && $0.requiresClosing != true
+                    && ($0.requiredHTTPHeaders ?? [:]).isEmpty
+            }), let sourceID = source.id, !sourceID.isEmpty,
+            let returnedURL = source.transcodingURL
+        else { throw FoundationLibraryError.unavailable }
+        let url = try Self.hlsURL(
+            returnedURL, itemID: item.id, sourceID: sourceID, serverSession: serverSession,
+            base: session.serverURL, token: session.accessToken, deviceID: session.deviceID)
+        #if DEBUG
+            let cleanupLoad = Self.hlsCleanupLoad ?? Self.signOutLoad
+        #else
+            let cleanupLoad = Self.signOutLoad
+        #endif
+        let lease = FoundationHLSLease(owner: hlsCleanup, key: serverSession) {
+            // One exact-session attempt using the existing bounded 8-second transport.
+            // A completed DELETE does not prove late segment requests cannot restart work.
+            do {
+                let endpoint = Request<Data>(
+                    path: "/Videos/ActiveEncodings", method: "DELETE",
+                    query: [("deviceId", session.deviceID), ("playSessionId", serverSession)])
+                _ = try await responseData(endpoint, loadOverride: cleanupLoad)
+                #if DEBUG
+                    FoundationJournal.shared.record("player.hls.cleanup outcome=returned")
+                #endif
+            } catch {
+                #if DEBUG
+                    FoundationJournal.shared.record(
+                        "player.hls.cleanup outcome=failed category=\(FoundationLibraryError.category(error).rawValue)"
+                    )
+                #endif
+            }
+        }
+        do {
+            try Task.checkCancellation()
+            var playbackURL = url
+            if resolveMetadata {
+                let audio = (source.mediaStreams ?? []).filter { $0.type == .audio }
+                guard source.id == selectedSource?.id, audio.count == 1,
+                    let expected = selectedAudio,
+                    audio[0].index == expected.index,
+                    audio[0].codec?.lowercased() == expected.codec?.lowercased(),
+                    audio[0].bitRate == expected.bitRate,
+                    audio[0].sampleRate == expected.sampleRate,
+                    audio[0].channels == expected.channels,
+                    audio[0].bitDepth == expected.bitDepth,
+                    audio[0].profile == expected.profile
+                else {
+                    #if DEBUG
+                        FoundationJournal.shared.record(
+                            "player.hls.copy outcome=rejected stage=sourceDrift")
+                    #endif
+                    throw FoundationLibraryError.unavailable
+                }
+            }
+            if let cap = quality.aacBitrate {
+                let fixedURL = try Self.validateFixedAACURL(
+                    returnedURL, cap: cap, audioIndex: selectedAudio?.index)
+                playbackURL = try Self.hlsURL(
+                    fixedURL, itemID: item.id, sourceID: sourceID, serverSession: serverSession,
+                    base: session.serverURL, token: session.accessToken, deviceID: session.deviceID)
+            }
+            if let copyCodec, let expected = selectedAudio {
+                let audio = [expected]
+                #if DEBUG
+                    FoundationJournal.shared.record(
+                        "player.hls.copy.source bitrate=\(audio[0].bitRate ?? -1) "
+                            + "sampleRate=\(audio[0].sampleRate ?? -1) channels=\(audio[0].channels ?? -1)"
+                    )
+                #endif
+                let master = try Self.hlsCopyMaster(
+                    returnedURL, audio: audio[0], codec: copyCodec, container: container)
+                let endpoint = Request<Data>(
+                    path: master.path, method: "GET",
+                    query: (master.queryItems ?? []).filter {
+                        !["api_key", "apikey"].contains($0.name.lowercased())
+                    }.map { ($0.name, $0.value) })
+                // Audio preparation uses the existing transport directly, never optional GET admission.
+                let data = try await responseData(
+                    endpoint, accept: "application/vnd.apple.mpegurl", loadOverride: load)
+                try Task.checkCancellation()
+                playbackURL = try Self.hlsCopyURL(
+                    data, container: container, audio: expected, codec: copyCodec,
+                    itemID: item.id, sourceID: sourceID, serverSession: serverSession,
+                    base: session.serverURL, token: session.accessToken,
+                    deviceID: session.deviceID)
+            }
+            try Task.checkCancellation()
+            return FoundationPlaybackResource(
+                url: playbackURL,
+                source: .init(
+                    delivery: copyOnly ? .hlsCopy : .hlsAAC,
+                    mediaSourceID: sourceID, serverSessionID: serverSession)
+            ) { await lease.release() }
+        } catch {
+            await lease.release()
+            throw error
+        }
+    }
+
+    /// Reject a server decision that would bypass the explicit fixed AAC policy.
+    @discardableResult
+    static func validateFixedAACURL(_ raw: String, cap: Int, audioIndex: Int?) throws -> String {
+        guard var components = URLComponents(string: raw), let index = audioIndex, index >= 0 else {
+            throw FoundationLibraryError.invalidResponse
+        }
+        let query = components.queryItems ?? []
+        func value(_ key: String) throws -> String {
+            let matches = query.filter { $0.name.lowercased() == key }
+            guard matches.count == 1, let value = matches[0].value else {
+                throw FoundationLibraryError.invalidResponse
+            }
+            return value
+        }
+        for key in ["allowaudiostreamcopy", "enableautostreamcopy", "static"] {
+            let matches = query.filter { $0.name.lowercased() == key }
+            guard
+                matches.isEmpty
+                    || (matches.count == 1 && matches[0].value?.lowercased() == "false")
+            else { throw FoundationLibraryError.invalidResponse }
+        }
+        guard try value("audiocodec").lowercased() == "aac",
+            let bitrate = Int(try value("audiobitrate")), bitrate > 0, bitrate <= cap,
+            try value("segmentcontainer").lowercased() == "ts"
+        else { throw FoundationLibraryError.invalidResponse }
+        // Jellyfin's audio-only StreamInfo may omit this optional URL field even
+        // when requested. The caller has already verified exactly one unchanged
+        // audio stream in the selected source. Keep that selection explicit.
+        let indices = query.filter { $0.name.lowercased() == "audiostreamindex" }
+        guard indices.count <= 1,
+            indices.isEmpty || indices[0].value.flatMap(Int.init) == index
+        else { throw FoundationLibraryError.invalidResponse }
+        if indices.isEmpty {
+            components.queryItems =
+                query + [URLQueryItem(name: "AudioStreamIndex", value: String(index))]
+        }
+        guard let result = components.string else { throw FoundationLibraryError.invalidResponse }
+        return result
+    }
+
+    private static func decodePlaybackMetadata(_ data: Data) throws -> BaseItemDto {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .custom { decoder in
+            let text = try decoder.singleValueContainer().decode(String.self)
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            if let value = formatter.date(from: text) { return value }
+            formatter.formatOptions = [.withInternetDateTime]
+            guard let value = formatter.date(from: text) else {
+                throw FoundationLibraryError.invalidResponse
+            }
+            return value
+        }
+        return try decoder.decode(BaseItemDto.self, from: data)
+    }
+
+    static func hlsCopyReason(_ audio: MediaStream) -> String {
+        guard let codec = audio.codec?.lowercased(),
+            ["mp3", "aac", "flac", "alac"].contains(codec)
+        else { return "unsupportedCodec" }
+        guard let bitrate = audio.bitRate, bitrate > 0,
+            let rate = audio.sampleRate, rate > 0,
+            let channels = audio.channels, channels > 0
+        else { return "unknownMetadata" }
+        guard bitrate <= 50_000_000, rate <= 192_000, channels <= 8,
+            codec != "mp3" || (bitrate <= 320_000 && rate <= 48_000 && channels <= 2)
+        else { return "sourceLimits" }
+        if ["flac", "alac"].contains(codec) {
+            guard let depth = audio.bitDepth else { return "unknownMetadata" }
+            guard (1...24).contains(depth) else { return "bitDepth" }
+        }
+        if codec == "aac" {
+            guard let profile = audio.profile?.lowercased(),
+                ["lc", "he-aac", "he-aacv2", "he-aac v2", "he", "hev2"].contains(profile)
+            else { return "aacProfile" }
+        }
+        return "compatible"
+    }
+
+    static func hlsCopyCodec(_ audio: MediaStream) -> String? {
+        hlsCopyReason(audio) == "compatible" ? audio.codec?.lowercased() : nil
+    }
+
+    static func hlsMP3CopyMaster(_ raw: String, audio: MediaStream) throws
+        -> URLComponents
+    {
+        try hlsCopyMaster(raw, audio: audio, codec: "mp3", container: "ts")
+    }
+
+    static func hlsMP3CopyURL(
+        _ data: Data, itemID: String, sourceID: String, serverSession: String,
+        base: URL, token: String, deviceID: String
+    ) throws -> URL {
+        try hlsCopyURL(
+            data, container: "ts", itemID: itemID, sourceID: sourceID,
+            serverSession: serverSession, base: base, token: token, deviceID: deviceID)
+    }
+
+    /// Called only after route/session validation. Audio-only HLS does not automatically
+    /// select copy on every server version; request it explicitly without bypassing limits.
+    static func hlsCopyMaster(
+        _ raw: String, audio: MediaStream, codec: String, container: String
+    ) throws -> URLComponents {
+        func reject(_ reason: String) -> FoundationLibraryError {
+            #if DEBUG
+                FoundationJournal.shared.record(
+                    "player.hls.copy outcome=rejected stage=masterConstraints reason=\(reason)")
+            #endif
+            return .unavailable
+        }
+        guard var master = URLComponents(string: raw),
+            Self.hlsCopyCodec(audio) == codec, let bitrate = audio.bitRate
+        else { throw reject("source") }
+        var query = master.queryItems ?? []
+        func value(_ key: String, required: Bool = false) throws -> String? {
+            let matches = query.filter { $0.name.lowercased() == key }
+            guard matches.count <= 1, !required || matches.count == 1,
+                matches.isEmpty || matches[0].value?.isEmpty == false
+            else { throw reject("ambiguousLimit") }
+            return matches.first?.value
+        }
+        guard let codec = try value("audiocodec", required: true),
+            [audio.codec?.lowercased(), "copy"].contains(codec.lowercased()),
+            try value("segmentcontainer", required: true)?.lowercased() == container
+        else { throw reject("format") }
+        for key in ["allowaudiostreamcopy", "enableautostreamcopy"] {
+            if let flag = try value(key), flag.lowercased() != "true" {
+                throw reject("copyDisabled")
+            }
+        }
+        func limit(_ key: String, source: Int?, exact: Bool = false, required: Bool = false)
+            throws
+        {
+            guard let raw = try value(key, required: required) else { return }
+            guard let bound = Int(raw), bound > 0, let source, source > 0,
+                exact ? source == bound : source <= bound
+            else { throw reject(key) }
+        }
+        try limit("audiobitrate", source: bitrate, required: true)
+        try limit("maxstreamingbitrate", source: bitrate)
+        try limit("audiosamplerate", source: audio.sampleRate, exact: true)
+        try limit("audiochannels", source: audio.channels, exact: true)
+        try limit("maxaudiochannels", source: audio.channels)
+        try limit("transcodingmaxaudiochannels", source: audio.channels)
+        try limit("audiobitdepth", source: audio.bitDepth, exact: true)
+        try limit("maxaudiobitdepth", source: audio.bitDepth)
+        if let rawIndex = try value("audiostreamindex") {
+            guard let index = Int(rawIndex), index >= 0, audio.index == index else {
+                throw reject("audioStreamIndex")
+            }
+        }
+        // Jellyfin includes this encoding preference even for copy requests.
+        // The audio copy branch ignores it; preserve a valid negotiated boolean.
+        if let flag = try value("enableaudiovbrencoding"),
+            !["true", "false"].contains(flag.lowercased())
+        {
+            throw reject("audioVbrEncoding")
+        }
+        let understood = Set([
+            "audiocodec", "allowaudiostreamcopy", "audiobitrate", "audiosamplerate",
+            "audiochannels", "maxaudiochannels", "audiobitdepth", "maxaudiobitdepth",
+            "audiostreamindex", "enableaudiovbrencoding", "transcodingmaxaudiochannels",
+        ])
+        guard
+            !query.contains(where: {
+                $0.name.lowercased().contains("audio")
+                    && !understood.contains($0.name.lowercased())
+            })
+        else { throw reject("unknownAudioConstraint") }
+        // Preserve every negotiated limit and identity; replace only the codec decision.
+        let index = query.firstIndex { $0.name.lowercased() == "audiocodec" }!
+        query[index].value = "copy"
+        master.queryItems = query
+        #if DEBUG
+            FoundationJournal.shared.record("player.hls.copy.master outcome=explicitCopy")
+        #endif
+        return master
+    }
+
+    /// A copy-only experiment: reject alternative renditions and any encoding decision.
+    /// The resolved child is handed to AVPlayer so a second master fetch cannot choose encoding.
+    static func hlsCopyURL(
+        _ data: Data, container: String, audio: MediaStream? = nil, codec: String = "mp3",
+        itemID: String, sourceID: String, serverSession: String,
+        base: URL, token: String, deviceID: String
+    ) throws -> URL {
+        guard data.count <= 65_536, let text = String(data: data, encoding: .utf8) else {
+            throw FoundationLibraryError.invalidResponse
+        }
+        let lines = text.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        let variants = lines.filter { $0.hasPrefix("#EXT-X-STREAM-INF:") }
+        let paths = lines.filter { !$0.hasPrefix("#") }
+        guard lines.first == "#EXTM3U", variants.count == 1, paths.count == 1,
+            !lines.contains(where: {
+                $0.hasPrefix("#EXT-X-MEDIA:") || $0.hasPrefix("#EXT-X-I-FRAME-STREAM-INF:")
+                    || ($0.hasPrefix("#") && $0.uppercased().contains("URI="))
+            }),
+            let child = URLComponents(string: paths[0]), child.scheme == nil,
+            child.host == nil, child.fragment == nil, child.user == nil, child.password == nil,
+            child.percentEncodedPath == "main.m3u8"
+        else { throw FoundationLibraryError.invalidResponse }
+        let query = child.queryItems ?? []
+        // Only fixed categories and parsed numbers; never emit arbitrary server query values.
+        #if DEBUG
+            for key in [
+                "audiocodec", "segmentcontainer", "allowaudiostreamcopy", "enableautostreamcopy",
+            ] {
+                let matches = query.filter { $0.name.lowercased() == key }
+                let raw = matches.first?.value?.lowercased()
+                let known = ["copy", "mp3", "aac", "mp4", "ts", "true", "false"]
+                let decision = raw.map { known.contains($0) ? $0 : "other" } ?? "missing"
+                FoundationJournal.shared.record(
+                    "player.hls.copy.decision field=\(key) value=\(decision) count=\(matches.count)"
+                )
+            }
+            for key in ["audiobitrate", "audiosamplerate", "audiochannels", "maxaudiochannels"] {
+                let matches = query.filter { $0.name.lowercased() == key }
+                let number = matches.first?.value.flatMap(Int.init) ?? -1
+                FoundationJournal.shared.record(
+                    "player.hls.copy.limit field=\(key) value=\(number) count=\(matches.count)")
+            }
+        #endif
+        for (key, value) in [("audiocodec", "copy"), ("segmentcontainer", container)] {
+            let matches = query.filter { $0.name.lowercased() == key }
+            guard matches.count == 1, matches[0].value == value else {
+                #if DEBUG
+                    FoundationJournal.shared.record(
+                        "player.hls.copy outcome=rejected stage=serverDecision field=\(key)")
+                #endif
+                throw FoundationLibraryError.unavailable
+            }
+        }
+        // Reuse the negotiated route and exact session/source/device checks.
+        var route = child
+        route.percentEncodedPath = "/audio/\(itemID)/master.m3u8"
+        if let audio {
+            _ = try hlsCopyMaster(
+                route.string ?? "", audio: audio, codec: codec, container: container)
+        }
+        let validated = try hlsURL(
+            route.string ?? "", itemID: itemID, sourceID: sourceID,
+            serverSession: serverSession,
+            base: base, token: token, deviceID: deviceID)
+        guard var result = URLComponents(url: validated, resolvingAgainstBaseURL: false) else {
+            throw FoundationLibraryError.invalidResponse
+        }
+        result.percentEncodedPath =
+            String(result.percentEncodedPath.dropLast("master.m3u8".count)) + "main.m3u8"
+        guard let url = result.url else { throw FoundationLibraryError.invalidResponse }
+        #if DEBUG
+            FoundationJournal.shared.record("player.hls.copy outcome=validated")
+        #endif
+        return url
+    }
+
+    /// Accept only the negotiated API-relative audio playlist, retaining the reverse-proxy base.
+    static func hlsURL(
+        _ raw: String, itemID: String, sourceID: String, serverSession: String,
+        base: URL, token: String, deviceID: String
+    ) throws -> URL {
+        guard let returned = URLComponents(string: raw),
+            returned.scheme == nil, returned.host == nil, returned.user == nil,
+            returned.password == nil, returned.fragment == nil,
+            var result = URLComponents(
+                url: try validatedServerURL(base), resolvingAgainstBaseURL: false)
+        else { throw FoundationLibraryError.invalidResponse }
+        // Jellyfin's StreamInfo formats ItemId as a GUID in the route, while
+        // catalog identifiers may be compact. Compare identity, not spelling.
+        // Keep exact route boundaries; encoded paths and traversal remain invalid.
+        let pathParts = returned.percentEncodedPath.split(
+            separator: "/", omittingEmptySubsequences: false)
+        guard pathParts.count == 4, pathParts[0].isEmpty,
+            pathParts[1].lowercased() == "audio",
+            pathParts[3].lowercased() == "master.m3u8",
+            Self.validID(itemID), Self.validID(String(pathParts[2])),
+            pathParts[2].replacingOccurrences(of: "-", with: "").lowercased()
+                == itemID.replacingOccurrences(of: "-", with: "").lowercased()
+        else {
+            #if DEBUG
+                FoundationJournal.shared.record(
+                    "player.hls.negotiation outcome=rejected stage=playlistRoute")
+            #endif
+            throw FoundationLibraryError.invalidResponse
+        }
+        #if DEBUG
+            FoundationJournal.shared.record("player.hls.playlist outcome=validated")
+        #endif
+        var query = returned.queryItems ?? []
+        for (key, expected) in [
+            ("playsessionid", serverSession), ("mediasourceid", sourceID),
+            ("deviceid", deviceID),
+        ] {
+            let values = query.filter { $0.name.lowercased() == key }
+            guard values.count == 1, values.first?.value == expected else {
+                #if DEBUG
+                    FoundationJournal.shared.record(
+                        "player.hls.negotiation outcome=rejected stage=identity field=\(key) count=\(values.count)"
+                    )
+                #endif
+                throw FoundationLibraryError.invalidResponse
+            }
+        }
+        // Do not forward a server-supplied credential or accept ambiguous authentication keys.
+        query.removeAll {
+            $0.name.lowercased() == "api_key" || $0.name.lowercased() == "apikey"
+        }
+        query.append(URLQueryItem(name: "ApiKey", value: token))
+        var path = result.percentEncodedPath
+        while path.hasSuffix("/") { path.removeLast() }
+        result.percentEncodedPath = path + returned.percentEncodedPath
+        result.queryItems = query
+        guard let url = result.url else { throw FoundationLibraryError.invalidResponse }
+        return url
+    }
+
+    // Compatibility URL-only helper; live playback uses playbackResource to retain its HLS lease.
     func playbackURL(for item: FoundationItem) async throws -> URL {
         try Task.checkCancellation()
         guard item.kind == .track, Self.validID(item.id),
@@ -1832,7 +2466,7 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
 
     private func responseData<Response>(
         _ endpoint: Request<Response>, accept: String = "application/json",
-        notFoundIsEmpty: Bool = false, allowsCellular: Bool? = nil
+        notFoundIsEmpty: Bool = false, allowsCellular: Bool? = nil, loadOverride: Load? = nil
     ) async throws -> Data {
         #if DEBUG
             let operationID = UUID().uuidString
@@ -1879,6 +2513,7 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
                             "api operation=\(operationID) purpose=\(purpose) \(traceFields) event=loadReturned"
                         )
                     }
+                    if let loadOverride { return try await loadOverride(request) }
                     return try await admittedLoad(request)
                 } onCancel: {
                     FoundationJournal.shared.record(
@@ -1886,7 +2521,15 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
                     )
                 }
             #else
-                let (data, response) = try await admittedLoad(request)
+                // Playback preparation and exact-session cleanup retain their explicit
+                // transports in Release too; neither waits behind optional browsing.
+                let data: Data
+                let response: URLResponse
+                if let loadOverride {
+                    (data, response) = try await loadOverride(request)
+                } else {
+                    (data, response) = try await admittedLoad(request)
+                }
             #endif
             try Task.checkCancellation()
             guard let response = response as? HTTPURLResponse else {

@@ -18,6 +18,7 @@ struct FoundationDownloadOwner: Identifiable {
     var item: FoundationItem
     var tracks: [FoundationItem]
     var state: FoundationDownloadState
+    var requestedQuality: FoundationDownloadQuality = .original
     var activeTrackID: String? = nil
     var activeTrackProgress: Double? = nil
     var progress: Double = 0
@@ -48,6 +49,11 @@ final class FoundationDownloads: ObservableObject {
             FoundationDownloadSource, URL, Bool,
             @escaping @Sendable (Int64, Int64?) -> Void
         ) async throws -> Void
+    typealias ConvertedTransfer =
+        @Sendable (
+            FoundationDownloadConversionProposal, URL, Bool,
+            @escaping @Sendable (Int64, Int64?) -> Void
+        ) async throws -> FoundationVerifiedConvertedDownload
     typealias FileVerifier =
         @Sendable ([String: FoundationDownloadManifest.File], URL) async throws
         -> [String: FoundationDownloadManifest.File]
@@ -64,6 +70,8 @@ final class FoundationDownloads: ObservableObject {
     private let observeTracks: @MainActor ([FoundationItem], String?) -> Void
     private let directory: URL
     private let transfer: Transfer
+    private let convertedTransfer: ConvertedTransfer
+    private let requestedQuality: @MainActor () -> FoundationDownloadQuality
     private let verifyReacquisitionFiles: FileVerifier
     private var manifest = FoundationDownloadManifest()
     private var collectionModels: [String: FoundationBrowseModel] = [:]
@@ -94,6 +102,8 @@ final class FoundationDownloads: ObservableObject {
     init(
         scope: String, library: any FoundationLibrary, root: URL? = nil,
         transfer: Transfer? = nil, monitorConnectivity: Bool = true,
+        convertedTransfer: ConvertedTransfer? = nil,
+        requestedQuality: @escaping @MainActor () -> FoundationDownloadQuality = { .original },
         verifyReacquisitionFiles: FileVerifier? = nil,
         observeTracks: @escaping @MainActor ([FoundationItem], String?) -> Void = { _, _ in },
         projectTracks: @escaping @MainActor ([FoundationItem], String?) -> [FoundationItem] = {
@@ -101,6 +111,12 @@ final class FoundationDownloads: ObservableObject {
         }
     ) {
         self.library = library
+        self.requestedQuality = requestedQuality
+        self.convertedTransfer =
+            convertedTransfer ?? { proposal, target, cellular, progress in
+                try await FoundationConvertedDownload.transfer(
+                    proposal: proposal, to: target, allowsCellular: cellular, progress: progress)
+            }
         self.projectTracks = projectTracks
         self.observeTracks = observeTracks
         self.verifyReacquisitionFiles =
@@ -124,7 +140,8 @@ final class FoundationDownloads: ObservableObject {
                 owners.append(
                     FoundationDownloadOwner(
                         id: saved.id, item: saved.item.item, tracks: saved.tracks.map(\.item),
-                        state: saved.paused ? .cancelled : .queued))
+                        state: saved.paused ? .cancelled : .queued,
+                        requestedQuality: saved.requestedQuality ?? .original))
             }
             for owner in owners {
                 observeTracks(owner.tracks, owner.item.kind == .album ? owner.item.id : nil)
@@ -279,7 +296,10 @@ final class FoundationDownloads: ObservableObject {
             retry(ownerID: id)
             return
         }
-        owners.append(FoundationDownloadOwner(id: id, item: item, tracks: [], state: .queued))
+        owners.append(
+            FoundationDownloadOwner(
+                id: id, item: item, tracks: [], state: .queued,
+                requestedQuality: requestedQuality()))
         do { try save() } catch {
             owners.removeAll { $0.id == id }
             reportStorageFailure()
@@ -745,7 +765,10 @@ final class FoundationDownloads: ObservableObject {
             paused.remove(id)
             owners[index].state = .queued
         } else {
-            owners.append(FoundationDownloadOwner(id: id, item: item, tracks: [], state: .queued))
+            owners.append(
+                FoundationDownloadOwner(
+                    id: id, item: item, tracks: [], state: .queued,
+                    requestedQuality: requestedQuality()))
         }
         do { try save() } catch {
             manifest = previousManifest
@@ -904,23 +927,24 @@ final class FoundationDownloads: ObservableObject {
                         owners[index].activeTrackID = track.id
                         owners[index].activeTrackProgress = nil
                     }
-                    let source = try await library.downloadSource(for: track)
+                    let preparation = try await library.downloadPreparation(
+                        for: track, quality: current.requestedQuality)
                     try check(epoch: epoch, ownerID: owner.id)
                     guard
                         !projectTracks([track], current.item.kind == .album ? current.item.id : nil)
                             .isEmpty
                     else { continue }
-                    let ext = source.fileExtension.lowercased()
+                    let ext = preparation.fileExtension.lowercased()
                     guard !ext.isEmpty, ext.count <= 8,
                         ext.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber) })
                     else { throw FoundationLibraryError.invalidResponse }
                     let stage = directory.appendingPathComponent(
                         "stage-" + UUID().uuidString + "." + ext)
                     do {
-                        try await transfer(source, stage, allowsCellular) {
+                        let progress: @Sendable (Int64, Int64?) -> Void = {
                             [weak self] bytes, total in
                             Task { @MainActor [weak self] in
-                                guard let self, self.generation == epoch,
+                                guard let self, self.isLive, self.generation == epoch,
                                     self.transferRevision == revision, self.activeOwner == owner.id,
                                     let index = self.owners.firstIndex(where: { $0.id == owner.id })
                                 else { return }
@@ -941,19 +965,47 @@ final class FoundationDownloads: ObservableObject {
                                 self.refreshBytes()
                             }
                         }
-                        try check(epoch: epoch, ownerID: owner.id)
-                        try FoundationDownloadStorage.protect(stage)
-                        let bytes = Int64(
-                            try stage.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0)
-                        guard bytes > 0,
-                            source.expectedBytes == nil || source.expectedBytes == bytes
-                        else {
-                            throw CocoaError(.fileReadCorruptFile)
+                        let file: FoundationDownloadManifest.File
+                        switch preparation {
+                        case .original(let source):
+                            guard current.requestedQuality == .original else {
+                                throw FoundationDownloadError.unsupported
+                            }
+                            try await transfer(source, stage, allowsCellular, progress)
+                            try check(epoch: epoch, ownerID: owner.id)
+                            try FoundationDownloadStorage.protect(stage)
+                            let bytes = Int64(
+                                try stage.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0)
+                            guard bytes > 0,
+                                source.expectedBytes == nil || source.expectedBytes == bytes
+                            else { throw CocoaError(.fileReadCorruptFile) }
+                            let digest = try await FoundationDownloadStorage.digestOffMain(stage)
+                            try check(epoch: epoch, ownerID: owner.id)
+                            file = FoundationDownloadManifest.File(
+                                name: UUID().uuidString + "." + ext, bytes: bytes, digest: digest)
+                        case .converted(let proposal):
+                            guard proposal.plan.quality == current.requestedQuality,
+                                proposal.itemID == track.id
+                            else { throw FoundationDownloadError.response }
+                            let verified = try await convertedTransfer(
+                                proposal, stage, allowsCellular, progress)
+                            try check(epoch: epoch, ownerID: owner.id)
+                            file = FoundationDownloadManifest.File(
+                                name: UUID().uuidString + "." + ext,
+                                bytes: verified.bytes, digest: verified.digest,
+                                convertedRendition: verified.rendition)
                         }
-                        let digest = try await FoundationDownloadStorage.digestOffMain(stage)
-                        try check(epoch: epoch, ownerID: owner.id)
-                        let file = FoundationDownloadManifest.File(
-                            name: UUID().uuidString + "." + ext, bytes: bytes, digest: digest)
+                        // Projection may change while transfer/inspection/cleanup suspends.
+                        // Never publish content that became hidden or excluded in that time.
+                        guard !isExcluded(track.id),
+                            !projectTracks(
+                                [track], current.item.kind == .album ? current.item.id : nil
+                            )
+                            .isEmpty
+                        else {
+                            try FileManager.default.removeItem(at: stage)
+                            continue
+                        }
                         let destination = directory.appendingPathComponent(file.name)
                         try FileManager.default.moveItem(at: stage, to: destination)
                         do {
@@ -1054,7 +1106,8 @@ final class FoundationDownloads: ObservableObject {
                 id: $0.id, item: FoundationStoredDownloadItem($0.item),
                 tracks: $0.tracks.map(FoundationStoredDownloadItem.init),
                 paused: paused.contains($0.id), expanded: expanded.contains($0.id),
-                reacquiresExcludedTracks: reacquiring.contains($0.id) ? true : nil)
+                reacquiresExcludedTracks: reacquiring.contains($0.id) ? true : nil,
+                requestedQuality: $0.requestedQuality == .original ? nil : $0.requestedQuality)
         }
         try FoundationDownloadStorage.save(manifest, directory: directory)
     }
@@ -1315,9 +1368,12 @@ final class FoundationDownloads: ObservableObject {
         }
         guard allowsRemoteFallback else { throw FoundationLibraryError.unavailable }
         let epoch = generation
-        let url = try await library.playbackURL(for: item)
-        guard isLive, epoch == generation else { throw CancellationError() }
-        return FoundationPlaybackResource(url: url, release: {})
+        let resource = try await library.playbackResource(for: item)
+        guard isLive, epoch == generation, !Task.isCancelled else {
+            await resource.release()
+            throw CancellationError()
+        }
+        return resource
     }
 
     private func releaseLease(_ id: String) {

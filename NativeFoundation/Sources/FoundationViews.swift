@@ -12,79 +12,11 @@ extension EnvironmentValues {
     }
 }
 
-/// The account owns collection work, so its outcome remains visible above browsing.
-private struct FoundationCollectionActionStatus: View {
-    @EnvironmentObject private var actions: FoundationLibraryActions
-    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
-    var compactPresentation = false
-
-    var body: some View {
-        if showsLoadingStatus
-            || (!actions.isQueueLoading
-                && (actions.queueErrorMessage != nil || actions.queueNotice != nil))
-        {
-            VStack(alignment: .leading, spacing: 8) {
-                if showsLoadingStatus {
-                    if compactPresentation && !dynamicTypeSize.isAccessibilitySize {
-                        HStack(spacing: 12) {
-                            loadingStatus
-                            Spacer(minLength: 0)
-                            cancelButton
-                        }
-                    } else {
-                        loadingStatus
-                        cancelButton
-                    }
-                } else {
-                    Text(actions.queueErrorMessage ?? actions.queueNotice ?? "")
-                        .fixedSize(horizontal: false, vertical: true)
-                    HStack {
-                        if actions.canRetryQueueAddition {
-                            Button("Retry") { actions.retryQueueAddition() }
-                                .accessibilityLabel("Retry collection loading")
-                                .frame(
-                                    minWidth: compactPresentation ? 44 : nil,
-                                    minHeight: compactPresentation ? 44 : nil)
-                        }
-                        Button("Dismiss") { actions.dismissQueueOutcome() }
-                            .frame(
-                                minWidth: compactPresentation ? 44 : nil,
-                                minHeight: compactPresentation ? 44 : nil)
-                    }
-                }
-            }
-            .font(.callout)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 16)
-            .padding(.vertical, compactPresentation ? 4 : 16)
-            .background {
-                if !compactPresentation { Rectangle().fill(.regularMaterial) }
-            }
-            .accessibilityElement(children: .contain)
-        }
-    }
-
-    private var showsLoadingStatus: Bool {
-        actions.isQueueLoading && actions.queueOperation == .enqueue
-    }
-
-    @ViewBuilder private var loadingStatus: some View {
-        if let notice = actions.queueNotice {
-            ProgressView(compactPresentation ? "Cancelling collection loading…" : notice)
-        } else {
-            ProgressView("Loading songs… \(actions.queueLoadedCount) loaded")
-        }
-    }
-
-    @ViewBuilder private var cancelButton: some View {
-        if actions.queueNotice == nil {
-            Button("Cancel") { actions.cancelQueueAddition() }
-                .accessibilityLabel("Cancel collection loading")
-                .frame(
-                    minWidth: compactPresentation ? 44 : nil,
-                    minHeight: compactPresentation ? 44 : nil)
-        }
-    }
+/// Snapshot the outcome without dismissing the account-owned retry action first.
+private struct FoundationCollectionOutcome: Equatable {
+    let message: String
+    let isError: Bool
+    let canRetry: Bool
 }
 
 enum FoundationDestination: Int, CaseIterable {
@@ -156,10 +88,10 @@ struct FoundationLibraryView: View {
         @Environment(\.openSettings) private var openSettings
         @EnvironmentObject private var appModel: FoundationAppModel
         @State private var macPanel = FoundationMacPlaybackPanel.Mode.queue
+        @State private var macQueuePresentation = 0
         @State private var macLibraryRoute = FoundationMacLibraryRoute.overview
         @State private var macNavigationRevision = 0
         @StateObject private var macNavigation = FoundationMacNavigation()
-        @State private var macContentWidth = CGFloat.zero
         @State private var macShellWidth = CGFloat.zero
         @State private var macTransportInset = CGFloat(120)
         @State private var macLibraryExpanded = true
@@ -167,6 +99,7 @@ struct FoundationLibraryView: View {
         @State private var macPlaylistsExpanded = true
     #endif
     @State private var showingSettings = false
+    @State private var presentedCollectionOutcome: FoundationCollectionOutcome?
     @State private var playlistSource: FoundationItem?
     @StateObject private var playlistChanges = FoundationPlaylistChanges()
     @State private var profileName = ""
@@ -244,9 +177,6 @@ struct FoundationLibraryView: View {
                 )
                 .font(.footnote).foregroundStyle(.secondary).padding(.horizontal)
             }
-            #if os(macOS)
-                FoundationCollectionActionStatus()
-            #endif
             shell
         }
         .onPreferenceChange(FoundationOfflineSurfacePreferenceKey.self) { offlineSurface = $0 }
@@ -258,6 +188,11 @@ struct FoundationLibraryView: View {
                 FoundationTrace.event(
                     "surface origin=\(String(describing: selectedTab)) page=root playerSheet=\(shown ? 1 : 0)"
                 )
+            }
+        #endif
+        #if os(macOS)
+            .onChange(of: showingPlayer && macPanel == .queue) { _, presented in
+                if presented { macQueuePresentation += 1 }
             }
         #endif
         .onChange(of: selectedTab) { _, _ in actions.cancelQueueAddition() }
@@ -275,6 +210,13 @@ struct FoundationLibraryView: View {
         .onChange(of: connectivity.status) { _, _ in resolveInitialConnection() }
         .onChange(of: playlistChanges.revisions) { _, _ in
             downloads.reconcilePlaylists()
+        }
+        .task(
+            id:
+                "playlist-catalog-\(playlistChanges.catalogRevision)-\(library.catalogScopeID)-\(connectivity.localOnly)"
+        ) {
+            guard playlistChanges.catalogRevision > 0, !connectivity.localOnly else { return }
+            await playlists.load(.refresh, using: library.playlists)
         }
         .onChange(of: actions.favoriteRevision) { _, _ in
             favorites.request(.refresh)
@@ -299,6 +241,23 @@ struct FoundationLibraryView: View {
             if let source = playlistSource {
                 FoundationPlaylistPicker(source: source, library: library)
             }
+        }
+        .onChange(of: collectionOutcome, initial: true) { _, outcome in
+            presentedCollectionOutcome = outcome
+        }
+        .alert(
+            presentedCollectionOutcome?.isError == true ? "Unable to Complete Action" : "Music",
+            isPresented: Binding(
+                get: { presentedCollectionOutcome != nil },
+                set: { if !$0 { presentedCollectionOutcome = nil } }),
+            presenting: presentedCollectionOutcome
+        ) { outcome in
+            if outcome.canRetry {
+                Button("Retry") { actions.retryQueueAddition() }
+            }
+            Button("Dismiss", role: .cancel) { actions.dismissQueueOutcome() }
+        } message: { outcome in
+            Text(outcome.message)
         }
         .foundationDownloadRemovalPresentation()
         .environmentObject(playlistChanges)
@@ -328,6 +287,14 @@ struct FoundationLibraryView: View {
             .onChange(of: macLibraryRoute) { _, _ in actions.cancelQueueAddition() }
         #endif
 
+    }
+
+    private var collectionOutcome: FoundationCollectionOutcome? {
+        guard !actions.isQueueLoading else { return nil }
+        guard let message = actions.queueErrorMessage ?? actions.queueNotice else { return nil }
+        return FoundationCollectionOutcome(
+            message: message, isError: actions.queueErrorMessage != nil,
+            canRetry: actions.canRetryQueueAddition)
     }
 
     private func playerDidDismiss() {
@@ -376,7 +343,7 @@ struct FoundationLibraryView: View {
 
     @ViewBuilder private var shell: some View {
         #if os(iOS)
-            tabs.tabBarMinimizeBehavior(hasCollectionOutcome ? .never : .onScrollDown)
+            tabs.tabBarMinimizeBehavior(.onScrollDown)
         #else
             FoundationMacLibraryShell(
                 selection: tabSelection, searchQuery: $searchQuery,
@@ -408,18 +375,29 @@ struct FoundationLibraryView: View {
                 showingFavorites = false
                 selectedTab = .search
             }
-            .onGeometryChange(for: CGFloat.self) {
-                $0.size.width
-            } action: { width in
-                macContentWidth = width
-            }
             .inspector(isPresented: $showingPlayer) {
-                FoundationMacPlaybackPanel(player: player, library: accountLibrary, mode: macPanel)
-                    .environment(\.foundationMacTransportBottomInset, 0)
-                    .environment(\.foundationMacUsesShellToolbar, false)
-                    .inspectorColumnWidth(
-                        min: FoundationMacLayout.minimumInspectorWidth,
-                        ideal: min(340, macMaximumInspectorWidth), max: macMaximumInspectorWidth)
+                FoundationMacPlaybackPanel(
+                    player: player, library: accountLibrary, mode: macPanel,
+                    queuePresentation: macQueuePresentation
+                )
+                .environment(\.foundationMacTransportBottomInset, 0)
+                .environment(\.foundationMacUsesShellToolbar, false)
+                // A meaningful, noninteractive title owns the inspector's native
+                // toolbar section; Now Playing toggles still control presentation.
+                .toolbar {
+                    if showingPlayer {
+                        ToolbarItem(placement: .principal) {
+                            Text(macPanel.rawValue)
+                                .font(.headline)
+                                .accessibilityAddTraits(.isHeader)
+                                .accessibilityIdentifier("mac-playback-inspector-title")
+                        }
+                        .sharedBackgroundVisibility(.hidden)
+                    }
+                }
+                .inspectorColumnWidth(
+                    min: FoundationMacLayout.minimumInspectorWidth,
+                    ideal: min(340, macMaximumInspectorWidth), max: macMaximumInspectorWidth)
             }
             .frame(
                 minWidth: showingPlayer
@@ -435,10 +413,6 @@ struct FoundationLibraryView: View {
             .environment(
                 \.foundationMacTransportBottomInset,
                 macTransportInset
-            )
-            .environment(
-                \.foundationMacToolbarTrailingReserve,
-                showingPlayer ? max(0, macShellWidth - macContentWidth) : 0
             )
             .environment(\.foundationMacUsesShellToolbar, true)
             .task(id: "\(library.catalogScopeID)-\(macPlaylistsExpanded)-\(connectivity.localOnly)")
@@ -480,24 +454,12 @@ struct FoundationLibraryView: View {
     }
 
     #if os(iOS)
-        private var hasCollectionOutcome: Bool {
-            (actions.isQueueLoading && actions.queueOperation == .enqueue)
-                || (!actions.isQueueLoading
-                    && (actions.queueErrorMessage != nil || actions.queueNotice != nil))
-        }
-
         private var tabs: some View {
             TabView(selection: tabSelection) {
                 ForEach(FoundationDestination.allCases, id: \.self) { destination in
                     Tab(value: destination, role: destination == .search ? .search : nil) {
                         NavigationStack {
                             browsingContent(destination)
-                        }
-                        .safeAreaInset(edge: .bottom, spacing: 0) {
-                            // Unlike TabView's fixed-height accessory, this inset sizes and
-                            // hit-tests the complete status above the native playback controls.
-                            FoundationCollectionActionStatus(compactPresentation: true)
-                                .background(.regularMaterial)
                         }
                         .id(library.catalogScopeID + String(destination.rawValue))
                     } label: {
@@ -833,6 +795,7 @@ struct FoundationLibraryView: View {
                             "Albums", subtitle: "Browse your collection by album",
                             symbol: "opticaldisc.fill")
                     }.accessibilityIdentifier("library-category-albums")
+                    categoryDivider
                     NavigationLink {
                         FoundationLibraryIndexView(
                             kind: .artist, model: artists, library: library, player: player,
@@ -841,6 +804,7 @@ struct FoundationLibraryView: View {
                         categoryRow(
                             "Artists", subtitle: "Find music by artist", symbol: "music.mic")
                     }.accessibilityIdentifier("library-category-artists")
+                    categoryDivider
                     NavigationLink {
                         FoundationLibraryIndexView(
                             kind: .track, model: songs, library: library, player: player,
@@ -850,6 +814,7 @@ struct FoundationLibraryView: View {
                             "Songs", subtitle: "See every song in your library",
                             symbol: "music.note")
                     }.accessibilityIdentifier("library-category-songs")
+                    categoryDivider
                     NavigationLink {
                         FoundationPlaylistIndex(
                             library: library, player: player, isActive: catalogIsActive(.library),
@@ -863,6 +828,7 @@ struct FoundationLibraryView: View {
                             "Playlists", subtitle: "Collections from all music libraries",
                             symbol: "music.note.list")
                     }.accessibilityIdentifier("library-category-playlists")
+                    categoryDivider
                     NavigationLink {
                         #if os(macOS)
                             macGenreIndex
@@ -875,6 +841,7 @@ struct FoundationLibraryView: View {
                         categoryRow(
                             "Genres", subtitle: "Browse albums by genre", symbol: "guitars")
                     }.accessibilityIdentifier("library-category-genres")
+                    categoryDivider
                     NavigationLink {
                         FoundationDownloadsView(
                             library: library, player: player, isActive: catalogIsActive(.library))
@@ -1001,13 +968,19 @@ struct FoundationLibraryView: View {
             })
     }
 
+    private var categoryDivider: some View {
+        Divider()
+            .opacity(0.35)
+            .padding(.leading, 50)
+            .accessibilityHidden(true)
+    }
+
     private func categoryRow(_ title: String, subtitle: String, symbol: String) -> some View {
         HStack(spacing: 12) {
             Image(systemName: symbol)
-                .font(.title3.weight(.medium))
+                .font(.title2.weight(.medium))
                 .foregroundStyle(.tint)
                 .frame(width: 38, height: 38)
-                .background(.quaternary, in: RoundedRectangle(cornerRadius: 10))
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 3) {
                 Text(title).font(.body.weight(.medium))
@@ -1015,6 +988,7 @@ struct FoundationLibraryView: View {
             }
             Spacer(minLength: 0)
         }.padding(.vertical, 5)
+            .contentShape(Rectangle())
             .accessibilityElement(children: .combine)
             .accessibilityLabel(title + ", " + subtitle)
     }
@@ -1035,7 +1009,7 @@ struct FoundationLibraryView: View {
                         FoundationCatalogArtwork(
                             source: .current(currentArtwork.result(for: item)),
                             item: item.catalogArtworkItem, library: library,
-                            isActive: true, size: 40
+                            isActive: true, size: FoundationMacLayout.transportContentHeight
                         ).id(item.sharedArtworkIdentity)
                     }
                 }
@@ -1519,12 +1493,6 @@ struct FoundationCatalogView: View {
                 ToolbarItemGroup(placement: .primaryAction) {
                     if !relatedItemSheet { catalogActions }
                 }
-                if !relatedItemSheet {
-                    ToolbarItem(id: "catalog-content-trailing-clearance", placement: .primaryAction)
-                    {
-                        FoundationMacToolbarClearance()
-                    }.sharedBackgroundVisibility(.hidden)
-                }
             #else
                 if !relatedItemSheet { catalogActions }
             #endif
@@ -1736,7 +1704,7 @@ struct FoundationCatalogView: View {
     }
 }
 
-/// Shared cover grids retain readable titles at accessibility text sizes.
+/// Shared cover grids grow their columns at accessibility text sizes.
 func foundationCollectionColumns(for size: DynamicTypeSize) -> [GridItem] {
     [
         GridItem(
@@ -1774,13 +1742,17 @@ struct FoundationCollectionCard: View {
                         ).id(artworkItem.sharedArtworkIdentity)
                             .foundationCollectionArtworkSource(item: item)
                     } else {
-                        GeometryReader { geometry in
-                            FoundationCatalogArtwork(
-                                item: artworkItem, library: library, isActive: isActive,
-                                size: geometry.size.width
-                            ).id(artworkItem.sharedArtworkIdentity)
-                                .foundationCollectionArtworkSource(item: item)
-                        }.aspectRatio(1, contentMode: .fit)
+                        // The square owns its height; text never compresses the cover.
+                        Color.clear.aspectRatio(1, contentMode: .fit)
+                            .overlay {
+                                GeometryReader { geometry in
+                                    FoundationCatalogArtwork(
+                                        item: artworkItem, library: library, isActive: isActive,
+                                        size: geometry.size.width
+                                    ).id(artworkItem.sharedArtworkIdentity)
+                                        .foundationCollectionArtworkSource(item: item)
+                                }
+                            }
                     }
                 }.buttonStyle(.plain).accessibilityLabel("View " + item.title)
                 Button {
@@ -1788,13 +1760,13 @@ struct FoundationCollectionCard: View {
                 } label: {
                     VStack(alignment: item.kind == .artist ? .center : .leading, spacing: 3) {
                         HStack(alignment: .firstTextBaseline, spacing: 6) {
-                            Text(item.title).font(.headline).lineLimit(2)
-                                .fixedSize(horizontal: false, vertical: true)
+                            Text(item.title).font(.headline).lineLimit(1)
+                                .truncationMode(.tail)
                             FoundationDownloadBadge(item: item)
                         }
-                        if showsSubtitle, !subtitle.isEmpty {
+                        if showsSubtitle {
                             Text(subtitle).font(.caption).foregroundStyle(.secondary)
-                                .lineLimit(2)
+                                .lineLimit(1, reservesSpace: true).truncationMode(.tail)
                         }
                     }
                     .frame(
@@ -1805,7 +1777,9 @@ struct FoundationCollectionCard: View {
                 if let error = actions.errorMessage(for: item) {
                     Text(error).font(.caption).foregroundStyle(.red)
                 }
-            }.contextMenu {
+            }
+            .fixedSize(horizontal: false, vertical: true)
+            .contextMenu {
                 FoundationItemMenu(
                     item: item, actions: actions, initialFavorite: item.isFavorite,
                     open: open, library: library, player: player, navigate: navigate)
@@ -2011,7 +1985,7 @@ private struct FoundationCollectionView: View {
     let library: any FoundationLibrary
     let player: FoundationPlayer
     let isActive: Bool
-    @State private var managingPlaylist = false
+    @State private var playlistSheet: FoundationPlaylistSheet?
     @State private var playlistName: String?
     @Environment(\.dismiss) private var dismiss
 
@@ -2031,7 +2005,8 @@ private struct FoundationCollectionView: View {
             playlistRevision: item.kind == .playlist
                 ? playlistChanges.revision(for: item.id) : 0,
             refreshRevision: refreshRevision,
-            managePlaylist: item.kind == .playlist ? { managingPlaylist = true } : nil,
+            managePlaylist: item.kind == .playlist ? { playlistSheet = .manage } : nil,
+            addPlaylistSongs: item.kind == .playlist ? { playlistSheet = .addSongs } : nil,
             loader: { offset in
                 if item.kind == .playlist {
                     return try await library.playlistTracks(
@@ -2041,18 +2016,23 @@ private struct FoundationCollectionView: View {
             }
         )
         .onChange(of: connectivity.localOnly) { _, offline in
-            if offline { managingPlaylist = false }
+            if offline { playlistSheet = nil }
         }
         .sheet(
-            isPresented: $managingPlaylist,
+            item: $playlistSheet,
             onDismiss: {
                 guard !connectivity.localOnly else { return }
                 refreshRevision += 1
             },
-            content: {
-                FoundationPlaylistEditor(
-                    playlist: displayItem, onDeleted: { dismiss() },
-                    onRenamed: { playlistName = $0 }, library: library)
+            content: { destination in
+                switch destination {
+                case .manage:
+                    FoundationPlaylistEditor(
+                        playlist: displayItem, onDeleted: { dismiss() },
+                        onRenamed: { playlistName = $0 }, library: library)
+                case .addSongs:
+                    FoundationPlaylistSongPicker(playlist: displayItem, library: library)
+                }
             })
     }
 }
@@ -2077,6 +2057,7 @@ struct FoundationTrackList: View {
     var playlistRevision = 0
     var refreshRevision = 0
     var managePlaylist: (() -> Void)? = nil
+    var addPlaylistSongs: (() -> Void)? = nil
     var localItems: (() -> [FoundationItem])? = nil
     @State private var loadedPlaylistRevision = 0
     @State private var loadedRefreshRevision = 0
@@ -2122,13 +2103,6 @@ struct FoundationTrackList: View {
                 #if os(macOS)
                     ToolbarItemGroup(placement: .primaryAction) {
                         if !relatedItemSheet { collectionActions }
-                    }
-                    if !relatedItemSheet {
-                        ToolbarItem(
-                            id: "tracks-content-trailing-clearance", placement: .primaryAction
-                        ) {
-                            FoundationMacToolbarClearance()
-                        }.sharedBackgroundVisibility(.hidden)
                     }
                 #else
                     if !relatedItemSheet { collectionActions }
@@ -2197,8 +2171,12 @@ struct FoundationTrackList: View {
                     item: collection, iconFont: collectionActionFont)
             #endif
             Menu {
+                if let addPlaylistSongs {
+                    Button("Add Songs", systemImage: "plus", action: addPlaylistSongs)
+                        .disabled(!library.supportsPlaylistManagement || connectivity.localOnly)
+                }
                 if let managePlaylist {
-                    Button("Edit Playlist", systemImage: "pencil", action: managePlaylist)
+                    Button("Manage Playlist", systemImage: "pencil", action: managePlaylist)
                         .disabled(!library.supportsPlaylistManagement || connectivity.localOnly)
                     Divider()
                 }
@@ -2210,6 +2188,7 @@ struct FoundationTrackList: View {
                 }
                 FoundationItemMenu(
                     item: collection, actions: actions, initialFavorite: collection.isFavorite,
+                    showsFavoriteAction: collection.kind != .album,
                     library: library, player: player)
             } label: {
                 Image(systemName: "ellipsis")
@@ -2218,6 +2197,24 @@ struct FoundationTrackList: View {
                         height: relatedItemSheet ? 48 : nil)
             }.foundationEllipsisMenuIndicator().accessibilityLabel("More actions")
         }
+    }
+
+    private func albumDiscHeading(_ heading: FoundationAlbumTrackPolicy.DiscHeading) -> some View {
+        Group {
+            switch heading {
+            case .disc(let number): Text("Disc \(number)")
+            case .unspecified: Text("Other Tracks")
+            }
+        }
+        .font(.headline)
+        .foregroundStyle(.secondary)
+        .padding(.top, 20)
+        .padding(.bottom, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityAddTraits(.isHeader)
+        #if os(macOS)
+            .padding(.horizontal, 16)
+        #endif
     }
 
     @ViewBuilder private var trackSurface: some View {
@@ -2245,6 +2242,22 @@ struct FoundationTrackList: View {
                 .listRowBackground(Color.clear)
                 .listRowSeparator(.hidden)
         }
+        if collection?.kind == .playlist, library.supportsPlaylistManagement {
+            HStack(spacing: 12) {
+                if let addPlaylistSongs {
+                    Button("Add Songs", systemImage: "plus", action: addPlaylistSongs)
+                }
+                if let managePlaylist {
+                    Button("Manage Songs", systemImage: "checklist", action: managePlaylist)
+                }
+                Spacer(minLength: 0)
+            }
+            .buttonStyle(.bordered)
+            .disabled(connectivity.localOnly)
+            .padding(.vertical, 8)
+            .listRowBackground(Color.clear)
+            .listRowSeparator(.hidden)
+        }
         if connectivity.hasConnectionIssue || tracks.hasConnectionIssue {
             FoundationOfflineNotice().listRowBackground(Color.clear)
         }
@@ -2261,85 +2274,26 @@ struct FoundationTrackList: View {
         {
             FoundationPlaylistStatus(operation: playlistRemoval)
         }
-        ForEach(Array(visibleTracks.enumerated()), id: \.offset) { index, item in
-            let artworkItem = item.catalogArtworkItem
-            let albumTitle =
-                item.album?.title ?? (collection?.kind == .album ? collection?.title : nil)
-                ?? ""
-            let subtitle = [item.subtitle, albumTitle]
-                .filter { !$0.isEmpty }.joined(separator: " · ")
-            VStack(alignment: .leading) {
-                HStack {
-                    Button {
-                        play(index, expected: item)
-                    } label: {
-                        HStack {
-                            if collection == nil {
-                                FoundationCatalogArtwork(
-                                    item: artworkItem, library: library,
-                                    isActive: isActive && isVisible
-                                )
-                                .id(artworkItem.id + (artworkItem.primaryImageTag ?? ""))
-                            } else {
-                                Text(
-                                    "\(collection?.kind == .album ? (item.trackNumber ?? index + 1) : index + 1)"
-                                ).font(.subheadline)
-                                    .accessibilityIdentifier("album-track-number-\(index)")
-                                    .foregroundStyle(.secondary).monospacedDigit()
-                                    .frame(minWidth: 24, alignment: .leading)
-                            }
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(item.title).font(.body.weight(.medium))
-                                    .lineLimit(2)
-                                if !subtitle.isEmpty {
-                                    Text(subtitle).font(.caption).foregroundStyle(.secondary)
-                                        .lineLimit(2)
-                                }
-                                if connectivity.localOnly, !downloads.isReady(item) {
-                                    Label("Not downloaded", systemImage: "icloud.slash")
-                                        .font(.caption).foregroundStyle(.secondary)
-                                }
-                            }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                        .padding(.vertical, 6)
-                        .contentShape(Rectangle())
-                    }.buttonStyle(.plain)
-                        .disabled(connectivity.localOnly && !downloads.isReady(item))
-                        .opacity(connectivity.localOnly && !downloads.isReady(item) ? 0.5 : 1)
-                        .accessibilityIdentifier("collection-track-\(index)")
-                        .accessibilityLabel(item.title)
-                        .accessibilityValue(
-                            connectivity.localOnly && !downloads.isReady(item)
-                                ? "Not downloaded, unavailable offline" : "")
-                    Spacer(minLength: 8)
-                    FoundationDownloadBadge(item: item)
-                        .accessibilityIdentifier("collection-track-download-\(index)")
-                    Menu {
-                        trackMenu(item, index: index)
-                    } label: {
-                        Image(systemName: "ellipsis").frame(width: 44, height: 44)
+        if collection?.kind == .album {
+            let albumDiscHeadings = FoundationAlbumTrackPolicy.discHeadings(for: visibleTracks)
+            ForEach(Array(visibleTracks.enumerated()), id: \.offset) { index, item in
+                // One list row per track, even when this track begins a new disc.
+                VStack(alignment: .leading, spacing: 0) {
+                    if let heading = albumDiscHeadings[index] {
+                        albumDiscHeading(heading)
                     }
-                    .menuStyle(.borderlessButton)
-                    .foundationEllipsisMenuIndicator()
-                    .accessibilityLabel("Actions for " + item.title)
-                    .accessibilityIdentifier("collection-track-actions-\(index)")
+                    trackRow(item, index: index)
+                    #if os(macOS)
+                        Divider().overlay(.white.opacity(0.12)).padding(.horizontal, 16)
+                    #endif
                 }
-                if let error = actions.errorMessage(for: item) {
-                    Text(error).font(.caption).foregroundStyle(.red)
-                }
+                .listRowBackground(Color.clear)
+                .listRowSeparatorTint(.white.opacity(0.12))
             }
-            .listRowBackground(Color.clear)
-            .listRowSeparatorTint(collection == nil ? nil : .white.opacity(0.12))
-            #if os(macOS)
-                .padding(.horizontal, collection?.kind == .album ? 16 : 0)
-            #endif
-            .contextMenu { trackMenu(item, index: index) }
-            #if os(macOS)
-                if collection?.kind == .album {
-                    Divider().overlay(.white.opacity(0.12)).padding(.horizontal, 16)
-                }
-            #endif
+        } else {
+            ForEach(Array(visibleTracks.enumerated()), id: \.offset) { index, item in
+                trackRow(item, index: index)
+            }
         }
         Group {
             if !connectivity.localOnly, tracks.loaded, tracks.items.isEmpty {
@@ -2372,6 +2326,82 @@ struct FoundationTrackList: View {
             .listRowBackground(Color.clear)
             .listRowSeparator(.hidden)
         }
+    }
+
+    private func trackRow(_ item: FoundationItem, index: Int) -> some View {
+        let artworkItem = item.catalogArtworkItem
+        let albumTitle =
+            item.album?.title ?? (collection?.kind == .album ? collection?.title : nil)
+            ?? ""
+        let subtitle = [item.subtitle, albumTitle]
+            .filter { !$0.isEmpty }.joined(separator: " · ")
+        return VStack(alignment: .leading) {
+            HStack {
+                Button {
+                    play(index, expected: item)
+                } label: {
+                    HStack {
+                        if collection == nil {
+                            FoundationCatalogArtwork(
+                                item: artworkItem, library: library,
+                                isActive: isActive && isVisible
+                            )
+                            .id(artworkItem.id + (artworkItem.primaryImageTag ?? ""))
+                        } else {
+                            Text(
+                                "\(collection?.kind == .album ? (item.trackNumber ?? index + 1) : index + 1)"
+                            ).font(.subheadline)
+                                .accessibilityIdentifier("album-track-number-\(index)")
+                                .foregroundStyle(.secondary).monospacedDigit()
+                                .frame(minWidth: 24, alignment: .leading)
+                        }
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(item.title).font(.body.weight(.medium))
+                                .lineLimit(2)
+                            if !subtitle.isEmpty {
+                                Text(subtitle).font(.caption).foregroundStyle(.secondary)
+                                    .lineLimit(2)
+                            }
+                            if connectivity.localOnly, !downloads.isReady(item) {
+                                Label("Not downloaded", systemImage: "icloud.slash")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .padding(.vertical, 6)
+                    .contentShape(Rectangle())
+                }.buttonStyle(.plain)
+                    .disabled(connectivity.localOnly && !downloads.isReady(item))
+                    .opacity(connectivity.localOnly && !downloads.isReady(item) ? 0.5 : 1)
+                    .accessibilityIdentifier("collection-track-\(index)")
+                    .accessibilityLabel(item.title)
+                    .accessibilityValue(
+                        connectivity.localOnly && !downloads.isReady(item)
+                            ? "Not downloaded, unavailable offline" : "")
+                Spacer(minLength: 8)
+                FoundationDownloadBadge(item: item)
+                    .accessibilityIdentifier("collection-track-download-\(index)")
+                Menu {
+                    trackMenu(item, index: index)
+                } label: {
+                    Image(systemName: "ellipsis").frame(width: 44, height: 44)
+                }
+                .menuStyle(.borderlessButton)
+                .foundationEllipsisMenuIndicator()
+                .accessibilityLabel("Actions for " + item.title)
+                .accessibilityIdentifier("collection-track-actions-\(index)")
+            }
+            if let error = actions.errorMessage(for: item) {
+                Text(error).font(.caption).foregroundStyle(.red)
+            }
+        }
+        .listRowBackground(Color.clear)
+        .listRowSeparatorTint(collection == nil ? nil : .white.opacity(0.12))
+        #if os(macOS)
+            .padding(.horizontal, collection?.kind == .album ? 16 : 0)
+        #endif
+        .contextMenu { trackMenu(item, index: index) }
     }
 
     private var collectionActionFont: Font {
@@ -2576,6 +2606,7 @@ private struct FoundationScreenHeader<Profile: View, Search: View>: ViewModifier
     let search: Search
     let searchHeight: CGFloat
     var keepsVisible = false
+    @Environment(\.foundationReduceTransparency) private var reduceTransparency
     @State private var headerVisible = true
     @State private var isAtTop = true
     @State private var legacyMaterialOpacity = 0.0
@@ -2621,7 +2652,7 @@ private struct FoundationScreenHeader<Profile: View, Search: View>: ViewModifier
             if #available(iOS 26.0, *) {
                 content
                     .safeAreaBar(edge: .top, spacing: 0) {
-                        visibleHeader(headerContent)
+                        visibleHeader(headerContent.background { searchReadabilityBackground })
                     }
                     .scrollEdgeEffectStyle(.soft, for: .top)
                     .scrollEdgeEffectHidden(!showsHeader || isAtTop, for: .top)
@@ -2651,6 +2682,37 @@ private struct FoundationScreenHeader<Profile: View, Search: View>: ViewModifier
                 .allowsHitTesting(showsHeader)
                 .accessibilityHidden(!showsHeader)
                 .animation(.easeOut(duration: 0.18), value: showsHeader)
+        }
+
+        @ViewBuilder private var searchReadabilityBackground: some View {
+            // Search has a second header row. Keep its upper half legible before
+            // feathering into the results, without changing other root headers.
+            if searchHeight > 0 {
+                GeometryReader { geometry in
+                    let topInset = geometry.safeAreaInsets.top
+                    let height = geometry.size.height + topInset
+                    let midpoint = (topInset + 56 + searchHeight / 2) / max(1, height)
+                    Rectangle()
+                        .fill(
+                            reduceTransparency
+                                ? AnyShapeStyle(.background) : AnyShapeStyle(.regularMaterial)
+                        )
+                        .frame(height: height)
+                        .mask {
+                            LinearGradient(
+                                stops: [
+                                    .init(color: .black, location: 0),
+                                    .init(color: .black, location: midpoint),
+                                    .init(color: .clear, location: 1),
+                                ], startPoint: .top, endPoint: .bottom)
+                        }
+                        .offset(y: -topInset)
+                }
+                .opacity(isAtTop ? 0 : 1)
+                .animation(.easeOut(duration: 0.18), value: isAtTop)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+            }
         }
 
         private var legacyBackground: some View {
@@ -2788,7 +2850,6 @@ struct FoundationAlbumShelfCard: View {
     let open: () -> Void
     var navigate: ((FoundationItem) -> Void)?
     @EnvironmentObject private var actions: FoundationLibraryActions
-    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     @EnvironmentObject private var downloads: FoundationDownloads
     @EnvironmentObject private var connectivity: FoundationConnectivity
@@ -2805,14 +2866,12 @@ struct FoundationAlbumShelfCard: View {
                         .foundationCollectionArtworkSource(item: item)
                         VStack(alignment: .leading, spacing: 4) {
                             HStack(alignment: .firstTextBaseline, spacing: 6) {
-                                Text(item.title).font(.headline).lineLimit(
-                                    dynamicTypeSize.isAccessibilitySize ? nil : 2)
+                                Text(item.title).font(.headline).lineLimit(1)
+                                    .truncationMode(.tail)
                                 FoundationDownloadBadge(item: item)
                             }
-                            if !item.subtitle.isEmpty {
-                                Text(item.subtitle).font(.subheadline).foregroundStyle(.secondary)
-                                    .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 2)
-                            }
+                            Text(item.subtitle).font(.subheadline).foregroundStyle(.secondary)
+                                .lineLimit(1, reservesSpace: true).truncationMode(.tail)
                         }.frame(maxWidth: .infinity, alignment: .leading)
                     }.contentShape(Rectangle())
                 }.buttonStyle(.plain)
@@ -2821,6 +2880,7 @@ struct FoundationAlbumShelfCard: View {
                 }
             }
             .frame(width: 144, alignment: .leading)
+            .fixedSize(horizontal: false, vertical: true)
             .contextMenu {
                 FoundationItemMenu(
                     item: item, actions: actions, initialFavorite: item.isFavorite,

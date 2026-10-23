@@ -99,6 +99,71 @@ enum FoundationAppRuntime {
     static let model = FoundationAppModel()
 }
 
+enum FoundationCredentialUpgradeError: Error {
+    case confirmationRequired(UUID)
+}
+
+enum FoundationRetainedScopeMatch: Equatable { case empty, matching, unmatched }
+
+/// Existing account stores share one retention boundary; injection keeps upgrade tests disposable.
+@MainActor
+struct FoundationAccountRetention {
+    var inventory: (String) throws -> FoundationRetainedScopeMatch
+    var pins: (String?) -> Bool
+    var playback: (String?) -> Bool
+    var downloads: (String?) -> Bool
+    var selections: (String?) -> Bool
+    var artwork: (String?) async -> Bool
+    var pages: (String?) async -> Bool
+
+    static var system: Self {
+        Self(
+            inventory: { try inventory(scope: $0) },
+            pins: { FoundationPinStorage.removeStoredPins(retaining: $0) },
+            playback: { FoundationPlaybackSessionStore.clear(retaining: $0) },
+            downloads: { FoundationDownloads.clearStoredDownloads(retaining: $0) },
+            selections: { FoundationMusicLibraryStore.clear(retaining: $0) },
+            artwork: { await FoundationArtworkCache.clearStoredArtwork(retaining: $0) },
+            pages: { await FoundationCatalogPageCache.clearStoredPages(retaining: $0) })
+    }
+
+    static func inventory(
+        scope: String, defaults: UserDefaults = .standard,
+        roots: [(URL, String)]? = nil
+    ) throws -> FoundationRetainedScopeMatch {
+        let cacheRoot = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        let digest = FoundationArtworkCache.digest(scope)
+        let stores =
+            roots ?? [
+                (FoundationPlaybackSessionStore.defaultRoot, scope),
+                (FoundationMusicLibraryStore.defaultRoot, scope),
+                (FoundationDownloadStorage.base, digest),
+                (cacheRoot.appendingPathComponent("VelacantoArtwork"), digest),
+                (FoundationCatalogPageCache.defaultRoot, digest),
+            ]
+        let keys = defaults.dictionaryRepresentation().keys.filter {
+            $0.hasPrefix(FoundationPinStorage.keyPrefix)
+        }
+        var any = !keys.isEmpty
+        var matching = keys.contains(FoundationPinStorage.key(for: scope))
+        for (root, retained) in stores {
+            guard FileManager.default.fileExists(atPath: root.path) else { continue }
+            let values = try root.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+            guard values.isDirectory == true, values.isSymbolicLink != true else {
+                throw FoundationLibraryError.credentials
+            }
+            let entries = try FileManager.default.contentsOfDirectory(
+                at: root,
+                includingPropertiesForKeys: [.isSymbolicLinkKey])
+            guard entries.count <= 4096 else { throw FoundationLibraryError.credentials }
+            any = any || !entries.isEmpty
+            matching = matching || entries.contains { $0.lastPathComponent == retained }
+        }
+        return matching ? .matching : any ? .unmatched : .empty
+    }
+
+}
+
 @MainActor
 final class FoundationAppModel: ObservableObject {
     enum Readiness: Equatable {
@@ -109,10 +174,33 @@ final class FoundationAppModel: ObservableObject {
     private let restoreAccount: (@MainActor (FoundationAppModel) -> Void)?
     private var startupTask: Task<Void, Never>?
     private var startupGeneration = 0
+    private let credentialOperations: FoundationCredentials.Operations
+    private let accountRetention: FoundationAccountRetention
+    private let credentialDefaults: UserDefaults
+    private let publishAccount: ((FoundationSession, String) -> Void)?
+    private var accountCleanupTask: Task<Void, Never>?
+    private var authenticationGeneration = 0
+    private var pendingUpgradeAuthentication:
+        (
+            ticket: UUID, session: FoundationSession, epoch: Int, startup: Int, authentication: Int
+        )?
+    static let credentialBackendKey = "Velacanto.Foundation.CredentialBackend.v1"
+
+    var awaitsCredentialUpgrade: Bool {
+        #if os(macOS)
+            credentialDefaults.string(forKey: Self.credentialBackendKey) != "data-protection-ready"
+        #else
+            false
+        #endif
+    }
 
     init(
         prepareCaches: (@MainActor () async -> Bool)? = nil,
-        restoreAccount: (@MainActor (FoundationAppModel) -> Void)? = nil
+        restoreAccount: (@MainActor (FoundationAppModel) -> Void)? = nil,
+        credentialOperations: FoundationCredentials.Operations = .system,
+        accountRetention: FoundationAccountRetention? = nil,
+        credentialDefaults: UserDefaults = .standard,
+        publishAccount: ((FoundationSession, String) -> Void)? = nil
     ) {
         self.prepareCaches =
             prepareCaches ?? {
@@ -120,6 +208,10 @@ final class FoundationAppModel: ObservableObject {
                     version: FoundationDisposableCachePolicy.currentVersion)
             }
         self.restoreAccount = restoreAccount
+        self.credentialOperations = credentialOperations
+        self.accountRetention = accountRetention ?? .system
+        self.credentialDefaults = credentialDefaults
+        self.publishAccount = publishAccount
     }
 
     @Published private(set) var library: FoundationJellyfinLibrary?
@@ -161,6 +253,7 @@ final class FoundationAppModel: ObservableObject {
 
     isolated deinit {
         startupTask?.cancel()
+        accountCleanupTask?.cancel()
         FoundationAlphabetAccountLifecycle.retire(library)
         librarySelection?.invalidate()
         if let cache = library?.artworkCache {
@@ -222,6 +315,8 @@ final class FoundationAppModel: ObservableObject {
     }
 
     func retryCachePreparation() {
+        cancelCredentialUpgrade()
+        accountCleanupTask?.cancel()
         startupGeneration += 1
         startupTask?.cancel()
         startupTask = nil
@@ -233,6 +328,8 @@ final class FoundationAppModel: ObservableObject {
 
     /// Retire suspended startup work together with an account's local ownership.
     func invalidateAccountReadiness() {
+        cancelCredentialUpgrade()
+        accountCleanupTask?.cancel()
         accountEpoch += 1
         startupGeneration += 1
         startupTask?.cancel()
@@ -241,54 +338,70 @@ final class FoundationAppModel: ObservableObject {
         isPreparingCaches = false
     }
 
-    private func restoreCredentials() {
+    func restoreCredentials() {
+        if awaitsCredentialUpgrade {
+            // Quarantine scoped data until a modern credential exists. Never ask legacy storage.
+            do {
+                if let session = try FoundationCredentials.load(operations: credentialOperations) {
+                    try accept(session, saveCredentials: false)
+                }
+            } catch {
+                credentialError = "Saved sign-in could not be restored. Please sign in again."
+            }
+            return
+        }
         var credentialReadCompleted = false
         do {
-            let savedSession = try FoundationCredentials.load()
+            let savedSession = try FoundationCredentials.load(operations: credentialOperations)
             credentialReadCompleted = true
             if let session = savedSession {
                 let scope = Self.sourceScope(for: session)
-                if !FoundationPinStorage.removeStoredPins(retaining: scope) {
+                if !accountRetention.pins(scope) {
                     credentialError = "Older saved pins could not be removed from this device."
                 }
-                if !FoundationPlaybackSessionStore.clear(retaining: scope) {
+                if !accountRetention.playback(scope) {
                     credentialError =
                         "Older playback sessions could not be removed from this device."
                 }
-                if !FoundationDownloads.clearStoredDownloads(retaining: scope) {
+                if !accountRetention.downloads(scope) {
                     credentialError =
                         "Older downloaded music could not be removed from this device."
                 }
-                if !FoundationMusicLibraryStore.clear(retaining: scope) {
+                if !accountRetention.selections(scope) {
                     credentialError = "Older music-library selections could not be removed."
                 }
                 open(session, sourceScope: scope)
-            } else if !FoundationPinStorage.removeStoredPins() {
+            } else if !accountRetention.pins(nil) {
                 credentialError = "Saved pins could not be removed from this device."
             }
         } catch {
             credentialError = "Saved sign-in could not be read. Please sign in again."
-            if !FoundationPinStorage.removeStoredPins() {
+            if !accountRetention.pins(nil) {
                 credentialError =
                     "Saved sign-in could not be read. Please sign in again. "
                     + "Saved pins could not be removed from this device."
             }
         }
-        if library == nil, !FoundationPlaybackSessionStore.clear() {
+        if library == nil, !accountRetention.playback(nil) {
             credentialError = "Saved playback sessions could not be removed from this device."
         }
-        if credentialReadCompleted, library == nil, !FoundationDownloads.clearStoredDownloads() {
+        if credentialReadCompleted, library == nil, !accountRetention.downloads(nil) {
             credentialError = FoundationDownloadAccountError.cleanupFailed.errorDescription
         }
         if credentialReadCompleted, library == nil {
-            if !FoundationMusicLibraryStore.clear() {
+            if !accountRetention.selections(nil) {
                 credentialError = "Saved music-library selections could not be removed."
             }
             let epoch = accountEpoch
-            Task { [weak self] in
-                guard let self, self.accountEpoch == epoch, self.library == nil else { return }
-                let cleared = await FoundationArtworkCache.clearStoredArtwork()
-                let pagesCleared = await FoundationCatalogPageCache.clearStoredPages()
+            accountCleanupTask?.cancel()
+            accountCleanupTask = Task { [weak self] in
+                guard !Task.isCancelled, let self, self.accountEpoch == epoch, self.library == nil
+                else { return }
+                let cleared = await self.accountRetention.artwork(nil)
+                guard !Task.isCancelled, self.accountEpoch == epoch, self.library == nil else {
+                    return
+                }
+                let pagesCleared = await self.accountRetention.pages(nil)
                 guard self.accountEpoch == epoch, self.library == nil else { return }
                 if !cleared || !pagesCleared {
                     self.credentialError =
@@ -301,10 +414,125 @@ final class FoundationAppModel: ObservableObject {
         #endif
     }
 
-    fileprivate func accept(_ session: FoundationSession) throws {
+    func prepareSignIn(
+        authenticate: @MainActor () async throws -> FoundationSession
+    ) async throws -> FoundationSignInView.Acceptance {
+        cancelCredentialUpgrade()
+        // A prior owner's cleanup cannot complete migration during a new sign-in.
+        accountCleanupTask?.cancel()
+        let authentication = authenticationGeneration
+        let epoch = accountEpoch
+        let generation = startupGeneration
+        let quarantined = awaitsCredentialUpgrade
+        let session = try await FoundationSignInPolicy.authenticate {
+            quarantined || self.accountRetention.pins(nil)
+        } clearPlaybackSessions: {
+            quarantined || self.accountRetention.playback(nil)
+        } clearDownloads: {
+            quarantined || self.accountRetention.downloads(nil)
+        } signIn: {
+            try await authenticate()
+        }
+        try Task.checkCancellation()
+        guard accountEpoch == epoch, startupGeneration == generation,
+            authenticationGeneration == authentication
+        else {
+            throw CancellationError()
+        }
+        return { [weak self] in
+            try Task.checkCancellation()
+            guard let self, self.accountEpoch == epoch, self.startupGeneration == generation,
+                self.authenticationGeneration == authentication
+            else {
+                throw CancellationError()
+            }
+            try self.accept(session)
+        }
+    }
+
+    func cancelCredentialUpgrade() {
+        authenticationGeneration += 1
+        pendingUpgradeAuthentication = nil
+    }
+
+    func confirmCredentialUpgrade(_ ticket: UUID) throws {
+        let pending = pendingUpgradeAuthentication
+        guard let pending, pending.ticket == ticket, pending.epoch == accountEpoch,
+            pending.startup == startupGeneration,
+            pending.authentication == authenticationGeneration, awaitsCredentialUpgrade
+        else {
+            throw CancellationError()
+        }
+        pendingUpgradeAuthentication = nil
+        try Task.checkCancellation()
+        try accept(pending.session, allowScopeDiscard: true)
+    }
+
+    private func accept(
+        _ session: FoundationSession, saveCredentials: Bool = true,
+        allowScopeDiscard: Bool = false
+    ) throws {
         guard cachesReady else { throw FoundationLibraryError.unavailable }
-        try FoundationCredentials.save(session)
-        open(session, sourceScope: Self.sourceScope(for: session))
+        let scope = Self.sourceScope(for: session)
+        if awaitsCredentialUpgrade {
+            if !allowScopeDiscard, try accountRetention.inventory(scope) == .unmatched {
+                let ticket = UUID()
+                pendingUpgradeAuthentication = (
+                    ticket, session, accountEpoch,
+                    startupGeneration, authenticationGeneration
+                )
+                throw FoundationCredentialUpgradeError.confirmationRequired(ticket)
+            }
+            guard accountRetention.pins(scope), accountRetention.playback(scope),
+                accountRetention.downloads(scope), accountRetention.selections(scope)
+            else { throw FoundationLibraryError.credentials }
+        }
+        if saveCredentials {
+            try FoundationCredentials.save(session, operations: credentialOperations)
+        }
+        open(session, sourceScope: scope)
+    }
+
+    private func finishAccountCleanup(epoch: Int, generation: Int, cleared: Bool) {
+        guard !Task.isCancelled, accountEpoch == epoch, startupGeneration == generation else {
+            return
+        }
+        if !cleared {
+            credentialError = "Older disposable caches could not be removed from this device."
+        } else if awaitsCredentialUpgrade {
+            credentialDefaults.set("data-protection-ready", forKey: Self.credentialBackendKey)
+        }
+    }
+
+    func waitForAccountCleanup() async { await accountCleanupTask?.value }
+
+    private func beginAccountCleanup(
+        scope: String, retiringCache: FoundationArtworkCache?,
+        retiringPages: FoundationCatalogPageCache?
+    ) {
+        let epoch = accountEpoch
+        let generation = startupGeneration
+        accountCleanupTask = Task { [weak self] in
+            guard !Task.isCancelled else { return }
+            if let retiringCache {
+                _ = await retiringCache.invalidate(removeDisk: retiringCache.scope != scope)
+            }
+            guard !Task.isCancelled else { return }
+            if let retiringPages {
+                _ = await retiringPages.invalidate(removeDisk: retiringPages.scope != scope)
+            }
+            guard !Task.isCancelled, let self, self.accountEpoch == epoch,
+                self.startupGeneration == generation
+            else { return }
+            let cleared = await self.accountRetention.artwork(scope)
+            guard !Task.isCancelled, self.accountEpoch == epoch,
+                self.startupGeneration == generation
+            else { return }
+            let pagesCleared = await self.accountRetention.pages(scope)
+            self.finishAccountCleanup(
+                epoch: epoch, generation: generation,
+                cleared: cleared && pagesCleared)
+        }
     }
 
     private static func sourceScope(for session: FoundationSession) -> String {
@@ -315,6 +543,8 @@ final class FoundationAppModel: ObservableObject {
     }
 
     private func open(_ session: FoundationSession, sourceScope: String) {
+        cancelCredentialUpgrade()
+        accountCleanupTask?.cancel()
         FoundationAlphabetAccountLifecycle.retire(library)
         playbackSessionSubscription = nil
         accountEpoch += 1
@@ -339,31 +569,38 @@ final class FoundationAppModel: ObservableObject {
         currentRetainedArtworkIdentity = nil
         let retiringCache = library?.artworkCache
         let retiringPages = library?.catalogPageCache
+        let epoch = accountEpoch
+        if let publishAccount {
+            beginAccountCleanup(
+                scope: FoundationArtworkCache.digest(sourceScope), retiringCache: retiringCache,
+                retiringPages: retiringPages)
+            publishAccount(session, sourceScope)
+            return
+        }
         let admission = FoundationNetworkAdmission()
         let cache = FoundationArtworkCache(scope: sourceScope, networkAdmission: admission)
         let pages = FoundationCatalogPageCache(scope: sourceScope)
-        let epoch = accountEpoch
-        Task { [weak self] in
-            if let retiringCache {
-                _ = await retiringCache.invalidate(removeDisk: retiringCache.scope != cache.scope)
-            }
-            if let retiringPages {
-                _ = await retiringPages.invalidate(removeDisk: retiringPages.scope != pages.scope)
-            }
-            guard let self, self.accountEpoch == epoch else { return }
-            let cleared = await FoundationArtworkCache.clearStoredArtwork(retaining: cache.scope)
-            let pagesCleared = await FoundationCatalogPageCache.clearStoredPages(
-                retaining: pages.scope)
-            guard self.accountEpoch == epoch else { return }
-            if !cleared || !pagesCleared {
-                self.credentialError =
-                    "Older disposable caches could not be removed from this device."
-            }
-        }
+        beginAccountCleanup(
+            scope: FoundationArtworkCache.digest(sourceScope), retiringCache: retiringCache,
+            retiringPages: retiringPages)
         librarySelection?.invalidate()
         let library = FoundationJellyfinLibrary(
-            session: session, artworkCache: cache, catalogPageCache: pages,
-            networkAdmission: admission)
+            session: session,
+            streamingQuality: { [weak self, playbackPreferences] in
+                #if os(macOS)
+                    return await playbackPreferences.resolvedStreamingQuality(
+                        for: FoundationStreamingPath())
+                #else
+                    let model = self
+                    return await MainActor.run {
+                        let path =
+                            model?.accountEpoch == epoch
+                            ? model?.connectivity?.streamingPath : nil
+                        return playbackPreferences.resolvedStreamingQuality(
+                            for: path ?? FoundationStreamingPath())
+                    }
+                #endif
+            }, artworkCache: cache, catalogPageCache: pages, networkAdmission: admission)
         let selectionStore = FoundationMusicLibraryStore(scope: sourceScope)
         let savedSelection: FoundationMusicLibraryChoice?
         let selectionReadFailed: Bool
@@ -395,6 +632,9 @@ final class FoundationAppModel: ObservableObject {
         self.library = library
         let downloads = FoundationDownloads(
             scope: sourceScope, library: library, monitorConnectivity: false,
+            requestedQuality: { [weak playbackPreferences] in
+                playbackPreferences?.downloadQuality ?? .original
+            },
             observeTracks: { [weak self] items, albumID in
                 self?.actions?.observeTrackCopies(items, albumID: albumID)
             },
@@ -524,7 +764,7 @@ final class FoundationAppModel: ObservableObject {
                 }
             }
         } clear: {
-            try FoundationCredentials.clear()
+            try FoundationCredentials.clear(operations: credentialOperations)
         } clearPins: {
             FoundationPinStorage.removeStoredPins()
         }
@@ -678,6 +918,17 @@ struct FoundationRootView: View {
             }
         }
         .task { _ = await model.ensureReady() }
+        #if os(iOS)
+            .task(id: scenePhase) {
+                FoundationSiriStartupAuthorization.shared.foreground(
+                    isActive: scenePhase == .active,
+                    canPrompt: !accountAlertPresented.wrappedValue)
+            }
+            .onChange(of: accountAlertPresented.wrappedValue) { _, presented in
+                FoundationSiriStartupAuthorization.shared.foreground(
+                    isActive: scenePhase == .active, canPrompt: !presented)
+            }
+        #endif
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {
                 model.playbackPreferences.refresh()
@@ -698,28 +949,34 @@ struct FoundationRootView: View {
 struct FoundationSignInView: View {
     typealias Acceptance = @MainActor () throws -> Void
     private let authenticate: @MainActor (URL, String, String) async throws -> Acceptance
+    private let confirmUpgrade: @MainActor (UUID) throws -> Void
+    private let cancelUpgrade: @MainActor () -> Void
+    @State private var upgradeTicket: UUID?
 
     init(model: FoundationAppModel) {
-        self.init { url, username, password in
-            let session = try await FoundationSignInPolicy.authenticate {
-                FoundationPinStorage.removeStoredPins()
-            } clearPlaybackSessions: {
-                FoundationPlaybackSessionStore.clear()
-            } clearDownloads: {
-                FoundationDownloads.clearStoredDownloads()
-            } signIn: {
-                try await FoundationJellyfinLibrary.signIn(
-                    serverURL: url, username: username, password: password)
-            }
-            return { try model.accept(session) }
-        }
+        self.init(
+            authenticate: { url, username, password in
+                try await model.prepareSignIn {
+                    try await FoundationJellyfinLibrary.signIn(
+                        serverURL: url, username: username, password: password)
+                }
+            }, confirmUpgrade: { try model.confirmCredentialUpgrade($0) },
+            cancelUpgrade: { model.cancelCredentialUpgrade() })
         #if os(macOS)
             _address = State(initialValue: model.library?.session.serverURL.absoluteString ?? "")
         #endif
     }
 
-    init(authenticate: @escaping @MainActor (URL, String, String) async throws -> Acceptance) {
+    init(
+        authenticate: @escaping @MainActor (URL, String, String) async throws -> Acceptance,
+        confirmUpgrade: @escaping @MainActor (UUID) throws -> Void = { _ in
+            throw CancellationError()
+        },
+        cancelUpgrade: @escaping @MainActor () -> Void = {}
+    ) {
         self.authenticate = authenticate
+        self.confirmUpgrade = confirmUpgrade
+        self.cancelUpgrade = cancelUpgrade
     }
     @State private var address = ""
     @State private var username = ""
@@ -735,6 +992,8 @@ struct FoundationSignInView: View {
 
     private func beginSignIn() {
         guard canSignIn else { return }
+        cancelUpgrade()
+        upgradeTicket = nil
         focusedField = nil
         signingIn = true
         attempt += 1
@@ -781,7 +1040,12 @@ struct FoundationSignInView: View {
                     } catch {
                         guard !Task.isCancelled, signingIn, attempt == owner else { return }
                         signingIn = false
-                        if let downloadError = error as? FoundationDownloadAccountError {
+                        if let upgrade = error as? FoundationCredentialUpgradeError {
+                            if case .confirmationRequired(let ticket) = upgrade {
+                                password = ""
+                                upgradeTicket = ticket
+                            }
+                        } else if let downloadError = error as? FoundationDownloadAccountError {
                             errorMessage = downloadError.errorDescription
                         } else if let pinError = error as? FoundationPinStorageError {
                             errorMessage = pinError.errorDescription
@@ -793,6 +1057,43 @@ struct FoundationSignInView: View {
                             errorMessage = FoundationLibraryError.category(error).errorDescription
                         }
                     }
+                }
+                .onDisappear {
+                    cancelUpgrade()
+                    upgradeTicket = nil
+                }
+                .confirmationDialog(
+                    "Keep existing local data?",
+                    isPresented: Binding(
+                        get: { upgradeTicket != nil },
+                        set: { presented in
+                            guard !presented, let dismissedTicket = upgradeTicket else { return }
+                            // Native dismissal can precede its button callback. Let that
+                            // synchronous callback consume ownership first; never retire a new ticket.
+                            Task { @MainActor in
+                                await Task.yield()
+                                guard upgradeTicket == dismissedTicket else { return }
+                                cancelUpgrade()
+                                upgradeTicket = nil
+                            }
+                        }
+                    ), presenting: upgradeTicket
+                ) { ticket in
+                    Button("Remove Local Data and Continue", role: .destructive) {
+                        do { try confirmUpgrade(ticket) } catch {
+                            errorMessage =
+                                "Couldn’t finish signing in. Your library was not opened. Please retry."
+                        }
+                        upgradeTicket = nil
+                    }
+                    Button("Retry Sign-in", role: .cancel) {
+                        cancelUpgrade()
+                        upgradeTicket = nil
+                    }
+                } message: { _ in
+                    Text(
+                        "Existing downloads, pins, playback history and library settings don’t match this server address and account. Retry with the previous server address to keep them, or remove local data and continue. Your Jellyfin library will not be changed."
+                    )
                 }
         }
     }
@@ -901,6 +1202,7 @@ struct FoundationSignInView: View {
                     ProgressView("Connecting to your Jellyfin server…")
                         .accessibilityIdentifier("sign-in-progress")
                     Button("Cancel") {
+                        cancelUpgrade()
                         signingIn = false
                         attempt += 1
                     }

@@ -64,11 +64,15 @@ nonisolated struct FoundationDownloadManifest: Codable, Sendable {
         let expanded: Bool
         // Absent in existing manifests: ordinary intent never clears local exclusions.
         var reacquiresExcludedTracks: Bool? = nil
+        // Absent in existing manifests means Original. Never resample on retry/reconcile.
+        var requestedQuality: FoundationDownloadQuality? = nil
     }
     struct File: Codable, Sendable {
         let name: String
         let bytes: Int64
         let digest: String
+        // Nil means a historical/original file. Requested quality belongs to the owner.
+        var convertedRendition: FoundationConvertedDownloadRendition? = nil
     }
     struct Artwork: Codable, Sendable {
         let item: FoundationStoredDownloadItem
