@@ -19,9 +19,10 @@ This supersedes the earlier requirement to publish every task branch and open a
 PR into alpha. Preserve existing branches and historical PR evidence; do not
 force-push, rewrite history or delete unintegrated work during this transition.
 
-Owner naming decision (2026-10-11): spell the product **VelaCanto**. Completed
-integrated alpha builds display **VelaCanto Alpha**, replacing the Siri Test label
-on the next build. Preserve internal targets, bundle IDs and stored-data identities.
+Owner naming clarification (2026-10-23): spell the product **VelaCanto**.
+Canonical Release/TestFlight builds display **VelaCanto**, without Alpha. Local
+Debug/UITesting builds retain **VelaCanto Alpha**; an explicitly local Release
+build may override the name. Preserve targets, bundle IDs and stored-data identities.
 See the product-naming section of docs/development-workflow.md.
 
 Before editing, compare the fetched alpha guide, applicable nested guides, current
@@ -31,7 +32,7 @@ checkout's instructions to make them appear current. Explicit owner instructions
 take precedence, but a scoped exception does not permanently change the default
 workflow. Record its scope and reconcile shared documentation.
 
-Current release work targets **0.5.0 — Alpha Preview**, candidate build 216,
+Current release work targets **0.5.0 — Alpha Preview**, candidate build 217,
 from accepted local build 215. Read `docs/0.5.0-acceptance.md`,
 `docs/0.5.0-release-notes.md` and `docs/0.5.0-testflight-notes.md` for current scope,
 known limits and separate publication/distribution gates. The 0.4 development
@@ -42,7 +43,7 @@ without converting incomplete checks into passes. “Preview” does not require
 preview branch.
 
 The maintained app is `NativeFoundation/VelacantoFoundation.xcodeproj`, scheme
-`VelacantoFoundation`, product `Velacanto`; display name VelaCanto Alpha.
+`VelacantoFoundation`, product `Velacanto`; distribution display name VelaCanto.
 Read the nested guide, ADR 0012/0013 and playback contract before implementation.
 Native CarPlay, HLS streaming, quality/download options, playlist management and
 modern Mac credentials are now implemented. Historical plans marking them excluded
@@ -317,3 +318,14 @@ Final handoff: base and final SHA, PR/issue, owned paths, tests/results, privacy
 review, pending gates, integration status and next owner. Report local, published,
 merged, accepted and distributed as distinct states. Never mark documentation or
 implementation Done merely because a local commit or draft PR exists.
+
+## Delivery clarification — 2026-10-23
+
+Automatic TestFlight delivery is main-only. Keep an owner's explicitly started
+manual Cloud/TestFlight push separate from automatic branch-triggered delivery;
+do not remove its post-actions or promote branches as a workaround. For the
+0.5.0 preview the owner handles that manual push while GitHub checks are resolved
+independently. No Cloud workflow edits/removals were saved during this cleanup.
+Do not change tester groups, agreements or public-release scope. Record actual
+source, checks, Apple processing and availability separately; TestFlight activity
+does not turn a failed GitHub quality gate into a pass.

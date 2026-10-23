@@ -3,10 +3,11 @@
 VelaCanto is a native Jellyfin music app for iPhone, iPad and Mac. **Version
 0.5.0 — Alpha Preview** brings native CarPlay browsing, HLS playback, independent
 iOS streaming and download quality, and improved playlist management and library UI.
-Completed alpha builds display **VelaCanto Alpha**.
+TestFlight/distribution builds display **VelaCanto**. Local test builds can display
+**VelaCanto Alpha**; the alpha release channel does not change the distributed name.
 
-The release candidate is **0.5.0 (216)**, carrying the accepted build 215 runtime
-with release metadata updates. Alpha publication, the exact-candidate hosted gate
+The release candidate is **0.5.0 (217)**, carrying the accepted build 215 runtime
+with corrected distribution naming and release metadata. Alpha publication, the exact-candidate hosted gate
 and TestFlight upload/processing are tracked separately in the
 [release acceptance record](docs/0.5.0-acceptance.md). A source publication or passing
 CI check does not mean a TestFlight build is available.
@@ -57,7 +58,7 @@ Read [release notes](docs/0.5.0-release-notes.md),
 
 | Branch | Purpose / recorded checkpoint |
 | --- | --- |
-| `alpha` | Accepted development; target for the 0.5.0 Alpha Preview integration. |
+| `alpha` | Accepted development; 0.5.0 Alpha Preview source, with delivery gates tracked separately. |
 | `beta` | Validation through an authorized alpha → beta PR; previously promoted 0.4.0 (124). |
 | `main` | Previously accepted preview promoted through PR #190; not automatically advanced with alpha. |
 
@@ -65,6 +66,11 @@ Read [release notes](docs/0.5.0-release-notes.md),
 `preview` branch. Historical branches/tags remain evidence. Develop locally, publish
 accepted changes to alpha, and authorize beta/main promotion separately. See
 [development workflow](docs/development-workflow.md).
+
+Automatic TestFlight delivery is reserved for `main`. An owner-started manual
+TestFlight push is a separate action; do not remove its Cloud post-actions or
+promote branches merely to make that push possible. GitHub quality results and
+Apple processing/availability remain separate records.
 
 ## Development
 

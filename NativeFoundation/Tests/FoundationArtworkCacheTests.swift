@@ -469,6 +469,24 @@ final class FoundationArtworkCacheTests: XCTestCase {
         return data as Data
     }
 
+    private func cleanUp<Success: Sendable, Failure: Error>(
+        _ task: Task<Success, Failure>, releasing probes: [ArtworkCacheProbe],
+        cache: FoundationArtworkCache? = nil
+    ) {
+        addTeardownBlock {
+            task.cancel()
+            for probe in probes { await probe.release() }
+            _ = await task.result
+            if let cache { _ = await cache.invalidate(removeDisk: true) }
+        }
+    }
+
+    private func recordTiming(_ stage: String, since start: ContinuousClock.Instant, count: Int) {
+        let duration = start.duration(to: .now).components
+        let milliseconds = duration.seconds * 1000 + duration.attoseconds / 1_000_000_000_000_000
+        print("artworkFixture stage=\(stage) elapsedMs=\(milliseconds) count=\(count)")
+    }
+
     private func root() -> URL {
         FileManager.default.temporaryDirectory.appendingPathComponent(
             UUID().uuidString, isDirectory: true)
@@ -544,7 +562,7 @@ final class FoundationArtworkCacheTests: XCTestCase {
 
     func testLocalPreviewRemainsUsableDuringCancelledHeroUpgrade() async throws {
         let root = root()
-        defer { try? FileManager.default.removeItem(at: root) }
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
         let cache = FoundationArtworkCache(scope: "synthetic", root: root)
         let probe = ArtworkCacheProbe(data: try image())
         let album = item()
@@ -554,6 +572,7 @@ final class FoundationArtworkCacheTests: XCTestCase {
         let upgrade = Task {
             try await cache.result(for: album, pixels: 640, allowsNetwork: true, load: held.load)
         }
+        cleanUp(upgrade, releasing: [held], cache: cache)
         try await held.waitForCount(1)
         let preview = try await cache.cachedResult(for: album, pixels: 640)
         XCTAssertEqual(preview?.id, tile?.id)
@@ -570,16 +589,26 @@ final class FoundationArtworkCacheTests: XCTestCase {
         let root = root()
         defer { try? FileManager.default.removeItem(at: root) }
         let cache = FoundationArtworkCache(scope: "synthetic", root: root)
-        let probe = ArtworkCacheProbe(data: try image())
+        let fixtureStart = ContinuousClock.now
+        let data = try image()
+        recordTiming("identityJPEG", since: fixtureStart, count: 1)
+        let probe = ArtworkCacheProbe(data: data)
+        var operations = 0
         for kind in [FoundationItem.Kind.artist, .playlist, .genre, .album] {
             for _ in 0..<2 {
+                let start = ContinuousClock.now
                 _ = try await cache.result(
                     for: item("same", kind: kind), pixels: 160, allowsNetwork: true,
                     load: probe.load)
+                operations += 1
+                recordTiming("identityResult", since: start, count: operations)
             }
         }
+        let start = ContinuousClock.now
         _ = try await cache.result(
             for: item("same", tag: "v2"), pixels: 160, allowsNetwork: true, load: probe.load)
+        operations += 1
+        recordTiming("identityResult", since: start, count: operations)
         let count = await probe.count
         XCTAssertEqual(count, 5, "Album representative and genre Primary must not alias")
     }
@@ -649,19 +678,68 @@ final class FoundationArtworkCacheTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: retained), Data("retained".utf8))
     }
 
+    func testProbeCountWaitRetainsAnAlreadyEnteredSignal() async throws {
+        let probe = ArtworkCacheProbe(data: Data())
+        _ = try await probe.load(item(), 160)
+        try await probe.waitForCount(1)
+        let pending = await probe.pendingCountWaiterCount
+        XCTAssertEqual(pending, 0)
+    }
+
+    func testProbeCountTimeoutRemovesWaiterWithoutLoading() async throws {
+        let probe = ArtworkCacheProbe(data: Data())
+        let start = ContinuousClock.now
+        do {
+            try await probe.waitForCount(1)
+            XCTFail("Missing load must expire")
+        } catch FoundationLibraryError.unavailable {}
+        XCTAssertGreaterThanOrEqual(start.duration(to: .now), .seconds(5))
+        let pending = await probe.pendingCountWaiterCount
+        let count = await probe.count
+        XCTAssertEqual(pending, 0)
+        XCTAssertEqual(count, 0)
+    }
+
+    func testProbeCancellationRemovesCountAndHeldLoadWaiters() async throws {
+        let probe = ArtworkCacheProbe(data: Data(), held: true)
+        let waiting = Task { try await probe.waitForCount(1) }
+        waiting.cancel()
+        do {
+            try await waiting.value
+            XCTFail("Cancelled count waiter succeeded")
+        } catch is CancellationError {}
+        let countWaiters = await probe.pendingCountWaiterCount
+        XCTAssertEqual(countWaiters, 0)
+        let artwork = item()
+        let load = Task { try await probe.load(artwork, 160) }
+        cleanUp(load, releasing: [probe])
+        try await probe.waitForCount(1)
+        load.cancel()
+        do {
+            _ = try await load.value
+            XCTFail("Cancelled held load succeeded")
+        } catch is CancellationError {}
+        let heldLoads = await probe.pendingLoadCount
+        let active = await probe.active
+        XCTAssertEqual(heldLoads, 0)
+        XCTAssertEqual(active, 0)
+    }
+
     func testConcurrentRequestsCoalesceAndOneCancellationKeepsOtherConsumer() async throws {
         let root = root()
-        defer { try? FileManager.default.removeItem(at: root) }
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
         let cache = FoundationArtworkCache(scope: "synthetic", root: root)
         let probe = ArtworkCacheProbe(data: try image(), held: true)
         let album = item()
         let first = Task {
             try await cache.result(for: album, pixels: 160, allowsNetwork: true, load: probe.load)
         }
+        cleanUp(first, releasing: [probe], cache: cache)
         try await probe.waitForCount(1)
         let second = Task {
             try await cache.result(for: album, pixels: 160, allowsNetwork: true, load: probe.load)
         }
+        cleanUp(second, releasing: [probe], cache: cache)
         // Actor round trip after registering the second task.
         let deadline = ContinuousClock.now.advanced(by: .seconds(5))
         while await cache.consumerCount() < 2 {
@@ -681,7 +759,7 @@ final class FoundationArtworkCacheTests: XCTestCase {
 
     func testNowPlayingPromotesCoalescedArtworkWaitingForNetworkAdmission() async throws {
         let root = root()
-        defer { try? FileManager.default.removeItem(at: root) }
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
         let admission = FoundationNetworkAdmission(limit: 3)
         await admission.updatePlaybackProtection(true, revision: 1)
         let browsePermit = try await admission.acquire()
@@ -691,13 +769,20 @@ final class FoundationArtworkCacheTests: XCTestCase {
         let probe = ArtworkCacheProbe(data: try image())
         let load: @Sendable (FoundationItem, Int) async throws -> Data? = { item, pixels in
             let permit = try await admission.acquire()
-            let data = try await probe.load(item, pixels)
-            await admission.release(permit)
-            return data
+            do {
+                let data = try await probe.load(item, pixels)
+                await admission.release(permit)
+                return data
+            } catch {
+                await admission.release(permit)
+                throw error
+            }
         }
         let browse = Task {
             try await cache.result(for: album, pixels: 640, allowsNetwork: true, load: load)
         }
+        cleanUp(browse, releasing: [], cache: cache)
+        addTeardownBlock { await admission.release(browsePermit) }
         let deadline = ContinuousClock.now.advanced(by: .seconds(5))
         while await admission.pendingCount != 1 {
             guard ContinuousClock.now < deadline else { throw FoundationLibraryError.unavailable }
@@ -708,6 +793,7 @@ final class FoundationArtworkCacheTests: XCTestCase {
                 try await cache.result(for: album, pixels: 640, allowsNetwork: true, load: load)
             }
         }
+        cleanUp(current, releasing: [], cache: cache)
         try await probe.waitForCount(1)
         let currentResult = try await current.value
         let browseResult = try await browse.value
@@ -721,7 +807,7 @@ final class FoundationArtworkCacheTests: XCTestCase {
 
     func testNowPlayingHasPendingCapacityWhenBrowsingBudgetIsFull() async throws {
         let root = root()
-        defer { try? FileManager.default.removeItem(at: root) }
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
         let cache = FoundationArtworkCache(
             scope: "synthetic-pending", root: root,
             limits: .init(concurrentLoads: 2, pendingKeys: 3))
@@ -734,11 +820,13 @@ final class FoundationArtworkCacheTests: XCTestCase {
             try await cache.result(
                 for: firstItem, pixels: 640, allowsNetwork: true, load: held.load)
         }
+        cleanUp(first, releasing: [held], cache: cache)
         try await held.waitForCount(1)
         let second = Task {
             try await cache.result(
                 for: secondItem, pixels: 640, allowsNetwork: true, load: ready.load)
         }
+        cleanUp(second, releasing: [held], cache: cache)
         let deadline = ContinuousClock.now.advanced(by: .seconds(5))
         while await cache.usage().pending != 2 {
             guard ContinuousClock.now < deadline else { throw FoundationLibraryError.unavailable }
@@ -760,7 +848,7 @@ final class FoundationArtworkCacheTests: XCTestCase {
 
     func testNowPlayingUsesReservedArtworkWorkerWhileBrowseLoadIsHeld() async throws {
         let root = root()
-        defer { try? FileManager.default.removeItem(at: root) }
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
         let cache = FoundationArtworkCache(
             scope: "synthetic-reserved", root: root, limits: .init(concurrentLoads: 2))
         let held = ArtworkCacheProbe(data: try image(), held: true)
@@ -771,6 +859,7 @@ final class FoundationArtworkCacheTests: XCTestCase {
             try await cache.result(
                 for: firstItem, pixels: 640, allowsNetwork: true, load: held.load)
         }
+        cleanUp(first, releasing: [held], cache: cache)
         try await held.waitForCount(1)
         let current = Task {
             try await FoundationRequestIntent.$isPlayback.withValue(true) {
@@ -778,6 +867,7 @@ final class FoundationArtworkCacheTests: XCTestCase {
                     for: currentItem, pixels: 640, allowsNetwork: true, load: ready.load)
             }
         }
+        cleanUp(current, releasing: [held], cache: cache)
         try await ready.waitForCount(1)
         let result = try await current.value
         XCTAssertNotNil(result)
@@ -788,7 +878,7 @@ final class FoundationArtworkCacheTests: XCTestCase {
 
     func testFetchConcurrencyAndQueuedCancellationAreBounded() async throws {
         let root = root()
-        defer { try? FileManager.default.removeItem(at: root) }
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
         let cache = FoundationArtworkCache(
             scope: "synthetic", root: root, limits: .init(concurrentLoads: 3))
         let probe = ArtworkCacheProbe(data: try image(), held: true)
@@ -801,6 +891,7 @@ final class FoundationArtworkCacheTests: XCTestCase {
                         for: album, pixels: 160, allowsNetwork: true, load: probe.load)
                 })
         }
+        for task in tasks { cleanUp(task, releasing: [probe], cache: cache) }
         try await probe.waitForCount(2)
         for task in tasks { task.cancel() }
         await probe.release()
@@ -815,7 +906,7 @@ final class FoundationArtworkCacheTests: XCTestCase {
 
     func testDecodedArtworkPublishesWhilePersistenceIsHeldAndRetirementRemovesIt() async throws {
         let root = root()
-        defer { try? FileManager.default.removeItem(at: root) }
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
         let cache = FoundationArtworkCache(
             scope: "synthetic-held-persistence", root: root, limits: .init(memoryBytes: 0))
         let barrier = ArtworkCacheProbe(data: Data(), held: true)
@@ -824,12 +915,21 @@ final class FoundationArtworkCacheTests: XCTestCase {
         let probe = ArtworkCacheProbe(data: try image())
         let ready = expectation(description: "Decoded image publishes before persistence")
         let work = Task {
-            let image = try await cache.result(
+            defer { ready.fulfill() }
+            return try await cache.result(
                 for: artwork, pixels: 160, allowsNetwork: true, load: probe.load)
-            ready.fulfill()
-            return image
         }
-        try await barrier.waitForCount(1)
+        cleanUp(work, releasing: [barrier], cache: cache)
+        do {
+            try await barrier.waitForCount(1)
+        } catch {
+            work.cancel()
+            await barrier.release()
+            _ = await work.result
+            // Consume the expectation on the failure path without changing the first error.
+            await fulfillment(of: [ready], timeout: 2)
+            throw error
+        }
         await fulfillment(of: [ready], timeout: 2)
         let image = try await work.value
         XCTAssertNotNil(image)
@@ -840,6 +940,7 @@ final class FoundationArtworkCacheTests: XCTestCase {
         let reads = await probe.count
         XCTAssertEqual(reads, 1)
         let retired = Task { await cache.invalidate(removeDisk: true) }
+        cleanUp(retired, releasing: [barrier], cache: cache)
         await barrier.release()
         let cleared = await retired.value
         XCTAssertTrue(cleared)
@@ -852,15 +953,17 @@ final class FoundationArtworkCacheTests: XCTestCase {
 
     func testInvalidationRejectsLateBytesAndNoDiskResurrection() async throws {
         let root = root()
-        defer { try? FileManager.default.removeItem(at: root) }
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
         let cache = FoundationArtworkCache(scope: "synthetic", root: root)
         let probe = ArtworkCacheProbe(data: try image(), held: true)
         let album = item()
         let task = Task {
             try await cache.result(for: album, pixels: 160, allowsNetwork: true, load: probe.load)
         }
+        cleanUp(task, releasing: [probe], cache: cache)
         try await probe.waitForCount(1)
         let retire = Task { await cache.invalidate(removeDisk: true) }
+        cleanUp(retire, releasing: [probe], cache: cache)
         let deadline = ContinuousClock.now.advanced(by: .seconds(5))
         while await cache.consumerCount() != 0 {
             guard ContinuousClock.now < deadline else { throw FoundationLibraryError.unavailable }
@@ -936,6 +1039,7 @@ final class FoundationArtworkCacheTests: XCTestCase {
                 }, cached: { preview }, previewDelay: .milliseconds(1)
             ) { published.append($0.id) }
         }
+        cleanUp(slow, releasing: [probe])
         try await probe.waitForCount(1)
         let deadline = ContinuousClock.now.advanced(by: .seconds(5))
         while published.isEmpty, ContinuousClock.now < deadline { await Task.yield() }
@@ -1095,37 +1199,57 @@ final class FoundationArtworkCacheTests: XCTestCase {
     @MainActor
     func testCurrentOwnerReadsColdOfflineCacheWithoutChangingQueueOrPlaybackIntent() async throws {
         let root = root()
-        defer { try? FileManager.default.removeItem(at: root) }
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
         let cache = FoundationArtworkCache(scope: "synthetic", root: root)
         let probe = ArtworkCacheProbe(data: try image())
         let album = item()
         _ = try await cache.result(for: album, pixels: 640, allowsNetwork: true, load: probe.load)
         _ = await cache.invalidate(removeDisk: false)
         let restored = FoundationArtworkCache(scope: "synthetic", root: root)
+        let resolver = ArtworkCacheProbe(data: Data(), held: true)
         let player = FoundationPlayer(
-            resolve: { _ in URL(fileURLWithPath: "/synthetic") },
+            resolve: { item in
+                _ = try await resolver.load(item, 0)
+                try Task.checkCancellation()
+                return URL(fileURLWithPath: "/synthetic")
+            },
             makeItem: { _ in AVPlayerItem(asset: AVMutableComposition()) }, activateSession: {},
             deactivateSession: {}, startPlayback: { _ in })
         let track = FoundationItem(
             id: "song", title: "", subtitle: "", kind: .track, duration: nil,
             album: .init(id: album.id, title: "", primaryImageTag: album.primaryImageTag))
         player.setQueue([track, track], selectedIndex: 0)
+        let selectionTask = try XCTUnwrap(player.selectionTask)
+        addTeardownBlock { @MainActor in
+            player.stop()
+            await resolver.release()
+            await selectionTask.value
+            _ = await restored.invalidate(removeDisk: true)
+        }
+        try await resolver.waitForCount(1)
         let selection = player.selectedEntryID
         let entries = player.queue.map(\.id)
         let state = player.state
+        let wantsPlayback = player.wantsPlayback
+        XCTAssertEqual(state, .loading)
+        XCTAssertTrue(wantsPlayback)
         let current = FoundationCurrentArtwork(player: player) { item in
             try await restored.result(
                 for: item, pixels: 640, allowsNetwork: false, load: probe.load)?.data
         }
+        addTeardownBlock { @MainActor in current.invalidate() }
         await current.loadTask?.value
         XCTAssertNotNil(current.result(for: track))
         XCTAssertEqual(player.selectedEntryID, selection)
         XCTAssertEqual(player.queue.map(\.id), entries)
         XCTAssertEqual(player.state, state)
+        XCTAssertEqual(player.wantsPlayback, wantsPlayback)
         let count = await probe.count
         XCTAssertEqual(count, 1)
         current.invalidate()
         player.stop()
+        await resolver.release()
+        await selectionTask.value
         _ = await restored.invalidate(removeDisk: true)
     }
 
@@ -1327,7 +1451,16 @@ private actor ArtworkCacheProbe {
     var requestedTags: [String?] = []
     var active = 0
     var peak = 0
-    var waiters: [CheckedContinuation<Void, Never>] = []
+    private var waiters: [UUID: CheckedContinuation<Void, Error>] = [:]
+    private struct CountWaiter {
+        let expected: Int
+        let continuation: CheckedContinuation<Void, Error>
+        let deadline: ContinuousClock.Instant
+        let timeout: Task<Void, Never>
+    }
+    private var countWaiters: [UUID: CountWaiter] = [:]
+    var pendingLoadCount: Int { waiters.count }
+    var pendingCountWaiterCount: Int { countWaiters.count }
 
     init(data: Data, held: Bool = false) {
         self.data = data
@@ -1335,29 +1468,84 @@ private actor ArtworkCacheProbe {
     }
 
     func load(_ item: FoundationItem, _ pixels: Int) async throws -> Data? {
+        try Task.checkCancellation()
         count += 1
         requestedTags.append(item.primaryImageTag)
         active += 1
         peak = max(peak, active)
-        if held { await withCheckedContinuation { waiters.append($0) } }
-        active -= 1
+        defer { active -= 1 }
+        let ready = countWaiters.compactMap { $0.value.expected <= count ? $0.key : nil }
+        for id in ready { finishCountWaiter(id, error: nil) }
+        if held {
+            let id = UUID()
+            try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation {
+                    (continuation: CheckedContinuation<Void, Error>) in
+                    if Task.isCancelled {
+                        continuation.resume(throwing: CancellationError())
+                    } else {
+                        waiters[id] = continuation
+                    }
+                }
+            } onCancel: {
+                Task { await self.cancelLoad(id) }
+            }
+        }
+        try Task.checkCancellation()
         return data
+    }
+
+    private func cancelLoad(_ id: UUID) {
+        waiters.removeValue(forKey: id)?.resume(throwing: CancellationError())
     }
 
     func release() {
         held = false
-        let pending = waiters
+        let pending = waiters.values
         waiters.removeAll()
         for waiter in pending { waiter.resume() }
     }
 
     func waitForCount(_ expected: Int) async throws {
+        try Task.checkCancellation()
+        if count >= expected { return }
+        let id = UUID()
         let deadline = ContinuousClock.now.advanced(by: .seconds(5))
-        while count < expected {
-            guard ContinuousClock.now < deadline else { throw FoundationLibraryError.unavailable }
-            await Task.yield()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation {
+                (continuation: CheckedContinuation<Void, Error>) in
+                guard !Task.isCancelled else {
+                    continuation.resume(throwing: CancellationError())
+                    return
+                }
+                let timeout = Task.detached { [weak self] in
+                    do {
+                        try await ContinuousClock().sleep(until: deadline)
+                        await self?.finishCountWaiter(id, error: FoundationLibraryError.unavailable)
+                    } catch {}
+                }
+                countWaiters[id] = CountWaiter(
+                    expected: expected, continuation: continuation,
+                    deadline: deadline, timeout: timeout)
+            }
+        } onCancel: {
+            Task { await self.finishCountWaiter(id, error: CancellationError()) }
+        }
+        try Task.checkCancellation()
+    }
+
+    private func finishCountWaiter(_ id: UUID, error: Error?) {
+        guard let waiter = countWaiters.removeValue(forKey: id) else { return }
+        waiter.timeout.cancel()
+        if let error {
+            waiter.continuation.resume(throwing: error)
+        } else if ContinuousClock.now >= waiter.deadline {
+            waiter.continuation.resume(throwing: FoundationLibraryError.unavailable)
+        } else {
+            waiter.continuation.resume()
         }
     }
+
 }
 
 private final class ArtworkCacheClock: @unchecked Sendable {

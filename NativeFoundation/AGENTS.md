@@ -7,7 +7,7 @@ old controllers. Use the exact assigned base; never edit another worktree.
 
 ## Release boundary
 
-Current candidate is **0.5.0 (216), Alpha Preview**, packaging accepted build 215
+Current candidate is **0.5.0 (217), Alpha Preview**, packaging accepted build 215
 runtime with release metadata changes. Read `docs/0.5.0-acceptance.md` and the
 0.5.0 release/TestFlight notes before relying on historical scope exclusions.
 Alpha publication, exact-candidate hosted checks, signed distribution, Apple
@@ -78,7 +78,8 @@ Passing synthetic tests is not physical streaming or TestFlight acceptance.
 
 ## Identity and privacy
 
-Product VelaCanto; completed alpha display name VelaCanto Alpha; bundle com.chameleonenterprise.velacanto. Keep the rebuilt
+Product/distribution display name VelaCanto; local Debug/UITesting display name
+VelaCanto Alpha; bundle com.chameleonenterprise.velacanto. Keep the rebuilt
 Keychain format/protections; fresh sign-in is allowed, no legacy migration.
 Detailed diagnostics/test injection are internal DEBUG-only. Never log server
 origins, credentials, headers, media names or account/item IDs. Retain original
