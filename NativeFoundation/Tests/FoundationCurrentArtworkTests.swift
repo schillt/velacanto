@@ -332,6 +332,30 @@ final class FoundationCurrentArtworkTests: XCTestCase {
         XCTAssertEqual(count, 2)
     }
 
+    func testMissingCurrentArtworkRecoversOnlyAtExplicitRetryBoundary() async throws {
+        let player = player()
+        let item = track("album")
+        player.setQueue([item], selectedIndex: 0)
+        let probe = ArtworkProbe()
+        let data = try imageData()
+        let owner = FoundationCurrentArtwork(player: player) { _ in
+            let count = await probe.count
+            if count == 0 { return try await probe.missingResult(shouldFail: true) }
+            XCTAssertTrue(FoundationRequestIntent.isPlayback)
+            return data
+        }
+        defer {
+            owner.invalidate()
+            player.stop()
+        }
+        await owner.loadTask?.value
+        XCTAssertNil(owner.result)
+        owner.retryMissingArtwork()
+        await owner.loadTask?.value
+        XCTAssertNotNil(owner.result(for: item))
+        XCTAssertTrue(player.wantsPlayback)
+    }
+
     func testOptionalProviderFailureAndMissingResultDoNotRetrySameIdentity() async {
         let player = player()
         let item = track("album")
@@ -404,7 +428,7 @@ final class FoundationCurrentArtworkTests: XCTestCase {
         XCTAssertEqual(hero.image.height, 320)
         XCTAssertLessThanOrEqual(hero.image.bytesPerRow * hero.image.height, 640 * 640 * 4)
         XCTAssertNil(FoundationCurrentArtwork.decode(data, maximumPixels: 0))
-        XCTAssertNil(FoundationCurrentArtwork.decode(data, maximumPixels: 641))
+        XCTAssertNil(FoundationCurrentArtwork.decode(data, maximumPixels: 2049))
         XCTAssertNil(
             FoundationCurrentArtwork.decode(Data("offline failure".utf8), maximumPixels: 160))
     }

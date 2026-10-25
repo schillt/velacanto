@@ -1,3 +1,102 @@
+import Foundation
+
+/// Song title ranges use Name ordering. Jellyfin's name* filters instead constrain metadata SortName.
+enum FoundationSongAlphabetSeek {
+    struct Probe: Sendable {
+        let startIndex: Int
+        let totalCount: Int
+        let items: [FoundationItem]
+    }
+
+    static func key(_ item: FoundationItem) -> String {
+        FoundationSearchResolver.normalize(item.title)
+    }
+
+    static func letter(_ item: FoundationItem) -> String {
+        guard let scalar = key(item).unicodeScalars.first, (97...122).contains(scalar.value) else {
+            return "#"
+        }
+        return String(scalar).uppercased()
+    }
+
+    /// One count read and a logarithmic offset seek, never a catalog walk.
+    static func lowerBound(
+        letter: String, read: @Sendable (Int) async throws -> Probe
+    ) async throws -> Int {
+        try Task.checkCancellation()
+        guard
+            letter == "#"
+                || (letter.utf8.count == 1
+                    && letter.first.map { ("A"..."Z").contains(String($0)) } == true)
+        else { throw FoundationLibraryError.invalidResponse }
+        let initial = try await read(0)
+        try Task.checkCancellation()
+        guard initial.startIndex == 0, (0...1_000_000).contains(initial.totalCount),
+            initial.items.count == (initial.totalCount == 0 ? 0 : 1),
+            initial.items.allSatisfy({ $0.kind == .track })
+        else { throw FoundationLibraryError.invalidResponse }
+        guard initial.totalCount > 0, letter != "#" else { return 0 }
+        let target = letter.lowercased()
+        var lower = 0
+        var upper = initial.totalCount
+        var seen: [Int: String] = [0: key(initial.items[0])]
+        var seenIDs: [String: Int] = [initial.items[0].id: 0]
+        var reads = 1
+        while lower < upper {
+            try Task.checkCancellation()
+            let offset = lower + (upper - lower) / 2
+            let value: String
+            if let retained = seen[offset] {
+                value = retained
+            } else {
+                guard reads < 24 else { throw FoundationLibraryError.unavailable }
+                reads += 1
+                let probe = try await read(offset)
+                try Task.checkCancellation()
+                guard probe.startIndex == offset, probe.totalCount == initial.totalCount,
+                    probe.items.count == 1, probe.items[0].kind == .track
+                else { throw FoundationLibraryError.invalidResponse }
+                let item = probe.items[0]
+                guard seenIDs[item.id] == nil else { throw FoundationLibraryError.unavailable }
+                seenIDs[item.id] = offset
+                value = key(item)
+                // Detect ignored offsets, title ordering incompatible with this server, or changed catalogs.
+                guard
+                    seen.allSatisfy({ index, previous in
+                        index < offset ? previous <= value : previous >= value
+                    })
+                else { throw FoundationLibraryError.unavailable }
+                seen[offset] = value
+            }
+            if value < target { lower = offset + 1 } else { upper = offset }
+        }
+        // Prove the final boundary, including its predecessor, before accepting a distant jump.
+        for offset in [lower - 1, lower] where offset >= 0 && offset < initial.totalCount {
+            if seen[offset] == nil {
+                guard reads < 24 else { throw FoundationLibraryError.unavailable }
+                reads += 1
+                let probe = try await read(offset)
+                try Task.checkCancellation()
+                guard probe.startIndex == offset, probe.totalCount == initial.totalCount,
+                    probe.items.count == 1, probe.items[0].kind == .track,
+                    seenIDs[probe.items[0].id] == nil
+                else { throw FoundationLibraryError.invalidResponse }
+                let value = key(probe.items[0])
+                guard
+                    seen.allSatisfy({ index, previous in
+                        index < offset ? previous <= value : previous >= value
+                    })
+                else { throw FoundationLibraryError.unavailable }
+                seen[offset] = value
+                seenIDs[probe.items[0].id] = offset
+            }
+            guard let value = seen[offset], offset < lower ? value < target : value >= target
+            else { throw FoundationLibraryError.unavailable }
+        }
+        return lower
+    }
+}
+
 #if os(iOS)
     import SwiftUI
     import UIKit

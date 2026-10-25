@@ -28,6 +28,7 @@ final class FoundationCurrentArtwork: ObservableObject {
     private(set) var loadTask: Task<Void, Never>?
     private let player: FoundationPlayer
     private let load: @Sendable (FoundationItem) async throws -> Data?
+    private let prepareRetry: @Sendable (FoundationItem) async -> Void
     private let cachedLoad: @Sendable (FoundationItem) async throws -> Data?
     private let account = UUID()
     private var key: Key?
@@ -39,11 +40,13 @@ final class FoundationCurrentArtwork: ObservableObject {
     init(
         player: FoundationPlayer,
         cachedLoad: @escaping @Sendable (FoundationItem) async throws -> Data? = { _ in nil },
+        prepareRetry: @escaping @Sendable (FoundationItem) async -> Void = { _ in },
         load: @escaping @Sendable (FoundationItem) async throws -> Data?
     ) {
         self.player = player
         self.load = load
         self.cachedLoad = cachedLoad
+        self.prepareRetry = prepareRetry
         Publishers.Merge(
             player.$queue.map { _ in () },
             player.$selectedEntryID.removeDuplicates().map { _ in () }
@@ -79,7 +82,13 @@ final class FoundationCurrentArtwork: ObservableObject {
         refreshSelection(force: true)
     }
 
-    private func refreshSelection(force: Bool = false) {
+    /// Opening Now Playing or a successful explicit connectivity retry is a recovery boundary.
+    func retryMissingArtwork() {
+        guard result == nil, loadTask == nil else { return }
+        refreshSelection(force: true, retry: true)
+    }
+
+    private func refreshSelection(force: Bool = false, retry: Bool = false) {
         guard isLive else { return }
         let item = player.queue.first { $0.id == player.selectedEntryID }?.item
         let nextKey = item.flatMap(identity)
@@ -97,9 +106,12 @@ final class FoundationCurrentArtwork: ObservableObject {
         let requestGeneration = generation
         let load = load
         let cachedLoad = cachedLoad
+        let prepareRetry = prepareRetry
         let imageItem = item.catalogArtworkItem
         loadTask = Task { [weak self] in
             do {
+                try Task.checkCancellation()
+                if retry { await prepareRetry(imageItem) }
                 try Task.checkCancellation()
                 if let cached = try? await cachedLoad(imageItem) {
                     let preview = await Task.detached(priority: .utility) {
@@ -109,15 +121,21 @@ final class FoundationCurrentArtwork: ObservableObject {
                     guard let self, self.isLive, self.generation == requestGeneration else {
                         return
                     }
-                    if let preview { self.result = preview }
+                    if let preview { self.install(preview) }
                 }
                 let data: Data?
                 #if DEBUG
                     data = try await FoundationTrace.$context.withValue(
                         .init(origin: .nowPlaying, page: .nowPlayingArtwork)
-                    ) { try await load(imageItem) }
+                    ) {
+                        try await FoundationRequestIntent.$isPlayback.withValue(true) {
+                            try await load(imageItem)
+                        }
+                    }
                 #else
-                    data = try await load(imageItem)
+                    data = try await FoundationRequestIntent.$isPlayback.withValue(true) {
+                        try await load(imageItem)
+                    }
                 #endif
                 try Task.checkCancellation()
                 guard let self, self.isLive, self.generation == requestGeneration else { return }
@@ -126,14 +144,24 @@ final class FoundationCurrentArtwork: ObservableObject {
                 }.value
                 try Task.checkCancellation()
                 guard self.isLive, self.generation == requestGeneration else { return }
-                if let decoded { self.result = decoded }
+                if let decoded { self.install(decoded) }
                 self.loadTask = nil
             } catch {
                 guard let self, self.isLive, self.generation == requestGeneration else { return }
                 self.loadTask = nil
-                // Artwork is optional. Keep this identity completed until selection changes.
+                // Keep usable artwork; explicit refresh can retry this identity.
             }
         }
+    }
+
+    private func install(_ candidate: Result) {
+        if let result, result.id == candidate.id,
+            max(result.image.width, result.image.height)
+                > max(candidate.image.width, candidate.image.height)
+        {
+            return
+        }
+        result = candidate
     }
 
     /// Reject oversized input before decoding; retain at most one bounded image and payload.
@@ -142,7 +170,7 @@ final class FoundationCurrentArtwork: ObservableObject {
     )
         -> Result?
     {
-        guard maximumPixels > 0, maximumPixels <= requestedPixels,
+        guard maximumPixels > 0, maximumPixels <= 2048,
             !data.isEmpty, data.count <= maximumBytes,
             let source = CGImageSourceCreateWithData(
                 data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),

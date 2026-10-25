@@ -25,18 +25,24 @@ struct FoundationLibraryIndexView: View {
     @State private var selectedLetter: String?
     @State private var anchorRowID: String?
     @State private var anchorRevision = 0
+    @State private var awaitingLetterAnchor = false
     @State private var demandRevision = 0
     @State private var consumedDemandRevision = 0
     @State private var usesNativeAlphabet = false
     @StateObject private var searchModel = FoundationBrowseModel()
+    @StateObject private var letterModel = FoundationBrowseModel()
     @State private var query = ""
     @State private var isVisible = false
+    @State private var collectionOperationOwner = UUID()
     @State private var revision = 0
     @State private var openedItem: FoundationItem?
     @ScaledMetric(relativeTo: .body) private var rowHeight = 72.0
 
     private var term: String { query.trimmingCharacters(in: .whitespacesAndNewlines) }
-    private var displayed: FoundationBrowseModel { term.isEmpty ? model : searchModel }
+    private var displayed: FoundationBrowseModel {
+        if !term.isEmpty { return searchModel }
+        return selectedLetter == nil ? model : letterModel
+    }
     private var alphabetAvailable: Bool { kind == .track && term.isEmpty }
     private var wantsNativeAlphabet: Bool { alphabetAvailable }
     private var alphabetTitles: [String] {
@@ -113,7 +119,8 @@ struct FoundationLibraryIndexView: View {
             item: $openedItem, library: library, player: player, isActive: isActive
         )
         .onAppear {
-            model.configureCatalogPagination(sortByTitle: kind == .track)
+            model.configureCatalogPagination()
+            letterModel.configureCatalogPagination()
             searchModel.configureCatalogPagination()
             isVisible = true
             if openedItem == nil { usesNativeAlphabet = wantsNativeAlphabet }
@@ -126,8 +133,9 @@ struct FoundationLibraryIndexView: View {
         .onChange(of: openedItem) { _, item in
             if item == nil { usesNativeAlphabet = wantsNativeAlphabet }
         }
+        .environment(\.foundationCollectionOperationOwner, collectionOperationOwner)
         .onDisappear {
-            actions.cancelQueueAddition()
+            actions.cancelQueueAdditionOwned(by: collectionOperationOwner)
             isVisible = false
         }
         .onChange(of: query) { old, new in
@@ -137,9 +145,11 @@ struct FoundationLibraryIndexView: View {
             else { return }
             searchModel.clearRetainedData()
             selectedLetter = nil
+            awaitingLetterAnchor = false
         }
         .onChange(of: refreshToken) { _, _ in
             selectedLetter = nil
+            awaitingLetterAnchor = false
             model.request(.refresh)
             if !term.isEmpty { searchModel.request(.refresh) }
             revision += 1
@@ -147,21 +157,34 @@ struct FoundationLibraryIndexView: View {
         .onChange(of: connectivity.successfulRetryRevision) { _, _ in
             guard isActive, isVisible else { return }
             selectedLetter = nil
+            awaitingLetterAnchor = false
             displayed.request(.refresh)
             revision += 1
         }
         .onChange(of: connectivity.localOnly) { _, _ in
+            letterModel.clearRetainedData()
             selectedLetter = nil
+            awaitingLetterAnchor = false
             anchorRowID = nil
             revision += 1
+        }
+        .onReceive(letterModel.$items) { items in
+            guard awaitingLetterAnchor, selectedLetter != nil, let first = items.first else {
+                return
+            }
+            awaitingLetterAnchor = false
+            anchorRowID = "\(kind):\(first.id)"
+            anchorRevision += 1
         }
         .onReceive(downloads.objectWillChange) {
             if connectivity.localOnly { revision += 1 }
         }
         .onChange(of: library.catalogScopeID) { _, _ in
+            letterModel.clearRetainedData()
             demandRevision = 0
             consumedDemandRevision = 0
             selectedLetter = nil
+            awaitingLetterAnchor = false
             searchModel.clearRetainedData()
             revision += 1
         }
@@ -182,7 +205,7 @@ struct FoundationLibraryIndexView: View {
                 displayed.installSnapshot(
                     items.sorted { offlineSortKey($0) < offlineSortKey($1) })
             } else if alphabetAvailable {
-                await model.loadCatalogPage(using: loadPage)
+                await displayed.loadCatalogPage(using: loadPage)
             } else {
                 if !term.isEmpty {
                     do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
@@ -218,7 +241,7 @@ struct FoundationLibraryIndexView: View {
                             player: player, showsTrackArtwork: true,
                             navigate: { openedItem = $0 }
                         )
-                        .padding(.vertical, 4)
+                        .foundationLibraryListRow()
                         .id("\(kind):\(item.id)")
                     }
                 }
@@ -230,7 +253,7 @@ struct FoundationLibraryIndexView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         Text(error).foregroundStyle(.red)
                         Button("Retry") {
-                            selectedLetter = nil
+                            awaitingLetterAnchor = selectedLetter != nil
                             displayed.request(displayed.retryRequest)
                             revision += 1
                         }.disabled(connectivity.localOnly)
@@ -255,10 +278,14 @@ struct FoundationLibraryIndexView: View {
                 }
             }
             .listStyle(.plain)
+            #if os(macOS)
+                .padding(.horizontal, FoundationMacLayout.catalogHorizontalInset)
+            #endif
             .accessibilityIdentifier("library-index-\(kind)")
             .refreshable {
                 guard isActive, isVisible, !connectivity.localOnly else { return }
                 selectedLetter = nil
+                awaitingLetterAnchor = false
                 displayed.request(.refresh)
                 revision += 1
             }
@@ -276,7 +303,7 @@ struct FoundationLibraryIndexView: View {
 
     private func gridPlaceholderCount(viewport: CGSize, nativeIndex: Bool = false) -> Int {
         FoundationLibraryGridLayout.placeholderCount(
-            width: viewport.width, height: viewport.height,
+            width: viewport.width - 2 * (catalogHorizontalInset - 16), height: viewport.height,
             accessibility: dynamicTypeSize.isAccessibilitySize,
             textHeight: rowHeight, nativeIndex: nativeIndex)
     }
@@ -292,6 +319,14 @@ struct FoundationLibraryIndexView: View {
             \.foundationCollectionOccurrence,
             library.catalogScopeID + ":" + (selectedLetter ?? "All") + ":" + term + ":"
                 + kind.rawValue + ":" + item.id)
+    }
+
+    private var catalogHorizontalInset: CGFloat {
+        #if os(macOS)
+            FoundationMacLayout.catalogHorizontalInset
+        #else
+            16
+        #endif
     }
 
     private func collectionGrid(viewport: CGSize) -> some View {
@@ -347,7 +382,7 @@ struct FoundationLibraryIndexView: View {
                             pageModel, active: active, allowsNetwork: allowsNetwork)
                     }
                 }
-            }.padding(.horizontal, 16).padding(.vertical, 12)
+            }.padding(.horizontal, catalogHorizontalInset).padding(.vertical, 12)
         }
         .accessibilityIdentifier("library-index-\(kind)")
         .refreshable {
@@ -379,24 +414,43 @@ struct FoundationLibraryIndexView: View {
         switch kind {
         case .album: return try await library.albums(startIndex: offset)
         case .artist: return try await library.artists(startIndex: offset)
-        case .track: return try await library.songs(startIndex: offset)
+        case .track:
+            if let selectedLetter {
+                return try await library.alphabetPage(
+                    kind: .track, letter: selectedLetter, startIndex: offset)
+            }
+            return try await library.songs(startIndex: offset)
         case .playlist: return try await library.playlists(startIndex: offset)
         case .genre: return try await library.genres(startIndex: offset)
         }
     }
 
     private func offlineSortKey(_ item: FoundationItem) -> String {
-        FoundationAlphabetAnchors.key(for: item)
+        kind == .track
+            ? FoundationSongAlphabetSeek.key(item) : FoundationAlphabetAnchors.key(for: item)
     }
 
     private func chooseLetter(_ letter: String) {
-        // Selection changes only the scroll position of the existing full list.
-        guard let index = FoundationAlphabetAnchors.index(for: letter, in: model.items) else {
+        guard FoundationAlphabetAnchors.titles.contains(letter) else { return }
+        if connectivity.localOnly {
+            let items = displayed.items
+            guard
+                let index = items.firstIndex(where: {
+                    FoundationSongAlphabetSeek.letter($0) == letter
+                })
+                    ?? items.firstIndex(where: { FoundationSongAlphabetSeek.letter($0) > letter })
+                    ?? items.indices.last
+            else { return }
+            anchorRowID = "\(kind):\(items[index].id)"
+            anchorRevision += 1
             return
         }
+        // A rail selection owns one bounded server range, independent of the loaded All prefix.
+        letterModel.clearRetainedData()
         selectedLetter = letter
-        anchorRowID = "\(kind):\(model.items[index].id)"
-        anchorRevision += 1
+        awaitingLetterAnchor = true
+        anchorRowID = nil
+        revision += 1
     }
 
     #if os(iOS)
@@ -409,7 +463,7 @@ struct FoundationLibraryIndexView: View {
             }
             var sections: [FoundationAlphabetSection] = []
             for row in rows {
-                let letter = FoundationAlphabetAnchors.letter(for: row.item)
+                let letter = FoundationSongAlphabetSeek.letter(row.item)
                 if let last = sections.indices.last, sections[last].title == letter {
                     sections[last].rows.append(row)
                 } else {
@@ -440,6 +494,7 @@ struct FoundationLibraryIndexView: View {
                     onRefresh: {
                         guard isActive, isVisible, !connectivity.localOnly else { return }
                         selectedLetter = nil
+                        awaitingLetterAnchor = false
                         displayed.request(.refresh)
                         revision += 1
                     }
@@ -468,6 +523,7 @@ struct FoundationLibraryIndexView: View {
                     .environmentObject(downloads)
                     .environmentObject(connectivity)
                     .environmentObject(actions)
+                    .environment(\.foundationCollectionOperationOwner, collectionOperationOwner)
                     .environment(\.foundationCollectionTransition, transition)
                     .environment(
                         \.foundationCollectionOccurrence,
@@ -528,7 +584,7 @@ struct FoundationLibraryIndexView: View {
                 if let error = displayed.errorMessage, !displayed.hasConnectionIssue {
                     Text(error).foregroundStyle(.red)
                     Button("Retry") {
-                        selectedLetter = nil
+                        awaitingLetterAnchor = selectedLetter != nil
                         displayed.request(displayed.retryRequest)
                         revision += 1
                     }.disabled(connectivity.localOnly)

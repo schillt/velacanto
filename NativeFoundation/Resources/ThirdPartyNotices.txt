@@ -1,4 +1,4 @@
-Velacanto — Third-Party Notices
+VelaCanto — Third-Party Notices
 
 Thank you to the authors and contributors of these open-source projects.
 

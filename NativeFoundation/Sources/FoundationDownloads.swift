@@ -18,6 +18,7 @@ struct FoundationDownloadOwner: Identifiable {
     var item: FoundationItem
     var tracks: [FoundationItem]
     var state: FoundationDownloadState
+    var requestedQuality: FoundationDownloadQuality = .original
     var activeTrackID: String? = nil
     var activeTrackProgress: Double? = nil
     var progress: Double = 0
@@ -48,6 +49,11 @@ final class FoundationDownloads: ObservableObject {
             FoundationDownloadSource, URL, Bool,
             @escaping @Sendable (Int64, Int64?) -> Void
         ) async throws -> Void
+    typealias ConvertedTransfer =
+        @Sendable (
+            FoundationDownloadConversionProposal, URL, Bool,
+            @escaping @Sendable (Int64, Int64?) -> Void
+        ) async throws -> FoundationVerifiedConvertedDownload
     typealias FileVerifier =
         @Sendable ([String: FoundationDownloadManifest.File], URL) async throws
         -> [String: FoundationDownloadManifest.File]
@@ -60,8 +66,12 @@ final class FoundationDownloads: ObservableObject {
     @Published private(set) var artworkRevision: UInt = 0
     @Published private(set) var catalogRevision: UInt = 0
     private let library: any FoundationLibrary
+    private let projectTracks: @MainActor ([FoundationItem], String?) -> [FoundationItem]
+    private let observeTracks: @MainActor ([FoundationItem], String?) -> Void
     private let directory: URL
     private let transfer: Transfer
+    private let convertedTransfer: ConvertedTransfer
+    private let requestedQuality: @MainActor () -> FoundationDownloadQuality
     private let verifyReacquisitionFiles: FileVerifier
     private var manifest = FoundationDownloadManifest()
     private var collectionModels: [String: FoundationBrowseModel] = [:]
@@ -92,9 +102,23 @@ final class FoundationDownloads: ObservableObject {
     init(
         scope: String, library: any FoundationLibrary, root: URL? = nil,
         transfer: Transfer? = nil, monitorConnectivity: Bool = true,
-        verifyReacquisitionFiles: FileVerifier? = nil
+        convertedTransfer: ConvertedTransfer? = nil,
+        requestedQuality: @escaping @MainActor () -> FoundationDownloadQuality = { .original },
+        verifyReacquisitionFiles: FileVerifier? = nil,
+        observeTracks: @escaping @MainActor ([FoundationItem], String?) -> Void = { _, _ in },
+        projectTracks: @escaping @MainActor ([FoundationItem], String?) -> [FoundationItem] = {
+            items, _ in items
+        }
     ) {
         self.library = library
+        self.requestedQuality = requestedQuality
+        self.convertedTransfer =
+            convertedTransfer ?? { proposal, target, cellular, progress in
+                try await FoundationConvertedDownload.transfer(
+                    proposal: proposal, to: target, allowsCellular: cellular, progress: progress)
+            }
+        self.projectTracks = projectTracks
+        self.observeTracks = observeTracks
         self.verifyReacquisitionFiles =
             verifyReacquisitionFiles ?? { files, directory in
                 try await FoundationDownloadStorage.verifiedFiles(files, directory: directory)
@@ -116,7 +140,16 @@ final class FoundationDownloads: ObservableObject {
                 owners.append(
                     FoundationDownloadOwner(
                         id: saved.id, item: saved.item.item, tracks: saved.tracks.map(\.item),
-                        state: saved.paused ? .cancelled : .queued))
+                        state: saved.paused ? .cancelled : .queued,
+                        requestedQuality: saved.requestedQuality ?? .original))
+            }
+            for owner in owners {
+                observeTracks(owner.tracks, owner.item.kind == .album ? owner.item.id : nil)
+            }
+            for collection in manifest.collections ?? [] {
+                observeTracks(
+                    collection.tracks.map(\.item),
+                    collection.item.kind == "album" ? collection.item.id : nil)
             }
             if manifest.files.isEmpty && (manifest.artwork?.isEmpty ?? true) {
                 try finishInventory()
@@ -255,13 +288,18 @@ final class FoundationDownloads: ObservableObject {
     }
 
     func download(_ item: FoundationItem) {
-        guard isLive, storageUsable, [.track, .album, .playlist].contains(item.kind) else { return }
+        guard isLive, storageUsable, [.track, .album, .playlist].contains(item.kind),
+            item.kind != .track || !projectTracks([item], nil).isEmpty
+        else { return }
         let id = ownerID(item)
         if owners.contains(where: { $0.id == id }) {
             retry(ownerID: id)
             return
         }
-        owners.append(FoundationDownloadOwner(id: id, item: item, tracks: [], state: .queued))
+        owners.append(
+            FoundationDownloadOwner(
+                id: id, item: item, tracks: [], state: .queued,
+                requestedQuality: requestedQuality()))
         do { try save() } catch {
             owners.removeAll { $0.id == id }
             reportStorageFailure()
@@ -285,6 +323,8 @@ final class FoundationDownloads: ObservableObject {
 
     func retry(ownerID: String) {
         guard isLive, storageUsable, let index = owners.firstIndex(where: { $0.id == ownerID })
+        else { return }
+        guard owners[index].item.kind != .track || !projectTracks([owners[index].item], nil).isEmpty
         else { return }
         paused.remove(ownerID)
         owners[index].state = .queued
@@ -348,7 +388,9 @@ final class FoundationDownloads: ObservableObject {
     /// Physical files are shared; the Songs projection never repeats playlist occurrences.
     var downloadedSongs: [FoundationItem] {
         var seen: Set<String> = []
-        return owners.flatMap(\.tracks).filter { isReady($0) && seen.insert($0.id).inserted }
+        // Visibility is reversible; physical manifests and retained file accounting stay raw.
+        let ready = owners.flatMap(\.tracks).filter { isReady($0) && seen.insert($0.id).inserted }
+        return projectTracks(ready, nil)
     }
 
     var downloadedPlaylists: [FoundationItem] {
@@ -455,21 +497,25 @@ final class FoundationDownloads: ObservableObject {
         }
     }
 
-    /// Local search uses verified playable audio and its remembered related containers only.
-    func localSearchItems(query: String, kind: FoundationItem.Kind? = nil) -> [FoundationItem] {
-        let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard isLive, storageUsable, !query.isEmpty else {
-            return []
-        }
+    /// Shared account-owned catalog projection for local browsing and search.
+    func localCatalogItems(kind: FoundationItem.Kind? = nil) -> [FoundationItem] {
+        guard isLive, storageUsable else { return [] }
         var seen: Set<String> = []
         let containers = downloadedAlbums + downloadedArtists + downloadedPlaylists
         let candidates =
             downloadedSongs
             + containers.filter { availability(for: $0) != .unavailable || $0.kind == .artist }
+        return candidates.filter {
+            (kind == nil || kind == $0.kind) && seen.insert(collectionKey($0)).inserted
+        }
+    }
+
+    /// Local search uses verified playable audio and its remembered related containers only.
+    func localSearchItems(query: String, kind: FoundationItem.Kind? = nil) -> [FoundationItem] {
+        let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return [] }
+        let candidates = localCatalogItems(kind: kind)
         return candidates.filter { item in
-            guard kind == nil || kind == item.kind, seen.insert(collectionKey(item)).inserted else {
-                return false
-            }
             return [item.title, item.subtitle, item.album?.title ?? "", item.artist?.title ?? ""]
                 .contains {
                     $0.localizedStandardContains(query)
@@ -617,12 +663,15 @@ final class FoundationDownloads: ObservableObject {
     }
 
     func browseTracks(for item: FoundationItem) -> [FoundationItem] {
-        knownCollectionTracks(for: item).filter { isReady($0) }
+        projectTracks(
+            knownCollectionTracks(for: item).filter { isReady($0) },
+            item.kind == .album ? item.id : nil)
     }
 
     func availability(for item: FoundationItem) -> FoundationDownloadAvailability {
         if item.kind == .track { return isReady(item) ? .ready : .unavailable }
-        let tracks = knownCollectionTracks(for: item)
+        let tracks = projectTracks(
+            knownCollectionTracks(for: item), item.kind == .album ? item.id : nil)
         let ready = tracks.filter { isReady($0) }.count
         guard ready > 0 else { return .unavailable }
         // Partial derived groups do not prove complete membership; a full server snapshot does.
@@ -661,7 +710,7 @@ final class FoundationDownloads: ObservableObject {
     }
 
     func removeTrack(_ item: FoundationItem) {
-        guard item.kind == .track else { return }
+        guard item.kind == .track, !projectTracks([item], nil).isEmpty else { return }
         removeSelected(ownerIDs: [], trackIDs: [item.id])
     }
 
@@ -716,7 +765,10 @@ final class FoundationDownloads: ObservableObject {
             paused.remove(id)
             owners[index].state = .queued
         } else {
-            owners.append(FoundationDownloadOwner(id: id, item: item, tracks: [], state: .queued))
+            owners.append(
+                FoundationDownloadOwner(
+                    id: id, item: item, tracks: [], state: .queued,
+                    requestedQuality: requestedQuality()))
         }
         do { try save() } catch {
             manifest = previousManifest
@@ -830,6 +882,10 @@ final class FoundationDownloads: ObservableObject {
                     guard let index = owners.firstIndex(where: { $0.id == owner.id }) else {
                         return
                     }
+                    // Read the current preference after all expansion/verification awaits.
+                    observeTracks(tracks, owner.item.kind == .album ? owner.item.id : nil)
+                    let projectedTracks = projectTracks(
+                        tracks, owner.item.kind == .album ? owner.item.id : nil)
                     let before = owners[index].tracks
                     let previousManifest = manifest
                     let previousExpanded = expanded
@@ -838,7 +894,7 @@ final class FoundationDownloads: ObservableObject {
                     expanded.insert(owner.id)
                     if reacquires {
                         manifest.excludedTrackIDs = (manifest.excludedTrackIDs ?? []).subtracting(
-                            Set(tracks.map(\.id)))
+                            Set(projectedTracks.map(\.id)))
                         reacquiring.remove(owner.id)
                     }
                     do { try save() } catch {
@@ -856,7 +912,13 @@ final class FoundationDownloads: ObservableObject {
                 guard let current = owners.first(where: { $0.id == owner.id }) else { continue }
                 setState(owner.id, .downloading)
                 var visited: Set<String> = []
-                for track in current.tracks where visited.insert(track.id).inserted {
+                let demand = projectTracks(
+                    current.tracks, current.item.kind == .album ? current.item.id : nil)
+                for track in demand where visited.insert(track.id).inserted {
+                    guard
+                        !projectTracks([track], current.item.kind == .album ? current.item.id : nil)
+                            .isEmpty
+                    else { continue }
                     try check(epoch: epoch, ownerID: owner.id)
                     if isExcluded(track.id) || isReady(track) { continue }
                     transferRevision &+= 1
@@ -865,19 +927,24 @@ final class FoundationDownloads: ObservableObject {
                         owners[index].activeTrackID = track.id
                         owners[index].activeTrackProgress = nil
                     }
-                    let source = try await library.downloadSource(for: track)
+                    let preparation = try await library.downloadPreparation(
+                        for: track, quality: current.requestedQuality)
                     try check(epoch: epoch, ownerID: owner.id)
-                    let ext = source.fileExtension.lowercased()
+                    guard
+                        !projectTracks([track], current.item.kind == .album ? current.item.id : nil)
+                            .isEmpty
+                    else { continue }
+                    let ext = preparation.fileExtension.lowercased()
                     guard !ext.isEmpty, ext.count <= 8,
                         ext.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber) })
                     else { throw FoundationLibraryError.invalidResponse }
                     let stage = directory.appendingPathComponent(
                         "stage-" + UUID().uuidString + "." + ext)
                     do {
-                        try await transfer(source, stage, allowsCellular) {
+                        let progress: @Sendable (Int64, Int64?) -> Void = {
                             [weak self] bytes, total in
                             Task { @MainActor [weak self] in
-                                guard let self, self.generation == epoch,
+                                guard let self, self.isLive, self.generation == epoch,
                                     self.transferRevision == revision, self.activeOwner == owner.id,
                                     let index = self.owners.firstIndex(where: { $0.id == owner.id })
                                 else { return }
@@ -898,19 +965,47 @@ final class FoundationDownloads: ObservableObject {
                                 self.refreshBytes()
                             }
                         }
-                        try check(epoch: epoch, ownerID: owner.id)
-                        try FoundationDownloadStorage.protect(stage)
-                        let bytes = Int64(
-                            try stage.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0)
-                        guard bytes > 0,
-                            source.expectedBytes == nil || source.expectedBytes == bytes
-                        else {
-                            throw CocoaError(.fileReadCorruptFile)
+                        let file: FoundationDownloadManifest.File
+                        switch preparation {
+                        case .original(let source):
+                            guard current.requestedQuality == .original else {
+                                throw FoundationDownloadError.unsupported
+                            }
+                            try await transfer(source, stage, allowsCellular, progress)
+                            try check(epoch: epoch, ownerID: owner.id)
+                            try FoundationDownloadStorage.protect(stage)
+                            let bytes = Int64(
+                                try stage.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0)
+                            guard bytes > 0,
+                                source.expectedBytes == nil || source.expectedBytes == bytes
+                            else { throw CocoaError(.fileReadCorruptFile) }
+                            let digest = try await FoundationDownloadStorage.digestOffMain(stage)
+                            try check(epoch: epoch, ownerID: owner.id)
+                            file = FoundationDownloadManifest.File(
+                                name: UUID().uuidString + "." + ext, bytes: bytes, digest: digest)
+                        case .converted(let proposal):
+                            guard proposal.plan.quality == current.requestedQuality,
+                                proposal.itemID == track.id
+                            else { throw FoundationDownloadError.response }
+                            let verified = try await convertedTransfer(
+                                proposal, stage, allowsCellular, progress)
+                            try check(epoch: epoch, ownerID: owner.id)
+                            file = FoundationDownloadManifest.File(
+                                name: UUID().uuidString + "." + ext,
+                                bytes: verified.bytes, digest: verified.digest,
+                                convertedRendition: verified.rendition)
                         }
-                        let digest = try await FoundationDownloadStorage.digestOffMain(stage)
-                        try check(epoch: epoch, ownerID: owner.id)
-                        let file = FoundationDownloadManifest.File(
-                            name: UUID().uuidString + "." + ext, bytes: bytes, digest: digest)
+                        // Projection may change while transfer/inspection/cleanup suspends.
+                        // Never publish content that became hidden or excluded in that time.
+                        guard !isExcluded(track.id),
+                            !projectTracks(
+                                [track], current.item.kind == .album ? current.item.id : nil
+                            )
+                            .isEmpty
+                        else {
+                            try FileManager.default.removeItem(at: stage)
+                            continue
+                        }
                         let destination = directory.appendingPathComponent(file.name)
                         try FileManager.default.moveItem(at: stage, to: destination)
                         do {
@@ -988,7 +1083,11 @@ final class FoundationDownloads: ObservableObject {
             owners[index].availability = availability(for: owners[index].item)
             if paused.contains(id) { continue }
             if expanded.contains(id),
-                owners[index].tracks.allSatisfy({ isExcluded($0.id) || isReady($0) })
+                projectTracks(
+                    owners[index].tracks,
+                    owners[index].item.kind == .album ? owners[index].item.id : nil
+                )
+                .allSatisfy({ isExcluded($0.id) || isReady($0) })
             {
                 owners[index].state = .ready
                 owners[index].progress = 1
@@ -1007,7 +1106,8 @@ final class FoundationDownloads: ObservableObject {
                 id: $0.id, item: FoundationStoredDownloadItem($0.item),
                 tracks: $0.tracks.map(FoundationStoredDownloadItem.init),
                 paused: paused.contains($0.id), expanded: expanded.contains($0.id),
-                reacquiresExcludedTracks: reacquiring.contains($0.id) ? true : nil)
+                reacquiresExcludedTracks: reacquiring.contains($0.id) ? true : nil,
+                requestedQuality: $0.requestedQuality == .original ? nil : $0.requestedQuality)
         }
         try FoundationDownloadStorage.save(manifest, directory: directory)
     }
@@ -1268,9 +1368,12 @@ final class FoundationDownloads: ObservableObject {
         }
         guard allowsRemoteFallback else { throw FoundationLibraryError.unavailable }
         let epoch = generation
-        let url = try await library.playbackURL(for: item)
-        guard isLive, epoch == generation else { throw CancellationError() }
-        return FoundationPlaybackResource(url: url, release: {})
+        let resource = try await library.playbackResource(for: item)
+        guard isLive, epoch == generation, !Task.isCancelled else {
+            await resource.release()
+            throw CancellationError()
+        }
+        return resource
     }
 
     private func releaseLease(_ id: String) {

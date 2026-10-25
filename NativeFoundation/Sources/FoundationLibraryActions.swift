@@ -30,6 +30,8 @@ enum FoundationPinStorage {
 /// One source's local pins and explicit, pessimistic favorite changes.
 @MainActor
 final class FoundationLibraryActions: ObservableObject {
+    enum CollectionOperation: Sendable, Equatable { case playback, enqueue }
+
     struct FavoriteRead {
         fileprivate let owner: UUID
         fileprivate let sequence: UInt
@@ -83,6 +85,7 @@ final class FoundationLibraryActions: ObservableObject {
     @Published private var pending: Set<Key> = []
     @Published private var errors: [Key: String] = [:]
     @Published private(set) var pinErrorMessage: String?
+    @Published private(set) var queueOperation: CollectionOperation?
     @Published private(set) var isQueueLoading = false
     @Published private(set) var queueErrorMessage: String?
     @Published private(set) var queueLoadedCount = 0
@@ -91,6 +94,20 @@ final class FoundationLibraryActions: ObservableObject {
     private var retryQueueAdditionAction: (() -> Void)?
     static let maximumCollectionPages = 200
     static let maximumCollectionTracks = 10_000
+    private let showDuplicateAlbumTracks: @MainActor () -> Bool
+    private var canonicalTracks: [FoundationAlbumTrackPolicy.Key: FoundationItem] = [:]
+    private var knownTrackKeys: [String: FoundationAlbumTrackPolicy.Key] = [:]
+    private var trackPreferenceObservation: AnyCancellable?
+    private var trackAvailability: (FoundationItem) -> Bool = { _ in true }
+    func refreshTrackVisibility() {
+        guard active else { return }
+        trackVisibilityRevision += 1
+    }
+    func configureTrackAvailability(_ availability: @escaping (FoundationItem) -> Bool) {
+        trackAvailability = availability
+        trackVisibilityRevision += 1
+    }
+    @Published private(set) var trackVisibilityRevision = 0
     private let storageKey: String
     private let write: (String, Data) throws -> Void
     private let mutateFavorite: @Sendable (FoundationItem, Bool) async throws -> Void
@@ -109,12 +126,22 @@ final class FoundationLibraryActions: ObservableObject {
         write: @escaping (String, Data) throws -> Void = {
             UserDefaults.standard.set($1, forKey: $0)
         },
+        showDuplicateAlbumTracks: @escaping @MainActor () -> Bool = { false },
+        trackPreferences: FoundationPlaybackPreferences? = nil,
         mutateFavorite: @escaping @Sendable (FoundationItem, Bool) async throws -> Void
     ) {
         // Scope must be an opaque source/account identity, never an origin or credential.
         storageKey = FoundationPinStorage.key(for: sourceScope)
         self.write = write
+        self.showDuplicateAlbumTracks =
+            trackPreferences.map { preferences in
+                { preferences.showDuplicateAlbumTracks }
+            } ?? showDuplicateAlbumTracks
         self.mutateFavorite = mutateFavorite
+        trackPreferenceObservation = trackPreferences?.$showDuplicateAlbumTracks.dropFirst().sink {
+            [weak self] _ in
+            Task { @MainActor [weak self] in self?.trackVisibilityRevision += 1 }
+        }
         do {
             if let data = try read(storageKey) {
                 var seen: Set<Key> = []
@@ -227,7 +254,9 @@ final class FoundationLibraryActions: ObservableObject {
 
     func setFavorite(for item: FoundationItem, isFavorite: Bool) async {
         let key = Key(item)
-        guard active, item.kind != .genre, !pending.contains(key), !Task.isCancelled else { return }
+        guard active, item.kind != .genre, !pending.contains(key), !Task.isCancelled,
+            !visibleTracks([item]).isEmpty
+        else { return }
         favoriteSequence &+= 1
         favoriteVersions[key] = favoriteSequence
         pending.insert(key)
@@ -256,10 +285,61 @@ final class FoundationLibraryActions: ObservableObject {
         }
     }
 
+    /// Learn only supplied, bounded metadata. No catalog fetch or server mutation occurs here.
+    func observeTrackCopies(_ items: [FoundationItem], albumID: String? = nil) {
+        guard active else { return }
+        var changed = false
+        for item in items {
+            guard let key = FoundationAlbumTrackPolicy.key(for: item, albumID: albumID) else {
+                continue
+            }
+            if canonicalTracks[key] == nil, canonicalTracks.count < Self.maximumCollectionTracks {
+                canonicalTracks[key] = item
+                changed = true
+            }
+            if knownTrackKeys[item.id] == nil,
+                knownTrackKeys.count < Self.maximumCollectionTracks * 2
+            {
+                knownTrackKeys[item.id] = key
+                changed = true
+            }
+        }
+        if changed { trackVisibilityRevision += 1 }
+    }
+
+    /// A reversible read projection; raw pages, mutation identities and saved files stay intact.
+    func visibleTracks(
+        _ items: [FoundationItem], albumID: String? = nil,
+        isAvailable: ((FoundationItem) -> Bool)? = nil
+    ) -> [FoundationItem] {
+        guard !showDuplicateAlbumTracks() else { return items }
+        let isAvailable = isAvailable ?? trackAvailability
+        let eligible = items.filter { item in
+            guard
+                let key = FoundationAlbumTrackPolicy.key(for: item, albumID: albumID)
+                    ?? knownTrackKeys[item.id], let canonical = canonicalTracks[key]
+            else { return true }
+            return canonical.id == item.id || (!isAvailable(canonical) && isAvailable(item))
+        }
+        return FoundationAlbumTrackPolicy.visibleTracks(
+            eligible, albumID: albumID, showDuplicates: false, isAvailable: isAvailable)
+
+    }
+
+    func collectionTracks(
+        _ items: [FoundationItem], for collection: FoundationItem,
+        isAvailable: ((FoundationItem) -> Bool)? = nil
+    ) -> [FoundationItem] {
+        let albumID = collection.kind == .album ? collection.id : nil
+        observeTrackCopies(items, albumID: albumID)
+        return visibleTracks(items, albumID: albumID, isAvailable: isAvailable)
+    }
+
     /// User-requested collection expansion is sequential and commits only a complete result.
     func enqueue(
         _ item: FoundationItem, position: FoundationPlayer.QueuePosition,
-        library: (any FoundationLibrary)? = nil, player: FoundationPlayer
+        library: (any FoundationLibrary)? = nil, player: FoundationPlayer,
+        owner: UUID? = nil
     ) {
         guard active, !isQueueLoading else { return }
         dismissQueueOutcome()
@@ -276,14 +356,16 @@ final class FoundationLibraryActions: ObservableObject {
         }
         retryQueueAdditionAction = { [weak self, weak player] in
             guard let player else { return }
-            self?.enqueue(item, position: position, library: library, player: player)
+            self?.enqueue(item, position: position, library: library, player: player, owner: owner)
         }
-        loadCollection(item, library: library) { player.enqueue($0, position: position) }
+        loadCollection(item, library: library, operation: .enqueue, owner: owner) {
+            player.enqueue($0, position: position)
+        }
     }
 
     func play(
         _ item: FoundationItem, shuffled: Bool, library: any FoundationLibrary,
-        player: FoundationPlayer
+        player: FoundationPlayer, owner: UUID? = nil, shouldCommit: (() -> Bool)? = nil
     ) {
         guard active, !isQueueLoading else { return }
         playbackPreparation = player.sessionChanged.sink { [weak self] in
@@ -291,15 +373,19 @@ final class FoundationLibraryActions: ObservableObject {
         }
         retryQueueAdditionAction = { [weak self, weak player] in
             guard let player else { return }
-            self?.play(item, shuffled: shuffled, library: library, player: player)
+            self?.play(
+                item, shuffled: shuffled, library: library, player: player, owner: owner,
+                shouldCommit: shouldCommit)
         }
-        loadCollection(item, library: library) { items in
+        loadCollection(item, library: library, operation: .playback, owner: owner) { items in
+            guard shouldCommit?() ?? true else { return }
             player.setQueue(shuffled ? items.shuffled() : items, selectedIndex: 0)
         }
     }
 
     private func loadCollection(
-        _ item: FoundationItem, library: any FoundationLibrary,
+        _ item: FoundationItem, library: any FoundationLibrary, operation: CollectionOperation,
+        owner: UUID?,
         commit: @escaping ([FoundationItem]) -> Void
     ) {
         guard active, !isQueueLoading else { return }
@@ -307,11 +393,14 @@ final class FoundationLibraryActions: ObservableObject {
         queueNotice = nil
         queueLoadedCount = 0
         canRetryQueueAddition = false
+        queueOperation = operation
+        queueOwner = owner
         isQueueLoading = true
         queueTask = Task { [weak self] in
             // Cancellation keeps the addition occupied until this task actually finishes.
             defer {
                 self?.isQueueLoading = false
+                self?.queueOperation = nil
                 self?.queueTask = nil
                 self?.playbackPreparation = nil
             }
@@ -325,15 +414,19 @@ final class FoundationLibraryActions: ObservableObject {
                     }
                     try Task.checkCancellation()
                     let page: FoundationPage
-                    switch item.kind {
-                    case .playlist:
-                        page = try await library.playlistTracks(
-                            playlistID: item.id, startIndex: offset)
-                    case .artist:
-                        page = try await library.tracks(artistID: item.id, startIndex: offset)
-                    case .album:
-                        page = try await library.tracks(albumID: item.id, startIndex: offset)
-                    default: throw FoundationLibraryError.invalidResponse
+                    page = try await FoundationRequestIntent.$isPlayback.withValue(
+                        operation == .playback
+                    ) {
+                        switch item.kind {
+                        case .playlist:
+                            return try await library.playlistTracks(
+                                playlistID: item.id, startIndex: offset)
+                        case .artist:
+                            return try await library.tracks(artistID: item.id, startIndex: offset)
+                        case .album:
+                            return try await library.tracks(albumID: item.id, startIndex: offset)
+                        default: throw FoundationLibraryError.invalidResponse
+                        }
                     }
                     try Task.checkCancellation()
                     guard page.items.allSatisfy({ $0.kind == .track }) else {
@@ -356,7 +449,9 @@ final class FoundationLibraryActions: ObservableObject {
                 } else {
                     self.playbackPreparation = nil
                     self.retryQueueAdditionAction = nil
-                    commit(items)
+                    let selected = self.collectionTracks(items, for: item)
+                    self.queueLoadedCount = selected.count
+                    commit(selected)
                 }
             } catch {
                 guard let self, self.active, !Task.isCancelled else { return }
@@ -372,12 +467,25 @@ final class FoundationLibraryActions: ObservableObject {
 
     private enum CollectionLimit: Error { case reached }
 
-    func cancelQueueAddition() {
+    private var queueOwner: UUID?
+
+    /// A departing surface may cancel its own work, never a newer destination's work.
+    func cancelQueueAdditionOwned(by owner: UUID?, file: String = #fileID, line: Int = #line) {
+        guard queueOwner == owner else { return }
+        cancelQueueAddition(file: file, line: line)
+    }
+
+    func cancelQueueAddition(file: String = #fileID, line: Int = #line) {
         retryQueueAdditionAction = nil
         canRetryQueueAddition = false
         guard isQueueLoading else { return }
+        #if DEBUG
+            FoundationTrace.event("collection event=cancel origin=\(file) line=\(line)")
+        #endif
         queueTask?.cancel()
-        queueNotice = "Collection loading cancelled."
+        if queueOperation == .enqueue {
+            queueNotice = "Collection loading cancelled."
+        }
     }
 
     func retryQueueAddition() {
@@ -388,6 +496,8 @@ final class FoundationLibraryActions: ObservableObject {
 
     func dismissQueueOutcome() {
         guard !isQueueLoading else { return }
+        queueOwner = nil
+        queueOperation = nil
         queueErrorMessage = nil
         queueNotice = nil
         canRetryQueueAddition = false
@@ -397,6 +507,10 @@ final class FoundationLibraryActions: ObservableObject {
     /// Called by the source owner before replacing or dismissing this source.
     func invalidate() {
         active = false
+        canonicalTracks = [:]
+        knownTrackKeys = [:]
+        trackAvailability = { _ in true }
+        trackPreferenceObservation = nil
         cancelQueueAddition()
         retryQueueAdditionAction = nil
         for task in tasks.values { task.cancel() }

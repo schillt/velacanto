@@ -14,6 +14,8 @@ nonisolated struct FoundationStoredDownloadItem: Codable, Equatable, Sendable {
     let albumTitle: String?
     let albumTag: String?
     var artist: FoundationItemReference? = nil
+    var trackNumber: Int? = nil
+    var discNumber: Int? = nil
 
     init(_ item: FoundationItem) {
         id = item.id
@@ -33,6 +35,8 @@ nonisolated struct FoundationStoredDownloadItem: Codable, Equatable, Sendable {
         albumTitle = item.album?.title
         artist = item.artist
         albumTag = item.album?.primaryImageTag
+        trackNumber = item.trackNumber
+        discNumber = item.discNumber
     }
 
     var item: FoundationItem {
@@ -45,6 +49,8 @@ nonisolated struct FoundationStoredDownloadItem: Codable, Equatable, Sendable {
                 id: albumID, title: albumTitle, primaryImageTag: albumTag)
         }
         result.artist = artist
+        result.trackNumber = trackNumber
+        result.discNumber = discNumber
         return result
     }
 }
@@ -58,11 +64,15 @@ nonisolated struct FoundationDownloadManifest: Codable, Sendable {
         let expanded: Bool
         // Absent in existing manifests: ordinary intent never clears local exclusions.
         var reacquiresExcludedTracks: Bool? = nil
+        // Absent in existing manifests means Original. Never resample on retry/reconcile.
+        var requestedQuality: FoundationDownloadQuality? = nil
     }
     struct File: Codable, Sendable {
         let name: String
         let bytes: Int64
         let digest: String
+        // Nil means a historical/original file. Requested quality belongs to the owner.
+        var convertedRendition: FoundationConvertedDownloadRendition? = nil
     }
     struct Artwork: Codable, Sendable {
         let item: FoundationStoredDownloadItem

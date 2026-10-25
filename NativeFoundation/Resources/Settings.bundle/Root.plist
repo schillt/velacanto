@@ -6,7 +6,7 @@
 	<array>
 		<dict>
 			<key>FooterText</key>
-			<string>Streaming controls affect audio played from your server, not downloaded music.</string>
+			<string>Streaming controls affect audio played from your server, not downloaded music. Quality changes apply to the next stream, not during playback. Auto uses Original on unmetered Wi-Fi or wired connections, AAC up to 192 kbps on cellular, costly or unknown paths, and 128 kbps on constrained paths. Connection type is used, not measured speed. Unknown connections use Cellular Quality.</string>
 			<key>Title</key>
 			<string>Streaming</string>
 			<key>Type</key>
@@ -14,13 +14,55 @@
 		</dict>
 		<dict>
 			<key>DefaultValue</key>
-			<string>Native / AAC fallback</string>
+			<string>original</string>
 			<key>Key</key>
-			<string>audio.streaming.qualityDescription</string>
+			<string>audio.streaming.wifiQuality</string>
 			<key>Title</key>
-			<string>Quality</string>
+			<string>Wi-Fi &amp; Wired Quality</string>
 			<key>Type</key>
-			<string>PSTitleValueSpecifier</string>
+			<string>PSMultiValueSpecifier</string>
+			<key>Titles</key>
+			<array>
+				<string>Original</string>
+				<string>Auto</string>
+				<string>High · 320 kbps</string>
+				<string>Standard · 192 kbps</string>
+				<string>Data Saver · 128 kbps</string>
+			</array>
+			<key>Values</key>
+			<array>
+				<string>original</string>
+				<string>auto</string>
+				<string>aac320</string>
+				<string>aac192</string>
+				<string>aac128</string>
+			</array>
+		</dict>
+		<dict>
+			<key>DefaultValue</key>
+			<string>auto</string>
+			<key>Key</key>
+			<string>audio.streaming.cellularQuality</string>
+			<key>Title</key>
+			<string>Cellular Quality</string>
+			<key>Type</key>
+			<string>PSMultiValueSpecifier</string>
+			<key>Titles</key>
+			<array>
+				<string>Original</string>
+				<string>Auto</string>
+				<string>High · 320 kbps</string>
+				<string>Standard · 192 kbps</string>
+				<string>Data Saver · 128 kbps</string>
+			</array>
+			<key>Values</key>
+			<array>
+				<string>original</string>
+				<string>auto</string>
+				<string>aac320</string>
+				<string>aac192</string>
+				<string>aac128</string>
+			</array>
 		</dict>
 		<dict>
 			<key>DefaultValue</key>
@@ -34,7 +76,7 @@
 		</dict>
 		<dict>
 			<key>FooterText</key>
-			<string>Download controls affect new downloads. Manage downloaded music and storage in Velacanto Settings.</string>
+			<string>Quality applies to new downloads. Existing files are kept. AAC conversion requires server permission. Manage downloaded music and storage in VelaCanto Settings.</string>
 			<key>Title</key>
 			<string>Downloads</string>
 			<key>Type</key>
@@ -42,13 +84,27 @@
 		</dict>
 		<dict>
 			<key>DefaultValue</key>
-			<string>Original</string>
+			<string>original</string>
 			<key>Key</key>
-			<string>audio.downloads.qualityDescription</string>
+			<string>audio.downloads.quality</string>
 			<key>Title</key>
 			<string>Quality</string>
 			<key>Type</key>
-			<string>PSTitleValueSpecifier</string>
+			<string>PSMultiValueSpecifier</string>
+			<key>Titles</key>
+			<array>
+				<string>Original</string>
+				<string>High · 320 kbps</string>
+				<string>Standard · 192 kbps</string>
+				<string>Data Saver · 128 kbps</string>
+			</array>
+			<key>Values</key>
+			<array>
+				<string>original</string>
+				<string>aac320</string>
+				<string>aac192</string>
+				<string>aac128</string>
+			</array>
 		</dict>
 		<dict>
 			<key>DefaultValue</key>

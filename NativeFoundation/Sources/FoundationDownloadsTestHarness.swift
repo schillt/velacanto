@@ -485,14 +485,9 @@
         let library: FoundationDownloadUILibrary
         @Published private(set) var catalogLibrary: FoundationDownloadUILibrary
         private(set) var librarySelection: FoundationMusicLibrarySelection?
-        let actions = FoundationLibraryActions(
-            sourceScope: "synthetic-ui", read: { _ in nil }, write: { _, _ in },
-            mutateFavorite: { _, _ in })
+        let actions: FoundationLibraryActions
         let artwork: FoundationCurrentArtwork
-        let preferences = FoundationPlaybackPreferences(
-            defaults: UserDefaults(
-                suiteName: "FoundationDownloadUIFixture."
-                    + ProcessInfo.processInfo.environment["FOUNDATION_UI_RUN_ID"]!)!)
+        let preferences: FoundationPlaybackPreferences
         let connectivity = FoundationConnectivity(
             monitorConnectivity: false, settleDuration: .zero, retry: {})
         let playlist = FoundationItem(
@@ -500,6 +495,16 @@
             duration: nil)
 
         init() {
+            let preferences = FoundationPlaybackPreferences(
+                defaults: UserDefaults(
+                    suiteName: "FoundationDownloadUIFixture."
+                        + ProcessInfo.processInfo.environment["FOUNDATION_UI_RUN_ID"]!)!)
+            self.preferences = preferences
+            let actions = FoundationLibraryActions(
+                sourceScope: "synthetic-ui", read: { _ in nil }, write: { _, _ in },
+                trackPreferences: preferences,
+                mutateFavorite: { _, _ in })
+            self.actions = actions
             let root = FoundationDownloadsTestHarness.storageRoot
             let library = FoundationDownloadUILibrary()
             self.library = library
@@ -510,13 +515,23 @@
                 scope: "synthetic-ui", library: library, root: root,
                 transfer: { _, destination, _, progress in
                     try await transfer.write(to: destination, progress: progress)
-                }, monitorConnectivity: false)
+                }, monitorConnectivity: false,
+                observeTracks: { items, albumID in
+                    actions.observeTrackCopies(items, albumID: albumID)
+                },
+                projectTracks: { items, albumID in actions.visibleTracks(items, albumID: albumID) })
             self.downloads = downloads
             self.player = FoundationPlayer(
                 library: library, resolveResource: { try await downloads.playbackResource(for: $0) }
             )
+            self.player.configureTrackProjection(
+                project: { actions.visibleTracks($0) }, observe: { actions.observeTrackCopies($0) })
             self.artwork = FoundationCurrentArtwork(player: player) { item in
                 await downloads.retainedArtwork(for: item)
+            }
+            let connectivity = self.connectivity
+            actions.configureTrackAvailability { [weak connectivity, weak downloads] item in
+                connectivity?.localOnly != true || downloads?.isReady(item) == true
             }
             // Start on synthetic cellular; the production toggle governs transfer permission.
             let productionShell = ProcessInfo.processInfo.arguments.contains(
@@ -688,7 +703,10 @@
                 "-fixtureExtendedSongsCatalog")
             let count = kind == .track ? (extendedSongs ? 280 : 180) : 120
             return (0..<count).map { index in
-                let letter = index < firstWindow ? "A" : (index < firstWindow + 50 ? "F" : "G")
+                let letter =
+                    index < firstWindow
+                    ? "A"
+                    : (index < firstWindow + 50 ? "F" : (extendedSongs && index >= 260 ? "Z" : "G"))
                 return .init(
                     id: "alphabet-\(kind)-\(index)",
                     title: "\(letter) Fixture \(kind) \(index)", subtitle: "Synthetic catalog",
@@ -733,7 +751,9 @@
         func alphabetPage(kind: FoundationItem.Kind, letter: String, startIndex: Int) async throws
             -> FoundationPage
         {
-            guard alphabetCatalog, letter.count == 1, ("A"..."Z").contains(letter) else {
+            guard alphabetCatalog || kind == .track, letter.count == 1,
+                letter == "#" || ("A"..."Z").contains(letter), startIndex >= 0
+            else {
                 throw FoundationLibraryError.unavailable
             }
             let key = "\(kind)-\(letter)-\(startIndex)"
@@ -752,12 +772,30 @@
             {
                 throw FoundationLibraryError.invalidResponse
             }
-            let items = alphabetItems(kind: kind).filter { String($0.title.prefix(1)) >= letter }
+            let all =
+                alphabetCatalog
+                ? alphabetItems(kind: kind)
+                : (canonical ? [missing, track] : [track])
+            if kind == .track {
+                let offset =
+                    startIndex == 0
+                    ? (letter == "#"
+                        ? 0
+                        : (all.firstIndex {
+                            FoundationSongAlphabetSeek.key($0) >= letter.lowercased()
+                        } ?? all.count))
+                    : startIndex
+                let end = min(offset + 50, all.count)
+                guard offset < end else { return .init(items: [], nextStartIndex: nil) }
+                return .init(
+                    items: Array(all[offset..<end]), nextStartIndex: end < all.count ? end : nil)
+            }
+            let items = all.filter { String($0.title.prefix(1)) >= letter }
             let end = min(startIndex + 50, items.count)
             guard startIndex < end else { return .init(items: [], nextStartIndex: nil) }
             return .init(
-                items: Array(items[startIndex..<end]),
-                nextStartIndex: end < items.count ? end : nil)
+                items: Array(items[startIndex..<end]), nextStartIndex: end < items.count ? end : nil
+            )
         }
         private let selectionID: String?
         private let selectionAvailable: Bool
@@ -1088,8 +1126,14 @@
             if let selected = try selectedAlbums() { return selected }
             return .init(items: [album], nextStartIndex: nil)
         }
+        func recentMusicSuggestions() async throws -> FoundationPage {
+            try await recentAlbums(startIndex: 0)
+        }
+
         func recentTracks(startIndex: Int) async throws -> FoundationPage {
-            .init(items: [track], nextStartIndex: nil)
+            guard startIndex == 0 else { return .init(items: [], nextStartIndex: nil) }
+            // Preserve the synthetic provider's Date Added ascending order, distinct from album order.
+            return .init(items: canonical ? [missing, track] : [track], nextStartIndex: nil)
         }
         func recentlyPlayed(startIndex: Int) async throws -> FoundationPage {
             .init(items: [track], nextStartIndex: nil)
@@ -1187,7 +1231,26 @@
             }
         }
         func tracks(albumID: String, startIndex: Int) async throws -> FoundationPage {
-            .init(items: canonical ? orderedTracks : [track], nextStartIndex: nil)
+            if ProcessInfo.processInfo.arguments.contains("-fixtureDuplicateAlbumTracks") {
+                var first = track
+                first.trackNumber = 1
+                first.discNumber = 1
+                var duplicate = FoundationItem(
+                    id: "tone-duplicate", title: track.title,
+                    subtitle: track.subtitle, kind: .track, duration: track.duration)
+                duplicate.album = track.album
+                duplicate.trackNumber = 1
+                duplicate.discNumber = 1
+                var second = FoundationItem(
+                    id: "tone-next", title: "Fixture Second Song",
+                    subtitle: track.subtitle, kind: .track, duration: track.duration)
+                second.album = track.album
+                second.trackNumber = 2
+                second.discNumber = 1
+                return .init(
+                    items: startIndex == 0 ? [first, duplicate, second] : [], nextStartIndex: nil)
+            }
+            return .init(items: canonical ? orderedTracks : [track], nextStartIndex: nil)
         }
         func playlistPermissions(id: String) async throws -> FoundationPlaylistPermissions {
             .init(name: "Fixture Playlist", canEdit: false, canDelete: false)

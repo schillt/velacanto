@@ -1,4 +1,4 @@
-# Velacanto agent guide
+# VelaCanto agent guide
 
 ## Authority and current product
 
@@ -19,6 +19,12 @@ This supersedes the earlier requirement to publish every task branch and open a
 PR into alpha. Preserve existing branches and historical PR evidence; do not
 force-push, rewrite history or delete unintegrated work during this transition.
 
+Owner naming clarification (2026-10-23): spell the product **VelaCanto**.
+Canonical Release/TestFlight builds display **VelaCanto**, without Alpha. Local
+Debug/UITesting builds retain **VelaCanto Alpha**; an explicitly local Release
+build may override the name. Preserve targets, bundle IDs and stored-data identities.
+See the product-naming section of docs/development-workflow.md.
+
 Before editing, compare the fetched alpha guide, applicable nested guides, current
 owner instructions and the issue contract. Check that board workflow descriptions
 agree. Report material conflicts before dependent work; never replace a dirty
@@ -26,13 +32,23 @@ checkout's instructions to make them appear current. Explicit owner instructions
 take precedence, but a scoped exception does not permanently change the default
 workflow. Record its scope and reconcile shared documentation.
 
-Velacanto 0.4.0 development follows the 0.3.5 and 0.3.0 (108) Foundation line.
-Read `docs/0.4-development-record.md` and `docs/0.4-plan.md` for the current
-integrated checkpoint and outstanding gates. The maintained
-app is `NativeFoundation/VelacantoFoundation.xcodeproj`, scheme
-`VelacantoFoundation`, product `Velacanto`. Read `NativeFoundation/AGENTS.md`,
-ADR 0012/0013 and `docs/0.3.5-acceptance.md`. Build 107 remains rejected. Historical
-0.3.0 freeze documents do not disable the scoped 0.3.5 features. Never restore old
+Current release work targets **0.5.0 — Alpha Preview**, candidate build 217,
+from accepted local build 215. Read `docs/0.5.0-acceptance.md`,
+`docs/0.5.0-release-notes.md` and `docs/0.5.0-testflight-notes.md` for current scope,
+known limits and separate publication/distribution gates. The 0.4 development
+record remains chronological evidence, not a current feature exclusion list.
+The owner authorizes accepted integration to alpha and preparation for TestFlight;
+beta/main promotion remains separate. Defer unfinished scope to the next milestone
+without converting incomplete checks into passes. “Preview” does not require a
+preview branch.
+
+The maintained app is `NativeFoundation/VelacantoFoundation.xcodeproj`, scheme
+`VelacantoFoundation`, product `Velacanto`; distribution display name VelaCanto.
+Read the nested guide, ADR 0012/0013 and playback contract before implementation.
+Native CarPlay, HLS streaming, quality/download options, playlist management and
+modern Mac credentials are now implemented. Historical plans marking them excluded
+or DEBUG-only are superseded for current source. Preserve internal bundle/storage
+identities and retained work. Build 107 remains rejected; never restore legacy
 controllers to satisfy superseded plans.
 
 The historical 0.3.5 exception authorized PR #174 into alpha after passing checks,
@@ -50,6 +66,12 @@ work. Apply `docs/engineering-rubric.md` to future reviews without inventing gra
 Subagents are authorized for independent, bounded tasks without asking for each
 assignment. Delegate when it enables useful parallel progress; simple tasks can
 remain with one agent. Delegation does not expand scope or count as acceptance.
+
+Owner instruction (2026-10-13): create a fresh subagent for each distinct topic or
+issue. Do not reuse an agent from another topic by assigning unrelated work through
+a follow-up. Follow-ups may clarify or continue that agent's original task. When
+agent capacity is exhausted, finish work with the primary agent or wait for a new
+agent slot; do not repurpose an older agent to bypass the boundary.
 
 - **Implementation agent:** implements one assigned issue per isolated worktree,
   writes meaningful focused tests and hands off exact commits and limitations.
@@ -190,7 +212,7 @@ private data solely because a broad scanner matches them. Review matches locally
 before reporting, without copying their contents into public evidence. HTTPS
 protects transit; it does not establish safe endpoint logging or local retention.
 
-The current LICENSE makes Velacanto public-source proprietary software, not an
+The current LICENSE makes VelaCanto public-source proprietary software, not an
 open-source-licensed app. Check the candidate LICENSE and third-party notices;
 do not change licensing, grant rights or describe dependencies as covered by the
 app's license without authorization.
@@ -249,6 +271,23 @@ from current main, then reconcile the accepted fix locally and publish it to alp
 before further release promotion. No routine cherry-pick-only divergence between
 shared branches.
 
+## Playback protection
+
+Read [Playback and Now Playing protection](docs/playback-protection.md) before
+changing playback, Now Playing, shared catalog/artwork loading, caching or async
+ownership. This owner-established contract applies even when the visible change
+is on a browsing screen. Only playback and Now Playing receive preferential
+admission; all browsing screens remain equal and publish independently. Audio
+must never depend on optional content or its admission queue. Preserve protected
+capacity, shared-request promotion, cancellation and recoverable artwork.
+
+Shared loading changes require affected regression checks and exact-candidate
+physical playback acceptance; untouched player files do not exempt them. Record
+initial acceptance separately from exhaustive validation and root-cause proof.
+Silent playback with persistent loading is a P1 acceptance blocker. Use the
+document's verification matrix and diagnostic boundaries; do not mask stalls with
+speculative retries, transport replacement, cache purges or global serialization.
+
 ## Quality, privacy and completion
 
 Prefer one owner per mutable state, explicit task lifetime/cancellation, complete
@@ -279,3 +318,14 @@ Final handoff: base and final SHA, PR/issue, owned paths, tests/results, privacy
 review, pending gates, integration status and next owner. Report local, published,
 merged, accepted and distributed as distinct states. Never mark documentation or
 implementation Done merely because a local commit or draft PR exists.
+
+## Delivery clarification — 2026-10-23
+
+Automatic TestFlight delivery is main-only. Keep an owner's explicitly started
+manual Cloud/TestFlight push separate from automatic branch-triggered delivery;
+do not remove its post-actions or promote branches as a workaround. For the
+0.5.0 preview the owner handles that manual push while GitHub checks are resolved
+independently. No Cloud workflow edits/removals were saved during this cleanup.
+Do not change tester groups, agreements or public-release scope. Record actual
+source, checks, Apple processing and availability separately; TestFlight activity
+does not turn a failed GitHub quality gate into a pass.
