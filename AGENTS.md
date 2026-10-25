@@ -83,6 +83,39 @@ The owner prohibition supersedes earlier remote-task-branch exceptions. Preserve
 existing remote historical branches until separately authorized cleanup; do not
 delete them as an inferred part of this policy.
 
+## Mandatory release-milestone disposition gate
+
+Owner directive (2026-10-25): never release a version while any issue in its
+current release milestone remains unresolved and undisposed. Before a version
+release, release promotion, release tag, GitHub release/prerelease or distribution,
+inspect the live GitHub milestone and all its issues, including every results page.
+Every issue must have one of these recorded outcomes:
+
+- **Completed:** the issue's acceptance criteria are satisfied and the issue is
+  closed as completed, with relevant integration and verification evidence.
+- **Replanned/deferred:** remaining work is explicitly recorded and the issue is
+  assigned to a specific later milestone, removed from the current release
+  milestone, and reflected consistently in active Project tracking.
+- **Discarded:** the decision and reason are recorded, the issue is closed as
+  not planned (or equivalent), and it is removed from the current release milestone
+  and active Project/roadmap tracking. Preserve the historical issue record.
+
+An open issue, a local note, a draft plan, an implementation-only claim or simply
+removing a milestone assignment does not satisfy this gate. Do not silently mark
+unfinished work completed, assign no later milestone to deferred work, or discard
+issues merely to clear the gate. Dispositions must follow the owner's approved
+scope decisions; unresolved decisions block release.
+
+Record the milestone, issue dispositions, verification time and remaining issue
+count in the release evidence. Recheck the live milestone immediately before the
+release action; newly added or reopened unresolved issues block it. Passing tests,
+a prior release authorization, source publication or TestFlight activity does not
+substitute for this check. This gate is additional to existing exact-source quality,
+acceptance and release authorization requirements. Ordinary local development and
+accepted development integration to alpha remain governed by their existing rules.
+Preserve this requirement in future guide edits; never weaken it during routine
+cleanup or release preparation.
+
 ## Roles and parallel delegation
 
 Subagents are authorized for independent, bounded tasks without asking for each
