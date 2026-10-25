@@ -13,7 +13,7 @@ the workspace maintainer so every worker receives the same contract.
 The owner-approved workflow, updated 2026-10-10, keeps development branches and
 worktrees local. Publish accepted changes to `alpha`; promote candidates through
 an **alpha → beta PR**. A local `codex/` branch name is an implementation detail,
-not a reason to create a GitHub development branch. Main/release distribution
+never a branch to publish to GitHub. Main/release distribution
 requires its own authorization and acceptance. See [workflow](docs/development-workflow.md).
 This supersedes the earlier requirement to publish every task branch and open a
 PR into alpha. Preserve existing branches and historical PR evidence; do not
@@ -60,6 +60,28 @@ not establish that the volume defect is fixed. Record current checks,
 exceptions and signed distribution status separately; no public App Store
 submission is implied. Do not change runtime/version metadata in planning-only
 work. Apply `docs/engineering-rubric.md` to future reviews without inventing grades.
+
+## Permanent branch preservation and local-only work
+
+Owner directive (2026-10-25): GitHub `alpha`, `beta` and `main` must always
+exist. Never delete, rename, replace or retire any of these three branches.
+Promotion advances their commits through the established PR flow; it never removes
+the source branch. Never select Delete branch after a promotion or enable merged
+branch auto-deletion that could remove a permanent branch. Verify all three
+branches and their expected heads before and after every promotion. If one is
+missing, stop dependent promotion work and restore its exact recorded head without
+rewriting any surviving branch. Preserve these rules in future instruction edits;
+do not remove or weaken them as routine cleanup or workflow maintenance.
+
+All `codex/*` branches and other local task/worktree branches stay local.
+Never push, create or publish those branch refs to GitHub, including for remote
+review, CI, a draft PR or a temporary candidate. Never push all branches or mirror
+local refs. Local commits are allowed; publish only reviewed, accepted integration
+to `alpha`, then promote `alpha → beta → main` through separately authorized
+PRs. A commit's former local branch name does not require publishing that ref.
+The owner prohibition supersedes earlier remote-task-branch exceptions. Preserve
+existing remote historical branches until separately authorized cleanup; do not
+delete them as an inferred part of this policy.
 
 ## Roles and parallel delegation
 
@@ -118,7 +140,8 @@ owner-authorized release decision; preview is not a mandatory stage.
 2. Fetch alpha. Confirm dependencies and worktree ownership. Start one clean,
    isolated local branch/worktree per issue from current `origin/alpha`; record
    its full base SHA. Never reuse another worker's dirty tree. Do not publish
-   temporary task branches unless the owner explicitly requests a remote review.
+   temporary task branches or any `codex/*` branch to GitHub. Review locally and
+   publish accepted integration only to alpha.
 3. Implement the issue contract and commit only explicit owned paths. Run focused
    checks and `git diff --check`; preserve others' dirty work and references.
 4. Acceptance and audit review the exact local candidate. Resolve discussions and
