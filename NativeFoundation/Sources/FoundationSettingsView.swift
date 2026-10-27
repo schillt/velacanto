@@ -20,6 +20,7 @@ struct FoundationSettingsView: View {
     var library: (any FoundationLibrary)? = nil
     var librarySelection: FoundationMusicLibrarySelection? = nil
     var signInAgain: (() -> Void)? = nil
+    var pinSync: FoundationPinSync? = nil
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var preferences: FoundationPlaybackPreferences
     #if DEBUG
@@ -52,6 +53,7 @@ struct FoundationSettingsView: View {
                     accountSections
                 #endif
                 librarySection
+                if let pinSync { FoundationPinSyncSection(sync: pinSync) }
                 Section("Storage") {
                     NavigationLink {
                         FoundationDownloadManagementView()
@@ -730,7 +732,8 @@ private struct FoundationLicensesView: View {
                             model.signOut()
                         },
                         library: library, librarySelection: model.librarySelection,
-                        signInAgain: { model.settingsShowsSignIn = true }
+                        signInAgain: { model.settingsShowsSignIn = true },
+                        pinSync: model.actions?.pinSync
                     )
                     .environmentObject(model.playbackPreferences)
                     .environmentObject(downloads)

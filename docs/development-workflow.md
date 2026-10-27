@@ -1,6 +1,11 @@
 # Development and promotion workflow
 
-Owner-approved 2026-10-10. [AGENTS.md](../AGENTS.md) is the detailed operational guide.
+Current owner instructions in [AGENTS.md](../AGENTS.md) and the
+[0.6 checkpoint](0.6.0-alpha-checkpoint.md) take precedence over historical
+workflow notes below. The current authorization is one reviewed alpha source
+checkpoint after exact build/install verification; final fields remain pending.
+
+Historical workflow recorded 2026-10-10:
 
 Develop and test in isolated local branches/worktrees. Temporary development
 branches stay local; their names do not create a GitHub publication requirement.

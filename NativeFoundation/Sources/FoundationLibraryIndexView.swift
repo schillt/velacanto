@@ -9,6 +9,8 @@ struct FoundationLibraryIndexView: View {
     let player: FoundationPlayer
     let isActive: Bool
     var refreshToken = 0
+    var showsContent = true
+    @EnvironmentObject private var primaryGenres: FoundationPrimaryGenresModel
     @EnvironmentObject private var downloads: FoundationDownloads
     @EnvironmentObject private var connectivity: FoundationConnectivity
     @EnvironmentObject private var actions: FoundationLibraryActions
@@ -67,17 +69,15 @@ struct FoundationLibraryIndexView: View {
         case .track: return downloads.downloadedSongs
         case .playlist: return downloads.downloadedPlaylists
         case .genre:
-            let references = (downloads.downloadedSongs + downloads.downloadedAlbums)
-                .flatMap(\.genres)
-            var seen: Set<String> = []
-            return references.filter { seen.insert($0.id).inserted }.map {
-                FoundationItem(
-                    id: $0.id, title: $0.title, subtitle: "", kind: .genre, duration: nil)
-            }.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+            return primaryGenres.items(localOnly: true)
         }
     }
 
-    var body: some View {
+    @ViewBuilder var body: some View {
+        if showsContent { indexBody }
+    }
+
+    private var indexBody: some View {
         // The task key and its closure must describe the same rendered activation.
         // Reading live @State after onAppear could start work under a superseded key.
         let active = isActive && isVisible
@@ -134,6 +134,7 @@ struct FoundationLibraryIndexView: View {
             if item == nil { usesNativeAlphabet = wantsNativeAlphabet }
         }
         .environment(\.foundationCollectionOperationOwner, collectionOperationOwner)
+        .foundationCollectionOutcomePresentation(owner: collectionOperationOwner)
         .onDisappear {
             actions.cancelQueueAdditionOwned(by: collectionOperationOwner)
             isVisible = false
@@ -233,16 +234,28 @@ struct FoundationLibraryIndexView: View {
                     FoundationLoadingPlaceholder(rowCount: placeholderRows, rowSpacing: 24)
                         .listRowSeparator(.hidden)
                 } else {
-                    ForEach(Array(displayed.items.enumerated()), id: \.offset) { index, item in
-                        FoundationLibraryItemRow(
-                            item: item, library: library, isActive: isActive && isVisible,
-                            open: { openedItem = item },
-                            play: kind == .track ? { play(index) } : nil,
-                            player: player, showsTrackArtwork: true,
-                            navigate: { openedItem = $0 }
-                        )
-                        .foundationLibraryListRow()
-                        .id("\(kind):\(item.id)")
+                    if kind == .genre {
+                        ForEach(displayed.items, id: \.genreIdentity) { genre in
+                            FoundationGenrePresentation(
+                                genre: genre, library: library, player: player,
+                                isActive: isActive && isVisible, context: .libraryRow,
+                                open: { openedItem = genre }, navigate: { openedItem = $0 }
+                            )
+                            .foundationLibraryListRow()
+                            .id(genre.genreIdentity)
+                        }
+                    } else {
+                        ForEach(Array(displayed.items.enumerated()), id: \.offset) { index, item in
+                            FoundationLibraryItemRow(
+                                item: item, library: library, isActive: isActive && isVisible,
+                                open: { openedItem = item },
+                                play: kind == .track ? { play(index) } : nil,
+                                player: player, showsTrackArtwork: true,
+                                navigate: { openedItem = $0 }
+                            )
+                            .foundationLibraryListRow()
+                            .id("\(kind):\(item.id)")
+                        }
                     }
                 }
                 if displayed.loaded, displayed.items.isEmpty {
@@ -277,6 +290,12 @@ struct FoundationLibraryIndexView: View {
                     }
                 }
             }
+            .foundationBottomChromeListClearance()
+            #if DEBUG && os(iOS) && targetEnvironment(simulator)
+                .environment(\.foundationChromeUIContext, "index-\(kind)")
+                .environment(\.foundationChromeUIItemCount, displayed.items.count)
+                .environment(\.foundationChromeUIHasMore, displayed.nextStartIndex != nil)
+            #endif
             .listStyle(.plain)
             #if os(macOS)
                 .padding(.horizontal, FoundationMacLayout.catalogHorizontalInset)
@@ -383,7 +402,14 @@ struct FoundationLibraryIndexView: View {
                     }
                 }
             }.padding(.horizontal, catalogHorizontalInset).padding(.vertical, 12)
+                .foundationBottomChromeEndPadding()
         }
+        .foundationBottomChromeScrollClearance()
+        #if DEBUG && os(iOS) && targetEnvironment(simulator)
+            .environment(\.foundationChromeUIContext, "index-\(kind)")
+            .environment(\.foundationChromeUIItemCount, displayed.items.count)
+            .environment(\.foundationChromeUIHasMore, displayed.nextStartIndex != nil)
+        #endif
         .accessibilityIdentifier("library-index-\(kind)")
         .refreshable {
             guard isActive, isVisible, !connectivity.localOnly else { return }
@@ -408,6 +434,10 @@ struct FoundationLibraryIndexView: View {
     }
 
     private func loadPage(_ offset: Int) async throws -> FoundationPage {
+        if kind == .genre {
+            return primaryGenres.page(
+                query: term, startIndex: offset, localOnly: connectivity.localOnly)
+        }
         if !term.isEmpty {
             return try await library.search(query: term, kind: kind, startIndex: offset, limit: 50)
         }
@@ -421,7 +451,8 @@ struct FoundationLibraryIndexView: View {
             }
             return try await library.songs(startIndex: offset)
         case .playlist: return try await library.playlists(startIndex: offset)
-        case .genre: return try await library.genres(startIndex: offset)
+        case .genre:
+            return primaryGenres.page(startIndex: offset, localOnly: connectivity.localOnly)
         }
     }
 
@@ -594,16 +625,11 @@ struct FoundationLibraryIndexView: View {
     #endif
 
     private func play(_ index: Int) {
-        guard let selection = displayed.trackQueue(selecting: index) else { return }
-        if connectivity.localOnly {
-            guard downloads.isReady(selection.items[selection.index]) else { return }
-            let ready = selection.items.filter { downloads.isReady($0) }
-            let selected = selection.items.prefix(selection.index).filter { downloads.isReady($0) }
-                .count
-            player.setQueue(ready, selectedIndex: selected)
-        } else {
-            player.setQueue(selection.items, selectedIndex: selection.index)
-        }
+        guard
+            let selection = displayed.trackQueue(
+                selecting: index, isAvailable: { !connectivity.localOnly || downloads.isReady($0) })
+        else { return }
+        player.setQueue(selection.items, selectedIndex: selection.index)
     }
 }
 

@@ -3,7 +3,7 @@ import Get
 import JellyfinAPI
 
 struct FoundationItem: Identifiable, Equatable, Codable, Sendable {
-    enum Kind: String, Codable, Sendable { case album, artist, track, playlist, genre }
+    enum Kind: String, Codable, Hashable, Sendable { case album, artist, track, playlist, genre }
     let id: String
     var title: String
     let subtitle: String
@@ -19,12 +19,18 @@ struct FoundationItem: Identifiable, Equatable, Codable, Sendable {
     var album: FoundationItemReference? = nil
     var artist: FoundationItemReference? = nil
     var genres: [FoundationItemReference] = []
+    /// Nil preserves legacy snapshots whose missing/empty tag coverage is unknown.
+    var genreMetadataIsComplete: Bool? = nil
+    /// Canonical primary-genre route origin; provider identity and raw tags stay intact.
+    var primaryGenreCensusID: UUID? = nil
     var playCount: Int = 0
     var sortName: String? = nil
     /// Membership identity for editing this occurrence, separate from the song identity.
     var playlistEntryID: String? = nil
     var trackNumber: Int? = nil
     var discNumber: Int? = nil
+    /// Nil preserves legacy account-owned Jellyfin snapshots. New local items are explicit.
+    var catalogSource: FoundationCatalogSource? = nil
 }
 
 extension FoundationItem {
@@ -50,19 +56,27 @@ extension FoundationItem {
 
     /// Related routes use the same catalog identity and metadata in every entry point.
     var relatedAlbum: FoundationItem? {
-        guard let album, !album.id.isEmpty else { return nil }
+        guard let album, !album.id.isEmpty,
+            catalogSource == nil || album.catalogSource == nil
+                || album.catalogSource == catalogSource
+        else { return nil }
         return FoundationItem(
             id: album.id, title: album.title.isEmpty ? "Album" : album.title,
             subtitle: artist.flatMap { $0.title.isEmpty ? nil : $0.title } ?? subtitle,
             kind: .album, duration: nil,
-            primaryImageTag: album.primaryImageTag, artist: artist)
+            primaryImageTag: album.primaryImageTag, artist: artist,
+            catalogSource: album.catalogSource ?? catalogSource)
     }
 
     var relatedArtist: FoundationItem? {
-        guard let artist, !artist.id.isEmpty else { return nil }
+        guard let artist, !artist.id.isEmpty,
+            catalogSource == nil || artist.catalogSource == nil
+                || artist.catalogSource == catalogSource
+        else { return nil }
         return FoundationItem(
             id: artist.id, title: artist.title.isEmpty ? "Artist" : artist.title,
-            subtitle: "", kind: .artist, duration: nil, primaryImageTag: artist.primaryImageTag)
+            subtitle: "", kind: .artist, duration: nil, primaryImageTag: artist.primaryImageTag,
+            catalogSource: artist.catalogSource ?? catalogSource)
     }
 }
 
@@ -70,6 +84,7 @@ struct FoundationItemReference: Equatable, Codable, Sendable {
     let id: String
     let title: String
     var primaryImageTag: String? = nil
+    var catalogSource: FoundationCatalogSource? = nil
 }
 
 struct FoundationPage: Codable, Sendable {
@@ -420,6 +435,8 @@ actor FoundationArtistDetailMemo {
 }
 
 protocol FoundationLibrary: Sendable {
+    var listeningActivityScope: String { get }
+    func remoteListeningActivity() async throws -> [FoundationRemoteListeningActivity]
     func reportPlayback(_ event: FoundationPlaybackReport) async throws
     func retireAlphabetCapability() async
     func alphabetCapability() async -> FoundationAlphabetCapability
@@ -437,6 +454,7 @@ protocol FoundationLibrary: Sendable {
         async throws -> FoundationDownloadPreparation
     var supportsPlaylistManagement: Bool { get }
     var supportsRepeatedPlaylistTracks: Bool { get }
+    var supportsPlaylistReordering: Bool { get }
     func playlistPermissions(id: String) async throws -> FoundationPlaylistPermissions
     func playlistEntries(id: String, startIndex: Int) async throws -> FoundationPlaylistPage
     func createPlaylist(name: String) async throws -> FoundationItem
@@ -444,9 +462,13 @@ protocol FoundationLibrary: Sendable {
     func deletePlaylist(id: String) async throws
     func addTracks(to playlistID: String, tracks: [FoundationItem]) async throws
     func removeEntry(from playlistID: String, entryID: String) async throws
+    func moveEntry(in playlistID: String, entryID: String, to index: Int) async throws
 
     func lyrics(for item: FoundationItem) async throws -> FoundationLyrics?
     func cachedArtistDetails(for item: FoundationItem) async -> FoundationArtistDetails?
+    var supportsItemMetadata: Bool { get }
+    var metadataScopeID: String { get }
+    func itemMetadata(for item: FoundationItem) async throws -> FoundationItemMetadata?
     func overview(for item: FoundationItem) async throws -> String?
     func itemDetails(for item: FoundationItem) async throws -> FoundationItem?
     func invalidateItemDetails(for item: FoundationItem) async
@@ -481,6 +503,10 @@ protocol FoundationLibrary: Sendable {
     func favorites(startIndex: Int) async throws -> FoundationPage
     func favorites(kind: FoundationItem.Kind, startIndex: Int) async throws -> FoundationPage
     func genres(startIndex: Int) async throws -> FoundationPage
+    var primaryGenreIndexScope: FoundationPrimaryGenreIndex.Scope? { get }
+    func primaryGenreMetadataPage(startIndex: Int) async throws
+        -> FoundationPrimaryGenreMetadataPage
+    func primaryGenreSongs(ids: [String]) async throws -> [FoundationItem]
     func albums(genreID: String, startIndex: Int) async throws -> FoundationPage
     func setFavorite(for item: FoundationItem, isFavorite: Bool) async throws
     func playbackURL(for item: FoundationItem) async throws -> URL
@@ -494,6 +520,8 @@ protocol FoundationLibrary: Sendable {
 }
 
 extension FoundationLibrary {
+    var listeningActivityScope: String { "" }
+    func remoteListeningActivity() async throws -> [FoundationRemoteListeningActivity] { [] }
     func playbackResource(for item: FoundationItem) async throws -> FoundationPlaybackResource {
         FoundationPlaybackResource(url: try await playbackURL(for: item))
     }
@@ -534,6 +562,7 @@ extension FoundationLibrary {
     }
     var supportsPlaylistManagement: Bool { false }
     var supportsRepeatedPlaylistTracks: Bool { false }
+    var supportsPlaylistReordering: Bool { false }
     func playlistPermissions(id: String) async throws -> FoundationPlaylistPermissions {
         throw FoundationLibraryError.unavailable
     }
@@ -551,6 +580,9 @@ extension FoundationLibrary {
         throw FoundationLibraryError.unavailable
     }
     func removeEntry(from playlistID: String, entryID: String) async throws {
+        throw FoundationLibraryError.unavailable
+    }
+    func moveEntry(in playlistID: String, entryID: String, to index: Int) async throws {
         throw FoundationLibraryError.unavailable
     }
 
@@ -573,6 +605,9 @@ extension FoundationLibrary {
         throw FoundationLibraryError.unavailable
     }
     func cachedArtistDetails(for item: FoundationItem) async -> FoundationArtistDetails? { nil }
+    var supportsItemMetadata: Bool { false }
+    var metadataScopeID: String { catalogScopeID }
+    func itemMetadata(for item: FoundationItem) async throws -> FoundationItemMetadata? { nil }
     func overview(for item: FoundationItem) async throws -> String? { nil }
     func itemDetails(for item: FoundationItem) async throws -> FoundationItem? { nil }
     func tracks(artistID: String, startIndex: Int) async throws -> FoundationPage {
@@ -613,6 +648,16 @@ extension FoundationLibrary {
     }
 
     func recentMusicSuggestions() async throws -> FoundationPage {
+        throw FoundationLibraryError.unavailable
+    }
+
+    func primaryGenreSongs(ids: [String]) async throws -> [FoundationItem] {
+        throw FoundationLibraryError.unavailable
+    }
+    var primaryGenreIndexScope: FoundationPrimaryGenreIndex.Scope? { nil }
+    func primaryGenreMetadataPage(startIndex: Int) async throws
+        -> FoundationPrimaryGenreMetadataPage
+    {
         throw FoundationLibraryError.unavailable
     }
 
@@ -705,6 +750,7 @@ enum FoundationLibraryError: String, Error, LocalizedError, Sendable {
 struct FoundationJellyfinLibrary: FoundationLibrary {
     typealias Load = @Sendable (URLRequest) async throws -> (Data, URLResponse)
     let session: FoundationSession
+    let deviceName: FoundationClientDeviceName
     private let load: Load
     private let streamingQuality: @Sendable () async -> FoundationStreamingQuality
     private let hlsCleanup = FoundationHLSCleanup()
@@ -720,6 +766,24 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
     let catalogPageCache: FoundationCatalogPageCache?
     private(set) var musicLibraryID: String?
     private(set) var catalogAvailable = true
+
+    /// Account identity matches FoundationApp's existing persisted source scope.
+    /// Music-library selection is a separate catalog filter, never account identity.
+    var catalogAccountIdentity: String {
+        FoundationMusicLibraryStore.digest(
+            "jellyfin\0" + session.serverURL.absoluteString + "\0" + session.userID)
+    }
+
+    private func acceptsCatalogItem(_ item: FoundationItem) -> Bool {
+        let expected = catalogAccountIdentity
+        func accepts(_ source: FoundationCatalogSource?) -> Bool {
+            source == nil || (source?.kind == .jellyfin && source?.identity == expected)
+        }
+        return accepts(item.catalogSource)
+            && ([item.album, item.artist].compactMap { $0 } + item.genres).allSatisfy {
+                accepts($0.catalogSource)
+            }
+    }
 
     var catalogScopeID: String {
         (musicLibraryID.map { FoundationMusicLibraryStore.digest($0) } ?? "all")
@@ -760,19 +824,20 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
     }
 
     init(
-        session: FoundationSession, load: @escaping Load = nativeLoad,
+        session: FoundationSession, deviceName: FoundationClientDeviceName = .apple,
+        load: @escaping Load = nativeLoad,
         artworkCache: FoundationArtworkCache? = nil,
         catalogPageCache: FoundationCatalogPageCache? = nil,
         networkAdmission: FoundationNetworkAdmission = FoundationNetworkAdmission()
     ) {
         self.init(
-            session: session, streamingQuality: { .original }, load: load,
+            session: session, deviceName: deviceName, streamingQuality: { .original }, load: load,
             artworkCache: artworkCache, catalogPageCache: catalogPageCache,
             networkAdmission: networkAdmission)
     }
 
     init(
-        session: FoundationSession,
+        session: FoundationSession, deviceName: FoundationClientDeviceName = .apple,
         streamingQuality: @escaping @Sendable () async -> FoundationStreamingQuality,
         load: @escaping Load = nativeLoad,
         artworkCache: FoundationArtworkCache? = nil,
@@ -780,6 +845,7 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
         networkAdmission: FoundationNetworkAdmission = FoundationNetworkAdmission()
     ) {
         self.session = session
+        self.deviceName = deviceName
         self.load = load
         self.streamingQuality = streamingQuality
         self.artworkCache = artworkCache
@@ -788,7 +854,27 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
         self.musicLibraryID = nil
     }
 
+    var listeningActivityScope: String {
+        FoundationMusicLibraryStore.digest(catalogAccountIdentity + "\0" + session.deviceID)
+    }
+
+    func remoteListeningActivity() async throws -> [FoundationRemoteListeningActivity] {
+        try await FoundationRequestIntent.$isPlayback.withValue(false) {
+            try await FoundationRemoteListeningDeadline.run {
+                let data = try await responseData(
+                    Paths.getSessions(parameters: .init(activeWithinSeconds: 90)),
+                    requestTimeout: 8)
+                try Task.checkCancellation()
+                return try FoundationRemoteListeningActivity.decode(
+                    data, userID: session.userID, ownDeviceID: session.deviceID, now: Date(),
+                    catalogSource: try FoundationCatalogSource.jellyfin(
+                        scope: catalogAccountIdentity))
+            }
+        }
+    }
+
     var supportsPlaylistManagement: Bool { true }
+    var supportsPlaylistReordering: Bool { true }
 
     func playlistPermissions(id: String) async throws -> FoundationPlaylistPermissions {
         guard Self.validID(id) else { throw FoundationLibraryError.invalidResponse }
@@ -851,7 +937,13 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
     }
 
     func addTracks(to playlistID: String, tracks: [FoundationItem]) async throws {
-        guard Self.validID(playlistID), !tracks.isEmpty, tracks.count <= 100,
+        guard !tracks.isEmpty, tracks.count <= 100 else {
+            throw FoundationLibraryError.invalidResponse
+        }
+        guard tracks.allSatisfy(acceptsCatalogItem) else {
+            throw FoundationLibraryError.unavailable
+        }
+        guard Self.validID(playlistID),
             tracks.allSatisfy({ $0.kind == .track && Self.validID($0.id) })
         else {
             throw FoundationLibraryError.invalidResponse
@@ -872,15 +964,27 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
             Paths.removeItemFromPlaylist(playlistID: playlistID, entryIDs: [entryID]))
     }
 
+    func moveEntry(in playlistID: String, entryID: String, to index: Int) async throws {
+        guard Self.validID(playlistID), index >= 0, index < 10_000,
+            !entryID.isEmpty, entryID.utf8.count <= 128,
+            entryID.unicodeScalars.allSatisfy({
+                CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_")).contains($0)
+            })
+        else { throw FoundationLibraryError.invalidResponse }
+        _ = try await responseData(
+            Paths.moveItem(playlistID: playlistID, itemID: entryID, newIndex: index))
+    }
+
     static func signIn(
         serverURL: URL, username: String, password: String,
+        deviceName: FoundationClientDeviceName = .apple,
         load: @escaping Load = nativeLoad
     ) async throws -> FoundationSession {
         let base = try validatedServerURL(serverURL)
         let deviceID = UUID().uuidString
         let unsigned = FoundationSession(
             serverURL: base, accessToken: "", userID: "", deviceID: deviceID)
-        let adapter = Self(session: unsigned, load: load)
+        let adapter = Self(session: unsigned, deviceName: deviceName, load: load)
         let result: AuthenticationResult = try await adapter.send(
             Paths.authenticateUserByName(AuthenticateUserByName(pw: password, username: username)))
         guard let token = result.accessToken, !token.isEmpty,
@@ -978,7 +1082,7 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
             let offset =
                 startIndex == 0
                 ? try await FoundationSongAlphabetSeek.lowerBound(
-                    letter: letter, read: songAlphabetProbe)
+                    letter: letter, read: { try await songAlphabetProbe($0) })
                 : startIndex
             let result = try await page(
                 kinds: [.track], parent: nil, startIndex: offset, limit: 50, sortBy: [.name])
@@ -1159,6 +1263,7 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
     }
 
     func similarItems(for item: FoundationItem) async throws -> FoundationPage {
+        guard acceptsCatalogItem(item) else { throw FoundationLibraryError.unavailable }
         guard Self.validID(item.id) else { throw FoundationLibraryError.invalidResponse }
         // Similar endpoints cannot honestly constrain results to a music folder.
         guard musicLibraryID == nil, catalogAvailable else {
@@ -1187,12 +1292,39 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
     }
 
     func cachedArtistDetails(for item: FoundationItem) async -> FoundationArtistDetails? {
+        guard acceptsCatalogItem(item) else { return nil }
         guard item.kind == .artist, Self.validID(item.id), !Task.isCancelled else { return nil }
         return await artistDetailMemo.cachedValue(
             key: item.id, revision: item.artistBrandingRevision)
     }
 
+    var supportsItemMetadata: Bool { true }
+
+    // Scope identity is internal only: no credential, provider ID or server address reaches the UI.
+    var metadataScopeID: String {
+        FoundationMusicLibraryStore.digest(session.serverURL.absoluteString + "|" + session.userID)
+            + "." + catalogScopeID
+    }
+
+    func itemMetadata(for item: FoundationItem) async throws -> FoundationItemMetadata? {
+        guard acceptsCatalogItem(item) else { throw FoundationLibraryError.unavailable }
+        guard item.kind == .track, Self.validID(item.id) else {
+            throw FoundationLibraryError.invalidResponse
+        }
+        guard catalogAvailable else { throw FoundationLibraryError.unavailable }
+        try Task.checkCancellation()
+        let detail: BaseItemDto = try await FoundationRequestIntent.$isPlayback.withValue(false) {
+            try await send(Paths.getItem(itemID: item.id, userID: session.userID))
+        }
+        try Task.checkCancellation()
+        guard detail.id == item.id, detail.type == .audio else {
+            throw FoundationLibraryError.invalidResponse
+        }
+        return FoundationItemMetadata.jellyfin(detail)
+    }
+
     func overview(for item: FoundationItem) async throws -> String? {
+        guard acceptsCatalogItem(item) else { throw FoundationLibraryError.unavailable }
         guard Self.validID(item.id), item.kind == .artist || item.kind == .album else {
             throw FoundationLibraryError.invalidResponse
         }
@@ -1204,6 +1336,7 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
     }
 
     func itemDetails(for item: FoundationItem) async throws -> FoundationItem? {
+        guard acceptsCatalogItem(item) else { throw FoundationLibraryError.unavailable }
         guard Self.validID(item.id), item.kind == .album || item.kind == .artist else {
             throw FoundationLibraryError.invalidResponse
         }
@@ -1214,10 +1347,33 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
         return try mappedItems([detail], kinds: [item.kind]).first
     }
 
+    /// Validate a continuation against the receiving account without expanding
+    /// collections, resolving audio or changing the artist-detail memo contract.
+    func handoffItem(for item: FoundationItem) async throws -> FoundationItem {
+        try Task.checkCancellation()
+        guard acceptsCatalogItem(item), catalogAvailable else {
+            throw FoundationLibraryError.unavailable
+        }
+        guard Self.validID(item.id),
+            [.track, .album, .artist, .playlist].contains(item.kind)
+        else { throw FoundationLibraryError.invalidResponse }
+        let detail: BaseItemDto = try await send(
+            Paths.getItem(itemID: item.id, userID: session.userID))
+        try Task.checkCancellation()
+        guard detail.id == item.id,
+            var resolved = try mappedItems([detail], kinds: [item.kind]).first
+        else { throw FoundationLibraryError.invalidResponse }
+        resolved.catalogSource = try .jellyfin(scope: catalogAccountIdentity)
+        return resolved
+    }
+
     private func artistDetails(for item: FoundationItem) async throws
         -> FoundationArtistDetailMemo.Value
     {
-        try await artistDetailMemo.value(key: item.id, revision: item.artistBrandingRevision) {
+        guard acceptsCatalogItem(item) else { throw FoundationLibraryError.unavailable }
+        return try await artistDetailMemo.value(
+            key: item.id, revision: item.artistBrandingRevision
+        ) {
             let detail: BaseItemDto = try await send(
                 Paths.getItem(itemID: item.id, userID: session.userID))
             guard detail.id == item.id,
@@ -1230,6 +1386,7 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
     }
 
     func invalidateItemDetails(for item: FoundationItem) async {
+        guard acceptsCatalogItem(item) else { return }
         if item.kind == .artist { await artistDetailMemo.invalidate(key: item.id) }
     }
 
@@ -1365,16 +1522,17 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
     }
 
     func homeGenres() async throws -> FoundationPage {
-        let page = try await rankedGenres(albumOnly: true)
+        let page = try await rankedAlbumGenres()
         return FoundationPage(items: Array(page.items.prefix(5)), nextStartIndex: nil)
     }
 
     func searchGenres() async throws -> FoundationPage {
-        try await rankedGenres(albumOnly: false)
+        // Search and Library browse the same bounded catalog; presentation owns layout.
+        try await genres(startIndex: 0)
     }
 
     /// Rank one complete, bounded summary response without scanning genre contents.
-    private func rankedGenres(albumOnly: Bool) async throws -> FoundationPage {
+    private func rankedAlbumGenres() async throws -> FoundationPage {
         let limit = 1000
         guard catalogAvailable else { throw FoundationLibraryError.unavailable }
         var parameters = Paths.GetGenresParameters()
@@ -1382,11 +1540,10 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
         parameters.parentID = musicLibraryID
         parameters.startIndex = 0
         parameters.limit = limit
-        parameters.includeItemTypes =
-            albumOnly ? [.musicAlbum] : [.musicAlbum, .audio, .musicArtist]
+        parameters.includeItemTypes = [.musicAlbum]
         parameters.fields = [.itemCounts]
         parameters.enableTotalRecordCount = true
-        parameters.enableImages = !albumOnly
+        parameters.enableImages = false
         parameters.enableImageTypes = [.primary]
         parameters.imageTypeLimit = 1
         let endpoint = Request<BaseItemDtoQueryResult>(
@@ -1398,9 +1555,7 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
         let page = try mappedPage(result, kinds: [.genre], startIndex: 0, limit: limit)
         let ranked = try zip(page.items, entries).map {
             item, entry -> (item: FoundationItem, count: Int?) in
-            let counts =
-                albumOnly
-                ? [entry.albumCount] : [entry.albumCount, entry.songCount, entry.artistCount]
+            let counts = [entry.albumCount]
             guard counts.allSatisfy({ $0 != nil }) else { return (item, nil) }
             let count = try counts.reduce(0) { total, value in
                 guard let value, value >= 0 else { throw FoundationLibraryError.unavailable }
@@ -1409,7 +1564,7 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
                 return sum
             }
             return (item: item, count: count)
-        }.filter { !albumOnly || ($0.count ?? 0) > 0 }.sorted {
+        }.filter { ($0.count ?? 0) > 0 }.sorted {
             if let left = $0.count, let right = $1.count {
                 if left != right { return left > right }
             } else if ($0.count != nil) != ($1.count != nil) {
@@ -1451,6 +1606,113 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
         try await genrePage(startIndex: startIndex, limit: 50)
     }
 
+    var primaryGenreIndexScope: FoundationPrimaryGenreIndex.Scope? {
+        guard catalogAvailable,
+            let source = try? FoundationCatalogSource.jellyfin(
+                scope: catalogAccountIdentity)
+        else { return nil }
+        return .init(source: source, libraryID: musicLibraryID)
+    }
+
+    /// Visible primary-genre pages resolve only their canonical per-song membership.
+    func primaryGenreSongs(ids: [String]) async throws -> [FoundationItem] {
+        guard catalogAvailable else { throw FoundationLibraryError.unavailable }
+        guard (1...50).contains(ids.count), ids.allSatisfy(Self.validID),
+            Set(ids).count == ids.count
+        else {
+            throw FoundationLibraryError.invalidResponse
+        }
+        var parameters = Paths.GetItemsParameters()
+        parameters.userID = session.userID
+        parameters.parentID = musicLibraryID
+        parameters.isRecursive = true
+        parameters.includeItemTypes = [.audio]
+        parameters.ids = ids
+        parameters.fields = [.genres]
+        parameters.startIndex = 0
+        parameters.limit = ids.count
+        parameters.enableImages = true
+        parameters.imageTypeLimit = 1
+        parameters.enableImageTypes = [.primary]
+        parameters.enableUserData = true
+        parameters.enableTotalRecordCount = true
+        let result: BaseItemDtoQueryResult = try await send(
+            Paths.getItems(parameters: parameters), maximumBytes: 4 * 1_024 * 1_024)
+        try Task.checkCancellation()
+        guard let entries = result.items, result.startIndex == 0,
+            result.totalRecordCount == ids.count, entries.count == ids.count
+        else {
+            throw FoundationLibraryError.unavailable
+        }
+        let mapped = try mappedItems(entries, kinds: [.track])
+        guard Set(mapped.map(\.id)) == Set(ids), Set(mapped.map(\.id)).count == mapped.count else {
+            throw FoundationLibraryError.unavailable
+        }
+        let byID = Dictionary(uniqueKeysWithValues: mapped.map { ($0.id, $0) })
+        return ids.compactMap { byID[$0] }
+    }
+
+    /// Explicit user-started tag census only; ordinary browsing never calls this operation.
+    func primaryGenreMetadataPage(startIndex: Int) async throws
+        -> FoundationPrimaryGenreMetadataPage
+    {
+        guard (0...50_000).contains(startIndex) else {
+            throw FoundationLibraryError.invalidResponse
+        }
+        guard catalogAvailable else { throw FoundationLibraryError.unavailable }
+        var parameters = Paths.GetItemsParameters()
+        parameters.userID = session.userID
+        parameters.parentID = musicLibraryID
+        parameters.isRecursive = true
+        parameters.includeItemTypes = [.audio]
+        parameters.fields = [.genres]
+        parameters.startIndex = startIndex
+        parameters.limit = 200
+        parameters.sortBy = [.sortName, .name]
+        parameters.sortOrder = [.ascending]
+        parameters.enableImages = false
+        parameters.enableUserData = false
+        parameters.enableTotalRecordCount = true
+        let result: BaseItemDtoQueryResult = try await FoundationRequestIntent.$isPlayback
+            .withValue(false) {
+                try await send(Paths.getItems(parameters: parameters), maximumBytes: 1_024 * 1_024)
+            }
+        try Task.checkCancellation()
+        guard let entries = result.items, entries.count <= 200,
+            result.startIndex == startIndex, let total = result.totalRecordCount, total >= 0
+        else { throw FoundationLibraryError.invalidResponse }
+        let songs = try entries.map { entry -> FoundationPrimaryGenreMetadataPage.Song in
+            guard entry.type == .audio, let id = entry.id, Self.validID(id) else {
+                throw FoundationLibraryError.invalidResponse
+            }
+            guard let raw = entry.genres, let references = entry.genreItems else {
+                throw FoundationPrimaryGenreIndex.Failure.unknownMetadata
+            }
+            guard raw.count <= 128, references.count <= 128 else {
+                throw FoundationPrimaryGenreIndex.Failure.resourceLimit
+            }
+            let genres = try references.map { reference -> FoundationItemReference in
+                guard let id = reference.id, Self.validID(id), let title = reference.name,
+                    !title.isEmpty, title.utf8.count <= 512
+                else {
+                    throw FoundationPrimaryGenreIndex.Failure.unknownMetadata
+                }
+                return .init(id: id, title: title)
+            }
+            guard Set(raw.filter { !$0.isEmpty }) == Set(genres.map(\.title)) else {
+                throw FoundationPrimaryGenreIndex.Failure.unknownMetadata
+            }
+            return .init(id: id, genres: genres)
+        }
+        let (end, overflow) = startIndex.addingReportingOverflow(entries.count)
+        guard !overflow, end <= total, !entries.isEmpty || end == total else {
+            throw FoundationLibraryError.invalidResponse
+        }
+        return .init(
+            startIndex: startIndex, total: total, songs: songs,
+            nextStartIndex: end < total ? end : nil)
+    }
+
     private func genrePage(
         startIndex: Int, limit: Int, query: String? = nil,
         sortNameBoundary: String? = nil
@@ -1488,6 +1750,7 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
     }
 
     func setFavorite(for item: FoundationItem, isFavorite: Bool) async throws {
+        guard acceptsCatalogItem(item) else { throw FoundationLibraryError.unavailable }
         guard item.kind != .genre else { throw FoundationLibraryError.unavailable }
         guard Self.validID(item.id), Self.validID(session.userID) else {
             throw FoundationLibraryError.invalidResponse
@@ -1503,6 +1766,7 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
 
     /// Only the lyrics endpoint treats a missing resource as optional metadata.
     func lyrics(for item: FoundationItem) async throws -> FoundationLyrics? {
+        guard acceptsCatalogItem(item) else { throw FoundationLibraryError.unavailable }
         guard item.kind == .track, Self.validID(item.id) else {
             throw FoundationLibraryError.invalidResponse
         }
@@ -1536,6 +1800,7 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
     }
 
     func downloadSource(for item: FoundationItem) async throws -> FoundationDownloadSource {
+        guard acceptsCatalogItem(item) else { throw FoundationLibraryError.unavailable }
         guard item.kind == .track, Self.validID(item.id) else {
             throw FoundationDownloadError.unsupported
         }
@@ -1562,7 +1827,7 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
         request.httpMethod = "GET"
         request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
         request.setValue(
-            "MediaBrowser Client=\"Velacanto Native\", Device=\"Apple\", DeviceId=\"\(session.deviceID)\", Version=\"1\", Token=\"\(session.accessToken)\"",
+            "MediaBrowser Client=\"Velacanto Native\", Device=\"\(deviceName.rawValue)\", DeviceId=\"\(session.deviceID)\", Version=\"1\", Token=\"\(session.accessToken)\"",
             forHTTPHeaderField: "Authorization")
         return FoundationDownloadSource(
             request: request, fileExtension: container == "mp4" ? "m4a" : container,
@@ -1572,6 +1837,7 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
     func downloadPreparation(for item: FoundationItem, quality: FoundationDownloadQuality)
         async throws -> FoundationDownloadPreparation
     {
+        guard acceptsCatalogItem(item) else { throw FoundationLibraryError.unavailable }
         if quality == .original { return .original(try await downloadSource(for: item)) }
         return .converted(try await convertedDownloadProposal(for: item, quality: quality))
     }
@@ -1580,6 +1846,7 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
     func convertedDownloadProposal(for item: FoundationItem, quality: FoundationDownloadQuality)
         async throws -> FoundationDownloadConversionProposal
     {
+        guard acceptsCatalogItem(item) else { throw FoundationLibraryError.unavailable }
         guard item.kind == .track, Self.validID(item.id), quality.aacBitrate != nil else {
             throw FoundationDownloadError.unsupported
         }
@@ -1630,7 +1897,7 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
         else { throw FoundationDownloadError.permission }
         request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
         request.setValue(
-            "MediaBrowser Client=\"Velacanto Native\", Device=\"Apple\", DeviceId=\"\(session.deviceID)\", Version=\"1\", Token=\"\(session.accessToken)\"",
+            "MediaBrowser Client=\"Velacanto Native\", Device=\"\(deviceName.rawValue)\", DeviceId=\"\(session.deviceID)\", Version=\"1\", Token=\"\(session.accessToken)\"",
             forHTTPHeaderField: "Authorization")
         var cleanupRequest = request
         cleanupRequest.url = try Self.url(
@@ -1680,6 +1947,7 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
     }
 
     func playbackResource(for item: FoundationItem) async throws -> FoundationPlaybackResource {
+        guard acceptsCatalogItem(item) else { throw FoundationLibraryError.unavailable }
         let quality = await streamingQuality().resolved(for: FoundationStreamingPath())
         #if DEBUG
             return try await hlsResource(
@@ -1692,6 +1960,7 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
     private func hlsResource(
         for item: FoundationItem, quality: FoundationStreamingQuality, resolveMetadata: Bool = true
     ) async throws -> FoundationPlaybackResource {
+        guard acceptsCatalogItem(item) else { throw FoundationLibraryError.unavailable }
         try Task.checkCancellation()
         guard item.kind == .track, Self.validID(item.id) else {
             throw FoundationLibraryError.unavailable
@@ -2197,6 +2466,7 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
 
     // Compatibility URL-only helper; live playback uses playbackResource to retain its HLS lease.
     func playbackURL(for item: FoundationItem) async throws -> URL {
+        guard acceptsCatalogItem(item) else { throw FoundationLibraryError.unavailable }
         try Task.checkCancellation()
         guard item.kind == .track, Self.validID(item.id),
             !session.accessToken.isEmpty
@@ -2220,20 +2490,24 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
     }
 
     func retryArtwork(for item: FoundationItem) async {
+        guard acceptsCatalogItem(item) else { return }
         await artworkCache?.clearFailures(for: item)
     }
 
     func cachedArtworkResult(for item: FoundationItem, size: Int) async throws
         -> FoundationCurrentArtwork.Result?
     {
-        try await artworkCache?.cachedResult(for: item, pixels: size)
+        guard acceptsCatalogItem(item) else { throw FoundationLibraryError.unavailable }
+        return try await artworkCache?.cachedResult(for: item, pixels: size)
     }
 
     func artwork(for item: FoundationItem) async throws -> Data? {
-        try await artwork(for: item, size: 160)
+        guard acceptsCatalogItem(item) else { throw FoundationLibraryError.unavailable }
+        return try await artwork(for: item, size: 160)
     }
 
     func artwork(for item: FoundationItem, size: Int) async throws -> Data? {
+        guard acceptsCatalogItem(item) else { throw FoundationLibraryError.unavailable }
         if artworkCache != nil {
             return try await artworkResult(for: item, size: size, allowsNetwork: true)?.data
         }
@@ -2243,12 +2517,14 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
     func downloadArtwork(for item: FoundationItem, size: Int, allowsCellular: Bool) async throws
         -> Data?
     {
-        try await readArtwork(for: item, size: size, allowsCellular: allowsCellular)
+        guard acceptsCatalogItem(item) else { throw FoundationLibraryError.unavailable }
+        return try await readArtwork(for: item, size: size, allowsCellular: allowsCellular)
     }
 
     func artworkResult(for item: FoundationItem, size: Int, allowsNetwork: Bool) async throws
         -> FoundationCurrentArtwork.Result?
     {
+        guard acceptsCatalogItem(item) else { throw FoundationLibraryError.unavailable }
         guard let artworkCache else {
             guard allowsNetwork else { return nil }
             let data = try await readArtwork(
@@ -2269,6 +2545,7 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
     private func readArtwork(for item: FoundationItem, size: Int, allowsCellular: Bool?)
         async throws -> Data?
     {
+        guard acceptsCatalogItem(item) else { throw FoundationLibraryError.unavailable }
         try Task.checkCancellation()
         let tag = item.primaryImageTag.flatMap { $0.isEmpty ? nil : $0 }
         // Artist and album references may omit image tags. Jellyfin accepts
@@ -2372,6 +2649,13 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
                 guard let id = reference.id, Self.validID(id) else { return nil }
                 return FoundationItemReference(id: id, title: reference.name ?? "Artist")
             }.first
+            let genres = (entry.genreItems ?? []).compactMap {
+                reference -> FoundationItemReference? in
+                guard let id = reference.id, Self.validID(id), let title = reference.name,
+                    !title.isEmpty
+                else { return nil }
+                return FoundationItemReference(id: id, title: title)
+            }
             return FoundationItem(
                 id: id, title: entry.name ?? "Untitled",
                 subtitle: entry.albumArtist ?? entry.artists?.joined(separator: ", ") ?? "",
@@ -2383,23 +2667,25 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
                 backdropImageTag: kind == .artist ? entry.backdropImageTags?.first : nil,
                 isFavorite: kind == .genre ? nil : entry.userData?.isFavorite,
                 album: album, artist: artist,
-                genres: (entry.genreItems ?? []).compactMap { reference in
-                    guard let id = reference.id, Self.validID(id), let title = reference.name,
-                        !title.isEmpty
-                    else { return nil }
-                    return FoundationItemReference(id: id, title: title)
-                }, playCount: max(0, entry.userData?.playCount ?? 0), sortName: entry.sortName,
+                genres: genres,
+                genreMetadataIsComplete: entry.genreItems.map { $0.count == genres.count },
+                playCount: max(0, entry.userData?.playCount ?? 0), sortName: entry.sortName,
                 playlistEntryID: entry.playlistItemID,
                 trackNumber: entry.indexNumber, discNumber: entry.parentIndexNumber)
         }
     }
 
-    private func send<Response: Decodable>(_ endpoint: Request<Response>) async throws -> Response {
+    private func send<Response: Decodable>(
+        _ endpoint: Request<Response>, maximumBytes: Int? = nil
+    ) async throws -> Response {
         #if DEBUG
             let timing = FoundationLoadTiming.current ?? FoundationLoadTiming(.catalog)
             timing.record(.requestStarted)
         #endif
         let data = try await responseData(endpoint)
+        if let maximumBytes, data.count > maximumBytes {
+            throw FoundationPrimaryGenreIndex.Failure.resourceLimit
+        }
         #if DEBUG
             timing.record(.responseReceived)
             timing.record(.decodeStarted)
@@ -2466,7 +2752,8 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
 
     private func responseData<Response>(
         _ endpoint: Request<Response>, accept: String = "application/json",
-        notFoundIsEmpty: Bool = false, allowsCellular: Bool? = nil, loadOverride: Load? = nil
+        notFoundIsEmpty: Bool = false, allowsCellular: Bool? = nil, loadOverride: Load? = nil,
+        requestTimeout: TimeInterval? = nil
     ) async throws -> Data {
         #if DEBUG
             let operationID = UUID().uuidString
@@ -2483,6 +2770,7 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
             try Task.checkCancellation()
             var request = URLRequest(url: try Self.url(endpoint, base: session.serverURL))
             request.httpMethod = endpoint.method.rawValue
+            if let requestTimeout { request.timeoutInterval = requestTimeout }
             if let allowsCellular {
                 request.allowsCellularAccess = allowsCellular
                 request.allowsExpensiveNetworkAccess = allowsCellular
@@ -2497,7 +2785,7 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
             let token = session.accessToken
             let device = session.deviceID
             request.setValue(
-                "MediaBrowser Client=\"Velacanto Native\", Device=\"Apple\", DeviceId=\"\(device)\", Version=\"1\", Token=\"\(token)\"",
+                "MediaBrowser Client=\"Velacanto Native\", Device=\"\(deviceName.rawValue)\", DeviceId=\"\(device)\", Version=\"1\", Token=\"\(token)\"",
                 forHTTPHeaderField: "Authorization")
             if let body = endpoint.body {
                 request.httpBody = try JSONEncoder().encode(body)
@@ -2812,4 +3100,54 @@ actor FoundationNetworkAdmission {
         var pendingCount: Int { waiters.count }
         var activeCount: Int { active.count }
     #endif
+}
+
+// Provider-specific decoding stays at the adapter boundary.
+extension FoundationItemMetadata {
+    static func jellyfin(_ item: BaseItemDto) -> Self {
+        let people = item.people ?? []
+        var seen = Set<Credit>()
+        let credits = people.prefix(128).compactMap { person -> Credit? in
+            guard let name = text(person.name) else { return nil }
+            let role: String
+            switch person.type {
+            case .composer: role = "Composer"
+            case .writer: role = "Writer"
+            case .producer: role = "Producer"
+            case .conductor: role = "Conductor"
+            case .lyricist: role = "Lyricist"
+            case .arranger: role = "Arranger"
+            case .engineer: role = "Engineer"
+            case .mixer: role = "Mixer"
+            case .remixer: role = "Remixer"
+            case .artist: role = "Artist"
+            case .albumArtist: role = "Album Artist"
+            default: role = "Contributor"
+            }
+            let credit = Credit(name: name, role: role, detail: text(person.role))
+            return seen.insert(credit).inserted ? credit : nil
+        }
+        var seenGenres = Set<String>()
+        let genres = (item.genres ?? []).prefix(32).compactMap { value -> String? in
+            guard let genre = text(value), seenGenres.insert(genre).inserted else { return nil }
+            return genre
+        }
+        return Self(
+            credits: credits,
+            year: item.productionYear.flatMap { (1...9999).contains($0) ? $0 : nil },
+            genres: genres, hasAdditionalCredits: people.count > 128,
+            hasAdditionalGenres: (item.genres?.count ?? 0) > 32)
+    }
+
+    private static func text(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let cleaned = String(
+            String.UnicodeScalarView(
+                value.unicodeScalars.filter {
+                    !CharacterSet.controlCharacters.contains($0)
+                        || CharacterSet.whitespacesAndNewlines.contains($0)
+                })
+        ).split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        return cleaned.isEmpty ? nil : String(cleaned.prefix(256))
+    }
 }

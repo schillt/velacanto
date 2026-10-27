@@ -20,7 +20,7 @@ struct FoundationPlaylistPage: Sendable {
 
 enum FoundationPlaylistError: Error, LocalizedError, Equatable {
     case tooLarge, changed, ambiguousMemberships, alreadyPresent, partialAddition, emptyAlbum,
-        readOnly, partialRemoval, partialCreation
+        readOnly, partialRemoval, partialCreation, partialReorder
     var errorDescription: String? {
         switch self {
         case .readOnly:
@@ -39,6 +39,8 @@ enum FoundationPlaylistError: Error, LocalizedError, Equatable {
             "The playlist was created, but adding its songs could not be confirmed. Select the new playlist below to check or finish adding them."
         case .partialRemoval:
             "The removal could not be completed. Some tracks may have been removed; refresh before trying again."
+        case .partialReorder:
+            "The order could not be confirmed. Some songs may have moved; refresh before trying again."
         case .emptyAlbum:
             "This album has no tracks to add."
         }
@@ -83,6 +85,48 @@ enum FoundationPlaylistSnapshot {
 }
 
 enum FoundationPlaylistMutation {
+    @MainActor
+    static func reorder(
+        playlistID: String, entries: [FoundationPlaylistEntry], from source: IndexSet,
+        to destination: Int, library: any FoundationLibrary
+    ) async throws -> [FoundationPlaylistEntry] {
+        let plan = try FoundationPlaylistReorderPlan(
+            entries: entries, from: source, to: destination)
+        guard !plan.moves.isEmpty else { return entries }
+        guard library.supportsPlaylistReordering else {
+            throw FoundationLibraryError.unavailable
+        }
+        try Task.checkCancellation()
+        let permissions = try await library.playlistPermissions(id: playlistID)
+        try Task.checkCancellation()
+        guard permissions.canEdit else { throw FoundationPlaylistError.readOnly }
+        let before = try await FoundationPlaylistSnapshot.load(id: playlistID, library: library)
+        guard FoundationPlaylistReorderPlan.sameMemberships(before, entries) else {
+            throw FoundationPlaylistError.changed
+        }
+        var attemptedWrite = false
+        do {
+            for move in plan.moves {
+                try Task.checkCancellation()
+                attemptedWrite = true
+                try await library.moveEntry(
+                    in: playlistID, entryID: move.entryID, to: move.destination)
+            }
+            let after = try await FoundationPlaylistSnapshot.load(id: playlistID, library: library)
+            try Task.checkCancellation()
+            guard FoundationPlaylistReorderPlan.sameMemberships(after, plan.entries) else {
+                throw FoundationPlaylistError.changed
+            }
+            return after
+        } catch {
+            if error is CancellationError || (error as? FoundationLibraryError) == .cancelled {
+                throw error
+            }
+            if attemptedWrite { throw FoundationPlaylistError.partialReorder }
+            throw error
+        }
+    }
+
     static func create(name: String, library: any FoundationLibrary) async throws {
         let requestedName = try FoundationPlaylistName.validated(name)
         let created = try await library.createPlaylist(name: requestedName)
@@ -338,6 +382,17 @@ final class FoundationPlaylistChanges: ObservableObject {
     }
 
     func revision(for id: String) -> Int { revisions[id, default: 0] }
+
+    func reorder(
+        playlistID: String, entries: [FoundationPlaylistEntry], from source: IndexSet,
+        to destination: Int, library: any FoundationLibrary
+    ) async throws -> [FoundationPlaylistEntry] {
+        // A sent move may have reached the server even when confirmation fails.
+        defer { invalidate(playlistID) }
+        return try await FoundationPlaylistMutation.reorder(
+            playlistID: playlistID, entries: entries, from: source, to: destination,
+            library: library)
+    }
 
     func add(playlistID: String, source: FoundationItem, library: any FoundationLibrary)
         async throws -> FoundationPlaylistMutation.Addition

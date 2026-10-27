@@ -4,6 +4,122 @@ import XCTest
 
 @MainActor
 final class FoundationPresentationTests: XCTestCase {
+    #if os(macOS)
+        func testHandoffBrowseRoutesWithoutAMountedRootCollectionBinding() async throws {
+            let audio = FoundationMacHandoffAudioProbe()
+            let player = FoundationPlayer(
+                resolve: { item in try await audio.resolve(item) },
+                activateSession: {}, deactivateSession: {})
+            let original = FoundationQueueEntry(
+                item: .init(
+                    id: "current", title: "Current", subtitle: "", kind: .track, duration: 30))
+            player.restoreSession(
+                .init(
+                    entries: [original], selectedEntryID: original.id,
+                    shuffleEnabled: false, repeatMode: .off))
+            let controller = FoundationHandoffController(publish: { _ in })
+            controller.configure(
+                scope: String(repeating: "a", count: 64), player: player,
+                resolve: { $0 }, navigate: { _ in })
+            defer {
+                controller.invalidate()
+                player.stop()
+            }
+            let navigation = FoundationMacNavigation()
+            // No SwiftUI collection-binding observer is mounted in this seam.
+            // Native continuation has already resolved the item for this account.
+            for kind in [FoundationItem.Kind.album, .artist, .playlist] {
+                let item = FoundationItem(
+                    id: "incoming", title: "Incoming", subtitle: "", kind: kind, duration: nil)
+                controller.requestBrowse(item)
+                navigation.continueBrowsing(try XCTUnwrap(controller.takeBrowseRequest()))
+                XCTAssertEqual(navigation.path.map(\.item), [item])
+                XCTAssertNil(controller.takeBrowseRequest(), "A browse delivery is consumed once")
+                XCTAssertEqual(player.persistedQueue, [original])
+                XCTAssertEqual(player.selectedEntryID, original.id)
+                XCTAssertFalse(player.wantsPlayback)
+                XCTAssertEqual(player.state, .paused)
+            }
+            let resolutions = await audio.count
+            XCTAssertEqual(resolutions, 0, "Browsing must not request an audio resource")
+        }
+
+        func testHandoffBrowseReplacesExistingMacDetailPath() {
+            let navigation = FoundationMacNavigation()
+            let album = FoundationItem(
+                id: "album", title: "Album", subtitle: "", kind: .album, duration: nil)
+            let artist = FoundationItem(
+                id: "artist", title: "Artist", subtitle: "", kind: .artist, duration: nil)
+            let playlist = FoundationItem(
+                id: "playlist", title: "Playlist", subtitle: "", kind: .playlist, duration: nil)
+            navigation.open(album)
+            navigation.open(artist)
+            let previousOwners = Set(navigation.path.map(\.headerOwnerID))
+
+            navigation.continueBrowsing(playlist)
+
+            XCTAssertEqual(navigation.path.map(\.item), [playlist])
+            XCTAssertFalse(previousOwners.contains(navigation.path[0].headerOwnerID))
+        }
+
+        func testPlaylistTitleChangePreservesSidebarDestinationIdentity() {
+            let before = FoundationItem(
+                id: "playlist", title: "Before", subtitle: "", kind: .playlist, duration: nil)
+            var after = before
+            after.title = "After"
+            let oldRoute = FoundationMacLibraryRoute.playlist(before)
+            let renamedRoute = FoundationMacLibraryRoute.playlist(after)
+            XCTAssertNotEqual(oldRoute, renamedRoute)
+            XCTAssertEqual(oldRoute.identity, renamedRoute.identity)
+            XCTAssertNotEqual(oldRoute.identity, FoundationMacLibraryRoute.playlists.identity)
+        }
+
+        func testConfirmedPlaylistRenameUpdatesAllOpenCopiesWithoutChangingNavigationIdentity() {
+            let navigation = FoundationMacNavigation()
+            let playlist = FoundationItem(
+                id: "playlist", title: "Before", subtitle: "", kind: .playlist, duration: nil)
+            navigation.open(playlist)
+            navigation.open(playlist)
+            let owners = navigation.path.map(\.headerOwnerID)
+            let before = Set(navigation.path)
+            XCTAssertEqual(before.count, 2, "Repeated destinations retain distinct header owners")
+
+            navigation.updatePlaylistTitle(id: playlist.id, name: "After")
+
+            XCTAssertEqual(navigation.path.map(\.item.title), ["After", "After"])
+            XCTAssertEqual(navigation.path.map(\.headerOwnerID), owners)
+            XCTAssertEqual(
+                Set(navigation.path), before, "Changing a title must not replace a route")
+            XCTAssertTrue(
+                navigation.path.allSatisfy {
+                    $0.item.id == playlist.id && $0.item.kind == .playlist
+                })
+        }
+
+        func testPlaylistRenameLeavesUnrelatedAndSameIDOtherKindDestinationsUntouched() {
+            let navigation = FoundationMacNavigation()
+            let playlist = FoundationItem(
+                id: "same", title: "Playlist", subtitle: "", kind: .playlist, duration: nil)
+            let album = FoundationItem(
+                id: "same", title: "Album", subtitle: "Artist", kind: .album, duration: nil)
+            let other = FoundationItem(
+                id: "other", title: "Other Playlist", subtitle: "", kind: .playlist, duration: nil)
+            for item in [playlist, album, other] { navigation.open(item) }
+            let owners = navigation.path.map(\.headerOwnerID)
+
+            navigation.updatePlaylistTitle(id: playlist.id, name: "Renamed")
+
+            XCTAssertEqual(
+                navigation.path.map(\.item.title), ["Renamed", "Album", "Other Playlist"])
+            XCTAssertEqual(navigation.path[1].item, album)
+            XCTAssertEqual(navigation.path[2].item, other)
+            XCTAssertEqual(navigation.path.map(\.headerOwnerID), owners)
+            navigation.updatePlaylistTitle(id: "missing", name: "Must Not Appear")
+            XCTAssertEqual(
+                navigation.path.map(\.item.title), ["Renamed", "Album", "Other Playlist"])
+        }
+    #endif
+
     func testSongAlphabetSeeksUnloadedFarLetterWithoutWalkingCatalogPages() async throws {
         let source = SongAlphabetFixture(total: 1_000_000, split: 750_000)
         let offset = try await FoundationSongAlphabetSeek.lowerBound(letter: "Z") {
@@ -521,3 +637,13 @@ private actor SongAlphabetFixture {
             ])
     }
 }
+
+#if os(macOS)
+    private actor FoundationMacHandoffAudioProbe {
+        private(set) var count = 0
+        func resolve(_ item: FoundationItem) throws -> URL {
+            count += 1
+            throw FoundationLibraryError.unavailable
+        }
+    }
+#endif

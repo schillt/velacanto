@@ -11,6 +11,7 @@
 <key>CFBundleShortVersionString</key><string>$(MARKETING_VERSION)</string>
 <key>CFBundleVersion</key><string>$(CURRENT_PROJECT_VERSION)</string>
 <key>ITSAppUsesNonExemptEncryption</key><false/>
+<key>NSUserActivityTypes</key><array><string>com.chameleonenterprise.velacanto.continuation.v1</string></array>
 <key>LSApplicationCategoryType</key><string>public.app-category.music</string>
 <key>NSLocalNetworkUsageDescription</key><string>Connect to your personal music library.</string>
 <key>UILaunchScreen</key><dict/>

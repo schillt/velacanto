@@ -143,6 +143,93 @@ final class FoundationLyricsTests: XCTestCase {
         } catch { XCTAssertEqual(error as? FoundationLibraryError, .invalidResponse) }
     }
 
+    func testActiveLineUsesTimestampThenIDIndependentOfSourceOrder() {
+        let lyrics = FoundationLyrics(lines: [
+            .init(id: 90, text: "Earlier", start: 2),
+            .init(id: 2, text: "Later", start: 8),
+            .init(id: 8, text: "Same earlier time", start: 2),
+            .init(id: 12, text: "Same later time", start: 8),
+            .init(id: -3, text: "", start: 12),
+        ])
+        XCTAssertEqual(lyrics.activeLine(at: 2, duration: 20), 90)
+        XCTAssertEqual(lyrics.activeLine(at: 8, duration: 20), 12)
+        XCTAssertEqual(lyrics.activeLine(at: 8, duration: 8), 90)
+        XCTAssertEqual(lyrics.activeLine(at: 12, duration: 20), -3)
+        XCTAssertEqual(lyrics.activeLine(at: 3, duration: 20), 90)
+    }
+
+    func testActiveLinePreservesUnknownAndNonfiniteDurationEligibility() {
+        let lyrics = FoundationLyrics(lines: [
+            .init(id: 0, text: "First", start: 0),
+            .init(id: 1, text: "Second", start: 2),
+            .init(id: 2, text: "Third", start: 5),
+        ])
+        for duration in [0, -1, -Double.infinity, Double.infinity] {
+            XCTAssertEqual(lyrics.activeLine(at: 5, duration: duration), 2)
+        }
+        XCTAssertNil(lyrics.activeLine(at: 5, duration: .nan))
+        XCTAssertEqual(lyrics.activeLine(at: 5, duration: 5), 1)
+        XCTAssertEqual(lyrics.activeLine(at: 5, duration: Double(5).nextUp), 2)
+        for elapsed in [-0.1, Double.nan, Double.infinity, -Double.infinity] {
+            XCTAssertNil(lyrics.activeLine(at: elapsed, duration: 20))
+        }
+    }
+
+    func testActiveLineInvalidStartsCannotHideEligibleBoundaryOrExtremeIDs() {
+        let lyrics = FoundationLyrics(lines: [
+            .init(id: Int.min, text: "First boundary", start: 0),
+            .init(id: 1, text: "Untimed", start: nil),
+            .init(id: 2, text: "Negative", start: -1),
+            .init(id: 3, text: "Not finite", start: Double.nan),
+            .init(id: 4, text: "Not finite", start: Double.infinity),
+            .init(id: 5, text: "Not finite", start: -Double.infinity),
+            .init(id: Int.max, text: "Same boundary", start: -0.0),
+            .init(id: 6, text: "Next boundary", start: 0.5),
+        ])
+        XCTAssertEqual(lyrics.activeLine(at: 0, duration: 1), Int.max)
+        XCTAssertEqual(lyrics.activeLine(at: 0.5, duration: 0.5), Int.max)
+        XCTAssertEqual(lyrics.activeLine(at: 0.5, duration: Double(0.5).nextUp), 6)
+        XCTAssertNil(FoundationLyrics(lines: []).activeLine(at: 0, duration: 1))
+    }
+
+    func testActiveLineMatchesPreviousSelectionContractAcrossLargeMixedTimeline() {
+        let lines: [FoundationLyrics.Line] = (0..<1_024).map { index in
+            let start: Double?
+            switch index % 13 {
+            case 0: start = nil
+            case 1: start = Double.nan
+            case 2: start = -Double.infinity
+            case 3: start = Double.infinity
+            case 4: start = -1
+            default: start = Double((index * 11) % 128) / 4
+            }
+            return .init(
+                id: (index * 37) % 1_024, text: index % 11 == 0 ? "" : "Synthetic line",
+                start: start)
+        }
+        let lyrics = FoundationLyrics(lines: lines)
+        // Two-pass reference preserves the pre-change selection contract. The explicit
+        // cases above independently name its timestamp, ID and eligibility boundaries.
+        func reference(elapsed: Double, duration: Double) -> Int? {
+            guard elapsed.isFinite, elapsed >= 0 else { return nil }
+            return lines.filter {
+                guard let start = $0.start, start.isFinite, start >= 0 else { return false }
+                return start <= elapsed && (duration <= 0 || start < duration)
+            }.max {
+                if $0.start == $1.start { return $0.id < $1.id }
+                return ($0.start ?? 0) < ($1.start ?? 0)
+            }?.id
+        }
+        for elapsed in [-1, -0.0, 0.01, 1.75, 3.5, 31.75, 32, 100, .nan, .infinity] {
+            for duration in [0, -2, 3.5, 12, 32, .nan, .infinity, -.infinity] {
+                XCTAssertEqual(
+                    lyrics.activeLine(at: elapsed, duration: duration),
+                    reference(elapsed: elapsed, duration: duration),
+                    "elapsed=\(elapsed), duration=\(duration)")
+            }
+        }
+    }
+
     func testTimingBoundariesDuplicatesBlankMarkersAndBackwardsPosition() {
         let lyrics = FoundationLyrics(lines: [
             .init(id: 0, text: "Later", start: 10),

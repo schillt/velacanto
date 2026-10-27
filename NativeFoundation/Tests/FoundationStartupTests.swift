@@ -32,46 +32,133 @@ final class FoundationStartupTests: XCTestCase {
             XCTAssertTrue(routed.delegateClass == FoundationCarPlaySceneDelegate.self)
         }
 
-        func testCarPlaySearchOffersNativeSiriAndTypingOnlyWhenVehicleAllowsIt() throws {
+        func testCarPlayAudioSearchUsesOnlyNativeAssistantAndBrowseAction() throws {
             let template = CPListTemplate(title: "Search", sections: [])
-            var typed = 0
+            var browsed = 0
             FoundationCarPlaySceneDelegate.configureSearchOptions(
-                template, keyboardLimited: false, siriAuthorized: true,
-                typeSearch: { typed += 1 }, close: {})
-            XCTAssertNotNil(template.assistantCellConfiguration)
+                template, siriAuthorized: true, isRootTab: false, isActive: { true },
+                browse: { browsed += 1 }, close: {})
+            let assistant = try XCTUnwrap(template.assistantCellConfiguration)
+            XCTAssertEqual(assistant.assistantAction, .playMedia)
             XCTAssertTrue(template.leadingNavigationBarButtons.isEmpty)
             XCTAssertEqual(template.backButton?.accessibilityLabel, "Back")
             let row = try XCTUnwrap(template.sections.first?.items.first as? CPListItem)
-            XCTAssertEqual(row.text, "Type to Search")
+            XCTAssertEqual(row.text, "Browse Library")
+            XCTAssertEqual(template.sections.first?.items.count, 1)
+            XCTAssertEqual(browsed, 0, "Configuring the hub must not invoke browsing or Siri.")
             var completions = 0
             row.handler?(row, { completions += 1 })
-            XCTAssertEqual(typed, 1)
+            XCTAssertEqual(browsed, 1)
             XCTAssertEqual(completions, 1)
+        }
+
+        func testCarPlaySearchWithoutSiriKeepsBrowsingAndExplainsAuthorization() throws {
+            let template = CPListTemplate(title: "Search", sections: [])
             FoundationCarPlaySceneDelegate.configureSearchOptions(
-                template, keyboardLimited: true, siriAuthorized: true,
-                typeSearch: { typed += 1 }, close: {})
-            XCTAssertTrue(template.sections.isEmpty)
+                template, siriAuthorized: false, isRootTab: false, isActive: { true },
+                browse: {}, close: {})
+            XCTAssertNil(template.assistantCellConfiguration)
+            let rows = try XCTUnwrap(template.sections.first?.items as? [CPListItem])
+            XCTAssertEqual(rows.count, 2)
+            XCTAssertEqual(rows.first?.text, "Browse Library")
+            XCTAssertEqual(rows.last?.text, "Enable Siri on iPhone")
+            XCTAssertEqual(rows.last?.isEnabled, false)
+            FoundationCarPlaySceneDelegate.configureSearchOptions(
+                template, siriAuthorized: true, isRootTab: false, isActive: { true },
+                browse: {}, close: {})
             XCTAssertNotNil(template.assistantCellConfiguration)
-            XCTAssertTrue(template.leadingNavigationBarButtons.isEmpty)
-            XCTAssertEqual(template.backButton?.accessibilityLabel, "Back")
-            XCTAssertEqual(typed, 1, "Changing restrictions must not invoke typing or Siri.")
-            FoundationCarPlaySceneDelegate.configureSearchOptions(
-                template, keyboardLimited: false, siriAuthorized: true,
-                typeSearch: { typed += 1 }, close: {})
             XCTAssertEqual(template.sections.first?.items.count, 1)
         }
 
-        func testCarPlaySearchExplainsSiriAuthorizationWithoutAnInactiveAssistantCell() throws {
+        func testCarPlayRootSearchHasExplicitCloseWithoutDuplicatingPushedBack() {
             let template = CPListTemplate(title: "Search", sections: [])
             FoundationCarPlaySceneDelegate.configureSearchOptions(
-                template, keyboardLimited: true, siriAuthorized: false,
-                typeSearch: { XCTFail("Typing is restricted") }, close: {})
-            XCTAssertNil(template.assistantCellConfiguration)
+                template, siriAuthorized: true, isRootTab: true, isActive: { true },
+                browse: {}, close: {})
+            XCTAssertEqual(template.leadingNavigationBarButtons.count, 1)
+            XCTAssertEqual(template.leadingNavigationBarButtons.first?.title, "Close")
+            XCTAssertEqual(
+                template.leadingNavigationBarButtons.first?.accessibilityLabel, "Close Search")
+            XCTAssertNil(template.backButton)
+            FoundationCarPlaySceneDelegate.configureSearchOptions(
+                template, siriAuthorized: true, isRootTab: false, isActive: { true },
+                browse: {}, close: {})
             XCTAssertTrue(template.leadingNavigationBarButtons.isEmpty)
             XCTAssertEqual(template.backButton?.accessibilityLabel, "Back")
-            let guidance = try XCTUnwrap(template.sections.first?.items.first as? CPListItem)
-            XCTAssertEqual(guidance.text, "Enable Siri on iPhone")
-            XCTAssertFalse(guidance.isEnabled)
+        }
+
+        func testCarPlaySearchCompletesInactiveNativeRowWithoutNavigating() throws {
+            let template = CPListTemplate(title: "Search", sections: [])
+            var active = true
+            var navigations = 0
+            FoundationCarPlaySceneDelegate.configureSearchOptions(
+                template, siriAuthorized: true, isRootTab: false, isActive: { active },
+                browse: { navigations += 1 }, close: { navigations += 1 })
+            let row = try XCTUnwrap(template.sections.first?.items.first as? CPListItem)
+            active = false
+            var completions = 0
+            row.handler?(row, { completions += 1 })
+            XCTAssertEqual(completions, 1)
+            XCTAssertEqual(navigations, 0)
+        }
+
+        func testCarPlaySearchEntryKeepsNowPlayingAboveAnAlreadySelectedSearchTab() {
+            let home = CPListTemplate(title: "Home", sections: [])
+            let search = CPListTemplate(title: "Search", sections: [])
+            let root = CPTabBarTemplate(templates: [home, search])
+            root.select(search)
+            let nowPlaying = CPNowPlayingTemplate.shared
+            XCTAssertTrue(
+                FoundationCarPlaySceneDelegate.searchEntryOrigin(
+                    root: root, top: nowPlaying) === nowPlaying)
+            let album = CPListTemplate(title: "Album", sections: [])
+            XCTAssertTrue(
+                FoundationCarPlaySceneDelegate.searchEntryOrigin(
+                    root: root, top: album) === album)
+        }
+
+        func testCarPlayInitialNowPlayingIsConsumedOnceForReadyRoot() {
+            let delegate = FoundationCarPlaySceneDelegate()
+            let library = CPListTemplate(title: "Library", sections: [])
+            let root = CPTabBarTemplate(templates: [library])
+            XCTAssertTrue(
+                delegate.consumeInitialNowPlaying(
+                    root: root, currentRoot: root, top: root, contextIsCurrent: true))
+            XCTAssertFalse(
+                delegate.consumeInitialNowPlaying(
+                    root: root, currentRoot: root, top: root, contextIsCurrent: true))
+            XCTAssertTrue(
+                FoundationCarPlaySceneDelegate().consumeInitialNowPlaying(
+                    root: root, currentRoot: root, top: library, contextIsCurrent: true))
+        }
+
+        func testCarPlayInitialNowPlayingRejectsStaleContextAndReplacedRootWithoutConsuming() {
+            let delegate = FoundationCarPlaySceneDelegate()
+            let root = CPTabBarTemplate(templates: [CPListTemplate(title: "Library", sections: [])])
+            let replacement = CPTabBarTemplate(templates: [
+                CPListTemplate(title: "Home", sections: [])
+            ])
+            XCTAssertFalse(
+                delegate.consumeInitialNowPlaying(
+                    root: root, currentRoot: root, top: root, contextIsCurrent: false))
+            XCTAssertFalse(
+                delegate.consumeInitialNowPlaying(
+                    root: root, currentRoot: replacement, top: replacement, contextIsCurrent: true))
+            XCTAssertTrue(
+                delegate.consumeInitialNowPlaying(
+                    root: root, currentRoot: root, top: root, contextIsCurrent: true))
+        }
+
+        func testCarPlayInitialNowPlayingDoesNotOverrideOrLaterFollowUserNavigation() {
+            let delegate = FoundationCarPlaySceneDelegate()
+            let root = CPTabBarTemplate(templates: [CPListTemplate(title: "Library", sections: [])])
+            let album = CPListTemplate(title: "Album", sections: [])
+            XCTAssertFalse(
+                delegate.consumeInitialNowPlaying(
+                    root: root, currentRoot: root, top: album, contextIsCurrent: true))
+            XCTAssertFalse(
+                delegate.consumeInitialNowPlaying(
+                    root: root, currentRoot: root, top: root, contextIsCurrent: true))
         }
 
         func testCarPlaySearchReturnsToExactNestedOriginAndSelectedContentTab() {
@@ -80,6 +167,11 @@ final class FoundationStartupTests: XCTestCase {
             let album = CPListTemplate(title: "Album", sections: [])
             let hub = CPListTemplate(title: "Search", sections: [])
             let root = CPTabBarTemplate(templates: [home, library])
+            let nowPlaying = CPNowPlayingTemplate.shared
+            XCTAssertTrue(
+                FoundationCarPlaySceneDelegate.searchReturnTarget(
+                    origin: nowPlaying, lastContentTab: library,
+                    stack: [root, nowPlaying, hub], tabs: [home, library]) === nowPlaying)
             XCTAssertTrue(
                 FoundationCarPlaySceneDelegate.searchReturnTarget(
                     origin: album, lastContentTab: library,
@@ -99,31 +191,27 @@ final class FoundationStartupTests: XCTestCase {
             let home = CPListTemplate(title: "Home", sections: [])
             let search = CPListTemplate(title: "Search", sections: [])
             let album = CPListTemplate(title: "Album", sections: [])
-            let keyboard = CPSearchTemplate()
+            let destination = CPListTemplate(title: "Destination", sections: [])
             let root = CPTabBarTemplate(templates: [home, search])
             let step = FoundationCarPlaySceneDelegate.searchReturnStep
             XCTAssertEqual(
-                step(home, root, keyboard, [root, search, keyboard], [home, search]), .popToRoot)
+                step(home, root, destination, [root, search, destination], [home, search]),
+                .popToRoot)
             XCTAssertEqual(step(home, root, root, [root], [home, search]), .selectTab)
             XCTAssertEqual(step(home, root, search, [root, search], [home, search]), .selectTab)
             XCTAssertEqual(
-                step(album, root, keyboard, [root, album, search, keyboard], [home, search]),
+                step(
+                    album, root, destination, [root, album, search, destination], [home, search]),
                 .popOne)
             XCTAssertEqual(step(album, root, album, [root, album], [home, search]), .done)
+            let nowPlaying = CPNowPlayingTemplate.shared
             XCTAssertEqual(
-                step(album, root, keyboard, [root, keyboard], [home, search]),
+                step(nowPlaying, root, search, [root, nowPlaying, search], [home, search]), .popOne)
+            XCTAssertEqual(
+                step(nowPlaying, root, nowPlaying, [root, nowPlaying], [home, search]), .done)
+            XCTAssertEqual(
+                step(album, root, destination, [root, destination], [home, search]),
                 .unavailable)
-        }
-
-        func testCarPlayKeyboardSearchUsesNativeCancelWithoutAnExtraResultRow() {
-            let result = CPListItem(text: "Result", detailText: nil)
-            XCTAssertTrue(FoundationCarPlaySceneDelegate.searchRows([], budget: 4).isEmpty)
-            let limited = FoundationCarPlaySceneDelegate.searchRows([result, result], budget: 2)
-            XCTAssertEqual(limited.count, 2)
-            XCTAssertTrue(limited.first === result)
-            XCTAssertTrue(limited.last === result)
-            XCTAssertEqual(FoundationCarPlaySceneDelegate.searchRows([result], budget: 1).count, 1)
-            XCTAssertTrue(FoundationCarPlaySceneDelegate.searchRows([result], budget: 0).isEmpty)
         }
 
         func testCarPlayCategoryArtworkPreservesAspectAndInsetsAtDisplayScale() throws {
@@ -176,16 +264,6 @@ final class FoundationStartupTests: XCTestCase {
             XCTAssertEqual(category.scale, 3)
         }
 
-        func testCarPlayCancelledSearchResponseCompletesOnlyOnce() {
-            var completions = 0
-            let response = FoundationCarPlaySceneDelegate.SearchResponse { rows in
-                completions += 1
-                XCTAssertTrue(rows.isEmpty)
-            }
-            response.finish([])
-            response.finish([CPListItem(text: "Late result", detailText: nil)])
-            XCTAssertEqual(completions, 1)
-        }
     #endif
 
     @MainActor

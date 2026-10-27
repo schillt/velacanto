@@ -16,17 +16,24 @@ struct FoundationLyrics: Equatable, Sendable {
     init(lines: [Line]) { self.lines = lines }
     init(text: String) { lines = [Line(id: 0, text: text, start: nil)] }
 
-    /// Select the latest eligible timestamp; equal timestamps use the last source row.
+    /// Select the latest eligible timestamp; equal timestamps use the greatest line ID.
     /// Blank timed rows remain boundaries, clearing the previous sung line.
     func activeLine(at elapsed: Double, duration: Double) -> Int? {
         guard elapsed.isFinite, elapsed >= 0 else { return nil }
-        return lines.filter {
-            guard let start = $0.start, start.isFinite, start >= 0 else { return false }
-            return start <= elapsed && (duration <= 0 || start < duration)
-        }.max {
-            if $0.start == $1.start { return $0.id < $1.id }
-            return ($0.start ?? 0) < ($1.start ?? 0)
-        }?.id
+        var selectedID: Int?
+        var selectedStart = -Double.infinity
+        for line in lines {
+            guard let start = line.start, start.isFinite, start >= 0,
+                start <= elapsed, duration <= 0 || start < duration
+            else { continue }
+            if let previousID = selectedID {
+                guard start > selectedStart || (start == selectedStart && line.id > previousID)
+                else { continue }
+            }
+            selectedID = line.id
+            selectedStart = start
+        }
+        return selectedID
     }
 
     /// A row from an obsolete queue occurrence can never seek the new selection.

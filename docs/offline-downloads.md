@@ -1,11 +1,13 @@
 # Offline downloads — issue #13
 
-This implementation retains original native-playable tracks, albums and playlists under one account-owned download store. The existing player prefers a complete local file; streaming remains the fallback when online browsing is available. Confirmed unavailable or restricted network paths preserve the familiar tabs, navigation and already-loaded pages, with brief inline guidance to Library where content is unavailable. Useful downloaded pages and playback surfaces keep their normal layouts. An offline cold launch may begin in Library. Remote catalog tasks and mutations are suspended; retained ready tracks remain playable in their original queue order. Path observations are advisory: a normal, explicit Retry Online request can restore browsing even when the observation is stale; a reachable network is not proof the server is reachable. Playback leases prevent removal while a file is installed or being resolved. Playlist occurrences/order are independent of shared physical track storage.
+This implementation retains Original or verified AAC tracks, albums and playlists under one account-owned download store. Download quality is independent of streaming quality and is captured when a download owner is created. The existing player prefers a complete local file; streaming remains the fallback when online browsing is available. Confirmed unavailable or restricted network paths preserve the familiar tabs, navigation and already-loaded pages, with brief inline guidance to Library where content is unavailable. Useful downloaded pages and playback surfaces keep their normal layouts. An offline cold launch may begin in Library. Remote catalog tasks and mutations are suspended; retained ready tracks remain playable in their original queue order. Path observations are advisory: a normal, explicit Retry Online request can restore browsing even when the observation is stale; a reachable network is not proof the server is reachable. Playback leases prevent removal while a file is installed or being resolved. Playlist occurrences/order are independent of shared physical track storage.
 
 Transfers default to Wi-Fi (or wired networking) with explicit cellular opt-in. A finite sequential native transfer worker exposes progress, cancellation and explicit retry. It does not promise background completion or resume unsupported partial files. Failed/unsupported/incomplete files never appear available. Low storage stops the affected download with an actionable failure; retained files are not silently evicted.
 
-Each transfer is bounded by its advertised original size and sampled free space on
-the temporary and destination filesystems, leaving a 256 MiB reserve. Native byte
+Original transfers are bounded by their advertised original size and sampled free
+space on the temporary and destination filesystems, leaving a 256 MiB reserve.
+Converted AAC uses its duration/bitrate-derived receive ceiling and validates the
+complete output, including format, timing, duration and digest, before publication. Native byte
 callbacks cancel responses that exceed the receive budget, including responses
 without a known length. Completed-file verification remains required before
 publication. Callback timing permits limited overshoot, and sampled capacity is
@@ -27,7 +29,9 @@ An explicit collection Download persists a bounded reacquisition intent until it
 
 Optional artwork is retained only for downloaded collection/album identities: one validated rendition up to 640 pixels, with bounded decoding and shared album references. Audio succeeds when optional artwork fails; a failed changed-tag read preserves the previous validated image. Last-reference removal and account cleanup release retained art. Local art feeds catalog presentation and the existing sole current-artwork owner; this is not a general catalog cache or prefetch scan. Storage totals include manifest/media/artwork/staging bytes.
 
-Streaming and Downloads have independent cellular preferences. Defaults preserve cellular streaming while downloads require Wi-Fi or wired connectivity. Supported scalar controls appear in iOS system Settings and the app's Mac Settings; detailed inventory and removal stay in the app. Downloads retain Original quality. Streaming keeps the existing native/direct and AAC fallback behavior. Quality descriptions are read-only until additional supported presets are verified. HLS downloads/conversion remain deferred. A streaming-policy change detaches an already installed remote asset; explicit Play builds it with the new policy. Pending and installed local playback are preserved; no automatic restart or saved-position promise is added.
+Streaming and Downloads have independent cellular preferences. Defaults preserve cellular streaming while downloads require Wi-Fi or wired connectivity. iOS system Settings owns the independent download selector: Original, High (320 kbps AAC), Standard (192 kbps AAC), or Data Saver (128 kbps AAC). Existing download owners retain their captured quality across retry, reconciliation and relaunch; verified ready files are reused rather than silently replaced when the preference changes. Mac streaming and default downloads remain Original; no new Mac download-quality selector is implied.
+
+Detailed inventory and bulk removal currently remain in the in-app Profile settings. Moving storage management to iPhone system Settings is separate unfinished #208 work; neither a Settings.bundle preference nor this AAC conversion backend establishes a system-managed offline-HLS storage surface. General native offline-HLS shipping remains a separately gated #189 dependency. A streaming-policy change detaches an already installed remote asset; explicit Play builds it with the new policy. Pending and installed local playback are preserved; no automatic restart or saved-position promise is added.
 
 Focused automated evidence belongs to the exact candidate handoff. Physical offline playback/seek, lock/background/routes, signed file protection/backup exclusion, actual storage pressure and sign-out/relaunch remain separate acceptance checks. Compiler/test success does not establish those outcomes or distribution availability.
 
@@ -104,3 +108,68 @@ unknown-length transfers and active collections show indeterminate activity. No
 aggregate collection percentage is inferred from equally weighted tracks.
 Connection notices keep usable content visible. Explicit Retry rechecks the server
 and refreshes active content even when the advisory path already reports available.
+
+## v0.6 remaining acceptance — issue #13
+
+Source audit base `255d59ddfeb6227ee0fa145866ffaa890979063a`, 2026-10-27.
+The live issue and all three comments were reviewed. No new native or live-server
+check was run for this audit. Existing regressions cover shared retention, player
+leases, failed-refresh snapshots, cellular cancellation/retry, cold manifests,
+late account results, explicit exclusions/reacquisition and quality intent. Those
+fixtures do not establish physical results.
+
+Owner acceptance from build212 remains scoped to Data Saver completion and audible
+offline playback, plus Original completion while another song streamed. Do not
+substitute those observations for High/Standard, all codecs, cancellation, routes,
+storage pressure or current-candidate acceptance.
+
+Use an exact installed candidate and sanctioned disposable playlist P with repeated
+occurrences A/A/B and an album sharing A. Record platform/build/source, selected
+preset, network/route, foreground/background, debugger/Mirroring and user-confirmed
+audible outcome. Keep identifiers, titles, server origins and raw traces private.
+
+1. On iPhone, independently download High and Standard under Wi-Fi, then disable
+   both Wi-Fi and cellular. Cold-launch, open the retained collection, play, seek,
+   advance and lock/background. Verify availability, occurrence order and audio.
+   Include Original on Mac rather than inferring parity from the iPhone result.
+2. With downloads cellular-disabled, confirm a queued request waits rather than
+   starting. Explicitly enable cellular and confirm progress. Cancel a transfer,
+   verify completed content survives, then explicitly retry. This is a download
+   policy check; streaming has its own preference. Restore the original preference.
+3. Download P, the shared album and an explicit A. Remove only P's download owner;
+   A must remain available. Separately confirm song removal's playlist warning,
+   cancel first, then confirm removal while A plays. Audio must continue until its
+   existing lease ends; bytes become reclaimable after all references/leases end.
+4. In disposable P, change order/membership through an app edit and an external
+   server edit. Verify launch, foreground and restored allowed connectivity trigger
+   bounded reconciliation, preserve duplicate occurrences/order, acquire additions
+   and release only unreferenced removals. Repeat with offline/failed refresh: the
+   last usable snapshot must survive. No continuous polling is expected.
+5. Sign-out/account-replacement checks require recoverable sanctioned accounts and
+   the coordinator's established cleanup procedure. Verify playback releases,
+   download tasks retire, account data is removed only after successful cleanup,
+   failures remain explicit and another account does not see the prior inventory.
+   Do not read/migrate/delete legacy Keychain items.
+6. Use synthetic fixtures for corruption, interrupted staging, receive ceilings and
+   unwritable storage. Do not fill the owner's disk or corrupt retained real media
+   to simulate pressure. Actual low-storage response and signed device protection/
+   backup-exclusion remain separate pending checks if not safely exercised.
+
+Delayed real-manager fixtures confirmed two stale reconciliation defects: an old
+snapshot can replace membership and delete newly downloaded files after either
+owner removal/recreation or a newer explicit Download Again. The first fixture
+failed six assertions at `14419c4`; its narrow fix `3787a19` then passed Mac82 and
+iOS84 cases (one existing physical Data Protection skip). The Download Again
+variant at `8b83aad` still failed five assertions, so that broader intent lifetime
+was not fixed by the first guard. Reviewed source `21d5981` uses one nonpersisted
+reconciliation identity, initialized for a new owner and rotated only after a
+successful explicit reacquisition save. Exact final candidate `a0805ca` passes
+Mac84 cases and iOS86 cases (85 passed, one existing physical Data Protection skip),
+with no failures. Both stale-result regressions pass, and a third real-store
+fixture verifies that a failed newer Download Again save does not retire the valid
+in-flight refresh. Tests cover manager/account/quality suites; they are not a full
+application suite or physical acceptance. Private aggregate receipts are retained
+in the workspace's `milestone-validation/release060-download-acceptance-13/`.
+These fixtures use actual manager, retention and file-store seams, without proving
+physical downloads, system Settings storage or exhaustive reconciliation behavior.
+#13 stays open until remaining criteria and corrections are verified and accepted.

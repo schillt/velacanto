@@ -10,6 +10,62 @@ final class FoundationPlayerTests: XCTestCase {
     private let track = FoundationItem(
         id: "synthetic", title: "", subtitle: "", kind: .track, duration: nil)
 
+    func testResolutionErrorsKeepCredentialSentinelsOutOfFailureUIAndJournal() async throws {
+        let token = "synthetic-error-credential-25"
+        let url = try XCTUnwrap(
+            URL(string: "https://playback-error.invalid/audio/master.m3u8?ApiKey=\(token)"))
+        let underlying = NSError(
+            domain: "synthetic-private-domain-25", code: 1,
+            userInfo: [NSLocalizedDescriptionKey: url.absoluteString])
+        let errors: [Error] = [
+            URLError(
+                .timedOut,
+                userInfo: [
+                    NSURLErrorFailingURLErrorKey: url,
+                    NSLocalizedDescriptionKey: token,
+                    NSUnderlyingErrorKey: underlying,
+                ]),
+            underlying,
+        ]
+        for error in errors {
+            let player = FoundationPlayer(
+                resolve: { _ in throw error },
+                makeItem: { _ in
+                    XCTFail("Resolution failure must not install a native item")
+                    return AVPlayerItem(asset: AVMutableComposition())
+                },
+                activateSession: {}, deactivateSession: {}, startPlayback: { _ in })
+            defer { player.stop() }
+            player.setQueue([track], selectedIndex: 0)
+            let occurrence = try XCTUnwrap(player.selectedEntryID)
+            await player.selectionTask?.value
+            XCTAssertEqual(player.state, .failed)
+            XCTAssertFalse(player.wantsPlayback)
+            XCTAssertNil(player.nativePlayer.currentItem)
+            XCTAssertEqual(player.selectedEntryID, occurrence)
+            XCTAssertEqual(player.queue.map(\.item), [track])
+            let message = try XCTUnwrap(player.errorMessage)
+            XCTAssertEqual(message, "Playback failed. Select a track to try again.")
+            for sentinel in [
+                token, url.absoluteString, "playback-error.invalid", underlying.domain,
+            ] {
+                XCTAssertFalse(message.contains(sentinel))
+            }
+            #if DEBUG
+                // Read the production projection; never clear or reconfigure the shared journal.
+                XCTAssertTrue(FoundationJournal.shared.isEnabled)
+                let journal = FoundationJournal.shared.snapshot()
+                let category = error is URLError ? "timeout" : "other"
+                XCTAssertTrue(journal.contains("player.failure.resolution." + category))
+                for sentinel in [
+                    token, url.absoluteString, "playback-error.invalid", underlying.domain,
+                ] {
+                    XCTAssertFalse(journal.contains(sentinel))
+                }
+            #endif
+        }
+    }
+
     func testPlaybackProtectionFollowsLoadingPauseFailureAndStop() async throws {
         let resources = PlaybackResourceProbe()
         let player = FoundationPlayer(

@@ -502,9 +502,9 @@ final class FoundationArtworkCacheTests: XCTestCase {
             id: "song", title: "", subtitle: "", kind: .track, duration: nil,
             album: .init(id: album.id, title: "", primaryImageTag: album.primaryImageTag))
         let home = try await cache.result(
-            for: album, pixels: 160, allowsNetwork: true, load: probe.load)
+            for: album, pixels: 160, allowsNetwork: true, load: { try await probe.load($0, $1) })
         let library = try await cache.result(
-            for: track, pixels: 160, allowsNetwork: true, load: probe.load)
+            for: track, pixels: 160, allowsNetwork: true, load: { try await probe.load($0, $1) })
         XCTAssertEqual(home?.id, library?.id)
         let count = await probe.count
         XCTAssertEqual(count, 1)
@@ -517,25 +517,26 @@ final class FoundationArtworkCacheTests: XCTestCase {
         let cache = FoundationArtworkCache(scope: "synthetic", root: root)
         let probe = ArtworkCacheProbe(data: try image())
         let original = try await cache.result(
-            for: item(), pixels: 160, allowsNetwork: true, load: probe.load)
+            for: item(), pixels: 160, allowsNetwork: true, load: { try await probe.load($0, $1) })
         let track = FoundationItem(
             id: "song", title: "", subtitle: "", kind: .track, duration: nil,
             album: .init(id: "album", title: "", primaryImageTag: nil))
         let omitted = try await cache.result(
-            for: track, pixels: 160, allowsNetwork: true, load: probe.load)
+            for: track, pixels: 160, allowsNetwork: true, load: { try await probe.load($0, $1) })
         XCTAssertEqual(original?.id, omitted?.id)
         _ = await cache.invalidate(removeDisk: false)
         let restored = FoundationArtworkCache(scope: "synthetic", root: root)
         let local = try await restored.result(
-            for: track, pixels: 640, allowsNetwork: false, load: probe.load)
+            for: track, pixels: 640, allowsNetwork: false, load: { try await probe.load($0, $1) })
         XCTAssertEqual(local?.image.width, 160)
         let count = await probe.count
         XCTAssertEqual(count, 1)
         let newer = try await restored.result(
-            for: item(tag: "v2"), pixels: 160, allowsNetwork: true, load: probe.load)
+            for: item(tag: "v2"), pixels: 160, allowsNetwork: true,
+            load: { try await probe.load($0, $1) })
         XCTAssertNotEqual(newer?.id, local?.id)
         let latest = try await restored.result(
-            for: track, pixels: 160, allowsNetwork: true, load: probe.load)
+            for: track, pixels: 160, allowsNetwork: true, load: { try await probe.load($0, $1) })
         XCTAssertEqual(newer?.id, latest?.id)
         let finalCount = await probe.count
         XCTAssertEqual(finalCount, 2)
@@ -548,14 +549,15 @@ final class FoundationArtworkCacheTests: XCTestCase {
         let cache = FoundationArtworkCache(scope: "synthetic", root: root)
         let probe = ArtworkCacheProbe(data: try image())
         _ = try await cache.result(
-            for: item(), pixels: 160, allowsNetwork: true, load: probe.load)
+            for: item(), pixels: 160, allowsNetwork: true, load: { try await probe.load($0, $1) })
         let upgraded = try await cache.result(
-            for: item(tag: nil), pixels: 640, allowsNetwork: true, load: probe.load)
+            for: item(tag: nil), pixels: 640, allowsNetwork: true,
+            load: { try await probe.load($0, $1) })
         XCTAssertEqual(upgraded?.image.width, 640)
         let requestedTags = await probe.requestedTags
         XCTAssertEqual(requestedTags, ["v1", "v1"])
         let explicit = try await cache.result(
-            for: item(), pixels: 640, allowsNetwork: true, load: probe.load)
+            for: item(), pixels: 640, allowsNetwork: true, load: { try await probe.load($0, $1) })
         XCTAssertEqual(upgraded?.id, explicit?.id)
         _ = await cache.invalidate(removeDisk: true)
     }
@@ -567,10 +569,11 @@ final class FoundationArtworkCacheTests: XCTestCase {
         let probe = ArtworkCacheProbe(data: try image())
         let album = item()
         let tile = try await cache.result(
-            for: album, pixels: 160, allowsNetwork: true, load: probe.load)
+            for: album, pixels: 160, allowsNetwork: true, load: { try await probe.load($0, $1) })
         let held = ArtworkCacheProbe(data: try image(), held: true)
         let upgrade = Task {
-            try await cache.result(for: album, pixels: 640, allowsNetwork: true, load: held.load)
+            try await cache.result(
+                for: album, pixels: 640, allowsNetwork: true, load: { try await held.load($0, $1) })
         }
         cleanUp(upgrade, releasing: [held], cache: cache)
         try await held.waitForCount(1)
@@ -599,14 +602,15 @@ final class FoundationArtworkCacheTests: XCTestCase {
                 let start = ContinuousClock.now
                 _ = try await cache.result(
                     for: item("same", kind: kind), pixels: 160, allowsNetwork: true,
-                    load: probe.load)
+                    load: { try await probe.load($0, $1) })
                 operations += 1
                 recordTiming("identityResult", since: start, count: operations)
             }
         }
         let start = ContinuousClock.now
         _ = try await cache.result(
-            for: item("same", tag: "v2"), pixels: 160, allowsNetwork: true, load: probe.load)
+            for: item("same", tag: "v2"), pixels: 160, allowsNetwork: true,
+            load: { try await probe.load($0, $1) })
         operations += 1
         recordTiming("identityResult", since: start, count: operations)
         let count = await probe.count
@@ -618,14 +622,17 @@ final class FoundationArtworkCacheTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let cache = FoundationArtworkCache(scope: "synthetic", root: root)
         let probe = ArtworkCacheProbe(data: try image())
-        _ = try await cache.result(for: item(), pixels: 160, allowsNetwork: true, load: probe.load)
+        _ = try await cache.result(
+            for: item(), pixels: 160, allowsNetwork: true, load: { try await probe.load($0, $1) })
         let hero = try await cache.result(
-            for: item(), pixels: 640, allowsNetwork: true, load: probe.load)
+            for: item(), pixels: 640, allowsNetwork: true, load: { try await probe.load($0, $1) })
         XCTAssertEqual(hero?.image.width, 640)
         let tile = try await cache.result(
-            for: item("second"), pixels: 640, allowsNetwork: true, load: probe.load)
+            for: item("second"), pixels: 640, allowsNetwork: true,
+            load: { try await probe.load($0, $1) })
         let smaller = try await cache.result(
-            for: item("second"), pixels: 160, allowsNetwork: true, load: probe.load)
+            for: item("second"), pixels: 160, allowsNetwork: true,
+            load: { try await probe.load($0, $1) })
         XCTAssertEqual(tile?.id, smaller?.id)
         let count = await probe.count
         XCTAssertEqual(count, 3)
@@ -636,15 +643,16 @@ final class FoundationArtworkCacheTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let probe = ArtworkCacheProbe(data: try image())
         let cache = FoundationArtworkCache(scope: "server-a/account-a", root: root)
-        _ = try await cache.result(for: item(), pixels: 640, allowsNetwork: true, load: probe.load)
+        _ = try await cache.result(
+            for: item(), pixels: 640, allowsNetwork: true, load: { try await probe.load($0, $1) })
         _ = await cache.invalidate(removeDisk: false)
         let restored = FoundationArtworkCache(scope: "server-a/account-a", root: root)
         let local = try await restored.result(
-            for: item(), pixels: 160, allowsNetwork: false, load: probe.load)
+            for: item(), pixels: 160, allowsNetwork: false, load: { try await probe.load($0, $1) })
         XCTAssertNotNil(local)
         let other = FoundationArtworkCache(scope: "server-b/account-a", root: root)
         let foreign = try await other.result(
-            for: item(), pixels: 160, allowsNetwork: false, load: probe.load)
+            for: item(), pixels: 160, allowsNetwork: false, load: { try await probe.load($0, $1) })
         XCTAssertNil(foreign)
         let count = await probe.count
         XCTAssertEqual(count, 1)
@@ -652,7 +660,7 @@ final class FoundationArtworkCacheTests: XCTestCase {
         XCTAssertTrue(cleared)
         let third = FoundationArtworkCache(scope: "server-a/account-a", root: root)
         let removed = try await third.result(
-            for: item(), pixels: 160, allowsNetwork: false, load: probe.load)
+            for: item(), pixels: 160, allowsNetwork: false, load: { try await probe.load($0, $1) })
         XCTAssertNil(removed)
     }
 
@@ -669,7 +677,8 @@ final class FoundationArtworkCacheTests: XCTestCase {
         let probe = ArtworkCacheProbe(data: data)
         for id in ["one", "two", "three"] {
             _ = try await cache.result(
-                for: item(id), pixels: 160, allowsNetwork: true, load: probe.load)
+                for: item(id), pixels: 160, allowsNetwork: true,
+                load: { try await probe.load($0, $1) })
         }
         let usage = await cache.usage()
         XCTAssertLessThanOrEqual(usage.memory, 60_000)
@@ -732,12 +741,16 @@ final class FoundationArtworkCacheTests: XCTestCase {
         let probe = ArtworkCacheProbe(data: try image(), held: true)
         let album = item()
         let first = Task {
-            try await cache.result(for: album, pixels: 160, allowsNetwork: true, load: probe.load)
+            try await cache.result(
+                for: album, pixels: 160, allowsNetwork: true, load: { try await probe.load($0, $1) }
+            )
         }
         cleanUp(first, releasing: [probe], cache: cache)
         try await probe.waitForCount(1)
         let second = Task {
-            try await cache.result(for: album, pixels: 160, allowsNetwork: true, load: probe.load)
+            try await cache.result(
+                for: album, pixels: 160, allowsNetwork: true, load: { try await probe.load($0, $1) }
+            )
         }
         cleanUp(second, releasing: [probe], cache: cache)
         // Actor round trip after registering the second task.
@@ -818,13 +831,15 @@ final class FoundationArtworkCacheTests: XCTestCase {
         let currentItem = item("current")
         let first = Task {
             try await cache.result(
-                for: firstItem, pixels: 640, allowsNetwork: true, load: held.load)
+                for: firstItem, pixels: 640, allowsNetwork: true,
+                load: { try await held.load($0, $1) })
         }
         cleanUp(first, releasing: [held], cache: cache)
         try await held.waitForCount(1)
         let second = Task {
             try await cache.result(
-                for: secondItem, pixels: 640, allowsNetwork: true, load: ready.load)
+                for: secondItem, pixels: 640, allowsNetwork: true,
+                load: { try await ready.load($0, $1) })
         }
         cleanUp(second, releasing: [held], cache: cache)
         let deadline = ContinuousClock.now.advanced(by: .seconds(5))
@@ -833,11 +848,13 @@ final class FoundationArtworkCacheTests: XCTestCase {
             await Task.yield()
         }
         let refusedBrowse = try await cache.result(
-            for: item("excess"), pixels: 640, allowsNetwork: true, load: ready.load)
+            for: item("excess"), pixels: 640, allowsNetwork: true,
+            load: { try await ready.load($0, $1) })
         XCTAssertNil(refusedBrowse)
         let current = try await FoundationRequestIntent.$isPlayback.withValue(true) {
             try await cache.result(
-                for: currentItem, pixels: 640, allowsNetwork: true, load: ready.load)
+                for: currentItem, pixels: 640, allowsNetwork: true,
+                load: { try await ready.load($0, $1) })
         }
         XCTAssertNotNil(current)
         await held.release()
@@ -857,14 +874,16 @@ final class FoundationArtworkCacheTests: XCTestCase {
         let currentItem = item("current")
         let first = Task {
             try await cache.result(
-                for: firstItem, pixels: 640, allowsNetwork: true, load: held.load)
+                for: firstItem, pixels: 640, allowsNetwork: true,
+                load: { try await held.load($0, $1) })
         }
         cleanUp(first, releasing: [held], cache: cache)
         try await held.waitForCount(1)
         let current = Task {
             try await FoundationRequestIntent.$isPlayback.withValue(true) {
                 try await cache.result(
-                    for: currentItem, pixels: 640, allowsNetwork: true, load: ready.load)
+                    for: currentItem, pixels: 640, allowsNetwork: true,
+                    load: { try await ready.load($0, $1) })
             }
         }
         cleanUp(current, releasing: [held], cache: cache)
@@ -888,7 +907,8 @@ final class FoundationArtworkCacheTests: XCTestCase {
             tasks.append(
                 Task {
                     try await cache.result(
-                        for: album, pixels: 160, allowsNetwork: true, load: probe.load)
+                        for: album, pixels: 160, allowsNetwork: true,
+                        load: { try await probe.load($0, $1) })
                 })
         }
         for task in tasks { cleanUp(task, releasing: [probe], cache: cache) }
@@ -917,7 +937,8 @@ final class FoundationArtworkCacheTests: XCTestCase {
         let work = Task {
             defer { ready.fulfill() }
             return try await cache.result(
-                for: artwork, pixels: 160, allowsNetwork: true, load: probe.load)
+                for: artwork, pixels: 160, allowsNetwork: true,
+                load: { try await probe.load($0, $1) })
         }
         cleanUp(work, releasing: [barrier], cache: cache)
         do {
@@ -935,7 +956,7 @@ final class FoundationArtworkCacheTests: XCTestCase {
         XCTAssertNotNil(image)
         // An oversized/uncached decoded result remains reusable while its write is pending.
         let reused = try await cache.result(
-            for: artwork, pixels: 160, allowsNetwork: true, load: probe.load)
+            for: artwork, pixels: 160, allowsNetwork: true, load: { try await probe.load($0, $1) })
         XCTAssertEqual(image?.id, reused?.id)
         let reads = await probe.count
         XCTAssertEqual(reads, 1)
@@ -946,7 +967,7 @@ final class FoundationArtworkCacheTests: XCTestCase {
         XCTAssertTrue(cleared)
         let restored = FoundationArtworkCache(scope: "synthetic-held-persistence", root: root)
         let absent = try await restored.result(
-            for: artwork, pixels: 160, allowsNetwork: false, load: probe.load)
+            for: artwork, pixels: 160, allowsNetwork: false, load: { try await probe.load($0, $1) })
         XCTAssertNil(absent)
         _ = await restored.invalidate(removeDisk: true)
     }
@@ -958,7 +979,9 @@ final class FoundationArtworkCacheTests: XCTestCase {
         let probe = ArtworkCacheProbe(data: try image(), held: true)
         let album = item()
         let task = Task {
-            try await cache.result(for: album, pixels: 160, allowsNetwork: true, load: probe.load)
+            try await cache.result(
+                for: album, pixels: 160, allowsNetwork: true, load: { try await probe.load($0, $1) }
+            )
         }
         cleanUp(task, releasing: [probe], cache: cache)
         try await probe.waitForCount(1)
@@ -978,7 +1001,7 @@ final class FoundationArtworkCacheTests: XCTestCase {
         } catch is CancellationError {}
         let restored = FoundationArtworkCache(scope: "synthetic", root: root)
         let result = try await restored.result(
-            for: album, pixels: 160, allowsNetwork: false, load: probe.load)
+            for: album, pixels: 160, allowsNetwork: false, load: { try await probe.load($0, $1) })
         XCTAssertNil(result)
     }
 
@@ -988,10 +1011,10 @@ final class FoundationArtworkCacheTests: XCTestCase {
         let cache = FoundationArtworkCache(scope: "synthetic", root: root)
         let probe = ArtworkCacheProbe(data: Data("invalid".utf8))
         let invalid = try await cache.result(
-            for: item(), pixels: 160, allowsNetwork: true, load: probe.load)
+            for: item(), pixels: 160, allowsNetwork: true, load: { try await probe.load($0, $1) })
         XCTAssertNil(invalid)
         let offline = try await cache.result(
-            for: item(), pixels: 160, allowsNetwork: false, load: probe.load)
+            for: item(), pixels: 160, allowsNetwork: false, load: { try await probe.load($0, $1) })
         XCTAssertNil(offline)
         let count = await probe.count
         XCTAssertEqual(count, 1)
@@ -1010,7 +1033,8 @@ final class FoundationArtworkCacheTests: XCTestCase {
         XCTAssertLessThanOrEqual(metadataBytes, 65_536)
         let cold = FoundationArtworkCache(scope: "synthetic", root: root)
         let restored = try await cold.result(
-            for: item(tag: nil), pixels: 160, allowsNetwork: false, load: probe.load)
+            for: item(tag: nil), pixels: 160, allowsNetwork: false,
+            load: { try await probe.load($0, $1) })
         XCTAssertNil(restored)
         let restoredCount = await probe.count
         XCTAssertEqual(restoredCount, 1)
@@ -1082,14 +1106,17 @@ final class FoundationArtworkCacheTests: XCTestCase {
         let invalid = ArtworkCacheProbe(data: Data("invalid".utf8))
         for id in ["a", "b"] {
             _ = try await cache.result(
-                for: item(id), pixels: 640, allowsNetwork: true, load: invalid.load)
+                for: item(id), pixels: 640, allowsNetwork: true,
+                load: { try await invalid.load($0, $1) })
         }
         await cache.clearFailures(for: item("a"))
         let valid = ArtworkCacheProbe(data: try image())
         let retried = try await cache.result(
-            for: item("a"), pixels: 640, allowsNetwork: true, load: valid.load)
+            for: item("a"), pixels: 640, allowsNetwork: true, load: { try await valid.load($0, $1) }
+        )
         let suppressed = try await cache.result(
-            for: item("b"), pixels: 640, allowsNetwork: true, load: valid.load)
+            for: item("b"), pixels: 640, allowsNetwork: true, load: { try await valid.load($0, $1) }
+        )
         XCTAssertNotNil(retried)
         XCTAssertNil(suppressed)
         let count = await valid.count
@@ -1104,9 +1131,11 @@ final class FoundationArtworkCacheTests: XCTestCase {
             scope: "synthetic-admission", root: root, limits: .init(memoryBytes: 100_000))
         let probe = ArtworkCacheProbe(data: try image())
         let thumbnail = try await cache.result(
-            for: item("small"), pixels: 160, allowsNetwork: true, load: probe.load)
+            for: item("small"), pixels: 160, allowsNetwork: true,
+            load: { try await probe.load($0, $1) })
         _ = try await cache.result(
-            for: item("hero"), pixels: 640, allowsNetwork: true, load: probe.load)
+            for: item("hero"), pixels: 640, allowsNetwork: true,
+            load: { try await probe.load($0, $1) })
         let retained = try await cache.cachedResult(for: item("small"), pixels: 160)
         XCTAssertEqual(retained?.id, thumbnail?.id)
         _ = await cache.invalidate(removeDisk: true)
@@ -1116,27 +1145,29 @@ final class FoundationArtworkCacheTests: XCTestCase {
         let root = root()
         defer { try? FileManager.default.removeItem(at: root) }
         let clock = ArtworkCacheClock()
-        let cache = FoundationArtworkCache(scope: "synthetic", root: root, now: clock.read)
+        let cache = FoundationArtworkCache(scope: "synthetic", root: root, now: { clock.read() })
         let probe = ArtworkCacheProbe(data: try image())
         let untagged = item(tag: nil, kind: .artist)
         _ = try await cache.result(
-            for: untagged, pixels: 160, allowsNetwork: true, load: probe.load)
+            for: untagged, pixels: 160, allowsNetwork: true, load: { try await probe.load($0, $1) })
         clock.advance(86_401)
         _ = try await cache.result(
-            for: untagged, pixels: 160, allowsNetwork: true, load: probe.load)
+            for: untagged, pixels: 160, allowsNetwork: true, load: { try await probe.load($0, $1) })
         let count = await probe.count
         XCTAssertEqual(count, 2)
         let invalid = ArtworkCacheProbe(data: Data("invalid".utf8))
         let missing = item("missing")
         for _ in 0..<5 {
             _ = try await cache.result(
-                for: missing, pixels: 160, allowsNetwork: true, load: invalid.load)
+                for: missing, pixels: 160, allowsNetwork: true,
+                load: { try await invalid.load($0, $1) })
         }
         let suppressed = await invalid.count
         XCTAssertEqual(suppressed, 1)
         clock.advance(61)
         _ = try await cache.result(
-            for: missing, pixels: 160, allowsNetwork: true, load: invalid.load)
+            for: missing, pixels: 160, allowsNetwork: true, load: { try await invalid.load($0, $1) }
+        )
         let retried = await invalid.count
         XCTAssertEqual(retried, 2)
         _ = await cache.invalidate(removeDisk: true)
@@ -1148,10 +1179,11 @@ final class FoundationArtworkCacheTests: XCTestCase {
         let probe = ArtworkCacheProbe(data: try image())
         let retired = FoundationArtworkCache(scope: "old-account", root: root)
         _ = try await retired.result(
-            for: item(), pixels: 160, allowsNetwork: true, load: probe.load)
+            for: item(), pixels: 160, allowsNetwork: true, load: { try await probe.load($0, $1) })
         _ = await retired.invalidate(removeDisk: false)
         let live = FoundationArtworkCache(scope: "live-account", root: root)
-        _ = try await live.result(for: item(), pixels: 160, allowsNetwork: true, load: probe.load)
+        _ = try await live.result(
+            for: item(), pixels: 160, allowsNetwork: true, load: { try await probe.load($0, $1) })
         let cleared = await FoundationArtworkCache.clearStoredArtwork(root: root)
         XCTAssertTrue(cleared)
         XCTAssertFalse(
@@ -1203,7 +1235,8 @@ final class FoundationArtworkCacheTests: XCTestCase {
         let cache = FoundationArtworkCache(scope: "synthetic", root: root)
         let probe = ArtworkCacheProbe(data: try image())
         let album = item()
-        _ = try await cache.result(for: album, pixels: 640, allowsNetwork: true, load: probe.load)
+        _ = try await cache.result(
+            for: album, pixels: 640, allowsNetwork: true, load: { try await probe.load($0, $1) })
         _ = await cache.invalidate(removeDisk: false)
         let restored = FoundationArtworkCache(scope: "synthetic", root: root)
         let resolver = ArtworkCacheProbe(data: Data(), held: true)
@@ -1235,7 +1268,8 @@ final class FoundationArtworkCacheTests: XCTestCase {
         XCTAssertTrue(wantsPlayback)
         let current = FoundationCurrentArtwork(player: player) { item in
             try await restored.result(
-                for: item, pixels: 640, allowsNetwork: false, load: probe.load)?.data
+                for: item, pixels: 640, allowsNetwork: false, load: { try await probe.load($0, $1) }
+            )?.data
         }
         addTeardownBlock { @MainActor in current.invalidate() }
         await current.loadTask?.value
@@ -1259,7 +1293,8 @@ final class FoundationArtworkCacheTests: XCTestCase {
         let cache = FoundationArtworkCache(scope: "synthetic", root: root)
         let probe = ArtworkCacheProbe(data: try image())
         let album = item()
-        _ = try await cache.result(for: album, pixels: 160, allowsNetwork: true, load: probe.load)
+        _ = try await cache.result(
+            for: album, pixels: 160, allowsNetwork: true, load: { try await probe.load($0, $1) })
         _ = await cache.invalidate(removeDisk: false)
         let directory = root.appendingPathComponent(cache.scope)
         let file = try XCTUnwrap(
@@ -1268,7 +1303,7 @@ final class FoundationArtworkCacheTests: XCTestCase {
         try Data("corrupt".utf8).write(to: file)
         let restored = FoundationArtworkCache(scope: "synthetic", root: root)
         let result = try await restored.result(
-            for: album, pixels: 160, allowsNetwork: true, load: probe.load)
+            for: album, pixels: 160, allowsNetwork: true, load: { try await probe.load($0, $1) })
         XCTAssertNotNil(result)
         let count = await probe.count
         XCTAssertEqual(count, 2)
@@ -1295,7 +1330,8 @@ final class FoundationArtworkCacheTests: XCTestCase {
             ], selectedIndex: 0)
         let current = FoundationCurrentArtwork(player: player) { item in
             try await cache.result(
-                for: item, pixels: 640, allowsNetwork: availability.read(), load: probe.load)?.data
+                for: item, pixels: 640, allowsNetwork: availability.read(),
+                load: { try await probe.load($0, $1) })?.data
         }
         await current.loadTask?.value
         XCTAssertNil(current.result)
@@ -1323,7 +1359,8 @@ final class FoundationArtworkCacheTests: XCTestCase {
         let probe = ArtworkCacheProbe(data: data)
         for id in ["one", "two"] {
             _ = try await cache.result(
-                for: item(id), pixels: 160, allowsNetwork: true, load: probe.load)
+                for: item(id), pixels: 160, allowsNetwork: true,
+                load: { try await probe.load($0, $1) })
         }
         await cache.flushPersistence()
         let directory = root.appendingPathComponent(cache.scope)
@@ -1334,9 +1371,11 @@ final class FoundationArtworkCacheTests: XCTestCase {
                 [.modificationDate: Date(timeIntervalSince1970: 1)], ofItemAtPath: file.path)
         }
         _ = try await cache.result(
-            for: item("one"), pixels: 160, allowsNetwork: true, load: probe.load)
+            for: item("one"), pixels: 160, allowsNetwork: true,
+            load: { try await probe.load($0, $1) })
         _ = try await cache.result(
-            for: item("three"), pixels: 160, allowsNetwork: true, load: probe.load)
+            for: item("three"), pixels: 160, allowsNetwork: true,
+            load: { try await probe.load($0, $1) })
         await cache.flushPersistence()
         let one = FoundationArtworkCache.key(item("one"), pixels: 160)
         let two = FoundationArtworkCache.key(item("two"), pixels: 160)
@@ -1377,10 +1416,10 @@ final class FoundationArtworkCacheTests: XCTestCase {
         XCTAssertEqual(FoundationArtworkCache.key(artist, pixels: 1280).pixels, 1280)
         let probe = ArtworkCacheProbe(data: try image(width: 1280, height: 640))
         let preview = try await cache.result(
-            for: logo, pixels: 640, allowsNetwork: true, load: probe.load)
+            for: logo, pixels: 640, allowsNetwork: true, load: { try await probe.load($0, $1) })
         XCTAssertEqual(preview?.image.width, 640)
         let upgraded = try await cache.result(
-            for: logo, pixels: 1280, allowsNetwork: true, load: probe.load)
+            for: logo, pixels: 1280, allowsNetwork: true, load: { try await probe.load($0, $1) })
         XCTAssertEqual(upgraded?.image.width, 1280)
         let calls = await probe.count
         XCTAssertEqual(calls, 2)
@@ -1397,25 +1436,28 @@ final class FoundationArtworkCacheTests: XCTestCase {
         let probe = ArtworkCacheProbe(data: try image(width: 2048, height: 1024))
         let warm = FoundationArtworkCache(scope: "synthetic-upgrade", root: root)
         let preview = try await warm.result(
-            for: backdrop, pixels: 640, allowsNetwork: true, load: probe.load)
+            for: backdrop, pixels: 640, allowsNetwork: true, load: { try await probe.load($0, $1) })
         XCTAssertEqual(preview?.image.width, 640)
         let warmPreview = try await warm.cachedResult(for: backdrop, pixels: 2048)
         XCTAssertEqual(warmPreview?.image.width, 640)
         let upgraded = try await warm.result(
-            for: backdrop, pixels: 2048, allowsNetwork: true, load: probe.load)
+            for: backdrop, pixels: 2048, allowsNetwork: true, load: { try await probe.load($0, $1) }
+        )
         XCTAssertEqual(upgraded?.image.width, 2048)
         let warmLoads = await probe.count
         XCTAssertEqual(warmLoads, 2)
         _ = await warm.invalidate(removeDisk: true)
 
         let seed = FoundationArtworkCache(scope: "synthetic-upgrade", root: root)
-        _ = try await seed.result(for: backdrop, pixels: 160, allowsNetwork: true, load: probe.load)
+        _ = try await seed.result(
+            for: backdrop, pixels: 160, allowsNetwork: true, load: { try await probe.load($0, $1) })
         _ = await seed.invalidate(removeDisk: false)
         let cold = FoundationArtworkCache(scope: "synthetic-upgrade", root: root)
         let coldPreview = try await cold.cachedResult(for: backdrop, pixels: 2048)
         XCTAssertEqual(coldPreview?.image.width, 160)
         let coldUpgrade = try await cold.result(
-            for: backdrop, pixels: 2048, allowsNetwork: true, load: probe.load)
+            for: backdrop, pixels: 2048, allowsNetwork: true, load: { try await probe.load($0, $1) }
+        )
         XCTAssertEqual(coldUpgrade?.image.width, 2048)
         let coldLoads = await probe.count
         XCTAssertEqual(coldLoads, 4)

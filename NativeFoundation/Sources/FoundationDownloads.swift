@@ -15,6 +15,8 @@ nonisolated enum FoundationDownloadAvailability: Equatable, Sendable {
 
 struct FoundationDownloadOwner: Identifiable {
     let id: String
+    // In-memory identity rejects results from removed owners or newer explicit reacquisition.
+    var reconciliationIdentity = UUID()
     var item: FoundationItem
     var tracks: [FoundationItem]
     var state: FoundationDownloadState
@@ -65,6 +67,7 @@ final class FoundationDownloads: ObservableObject {
     @Published private(set) var errorMessage: String?
     @Published private(set) var artworkRevision: UInt = 0
     @Published private(set) var catalogRevision: UInt = 0
+    @Published private(set) var verifiedReadyRevision: UInt = 0
     private let library: any FoundationLibrary
     private let projectTracks: @MainActor ([FoundationItem], String?) -> [FoundationItem]
     private let observeTracks: @MainActor ([FoundationItem], String?) -> Void
@@ -73,6 +76,7 @@ final class FoundationDownloads: ObservableObject {
     private let convertedTransfer: ConvertedTransfer
     private let requestedQuality: @MainActor () -> FoundationDownloadQuality
     private let verifyReacquisitionFiles: FileVerifier
+    private let verifyInventoryFiles: FileVerifier
     private var manifest = FoundationDownloadManifest()
     private var collectionModels: [String: FoundationBrowseModel] = [:]
     private var paused: Set<String> = []
@@ -80,7 +84,11 @@ final class FoundationDownloads: ObservableObject {
     private var reacquiring: Set<String> = []
     private var leases: [String: Int] = [:]
     private var pendingDeletion: Set<String> = []
-    private var readyFileIDs: Set<String> = []
+    private var readyFileIDs: Set<String> = [] {
+        didSet {
+            if readyFileIDs != oldValue { verifiedReadyRevision &+= 1 }
+        }
+    }
     private(set) var artworkTask: Task<Void, Never>?
     private var attemptedArtwork: Set<String> = []
     private var worker: Task<Void, Never>?
@@ -105,6 +113,7 @@ final class FoundationDownloads: ObservableObject {
         convertedTransfer: ConvertedTransfer? = nil,
         requestedQuality: @escaping @MainActor () -> FoundationDownloadQuality = { .original },
         verifyReacquisitionFiles: FileVerifier? = nil,
+        verifyInventoryFiles: FileVerifier? = nil,
         observeTracks: @escaping @MainActor ([FoundationItem], String?) -> Void = { _, _ in },
         projectTracks: @escaping @MainActor ([FoundationItem], String?) -> [FoundationItem] = {
             items, _ in items
@@ -121,6 +130,10 @@ final class FoundationDownloads: ObservableObject {
         self.observeTracks = observeTracks
         self.verifyReacquisitionFiles =
             verifyReacquisitionFiles ?? { files, directory in
+                try await FoundationDownloadStorage.verifiedFiles(files, directory: directory)
+            }
+        self.verifyInventoryFiles =
+            verifyInventoryFiles ?? { files, directory in
                 try await FoundationDownloadStorage.verifiedFiles(files, directory: directory)
             }
         directory = FoundationDownloadStorage.directory(scope: scope, root: root)
@@ -189,13 +202,12 @@ final class FoundationDownloads: ObservableObject {
         let files = manifest.files
         let artwork = manifest.artwork ?? [:]
         let directory = directory
+        let verifier = verifyInventoryFiles
         let epoch = generation
         inventoryTask = Task { [weak self] in
             do {
-                let verified = try await FoundationDownloadStorage.verifiedFiles(
-                    files, directory: directory)
-                let verifiedArtwork = try await FoundationDownloadStorage.verifiedFiles(
-                    artwork.mapValues(\.file), directory: directory)
+                let verified = try await verifier(files, directory)
+                let verifiedArtwork = try await verifier(artwork.mapValues(\.file), directory)
                 guard let self, self.isLive, self.generation == epoch else { return }
                 self.manifest.artwork = artwork.filter { verifiedArtwork[$0.key] != nil }
                 self.manifest.files = verified
@@ -761,7 +773,8 @@ final class FoundationDownloads: ObservableObject {
             reacquiring.insert(id)
             expanded.remove(id)
         }
-        if let index = owners.firstIndex(where: { $0.id == id }) {
+        let existingOwnerIndex = owners.firstIndex(where: { $0.id == id })
+        if let index = existingOwnerIndex {
             paused.remove(id)
             owners[index].state = .queued
         } else {
@@ -779,6 +792,7 @@ final class FoundationDownloads: ObservableObject {
             reportStorageFailure()
             return
         }
+        if let index = existingOwnerIndex { owners[index].reconciliationIdentity = UUID() }
         if activeOwner == id { worker?.cancel() }
         // A leased, previously excluded file can be retained again without replacing it.
         attemptedArtwork = attemptedArtwork.filter { attempt in
@@ -1406,6 +1420,14 @@ final class FoundationDownloads: ObservableObject {
         }
     }
 
+    #if DEBUG
+        /// Joins only the current work for deterministic lifecycle regression fixtures.
+        func waitForCurrentReconciliationForTesting() async {
+            let current = syncTask
+            await current?.value
+        }
+    #endif
+
     private func runReconciliation() async {
         let epoch = generation
         while syncPending, isLive, allowed, !Task.isCancelled {
@@ -1418,7 +1440,8 @@ final class FoundationDownloads: ObservableObject {
                     let permission = try await library.playlistPermissions(id: owner.item.id)
                     try Task.checkCancellation()
                     guard isLive, epoch == generation,
-                        let index = owners.firstIndex(where: { $0.id == owner.id })
+                        let index = owners.firstIndex(where: { $0.id == owner.id }),
+                        owners[index].reconciliationIdentity == owner.reconciliationIdentity
                     else { continue }
                     let previous = owners[index]
                     var item = owner.item

@@ -2113,6 +2113,47 @@ final class FoundationLibraryTests: XCTestCase {
         }
     }
 
+    func testLibraryAndSearchPreserveAlbumArtistIdentityWithoutInferringFromCounts() async throws {
+        let recorder = Recorder()
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            await recorder.append(request)
+            return (
+                Data(
+                    #"{"Items":[{"Id":"00000000000000000000000000000001","Type":"MusicArtist","Name":"Synthetic shared name"},{"Id":"00000000000000000000000000000002","Type":"MusicArtist","Name":"Synthetic shared name","AlbumCount":0,"SongCount":2},{"Id":"00000000000000000000000000000003","Type":"MusicArtist","Name":"Synthetic album artist","AlbumCount":3,"SongCount":12}],"StartIndex":0,"TotalRecordCount":3}"#
+                        .utf8), Self.response(request)
+            )
+        }
+        let expectedIDs = (1...3).map { String(format: "%032d", $0) }
+        // Missing/zero counts do not remove identities certified by AlbumArtists.
+        // Equal display names never merge distinct provider identities.
+        for _ in 0..<2 {
+            let browse = try await library.artists(startIndex: 0)
+            let search = try await library.search(
+                query: " Synthetic ", kind: .artist, startIndex: 0, limit: 50)
+            XCTAssertEqual(browse.items.map(\.id), expectedIDs)
+            XCTAssertEqual(search.items.map(\.id), expectedIDs)
+            XCTAssertEqual(search.items, browse.items)
+            XCTAssertTrue(browse.items.allSatisfy { $0.kind == .artist })
+            XCTAssertNil(browse.nextStartIndex)
+            XCTAssertNil(search.nextStartIndex)
+        }
+        let requests = await recorder.requests
+        XCTAssertEqual(requests.count, 4, "Repeated requests never fan out into artist checks")
+        for (index, request) in requests.enumerated() {
+            let url = try XCTUnwrap(request.url)
+            XCTAssertTrue(url.path.hasSuffix("/Artists/AlbumArtists"))
+            let query = try XCTUnwrap(
+                URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems)
+            func value(_ key: String) -> String? {
+                query.first { $0.name == key }?.value
+            }
+            XCTAssertEqual(value("startIndex"), "0")
+            XCTAssertEqual(value("limit"), "50")
+            XCTAssertEqual(value("searchTerm"), index.isMultiple(of: 2) ? nil : "Synthetic")
+            XCTAssertEqual(value("sortBy"), "SortName")
+        }
+    }
+
     func testInvalidArtistScopeAndNegativeArtistPageStartNoTransport() async {
         let recorder = Recorder()
         let library = FoundationJellyfinLibrary(session: session) { request in

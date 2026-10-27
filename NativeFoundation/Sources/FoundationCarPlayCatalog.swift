@@ -8,6 +8,14 @@ enum FoundationCarPlayCatalog {
         case collection(FoundationItem)
         case genre(FoundationItem)
         case artistAlbums(FoundationItem)
+
+        var isPrimaryGenre: Bool {
+            switch self {
+            case .genres, .genre: true
+            case .collection(let item): item.kind == .genre
+            default: false
+            }
+        }
     }
 
     enum Shelf: String, CaseIterable, Sendable {
@@ -25,16 +33,50 @@ enum FoundationCarPlayCatalog {
     struct SearchSnapshot: Sendable {
         let items: [FoundationItem]
         let partialFailure: FoundationLibraryError?
+        let nextStartIndex: Int?
     }
 
     static let pageSize = 40
 
     static func page(
         route: Route, startIndex: Int, library: any FoundationLibrary,
-        downloads: FoundationDownloads?, localOnly: Bool
+        downloads: FoundationDownloads?, localOnly: Bool,
+        primaryGenres: FoundationPrimaryGenresModel? = nil
     ) async throws -> FoundationPage {
         try Task.checkCancellation()
         guard startIndex >= 0 else { throw FoundationLibraryError.invalidResponse }
+        if route.isPrimaryGenre {
+            guard let primaryGenres,
+                let record = primaryGenres.completedRecord(
+                    libraryScope: library.primaryGenreIndexScope)
+            else { throw FoundationLibraryError.unavailable }
+            if route == .genres {
+                return primaryGenres.page(
+                    startIndex: startIndex, limit: pageSize, localOnly: localOnly)
+            }
+            let genre: FoundationItem
+            switch route {
+            case .genre(let item), .collection(let item): genre = item
+            default: throw FoundationLibraryError.invalidResponse
+            }
+            guard
+                primaryGenres.canonicalRecord(
+                    for: genre, libraryScope: library.primaryGenreIndexScope) != nil
+            else { throw FoundationLibraryError.unavailable }
+            if localOnly {
+                return localPage(
+                    record.readySongs(
+                        membershipIDs: record.songIDs(for: genre.id),
+                        from: downloads?.downloadedSongs ?? []), startIndex: startIndex)
+            }
+            let page = try await record.songPage(
+                genreID: genre.id, startIndex: startIndex, limit: pageSize, library: library)
+            guard
+                primaryGenres.canonicalRecord(
+                    for: genre, libraryScope: library.primaryGenreIndexScope) != nil
+            else { throw FoundationLibraryError.unavailable }
+            return page
+        }
         if localOnly || route == .downloads {
             let items = localItems(route: route, downloads: downloads)
             return localPage(items, startIndex: startIndex)
@@ -46,14 +88,12 @@ enum FoundationCarPlayCatalog {
         case .albums: result = try await library.albums(startIndex: startIndex)
         case .artists: result = try await library.artists(startIndex: startIndex)
         case .songs: result = try await library.songs(startIndex: startIndex)
-        case .genres: result = try await library.genres(startIndex: startIndex)
+        case .genres: throw FoundationLibraryError.unavailable
         case .downloads: result = .init(items: [], nextStartIndex: nil)
         case .artistAlbums(let item):
             guard item.kind == .artist else { throw FoundationLibraryError.invalidResponse }
             result = try await library.albums(artistID: item.id, startIndex: startIndex)
-        case .genre(let item):
-            guard item.kind == .genre else { throw FoundationLibraryError.invalidResponse }
-            result = try await library.albums(genreID: item.id, startIndex: startIndex)
+        case .genre: throw FoundationLibraryError.unavailable
         case .collection(let item):
             switch item.kind {
             case .album: result = try await library.tracks(albumID: item.id, startIndex: startIndex)
@@ -62,8 +102,7 @@ enum FoundationCarPlayCatalog {
             case .playlist:
                 result = try await library.playlistTracks(
                     playlistID: item.id, startIndex: startIndex)
-            case .genre:
-                result = try await library.albums(genreID: item.id, startIndex: startIndex)
+            case .genre: throw FoundationLibraryError.unavailable
             case .track: result = localPage([item], startIndex: startIndex)
             }
         }
@@ -123,14 +162,25 @@ enum FoundationCarPlayCatalog {
 
     static func search(
         query: String, library: any FoundationLibrary, downloads: FoundationDownloads?,
-        localOnly: Bool
+        localOnly: Bool, primaryGenres: FoundationPrimaryGenresModel? = nil, startIndex: Int = 0
     ) async throws -> SearchSnapshot {
         try Task.checkCancellation()
+        guard startIndex >= 0 else { throw FoundationLibraryError.invalidResponse }
+        guard !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return .init(items: [], partialFailure: nil, nextStartIndex: nil)
+        }
+        let record = primaryGenres?.completedRecord(libraryScope: library.primaryGenreIndexScope)
+        let genreItems =
+            record == nil ? [] : primaryGenres?.items(query: query, localOnly: localOnly) ?? []
+        let genrePage: FoundationSearchResolver.Search = { _, _, limit in
+            .init(items: Array(genreItems.prefix(limit)), nextStartIndex: nil)
+        }
         let resolver: FoundationSearchResolver
         if localOnly {
             let candidates = downloads?.localCatalogItems() ?? []
             resolver = FoundationSearchResolver(localSearch: { term, kind, limit in
                 try Task.checkCancellation()
+                if kind == .genre { return try await genrePage(term, kind, limit) }
                 let matches = candidates.filter {
                     $0.kind == kind
                         && [$0.title, $0.subtitle, $0.album?.title ?? "", $0.artist?.title ?? ""]
@@ -139,10 +189,16 @@ enum FoundationCarPlayCatalog {
                 return .init(items: Array(matches.prefix(limit)), nextStartIndex: nil)
             })
         } else {
-            resolver = FoundationSearchResolver(library: library)
+            resolver = FoundationSearchResolver(library: library, genreSearch: genrePage)
         }
         let result = try await resolver.resolve(query: query)
         try Task.checkCancellation()
+        if let record {
+            guard
+                primaryGenres?.completedRecord(libraryScope: library.primaryGenreIndexScope)?
+                    .snapshot.censusID == record.snapshot.censusID
+            else { throw FoundationLibraryError.unavailable }
+        }
         var sections = FoundationSearchResolver.displaySections(
             direct: result.direct, related: result.related, query: query)
         if let content = result.playlistContents {
@@ -168,19 +224,26 @@ enum FoundationCarPlayCatalog {
             result.direct.compactMap(\.error).first ?? result.playlistContentError
             ?? (!result.failures.isEmpty || (result.playlistContents?.partialFailureCount ?? 0) > 0
                 ? FoundationLibraryError.unavailable : nil)
+        let ranked = FoundationSearchResolver.ranked(
+            sections.flatMap(\.items).filter { $0.kind != .genre } + genreItems, query: query)
+        let page = localPage(ranked, startIndex: startIndex)
         return SearchSnapshot(
-            items: Array(
-                FoundationSearchResolver.ranked(sections.flatMap(\.items), query: query).prefix(
-                    pageSize)),
-            partialFailure: failure)
+            items: page.items,
+            partialFailure: failure
+                ?? (record == nil || (localOnly && primaryGenres?.offlineErrorMessage != nil)
+                    ? .unavailable : nil),
+            nextStartIndex: page.nextStartIndex)
     }
 
     static func resolve(
         query: String, library: any FoundationLibrary, downloads: FoundationDownloads?,
-        localOnly: Bool
+        localOnly: Bool, primaryGenres: FoundationPrimaryGenresModel? = nil
     ) async throws -> [FoundationItem] {
-        try await search(query: query, library: library, downloads: downloads, localOnly: localOnly)
-            .items
+        try await search(
+            query: query, library: library, downloads: downloads, localOnly: localOnly,
+            primaryGenres: primaryGenres
+        )
+        .items
     }
 
     private static func localItems(route: Route, downloads: FoundationDownloads?)
@@ -193,31 +256,15 @@ enum FoundationCarPlayCatalog {
         case .artists: return downloads.downloadedArtists
         case .songs, .downloads: return downloads.downloadedSongs
         case .favorites: return downloads.localCatalogItems().filter { $0.isFavorite == true }
-        case .genres:
-            var seen: Set<String> = []
-            return (downloads.downloadedSongs + downloads.downloadedAlbums).flatMap(\.genres)
-                .filter { seen.insert($0.id).inserted }.map {
-                    FoundationItem(
-                        id: $0.id, title: $0.title, subtitle: "", kind: .genre, duration: nil)
-                }
+        // The completed primary index handles these before local catalog routing.
+        case .genres: return []
         case .artistAlbums(let artist): return downloads.downloadedAlbums(artistID: artist.id)
-        case .genre(let genre): return localGenreAlbums(genre.id, downloads: downloads)
+        case .genre: return []
         case .collection(let item):
             if item.kind == .genre {
-                return localGenreAlbums(item.id, downloads: downloads)
+                return []
             }
             return downloads.browseTracks(for: item)
-        }
-    }
-
-    private static func localGenreAlbums(_ id: String, downloads: FoundationDownloads)
-        -> [FoundationItem]
-    {
-        let albums = Set(
-            downloads.downloadedSongs.filter { $0.genres.contains { $0.id == id } }
-                .compactMap { $0.album?.id })
-        return downloads.downloadedAlbums.filter {
-            albums.contains($0.id) || $0.genres.contains { $0.id == id }
         }
     }
 

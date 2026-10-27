@@ -121,9 +121,15 @@ struct FoundationSearchResolver: Sendable {
     private let localOnly: Bool
     private static let kinds: [FoundationItem.Kind] = [.track, .album, .artist, .playlist, .genre]
 
-    init(library: any FoundationLibrary) {
+    init(library: any FoundationLibrary, genreSearch: Search? = nil) {
         self.init(
-            search: { try await library.search(query: $0, kind: $1, startIndex: 0, limit: $2) },
+            search: { query, kind, limit in
+                if kind == .genre, let genreSearch {
+                    return try await genreSearch(query, kind, limit)
+                }
+                return try await library.search(
+                    query: query, kind: kind, startIndex: 0, limit: limit)
+            },
             artistAlbums: { try await library.albums(artistID: $0, startIndex: 0) },
             artistTracks: { try await library.tracks(artistID: $0, startIndex: 0) },
             artistMostPlayed: { try await library.mostPlayed(artistID: $0) },

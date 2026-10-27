@@ -28,8 +28,9 @@ test_ios() {
   fi
   # Simulator Keychain tests need the identity entitlements supplied by signing.
   # Ad-hoc signing requires neither a certificate nor a provisioning profile.
+  # Keep the unit host on the disposable identity, preserving installed sessions.
   run_xcode CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual \
-    DEVELOPMENT_TEAM= -configuration Debug -destination "$ios_destination" \
+    DEVELOPMENT_TEAM= -configuration UITesting -destination "$ios_destination" \
     -parallel-testing-enabled NO test
 }
 release() {

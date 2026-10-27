@@ -15,9 +15,10 @@ expected_display_name = os.environ.get("VELACANTO_APP_DISPLAY_NAME", "VelaCanto"
 assert expected_display_name in ("VelaCanto Alpha", "VelaCanto")
 assert info["CFBundleDisplayName"] == expected_display_name
 assert info["CFBundleName"] == expected_display_name
-assert info["CFBundleShortVersionString"] == "0.5.0"
-assert info["CFBundleVersion"] == os.environ.get("VELACANTO_BUILD_NUMBER", "217")
+assert info["CFBundleShortVersionString"] == "0.6.0"
+assert info["CFBundleVersion"] == os.environ.get("VELACANTO_BUILD_NUMBER", "233")
 assert info["ITSAppUsesNonExemptEncryption"] is False
+assert "com.chameleonenterprise.velacanto.continuation.v1" in info.get("NSUserActivityTypes", []), "Missing Handoff activity registration"
 privacy_path = app / "PrivacyInfo.xcprivacy"
 if not privacy_path.exists():
     privacy_path = app / "Contents/Resources/PrivacyInfo.xcprivacy"
@@ -61,6 +62,10 @@ markers = (
     b"seek.complete direction=", b"FoundationSystemMediaControlsTests",
     b"-foundationDownloadsUITesting", b"DownloadUITestFixtures", b"FoundationDownloadUIFixture",
     b"FoundationAccountUITestHarness", b"synthetic-not-a-password",
+    b"-diagnosticCarPlaySearch", b"-diagnosticCarPlayNativeSearch",
+    b"FoundationCarPlayInputDiagnostic", b"CarPlaySearchDiagnostics",
+    b"-diagnosticHomeRebound", b"HomeReboundDiagnostics", b"FoundationHomeReboundDiagnostic",
+    b"-fixtureSharedChromeEvidence", b"-fixtureRemoteListening", b"FoundationChromeUIScrollProbe",
 )
 for binary in [executable, *extension_binaries, *app.rglob("*.dylib")]:
     content = binary.read_bytes()

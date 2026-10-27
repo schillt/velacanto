@@ -1,16 +1,19 @@
 # VelaCanto
 
-VelaCanto is a native Jellyfin music app for iPhone, iPad and Mac. **Version
-0.5.0 — Alpha Preview** brings native CarPlay browsing, HLS playback, independent
-iOS streaming and download quality, and improved playlist management and library UI.
-TestFlight/distribution builds display **VelaCanto**. Local test builds can display
-**VelaCanto Alpha**; the alpha release channel does not change the distributed name.
+VelaCanto is a native Jellyfin music app for iPhone, iPad and Mac. Development is
+working toward **0.6**, including shared iOS/macOS feature parity, playlist and
+CarPlay refinement, native continuity, consistent UI/loading and maintainability.
 
-The release candidate is **0.5.0 (217)**, carrying the accepted build 215 runtime
-with corrected distribution naming and release metadata. Alpha publication, the exact-candidate hosted gate
-and TestFlight upload/processing are tracked separately in the
-[release acceptance record](docs/0.5.0-acceptance.md). A source publication or passing
-CI check does not mean a TestFlight build is available.
+The next usable alpha checkpoint is being frozen and verified. Its final build,
+source publication and installation record are **pending** in the
+[checkpoint](docs/0.6.0-alpha-checkpoint.md). The currently recorded internal
+installed build is 228; newer source/test evidence is not an installed artifact.
+No 0.6 release or TestFlight availability is claimed by this working tree.
+
+Use the [live milestone](https://github.com/schillt/velacanto/milestone/9),
+[current agent handoff](docs/0.6.0-agent-handoff.md), and [instructions](AGENTS.md)
+for current scope. Older release documents retain evidence for their own builds.
+The product spelling is **VelaCanto**; legal publisher drafts use **NovoLuxor**.
 
 ## Current experience
 
@@ -50,22 +53,25 @@ account data is held pending authenticated recovery, with an explicit confirmati
 if no exact saved account scope matches. Keep the same server address/account when
 recovering an existing installation.
 
-Read [release notes](docs/0.5.0-release-notes.md),
+For the previous accepted scope, read [release notes](docs/0.5.0-release-notes.md),
 [TestFlight testing notes](docs/0.5.0-testflight-notes.md) and
-[acceptance and deferred work](docs/0.5.0-acceptance.md) for supported scope and limits.
+[acceptance and deferred work](docs/0.5.0-acceptance.md) for that version’s supported scope and limits.
 
 ## Branches and distribution
 
 | Branch | Purpose / recorded checkpoint |
 | --- | --- |
-| `alpha` | Accepted development; 0.5.0 Alpha Preview source, with delivery gates tracked separately. |
-| `beta` | Validation through an authorized alpha → beta PR; previously promoted 0.4.0 (124). |
+| `alpha` | Permanent development branch; initial integration base `bf1af68`. See the current checkpoint for publication status. |
+| `beta` | Permanent validation branch; v0.5 merged through PR #205 at8d69179. |
 | `main` | Previously accepted preview promoted through PR #190; not automatically advanced with alpha. |
 
 “Alpha Preview” describes this release's maturity; it does not create or promote a
 `preview` branch. Historical branches/tags remain evidence. Develop locally, publish
 accepted changes to alpha, and authorize beta/main promotion separately. See
 [development workflow](docs/development-workflow.md).
+
+Never delete alpha, beta or main after promotion. All task/worktree refs, including
+codex/*, stay local. Verify permanent branch heads before/after authorized promotion.
 
 Automatic TestFlight delivery is reserved for `main`. An owner-started manual
 TestFlight push is a separate action; do not remove its Cloud post-actions or

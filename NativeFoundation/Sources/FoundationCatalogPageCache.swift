@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 /// Disposable account-scoped catalog metadata, independent of downloaded media storage.
@@ -127,6 +128,121 @@ actor FoundationCatalogPageCache {
         } catch { try? FileManager.default.removeItem(at: url) }
     }
 
+    /// Separate compact metadata records share this account directory's live lease and cleanup.
+    /// Up to two 8 MiB records; an atomic replacement may temporarily require one extra record.
+    func readPrimaryGenres(key: String, scope: FoundationPrimaryGenreIndex.Scope) async throws
+        -> FoundationPrimaryGenreRecord?
+    {
+        await registration.value
+        guard live else { throw FoundationLibraryError.unavailable }
+        try Task.checkCancellation()
+        try prepare()
+        try recoverPrimaryStaging()
+        let url = directory.appendingPathComponent(
+            FoundationArtworkCache.digest(key) + ".primarygenres")
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        let values = try url.resourceValues(forKeys: [
+            .isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey,
+        ])
+        guard values.isRegularFile == true, values.isSymbolicLink != true,
+            let size = values.fileSize, size <= 8 * 1_024 * 1_024
+        else { throw FoundationLibraryError.invalidResponse }
+        let record = try PropertyListDecoder().decode(
+            FoundationPrimaryGenreRecord.self, from: Data(contentsOf: url))
+        guard record.isValid(for: scope) else { throw FoundationLibraryError.invalidResponse }
+        return record
+    }
+
+    func writePrimaryGenres(
+        _ record: FoundationPrimaryGenreRecord, key: String, permit: FoundationPageWritePermit
+    ) async throws {
+        await registration.value
+        guard live, record.isValid(for: record.snapshot.scope) else {
+            throw FoundationLibraryError.unavailable
+        }
+        try Task.checkCancellation()
+        let encoder = PropertyListEncoder()
+        encoder.outputFormat = .binary
+        let data = try encoder.encode(record)
+        guard data.count <= 8 * 1_024 * 1_024 else {
+            throw FoundationPrimaryGenreIndex.Failure.resourceLimit
+        }
+        var outcome: Result<Void, Error> = .failure(CancellationError())
+        permit.ifValid {
+            outcome = Result {
+                try prepare()
+                try recoverPrimaryStaging()
+                let url = directory.appendingPathComponent(
+                    FoundationArtworkCache.digest(key) + ".primarygenres")
+                let manager = FileManager.default
+                if manager.fileExists(atPath: url.path) {
+                    let values = try url.resourceValues(forKeys: [
+                        .isRegularFileKey, .isSymbolicLinkKey,
+                    ])
+                    guard values.isRegularFile == true, values.isSymbolicLink != true else {
+                        throw FoundationLibraryError.invalidResponse
+                    }
+                }
+                let urls = try manager.contentsOfDirectory(
+                    at: directory, includingPropertiesForKeys: [.contentModificationDateKey])
+                let others = try urls.filter { $0.pathExtension == "primarygenres" && $0 != url }
+                    .map { other -> (url: URL, size: Int, date: Date) in
+                        let name = other.deletingPathExtension().lastPathComponent
+                        let values = try other.resourceValues(forKeys: [
+                            .isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey,
+                            .contentModificationDateKey,
+                        ])
+                        guard name.utf8.count == 64,
+                            name.utf8.allSatisfy({
+                                (48...57).contains($0) || (97...102).contains($0)
+                            }),
+                            values.isRegularFile == true, values.isSymbolicLink == false,
+                            let size = values.fileSize
+                        else {
+                            throw FoundationLibraryError.invalidResponse
+                        }
+                        return (other, size, values.contentModificationDate ?? .distantPast)
+                    }.sorted { $0.date > $1.date }
+                let staged = directory.appendingPathComponent(UUID().uuidString + ".primarytmp")
+                defer { try? manager.removeItem(at: staged) }
+                #if os(iOS)
+                    try data.write(
+                        to: staged,
+                        options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+                #else
+                    try data.write(to: staged, options: .atomic)
+                #endif
+                try manager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: staged.path)
+                // Complete all fallible protection/trim work before replacing the prior valid record.
+                for (position, old) in others.enumerated() {
+                    if position > 0 || old.size > 8 * 1_024 * 1_024 {
+                        try manager.removeItem(at: old.url)
+                    }
+                }
+                guard Darwin.rename(staged.path, url.path) == 0 else {
+                    throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+                }
+            }
+        }
+        try outcome.get()
+    }
+
+    /// Only canonical UUID staging names created by this writer are disposable.
+    /// Unknown names, directories and links are preserved and make recovery explicit failure.
+    private func recoverPrimaryStaging() throws {
+        let manager = FileManager.default
+        let urls = try manager.contentsOfDirectory(
+            at: directory, includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+        for url in urls where url.pathExtension == "primarytmp" {
+            let name = url.deletingPathExtension().lastPathComponent
+            let values = try url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+            guard let id = UUID(uuidString: name), id.uuidString == name,
+                values.isRegularFile == true, values.isSymbolicLink == false
+            else { throw FoundationLibraryError.invalidResponse }
+            try manager.removeItem(at: url)
+        }
+    }
+
     func invalidate(removeDisk: Bool = true) async -> Bool {
         live = false
         await registration.value
@@ -153,7 +269,8 @@ actor FoundationCatalogPageCache {
                 at: directory,
                 includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
             var bytes: Int64 = 0
-            for url in urls where url.pathExtension == "page" {
+            for url in urls
+            where ["page", "primarygenres", "primarytmp"].contains(url.pathExtension) {
                 let values = try url.resourceValues(forKeys: [
                     .isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey,
                 ])

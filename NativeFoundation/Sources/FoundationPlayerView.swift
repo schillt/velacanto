@@ -14,6 +14,7 @@ struct FoundationPlayerView: View {
     #endif
     @Environment(\.foundationReduceMotion) private var reduceMotion
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.foundationPlayerSystemColorScheme) private var systemColorScheme
     @State private var artworkFill: Image?
     @State private var artworkTint = Color(white: 0.12)
     @State private var isVisible = false
@@ -23,7 +24,19 @@ struct FoundationPlayerView: View {
     @State private var showingQueue = false
     @State private var lyricsPresentation: FoundationLyricsPresentation?
     @State private var showsDelayedLoading = false
-    @State private var relatedItem: FoundationItem?
+    @State private var sheetDestination: PlayerSheetDestination?
+
+    private enum PlayerSheetDestination: Identifiable {
+        case related(FoundationItem)
+        case credits(FoundationItem)
+
+        var id: String {
+            switch self {
+            case .related(let item): "related." + item.id
+            case .credits(let item): "credits." + item.id
+            }
+        }
+    }
 
     private enum ContentMode { case artwork, lyrics, queue }
 
@@ -107,7 +120,7 @@ struct FoundationPlayerView: View {
                                 FoundationQueueView(player: player, isPresented: $showingQueue) {
                                     item in
                                     guard showingQueue else { return }
-                                    relatedItem = item
+                                    sheetDestination = .related(item)
                                 }
                                 .frame(
                                     width: artworkGeometry.size.width,
@@ -213,6 +226,8 @@ struct FoundationPlayerView: View {
                 .toolbar(.hidden, for: .navigationBar)
             #endif
         }
+        // Keep artwork/transport dark without forcing the appearance of presented details.
+        .environment(\.colorScheme, .dark)
         .overlay(alignment: .top) {
             #if os(iOS)
                 Button(action: dismissPlayer) {
@@ -228,9 +243,17 @@ struct FoundationPlayerView: View {
             #endif
         }
         .foundationIdleGrabber(showsOverlay: false)
-        .sheet(item: $relatedItem) { item in
-            FoundationPlayerRelatedSheet(item: item, library: library, player: player)
-                .environment(\.foundationShowsDownloadBadges, true)
+        .sheet(item: $sheetDestination) { destination in
+            Group {
+                switch destination {
+                case .related(let item):
+                    FoundationPlayerRelatedSheet(item: item, library: library, player: player)
+                        .environment(\.foundationShowsDownloadBadges, true)
+                case .credits(let item):
+                    FoundationItemMetadataView(item: item, library: library)
+                }
+            }
+            .preferredColorScheme(systemColorScheme)
         }
         #if DEBUG && os(iOS) && targetEnvironment(simulator)
             .overlay(alignment: .bottomTrailing) {
@@ -254,7 +277,9 @@ struct FoundationPlayerView: View {
             }
         #endif
         .environment(\.foundationShowsDownloadBadges, false)
-        .interactiveDismissDisabled(scrubbing || lyricsPresentation != nil || relatedItem != nil)
+        .interactiveDismissDisabled(
+            scrubbing || lyricsPresentation != nil || sheetDestination != nil
+        )
         .accessibilityAction(.escape) { dismissPlayer() }
         #if os(iOS)
             .onAppear { updateArtworkDismissalAvailability() }
@@ -263,7 +288,7 @@ struct FoundationPlayerView: View {
             .onChange(of: showingQueue) { _, _ in updateArtworkDismissalAvailability() }
             .onChange(of: lyricsPresentation != nil) { _, _ in updateArtworkDismissalAvailability()
             }
-            .onChange(of: relatedItem != nil) { _, _ in updateArtworkDismissalAvailability() }
+            .onChange(of: sheetDestination != nil) { _, _ in updateArtworkDismissalAvailability() }
         #endif
         .onAppear { currentArtwork.retryMissingArtwork() }
         .task(id: LoadingCueKey(entryID: player.selectedEntryID, waiting: isWaitingForAudio)) {
@@ -287,7 +312,10 @@ struct FoundationPlayerView: View {
                 lyricsPresentation = nil
             }
         }
-        .preferredColorScheme(.dark)
+        #if os(iOS)
+            // The artwork presentation owns status-bar contrast; detail sheets have their own scheme.
+            .preferredColorScheme(.dark)
+        #endif
         #if os(macOS)
             .frame(minWidth: 420, idealWidth: 520, minHeight: 660, idealHeight: 800)
         #endif
@@ -318,7 +346,7 @@ struct FoundationPlayerView: View {
             artworkPresentation?.interactiveDismissalHeaderOnly = showingQueue
             artworkPresentation?.allowsInteractiveDismissal =
                 !scrubbing
-                && lyricsPresentation == nil && relatedItem == nil
+                && lyricsPresentation == nil && sheetDestination == nil
         }
     #endif
 
@@ -366,14 +394,14 @@ struct FoundationPlayerView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 Menu {
                     Button("View Album", systemImage: "square.stack") {
-                        if let album { relatedItem = album }
+                        if let album { sheetDestination = .related(album) }
                     }.disabled(
                         album == nil
                             || (connectivity.localOnly
                                 && album.map { downloads.browseTracks(for: $0).isEmpty } == true)
                     )
                     Button("View Artist", systemImage: "music.mic") {
-                        if let artist { relatedItem = artist }
+                        if let artist { sheetDestination = .related(artist) }
                     }.disabled(
                         artist == nil
                             || (connectivity.localOnly
@@ -382,6 +410,9 @@ struct FoundationPlayerView: View {
                                 }
                                     == true)
                     )
+                    Button("Song Credits", systemImage: "person.text.rectangle") {
+                        if let current { sheetDestination = .credits(current) }
+                    }.disabled(current == nil)
                 } label: {
                     Image(systemName: "ellipsis").frame(width: 44, height: 44)
                 }
@@ -719,14 +750,12 @@ private struct FoundationQueueView: View {
         if player.upcoming.contains(where: { $0.id == entry.id }) {
             Button("Play Next") { player.moveQueuedEntry(entry.id, position: .next) }
             Button("Play Last") { player.moveQueuedEntry(entry.id, position: .last) }
-            #if os(macOS)
-                if let index = player.upcoming.firstIndex(where: { $0.id == entry.id }) {
-                    Button("Move Up") { moveAccessibleEntry(entry.id, offset: -1) }
-                        .disabled(index == 0)
-                    Button("Move Down") { moveAccessibleEntry(entry.id, offset: 1) }
-                        .disabled(index + 1 == player.upcoming.count)
-                }
-            #endif
+            if let index = player.upcoming.firstIndex(where: { $0.id == entry.id }) {
+                Button("Move Up") { moveAccessibleEntry(entry.id, offset: -1) }
+                    .disabled(index == 0)
+                Button("Move Down") { moveAccessibleEntry(entry.id, offset: 1) }
+                    .disabled(index + 1 == player.upcoming.count)
+            }
             Button("Remove from Up Next", role: .destructive) { player.removeUpcoming(entry.id) }
         }
         FoundationRelatedDestinations(item: entry.item, navigate: openItem)
@@ -808,6 +837,7 @@ private struct FoundationPlayerPresentation<PlayerContent: View>: ViewModifier {
             if let sourceNamespace {
                 content.fullScreenCover(isPresented: $isPresented, onDismiss: onDismiss) {
                     playerContent()
+                        .environment(\.foundationPlayerSystemColorScheme, colorScheme)
                         .accessibilityElement(children: .contain)
                         .accessibilityIdentifier("foundation-now-playing")
                         .accessibilityAddTraits(.isModal)
@@ -831,6 +861,7 @@ private struct FoundationPlayerPresentation<PlayerContent: View>: ViewModifier {
                                 .environment(\.foundationReduceTransparency, reduceTransparency)
                                 .environment(\.dynamicTypeSize, dynamicTypeSize)
                                 .environment(\.colorScheme, colorScheme)
+                                .environment(\.foundationPlayerSystemColorScheme, colorScheme)
                                 .environment(\.scenePhase, scenePhase)),
                         inheritedEnvironment: inheritedEnvironment,
                         contentContextID: [
@@ -856,11 +887,21 @@ private struct FoundationPlayerPresentation<PlayerContent: View>: ViewModifier {
     }
 }
 
+private struct FoundationPlayerSystemColorSchemeKey: EnvironmentKey {
+    static let defaultValue: ColorScheme? = nil
+}
+
 private struct FoundationRelatedItemSheetKey: EnvironmentKey {
     static let defaultValue = false
 }
 
 extension EnvironmentValues {
+    /// Captured outside the iOS artwork presentation, so its Dark preference cannot mask system changes.
+    var foundationPlayerSystemColorScheme: ColorScheme? {
+        get { self[FoundationPlayerSystemColorSchemeKey.self] }
+        set { self[FoundationPlayerSystemColorSchemeKey.self] = newValue }
+    }
+
     var foundationRelatedItemSheet: Bool {
         get { self[FoundationRelatedItemSheetKey.self] }
         set { self[FoundationRelatedItemSheetKey.self] = newValue }
@@ -927,10 +968,9 @@ private struct FoundationPlayerRelatedSheet: View {
             .accessibilityAction(named: "Expand details") { detent = .large }
             .accessibilityAction(named: "Collapse details") { detent = .medium }
             .presentationDetents([.medium, .large], selection: $detent)
-            .presentationDragIndicator(.hidden)
-            .foundationIdleGrabber(showsOverlay: true)
+            // Native chrome owns this hit region even when the detail scroll view is offset.
+            .presentationDragIndicator(.visible)
             .presentationContentInteraction(.resizes)
-            .preferredColorScheme(.dark)
             #if os(macOS)
                 .frame(minWidth: 420, idealWidth: 520, minHeight: 460, idealHeight: 660)
             #endif

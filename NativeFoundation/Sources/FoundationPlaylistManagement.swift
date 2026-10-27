@@ -1,11 +1,11 @@
 import SwiftUI
 
 enum FoundationPlaylistSheet: String, Identifiable {
-    case manage, addSongs
+    case manage, addSongs, reorderSongs
     var id: String { rawValue }
 }
 
-private struct FoundationPlaylistSheetSize: ViewModifier {
+struct FoundationPlaylistSheetSize: ViewModifier {
     func body(content: Content) -> some View {
         #if os(macOS)
             content.frame(minWidth: 560, idealWidth: 640, minHeight: 500, idealHeight: 640)
@@ -16,7 +16,7 @@ private struct FoundationPlaylistSheetSize: ViewModifier {
 }
 
 /// A shared row keeps the editor and song picker aligned with the library's artwork and type.
-private struct FoundationPlaylistMusicRow: View {
+struct FoundationPlaylistMusicRow: View {
     let item: FoundationItem
     let library: any FoundationLibrary
 
@@ -41,7 +41,7 @@ private struct FoundationPlaylistMusicRow: View {
 }
 
 /// Progress belongs to the sheet; failures use a native alert rather than a custom panel.
-private struct FoundationPlaylistFeedback: ViewModifier {
+struct FoundationPlaylistFeedback: ViewModifier {
     @ObservedObject var operation: FoundationPlaylistOperation
     @State private var error: String?
 
@@ -73,13 +73,18 @@ struct FoundationPlaylistEditor: View {
     var onDeleted: () -> Void = {}
     var onRenamed: (String) -> Void = { _ in }
     let library: any FoundationLibrary
+    var showsDetailsInitially = false
     @State private var name = ""
     @State private var permissions: FoundationPlaylistPermissions?
     @State private var entries: [FoundationPlaylistEntry] = []
     @State private var selection: Set<String> = []
     @State private var query = ""
     @State private var detailsExpanded = false
-    @State private var addingSongs = false
+    private enum RelatedSheet: String, Identifiable {
+        case addSongs, reorderSongs
+        var id: String { rawValue }
+    }
+    @State private var relatedSheet: RelatedSheet?
     @State private var confirmDelete = false
     @State private var loaded = false
     @StateObject private var operation = FoundationPlaylistOperation()
@@ -120,8 +125,15 @@ struct FoundationPlaylistEditor: View {
                         Button("Done") { dismiss() }
                     }
                     ToolbarItemGroup(placement: .primaryAction) {
-                        Button("Add Songs", systemImage: "plus") { addingSongs = true }
+                        Button("Add Songs", systemImage: "plus") { relatedSheet = .addSongs }
                             .disabled(!editable || operation.isPending)
+                        Button("Reorder Songs", systemImage: "arrow.up.arrow.down") {
+                            relatedSheet = .reorderSongs
+                        }
+                        .disabled(
+                            !editable || !library.supportsPlaylistReordering || operation.isPending
+                        )
+                        .accessibilityIdentifier("playlist-editor-reorder-songs")
                         Button("Playlist Details", systemImage: "pencil") {
                             detailsExpanded.toggle()
                         }.disabled(operation.isPending)
@@ -152,17 +164,23 @@ struct FoundationPlaylistEditor: View {
                     Text("The songs will stay in your Jellyfin library.")
                 }
                 .sheet(
-                    isPresented: $addingSongs,
+                    item: $relatedSheet,
                     onDismiss: {
                         if !connectivity.localOnly { operation.run { try await refresh() } }
                     }
-                ) {
-                    FoundationPlaylistSongPicker(playlist: playlist, library: library)
+                ) { destination in
+                    switch destination {
+                    case .addSongs:
+                        FoundationPlaylistSongPicker(playlist: playlist, library: library)
+                    case .reorderSongs:
+                        FoundationPlaylistReorderSheet(playlist: playlist, library: library)
+                    }
                 }
         }
         .modifier(FoundationPlaylistSheetSize())
         .onAppear {
             name = playlist.title
+            if !loaded { detailsExpanded = showsDetailsInitially }
             if !connectivity.localOnly { operation.run { try await refresh() } }
         }
         .onDisappear { operation.cancel() }
@@ -172,7 +190,7 @@ struct FoundationPlaylistEditor: View {
         .onChange(of: connectivity.localOnly) { _, offline in
             if offline {
                 confirmDelete = false
-                addingSongs = false
+                relatedSheet = nil
                 operation.cancel()
             }
         }

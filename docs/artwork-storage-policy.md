@@ -19,8 +19,10 @@ still uses its existing provider read.
 
 - Scope is a digest of the existing server/account scope. Disk names are opaque
   SHA256 keys; no titles, origins, credentials or request URLs are stored.
-- Renditions are 160 and 640 pixels. A larger cached rendition serves smaller requests;
-  a tile cannot satisfy a missing hero rendition. Tagged entries expire after 30 days;
+- Cache rendition buckets are 160, 640, 1280 and 2048 pixels. The current-player
+  default remains 640; higher-resolution artist imagery is an explicit consumer
+  request. A larger cached rendition serves smaller requests; a tile cannot satisfy
+  a missing hero rendition. Tagged entries expire after 30 days;
   untagged entries after 24 hours. A changed tag has a new identity. Nil/failing reads
   are suppressed for 60 seconds in a bounded in-memory identity table; cancellation
   never installs a failure. No automatic retry, prefetch or metadata scanning.
@@ -29,13 +31,17 @@ still uses its existing provider read.
   operation, with atomic writes and disk LRU eviction. This is a retained-cache
   bound, not peak process memory or write staging usage. SwiftUI/current/system
   image retention and native transport buffers are outside it.
-- At most 4 shared image fetch/decode jobs run; pending distinct keys are bounded to 128.
-  Consumers of the same identity/rendition share a job. One cancellation releases
+- At most 4 shared fetch/decode workers run; pending distinct network-job keys are
+  bounded to 128, with reserved playback capacity. Local preview read/decode jobs
+  coalesce separately and have their own 128-key cap; four is not a global bound on
+  every decode or retained view image. Consumers of the same identity/rendition share a job. One cancellation releases
   that consumer; the last cancels queued/native work. A cancelled native job holds
   its slot until it ends. Requests for distinct resolution upgrades can be separate.
 - Decoding and serial disk I/O run off MainActor. Existing ImageIO validation rejects
-  malformed/multi-image/over 2 MiB payloads and source dimensions beyond 2048. Account
-  invalidation cancels work, rejects late publication and disables late disk writes.
+  malformed/multi-image/over 2 MiB payloads and source dimensions beyond 2048 before
+  image decoding/retention. Production URLSession buffers response data before this
+  check, so 2 MiB is not a transfer or peak-allocation ceiling. Account invalidation
+  cancels work, rejects late publication and disables late disk writes.
 - Cache roots are backup-excluded. Files use complete-until-first-authentication
   protection on iOS; account directories are owner-only on Mac. Signed physical
   protection/backup behavior remains an acceptance gate.
@@ -159,3 +165,97 @@ Native simulator flows and local builds establish only their recorded scope. Rea
 contention, physical audibility/background routes, VoiceOver and signed storage/backup
 verification remain separate acceptance gates. Build 117 and its phone data remain
 unchanged by this local refinement task.
+
+
+## v0.6 source audit and remaining acceptance — 2026-10-27
+
+Reviewed exact integration `abd4da785420ef4611a213ac8fe35df74bbcfdb6` and live #14
+with all three comments. The source audit establishes no new runtime defect. No
+fresh unit, native, performance, server or device check was executed for this audit.
+The policy corrections above describe existing behavior, not a cache replacement.
+
+| Boundary | Current source and meaningful existing regression |
+| --- | --- |
+| Retained cost and rendition selection | `FoundationArtworkCache.swift:6–10,97–110,494–506`; `FoundationCurrentArtwork.swift:24–25,168–195`. Eviction, oversized-hero retention and explicit backdrop-resolution tests cover retained limits and default-player resolution. |
+| Protected admission and coalescing | `FoundationArtworkCache.swift:275–338`, `FoundationLibrary.swift:2842–2949`. Actual adapter admission, promoted coalesced artwork, reserved worker and full pending-budget tests exist. |
+| Publish before optional persistence | `FoundationArtworkCache.swift:390–486`; `testDecodedArtworkPublishesWhilePersistenceIsHeldAndRetirementRemovesIt` holds persistence at the real cache seam. |
+| Offline/account retirement | `FoundationArtworkCache.swift:267–271,509–535,789–850`; cold-offline/account-isolation, delayed invalidation/no-resurrection and live-directory startup-cleanup tests exist. |
+| Current and system artwork | `FoundationCurrentArtwork.swift:92–165,211–247`; delayed provider cancellation, changed selection/account and explicit missing-image recovery tests exercise the existing owner. |
+| Independent browsing publication | `FoundationBrowseModel.swift:282–295`; `FoundationPresentationTests.testNewAlbumsCompleteWhileTracksStallAndCancelledTrackResultStaysUnpublished` exercises one section completing while another remains held. |
+
+These are named regression seams, not a new passing-suite claim. Use the exact
+candidate's existing evidence before deciding which affected suites need execution.
+Keep the prior hosted artwork fixture failures and later unchanged-source
+nonreproduction distinct; neither establishes a cause or justifies relaxed deadlines.
+
+The 16 MiB value counts retained shared entries, including encoded data and decoded
+row bytes. Pending persistence images, preview decoding, current/system artwork,
+view-owned images and transport buffers contribute separately to process memory.
+There is no claim of automatic memory-pressure purging or a measured process-wide
+plateau. A missing pressure notification handler alone does not establish a defect.
+The upcoming primary-genre index/cache work is separately reviewed under #211; its
+additional catalog storage must not be inferred to fit the older 2 MiB page budget.
+This audit changes no catalog-cache code or budget.
+
+Perform the following in the coordinator's serialized lane on an exact signed,
+installed candidate. Record platform, version/source, server version, network and
+route, window/text size, foreground/background state, debugger/Mirroring state and
+cache-generation preparation. Use a sanctioned fixture account/library where
+request counts, controlled errors or cleanup need server access. Do not sign out
+an unrecoverable real account or delete retained media to manufacture a cold cache.
+
+1. **Cold and warm reuse.** Start a fresh sanctioned fixture scope or an already
+   authorized disposable-cache reset. Visit one Home album, the matching Library
+   song rows and its detail, then revisit the same surfaces. Record artwork GET
+   counts by rendition/role and time to first useful content separately from final
+   artwork. Compare identical tag/identity and elapsed freshness windows; a new
+   image revision or a larger requested rendition is not an unexplained duplicate.
+   Separate initial loading, warm memory reuse and cold-process disk reuse. An app
+   update can invalidate disposable caches, so a newer build is not a warm baseline.
+2. **Useful content and playback under browsing.** Start audible playback, open
+   Home/New/Library/Search and scroll, then expand Now Playing, skip and seek.
+   Observe that completed sections and retained images remain usable while a
+   sanctioned slow/failed optional read is held. Record audible outcomes and
+   action order; a progressing timer or artwork timing event does not prove audio.
+   Check background/return and affected output routes. Browsing screens have equal
+   admission; do not label a particular screen faster by granting it priority.
+3. **Offline and recovery.** Warm selected artwork, end the process, disable the
+   fixture's network and relaunch the same build. Revisit warmed and never-warmed
+   items; verify retained artwork or deterministic placeholders without remote
+   requests. Reconnect and exercise the existing explicit retry/Now Playing-open
+   recovery boundary. A usable same-identity preview must survive an optional
+   upgrade failure; changed identities must not show the old image.
+4. **Pressure and storage accounting.** With a repeatable bounded browsing sequence,
+   record cache-retained cost, recognized artwork disk bytes and process memory
+   separately at the same checkpoints. Existing Cached Media measurements wait for
+   pending persistence and are not peak-process memory. Use controlled fixtures to
+   exceed test quotas; do not fill the owner's disk or purge unknown files. Reuse
+   the existing eviction/retained-download tests for synthetic pressure. If device
+   profiling shows growth, capture the responsible retained owners before changing
+   worker budgets or adding a pressure-purge mechanism.
+5. **Account and failure boundaries.** On recoverable sanctioned accounts, verify
+   failed credential removal preserves the active account/data; successful sign-out
+   retires cached/current/system results and does not expose them after another
+   account opens. Verify cleanup failures remain explicit. Preserve the pending
+   reauthentication quarantine, legacy-Keychain prohibition and retained-download
+   ownership contract. No old backups, server-token revocation or secure erasure
+   is established by deleting a local cache directory.
+6. **Signed storage and accessibility.** Verify directory/file protection and backup
+   exclusion on signed physical artifacts after creation and replacement. Record
+   locked-after-first-unlock/background behavior separately; Simulator assertions
+   do not prove device protection or actual backup exclusion. Check Light/Dark,
+   increased text size/contrast, reduced motion/transparency and VoiceOver for the
+   touched artwork/placeholder/status surfaces. Do not infer accessibility from a
+   cached-image test or one normal-size screenshot.
+
+Existing DEBUG `FoundationLoadTiming` milestones can distinguish cache read,
+request, decode, publication and persistence durations when the coordinator chooses
+a bounded diagnostic capture. They do not directly measure first meaningful text,
+scroll smoothness or audibility. Keep raw traces and account/media mappings private.
+Shared evidence uses aliases, aggregate request-kind/rendition counts, durations,
+byte deltas and per-row pass/fail/pending. Exclude titles, origins, paths,
+credentials/headers, stable account/item IDs and raw request bodies.
+
+#14 remains open until the current physical/performance/account/accessibility and
+signed protection/backup criteria are accepted. This packet performs no cleanup,
+new instrumentation, native run, policy activation, publication or distribution.

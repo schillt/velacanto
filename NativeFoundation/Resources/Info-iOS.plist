@@ -15,6 +15,7 @@
 <key>NSSiriUsageDescription</key><string>Ask Siri to find and play music in your library.</string>
 <key>INIntentsSupported</key><array><string>INPlayMediaIntent</string></array>
 <key>NSLocalNetworkUsageDescription</key><string>Connect to your personal music library.</string>
+<key>NSUserActivityTypes</key><array><string>com.chameleonenterprise.velacanto.continuation.v1</string></array>
 <key>UILaunchScreen</key><dict/>
 <key>UIBackgroundModes</key><array><string>audio</string></array>
 <key>UISupportedInterfaceOrientations</key><array><string>UIInterfaceOrientationPortrait</string><string>UIInterfaceOrientationLandscapeLeft</string><string>UIInterfaceOrientationLandscapeRight</string></array>

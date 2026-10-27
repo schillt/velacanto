@@ -284,6 +284,78 @@ final class FoundationLibraryActionsTests: XCTestCase {
         }
     }
 
+    func testStaleCollectionAlertCannotDismissOrRetryNewActionWithIdenticalError() async throws {
+        for reuseOwner in [false, true] {
+            let responses = CollectionResponses()
+            let library = makeCollectionLibrary { request in
+                if await responses.next() <= 2 { throw URLError(.timedOut) }
+                return selfContainedResponse(
+                    request,
+                    items: "{\"Id\":\"00000000000000000000000000000002\",\"Type\":\"Audio\"}")
+            }
+            let player = FoundationPlayer(resolve: { _ in throw CancellationError() })
+            let actions = makeCollectionActions()
+            let firstOwner = UUID()
+            actions.play(
+                collectionItem, shuffled: false, library: library, player: player, owner: firstOwner
+            )
+            await actions.queueTask?.value
+            let oldOutcome = try XCTUnwrap(actions.collectionOutcome(ownedBy: firstOwner))
+            XCTAssertTrue(oldOutcome.canRetry)
+            let nextOwner = reuseOwner ? firstOwner : UUID()
+            actions.play(
+                collectionItem, shuffled: false, library: library, player: player, owner: nextOwner)
+            await actions.queueTask?.value
+            let nextOutcome = try XCTUnwrap(actions.collectionOutcome(ownedBy: nextOwner))
+            XCTAssertEqual(oldOutcome.message, nextOutcome.message)
+            XCTAssertNotEqual(oldOutcome, nextOutcome)
+            if !reuseOwner { XCTAssertNil(actions.collectionOutcome(ownedBy: firstOwner)) }
+            XCTAssertNil(actions.collectionOutcome(ownedBy: nil))
+            actions.dismissQueueOutcome(matching: oldOutcome)
+            actions.retryQueueAddition(matching: oldOutcome)
+            XCTAssertEqual(actions.collectionOutcome(ownedBy: nextOwner), nextOutcome)
+            let callsBeforeRetry = await responses.count()
+            XCTAssertEqual(callsBeforeRetry, 2)
+            actions.retryQueueAddition(matching: nextOutcome)
+            XCTAssertNil(actions.collectionOutcome(ownedBy: nextOwner))
+            await actions.queueTask?.value
+            let callsAfterRetry = await responses.count()
+            XCTAssertEqual(callsAfterRetry, 3)
+            XCTAssertEqual(player.queue.count, 1)
+            XCTAssertNil(actions.collectionOutcome(ownedBy: nextOwner))
+            player.stop()
+        }
+    }
+
+    func testRetiredCollectionAlertCannotRetryOrClearChangedOutcome() async throws {
+        let responses = CollectionResponses()
+        let library = makeCollectionLibrary { _ in
+            _ = await responses.next()
+            throw URLError(.timedOut)
+        }
+        let player = FoundationPlayer(resolve: { _ in throw CancellationError() })
+        let actions = makeCollectionActions()
+        let owner = UUID()
+        actions.play(
+            collectionItem, shuffled: false, library: library, player: player, owner: owner)
+        await actions.queueTask?.value
+        let displayed = try XCTUnwrap(actions.collectionOutcome(ownedBy: owner))
+        actions.cancelQueueAdditionOwned(by: owner)
+        let retired = try XCTUnwrap(actions.collectionOutcome(ownedBy: owner))
+        XCTAssertFalse(retired.canRetry)
+        actions.retryQueueAddition(matching: displayed)
+        actions.dismissQueueOutcome(matching: displayed)
+        XCTAssertEqual(actions.collectionOutcome(ownedBy: owner), retired)
+        let calls = await responses.count()
+        XCTAssertEqual(calls, 1)
+        actions.dismissQueueOutcome(matching: retired)
+        XCTAssertNil(actions.collectionOutcome(ownedBy: owner))
+        XCTAssertNil(actions.queueErrorMessage)
+        actions.invalidate()
+        actions.retryQueueAddition(matching: displayed)
+        XCTAssertNil(actions.collectionOutcome(ownedBy: owner))
+    }
+
     func testCollectionFailureCanRetryExplicitlyWithoutReplacingQueueUntilSuccess() async throws {
         let responses = CollectionResponses()
         let library = makeCollectionLibrary { request in

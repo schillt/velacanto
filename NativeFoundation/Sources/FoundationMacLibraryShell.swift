@@ -36,7 +36,7 @@ import SwiftUI
     }
 
     struct FoundationMacNavigationItem: Hashable {
-        let item: FoundationItem
+        var item: FoundationItem
         let headerOwnerID = UUID().uuidString
 
         static func == (lhs: Self, rhs: Self) -> Bool { lhs.headerOwnerID == rhs.headerOwnerID }
@@ -51,6 +51,17 @@ import SwiftUI
 
         func open(_ item: FoundationItem) { path.append(.init(item: item)) }
         func returnToRoot() { path.removeAll() }
+
+        /// Incoming Handoff is a destination, not a local collection-binding change.
+        /// Replace the live stack directly even when its root has no such binding.
+        func continueBrowsing(_ item: FoundationItem) { path = [.init(item: item)] }
+
+        func updatePlaylistTitle(id: String, name: String) {
+            for index in path.indices
+            where path[index].item.kind == .playlist && path[index].item.id == id {
+                path[index].item.title = name
+            }
+        }
     }
 
     private struct FoundationMacNavigationKey: EnvironmentKey {
@@ -123,6 +134,7 @@ import SwiftUI
             let owner = navigation.path.last?.headerOwnerID ?? rootHeaderOwnerID
             return headerScrollByItem[owner] ?? false
         }
+        @Environment(\.foundationHandoff) private var handoff
         @Binding var playbackInset: CGFloat
         let showsMiniPlayer: Bool
         private let homeIconSize: CGFloat = 18
@@ -237,7 +249,16 @@ import SwiftUI
                     sidebarWidth = $0
                 }
             } detail: {
-                NavigationStack(path: $navigation.path) {
+                NavigationStack(
+                    path: Binding(
+                        get: { navigation.path },
+                        set: { path in
+                            if path != navigation.path {
+                                handoff?.navigationChangedByUser()
+                                navigation.path = path
+                            }
+                        })
+                ) {
                     content(selection)
                         .modifier(FoundationMacScrollChrome())
                         .environment(\.foundationMacHeaderOwnerID, rootHeaderOwnerID)

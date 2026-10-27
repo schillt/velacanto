@@ -10,6 +10,79 @@ final class FoundationNowPlayingTests: XCTestCase {
     private let track = FoundationItem(
         id: "synthetic", title: "Test title", subtitle: "Test artist", kind: .track, duration: 8)
 
+    func testHLSCredentialResourcesPreservePlayingMetadataWithoutPublishingSecrets() async throws {
+        let file = try XCTUnwrap(FoundationTestTones.resolve(FoundationTestTones.items[0]))
+        let token = "synthetic-metadata-credential-25"
+        let sourceID = "synthetic-private-source-25"
+        let sessionID = "synthetic-private-session-25"
+        for delivery in [FoundationPlaybackSource.Delivery.hlsCopy, .hlsAAC] {
+            let url = try XCTUnwrap(
+                URL(
+                    string: "https://playback-metadata.invalid/audio/master.m3u8?ApiKey=\(token)"
+                        + "&MediaSourceId=\(sourceID)&PlaySessionId=\(sessionID)"))
+            var receivedURLs: [URL] = []
+            let player = FoundationPlayer(
+                resolve: { _ in
+                    XCTFail("Resource resolver must own this selection")
+                    return file
+                },
+                resolveResource: { _ in
+                    FoundationPlaybackResource(
+                        url: url,
+                        source: .init(
+                            delivery: delivery, mediaSourceID: sourceID, serverSessionID: sessionID)
+                    )
+                },
+                makeItem: { received in
+                    receivedURLs.append(received)
+                    // Exercise real native playback without allowing a synthetic remote request.
+                    return AVPlayerItem(url: file)
+                },
+                activateSession: {}, deactivateSession: {})
+            player.nativePlayer.volume = 0
+            let bridge = FoundationNowPlaying(player: player)
+            defer {
+                bridge.invalidate()
+                player.stop()
+            }
+            player.setQueue([track], selectedIndex: 0)
+            await player.selectionTask?.value
+            await player.playTask?.value
+            await waitForPlayback(player)
+            await bridge.updateTask?.value
+            XCTAssertEqual(player.state, .playing)
+            XCTAssertTrue(player.wantsPlayback)
+            XCTAssertNil(player.errorMessage)
+            XCTAssertEqual(receivedURLs, [url])
+            let occurrence = try XCTUnwrap(player.selectedEntryID)
+            let content = try XCTUnwrap(bridge.content as? MusicContent)
+            XCTAssertEqual(bridge.entryID, occurrence)
+            XCTAssertEqual(content.id, occurrence.uuidString)
+            XCTAssertEqual(content.songTitle, track.title)
+            XCTAssertEqual(content.artistName, track.subtitle)
+            XCTAssertEqual(content.albumName, "")
+            XCTAssertNil(content.artwork)
+            XCTAssertNotNil(bridge.playbackSnapshot)
+            // Include the full public content projection, not just an empty/error placeholder.
+            let metadata = String(reflecting: content)
+            for sentinel in [
+                token, url.absoluteString, "playback-metadata.invalid", sourceID, sessionID,
+            ] {
+                XCTAssertFalse(metadata.contains(sentinel))
+            }
+            #if DEBUG
+                XCTAssertTrue(FoundationJournal.shared.isEnabled)
+                let journal = FoundationJournal.shared.snapshot()
+                XCTAssertTrue(journal.contains("requestedDelivery=" + delivery.rawValue))
+                for sentinel in [
+                    token, url.absoluteString, "playback-metadata.invalid", sourceID, sessionID,
+                ] {
+                    XCTAssertFalse(journal.contains(sentinel))
+                }
+            #endif
+        }
+    }
+
     func testRepeatAllEnablesSystemNextAtEndAndWrapsOccurrence() async throws {
         let source = NowPlayingSourceProbe()
         let player = FoundationPlayer(

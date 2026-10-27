@@ -294,10 +294,14 @@ extension FoundationItem {
     }
 
     var catalogArtworkItem: FoundationItem {
-        guard kind == .track, let album else { return self }
+        guard kind == .track, let album,
+            catalogSource == nil || album.catalogSource == nil
+                || album.catalogSource == catalogSource
+        else { return self }
         return FoundationItem(
             id: album.id, title: album.title, subtitle: "", kind: .album,
-            duration: nil, primaryImageTag: album.primaryImageTag)
+            duration: nil, primaryImageTag: album.primaryImageTag,
+            catalogSource: album.catalogSource ?? catalogSource)
     }
 }
 

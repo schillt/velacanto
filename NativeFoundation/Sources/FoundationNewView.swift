@@ -4,6 +4,7 @@ import SwiftUI
 struct FoundationNewView<Profile: View>: View {
     @EnvironmentObject private var downloads: FoundationDownloads
     @EnvironmentObject private var connectivity: FoundationConnectivity
+    @EnvironmentObject private var primaryGenres: FoundationPrimaryGenresModel
     let profile: Profile
     let library: any FoundationLibrary
     @ObservedObject var player: FoundationPlayer
@@ -31,7 +32,9 @@ struct FoundationNewView<Profile: View>: View {
                     Text(error).foregroundStyle(.red)
                 }
             }.padding()
+                .foundationBottomChromeEndPadding()
         }
+        .foundationBottomChromeScrollClearance()
         .refreshable {
             guard isActive, !connectivity.localOnly else { return }
             tracks.request(.refresh)
@@ -77,20 +80,12 @@ struct FoundationNewView<Profile: View>: View {
                     item: item, library: library, isActive: isActive && isVisible,
                     open: {},
                     play: {
-                        guard let selection = tracks.trackQueue(selecting: index) else { return }
-                        if connectivity.localOnly {
-                            guard downloads.isReady(selection.items[selection.index]) else {
-                                return
-                            }
-                            let ready = selection.items.filter { downloads.isReady($0) }
-                            let index = selection.items.prefix(selection.index).filter {
-                                downloads.isReady($0)
-                            }.count
-                            player.setQueue(ready, selectedIndex: index)
-                        } else {
-                            player.setQueue(selection.items, selectedIndex: selection.index)
-                        }
-
+                        guard
+                            let selection = tracks.trackQueue(
+                                selecting: index,
+                                isAvailable: { !connectivity.localOnly || downloads.isReady($0) })
+                        else { return }
+                        player.setQueue(selection.items, selectedIndex: selection.index)
                     }, player: player, showsTrackArtwork: true)
                 if index < min(5, tracks.items.count - 1) { Divider() }
             }
@@ -165,34 +160,21 @@ struct FoundationNewView<Profile: View>: View {
         }
     }
 
-    /// Most recent occurrence wins; only the existing first 24 albums contribute.
-    private var recentGenres: [(genre: FoundationItem, artwork: FoundationItem)] {
-        var seen = Set<String>()
-        var result: [(genre: FoundationItem, artwork: FoundationItem)] = []
-        for album in albums.items.prefix(24) {
-            for reference in album.genres where seen.insert(reference.id).inserted {
-                result.append(
-                    (
-                        FoundationItem(
-                            id: reference.id, title: reference.title, subtitle: "",
-                            kind: .genre, duration: nil), album
-                    ))
-                if result.count == 6 { return result }
-            }
-        }
-        return result
+    private var recentGenres: [FoundationPrimaryGenreRecord.RecentGenre] {
+        primaryGenres.completedRecord(libraryScope: library.primaryGenreIndexScope)?.recentGenres(
+            songs: tracks.items,
+            readySongIDs: connectivity.localOnly ? primaryGenres.readySongIDs : nil
+        ) ?? []
     }
 
     @ViewBuilder private var genreSection: some View {
-        let entries = recentGenres.filter {
-            !connectivity.localOnly || !downloads.browseTracks(for: $0.genre).isEmpty
-        }
+        let entries = recentGenres
         if !entries.isEmpty {
             VStack(alignment: .leading, spacing: 12) {
                 Text("Genres with New Music").font(.title2.bold())
                 ScrollView(.horizontal) {
                     LazyHStack(spacing: 16) {
-                        ForEach(entries, id: \.genre.id) { entry in
+                        ForEach(entries, id: \.genre.genreIdentity) { entry in
                             FoundationGenreCard(
                                 genre: entry.genre, library: library,
                                 isActive: isActive && isVisible,
@@ -205,6 +187,20 @@ struct FoundationNewView<Profile: View>: View {
                 .scrollIndicators(.hidden)
                 .foundationMacShelfUnderlap()
             }
+        } else if primaryGenres.completedRecord(libraryScope: library.primaryGenreIndexScope) == nil
+        {
+            Text("Build primary genres in Library to browse new music by genre.")
+                .font(.subheadline).foregroundStyle(.secondary)
+        }
+        if let record = primaryGenres.completedRecord(libraryScope: library.primaryGenreIndexScope),
+            tracks.items.contains(where: {
+                $0.kind == .track
+                    && ($0.catalogSource == nil || $0.catalogSource == record.snapshot.scope.source)
+                    && record.snapshot.primaryBySongID[$0.id] == nil
+            })
+        {
+            Text("Some recent songs are not in this index. Refresh primary genres in Library.")
+                .font(.subheadline).foregroundStyle(.secondary)
         }
     }
 

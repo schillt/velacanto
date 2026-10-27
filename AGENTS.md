@@ -1,387 +1,103 @@
-# VelaCanto agent guide
+# VelaCanto agent instructions
 
-## Authority and current product
+## Current authority
 
-GitHub `schillt/velacanto` is the shared source of truth: integrated source,
-versioned project instructions, issues and their latest relevant comments.
-Projects and milestones track delivery status; they do not override the issue
-contract or prove integration. Fetch `origin/alpha` before starting current
-implementation. Local notes, chat summaries and unpublished plans are working
-material, not integrated dependencies. Record approved changes in GitHub through
-the workspace maintainer so every worker receives the same contract.
-
-The owner-approved workflow, updated 2026-10-10, keeps development branches and
-worktrees local. Publish accepted changes to `alpha`; promote candidates through
-an **alpha → beta PR**. A local `codex/` branch name is an implementation detail,
-never a branch to publish to GitHub. Main/release distribution
-requires its own authorization and acceptance. See [workflow](docs/development-workflow.md).
-This supersedes the earlier requirement to publish every task branch and open a
-PR into alpha. Preserve existing branches and historical PR evidence; do not
-force-push, rewrite history or delete unintegrated work during this transition.
-
-Owner naming clarification (2026-10-23): spell the product **VelaCanto**.
-Canonical Release/TestFlight builds display **VelaCanto**, without Alpha. Local
-Debug/UITesting builds retain **VelaCanto Alpha**; an explicitly local Release
-build may override the name. Preserve targets, bundle IDs and stored-data identities.
-See the product-naming section of docs/development-workflow.md.
-
-Before editing, compare the fetched alpha guide, applicable nested guides, current
-owner instructions and the issue contract. Check that board workflow descriptions
-agree. Report material conflicts before dependent work; never replace a dirty
-checkout's instructions to make them appear current. Explicit owner instructions
-take precedence, but a scoped exception does not permanently change the default
-workflow. Record its scope and reconcile shared documentation.
-
-Current release work targets **0.5.0 — Alpha Preview**, candidate build 217,
-from accepted local build 215. Read `docs/0.5.0-acceptance.md`,
-`docs/0.5.0-release-notes.md` and `docs/0.5.0-testflight-notes.md` for current scope,
-known limits and separate publication/distribution gates. The 0.4 development
-record remains chronological evidence, not a current feature exclusion list.
-The owner authorizes accepted integration to alpha and preparation for TestFlight;
-beta/main promotion remains separate. Defer unfinished scope to the next milestone
-without converting incomplete checks into passes. “Preview” does not require a
-preview branch.
+Current owner instructions and the live GitHub issue contracts govern the work.
+The [0.6 milestone](https://github.com/schillt/velacanto/milestone/9) is the delivery
+scope source of truth. Read each issue and its latest relevant comments before
+changing it. This guide replaces the preceding agent guides at the owner's
+request; older release records remain historical evidence, not current commands.
 
 The maintained app is `NativeFoundation/VelacantoFoundation.xcodeproj`, scheme
-`VelacantoFoundation`, product `Velacanto`; distribution display name VelaCanto.
-Read the nested guide, ADR 0012/0013 and playback contract before implementation.
-Native CarPlay, HLS streaming, quality/download options, playlist management and
-modern Mac credentials are now implemented. Historical plans marking them excluded
-or DEBUG-only are superseded for current source. Preserve internal bundle/storage
-identities and retained work. Build 107 remains rejected; never restore legacy
-controllers to satisfy superseded plans.
+`VelacantoFoundation`. Product spelling is **VelaCanto**. Preserve internal bundle,
+Keychain, storage and target identities. Local builds may display VelaCanto Alpha;
+canonical distribution naming remains VelaCanto. Publisher documentation uses
+**NovoLuxor**, `support@novoluxor.dev`, United States. Privacy and terms remain drafts.
 
-The historical 0.3.5 exception authorized PR #174 into alpha after passing checks,
-a GitHub prerelease and existing-workflow internal TestFlight, with documented
-known bugs and the native volume slider retained. That exception did not authorize
-main promotion. The later accepted preview `de7abe9` was promoted through PR #190
-on 2026-10-07; newer 0.4 source is excluded. These recorded release decisions do
-not establish that the volume defect is fixed. Record current checks,
-exceptions and signed distribution status separately; no public App Store
-submission is implied. Do not change runtime/version metadata in planning-only
-work. Apply `docs/engineering-rubric.md` to future reviews without inventing grades.
+Read [the current checkpoint](docs/0.6.0-alpha-checkpoint.md),
+[the agent handoff](docs/0.6.0-agent-handoff.md), and the nested app guide first.
+Build233 source, signing, installation and verification limits are recorded in
+the checkpoint and relative-path runtime manifest. A source tree or green unit gate
+alone does not establish physical acceptance or distribution readiness.
 
-## Permanent branch preservation and local-only work
+## Branches and publication
 
-Owner directive (2026-10-25): GitHub `alpha`, `beta` and `main` must always
-exist. Never delete, rename, replace or retire any of these three branches.
-Promotion advances their commits through the established PR flow; it never removes
-the source branch. Never select Delete branch after a promotion or enable merged
-branch auto-deletion that could remove a permanent branch. Verify all three
-branches and their expected heads before and after every promotion. If one is
-missing, stop dependent promotion work and restore its exact recorded head without
-rewriting any surviving branch. Preserve these rules in future instruction edits;
-do not remove or weaken them as routine cleanup or workflow maintenance.
+Preserve GitHub `alpha`, `beta` and `main`. Never delete, rename, replace,
+force-push or rewrite them. Task branches and worktrees remain local; do not
+publish `codex/*` or other temporary branch refs.
 
-All `codex/*` branches and other local task/worktree branches stay local.
-Never push, create or publish those branch refs to GitHub, including for remote
-review, CI, a draft PR or a temporary candidate. Never push all branches or mirror
-local refs. Local commits are allowed; publish only reviewed, accepted integration
-to `alpha`, then promote `alpha → beta → main` through separately authorized
-PRs. A commit's former local branch name does not require publishing that ref.
-The owner prohibition supersedes earlier remote-task-branch exceptions. Preserve
-existing remote historical branches until separately authorized cleanup; do not
-delete them as an inferred part of this policy.
+The owner authorized one reviewed usable stopping-point integration to GitHub
+`alpha`, after installing that exact build on the Mac and iPhone and including
+current documentation and handoff reports. This is not standing permission for
+future publication, beta/main promotion, tags, releases, TestFlight or App Store
+submission. Revalidate current alpha before a normal non-force publication and
+preserve beta/main heads. Stop on a protection rejection; do not weaken a rule or
+publish a task branch as a workaround.
 
-## Mandatory release-milestone disposition gate
+Before any actual release/promotion/distribution, audit every page of the live
+milestone. Each item needs completed acceptance, explicit later-milestone
+replanning, or an owner-approved discarded disposition. Do not close issues,
+defer scope or mark checks passed merely to clear the gate. Development alpha
+source publication is not that release disposition.
 
-Owner directive (2026-10-25): never release a version while any issue in its
-current release milestone remains unresolved and undisposed. Before a version
-release, release promotion, release tag, GitHub release/prerelease or distribution,
-inspect the live GitHub milestone and all its issues, including every results page.
-Every issue must have one of these recorded outcomes:
+## Work and verification
 
-- **Completed:** the issue's acceptance criteria are satisfied and the issue is
-  closed as completed, with relevant integration and verification evidence.
-- **Replanned/deferred:** remaining work is explicitly recorded and the issue is
-  assigned to a specific later milestone, removed from the current release
-  milestone, and reflected consistently in active Project tracking.
-- **Discarded:** the decision and reason are recorded, the issue is closed as
-  not planned (or equivalent), and it is removed from the current release milestone
-  and active Project/roadmap tracking. Preserve the historical issue record.
+Keep all new source, build output and detailed evidence on non-synchronized local
+disk. Do not write development work into iCloud. Preserve historical archives and
+dirty work; do not repair or replace an older checkout to simplify integration.
 
-An open issue, a local note, a draft plan, an implementation-only claim or simply
-removing a milestone assignment does not satisfy this gate. Do not silently mark
-unfinished work completed, assign no later milestone to deferred work, or discard
-issues merely to clear the gate. Dispositions must follow the owner's approved
-scope decisions; unresolved decisions block release.
+Parallel bounded agents are authorized. Give each distinct topic clear file
+ownership and a separate local working copy. Do not edit another worker's files.
+Integrate serially and review the actual combined diff. A single coordinator owns
+the Xcode/simulator/device lane; read-only review and source work can run alongside
+it. Use existing authorized simulators/devices; preserve app identities and data.
 
-Record the milestone, issue dispositions, verification time and remaining issue
-count in the release evidence. Recheck the live milestone immediately before the
-release action; newly added or reopened unresolved issues block it. Passing tests,
-a prior release authorization, source publication or TestFlight activity does not
-substitute for this check. This gate is additional to existing exact-source quality,
-acceptance and release authorization requirements. Ordinary local development and
-accepted development integration to alpha remain governed by their existing rules.
-Preserve this requirement in future guide edits; never weaken it during routine
-cleanup or release preparation.
+Run proportionate tests for changed behavior, then combined iOS/macOS and signed
+package checks for the frozen build. Preserve failed logs and diagnose them before
+rerunning. Poll the same live process handle; a timeout is not completion. Do not
+relax assertions, add arbitrary sleeps, bypass privacy protection, or count skipped
+or inconclusive UI checks as accepted. Avoid automatic failure diagnostics when
+explicit bounded evidence already covers the failure. Report actual scope and
+counts, including platform differences, pending native checks and limitations.
 
-## Roles and parallel delegation
+## Runtime and privacy invariants
 
-Subagents are authorized for independent, bounded tasks without asking for each
-assignment. Delegate when it enables useful parallel progress; simple tasks can
-remain with one agent. Delegation does not expand scope or count as acceptance.
+Use the existing player, queue, native activation and continuation owners. Audio
+and Now Playing remain independent of optional browsing and artwork. Only actual
+playback/Now Playing work receives preferential admission; ordinary browsing stays
+bounded and independently published. Preserve cancellation, account retirement,
+occurrence identity and rejection of stale callbacks. Read the existing
+[playback protection contract](docs/playback-protection.md).
 
-Owner instruction (2026-10-13): create a fresh subagent for each distinct topic or
-issue. Do not reuse an agent from another topic by assigning unrelated work through
-a follow-up. Follow-ups may clarify or continue that agent's original task. When
-agent capacity is exhausted, finish work with the primary agent or wait for a new
-agent slot; do not repurpose an older agent to bypass the boundary.
+Keep original view appearance and native underlap. Expanded navigation clearance
+belongs at the end of scroll content, not in an opaque overlay or clipped viewport.
+Related Now Playing sheets must respect system appearance and their context.
 
-- **Implementation agent:** implements one assigned issue per isolated worktree,
-  writes meaningful focused tests and hands off exact commits and limitations.
-- **Acceptance agent:** independently tests the supplied exact candidate and
-  records pass/fail/pending plus reproduction. Does not silently modify the source
-  being accepted or invent physical/audible evidence.
-- **Workspace maintainer:** maintains project/setup/docs, publishes accepted local
-  integration to alpha, coordinates promotion PRs and build/device slots, and
-  executes authorized promotion merges.
-  Does not self-certify product acceptance.
-- **Auditor:** reviews scope, design, ownership, privacy, findings and acceptance
-  evidence; requests focused corrections and records disposition.
-- **Owner:** resolves scope/release decisions and authorizes final merges or
-  explicitly delegates that authority. A task assignment alone is not release
-  publication or automatic merge authorization.
+Continue Listening is remote-only: reuse its media card for another device's
+track, artist, album, artwork and reported progress. No local resume fallback or
+Now Playing duplication. Dismissal hides the card without stopping playback; use
+native accessible trash/swipe controls. Browser continuation is separate pending
+work; do not show Apple Handoff instructions for clients that cannot use it.
 
-Each handoff includes issue/subtask, exact base SHA, owned paths, dependencies,
-acceptance criteria and privacy constraints. Separate issues use separate
-worktrees. Workers within one issue require non-overlapping write ownership;
-never edit a file concurrently. Read-only review/research can run alongside
-implementation. Resolve conflicts before writes; preserve others' dirty work.
-Report completion or blockers promptly to the coordinating agent with the exact
-candidate and next owner; do not wait for the owner to ask for status. For a small
-patch, use focused implementation, one independent acceptance pass, an integrated
-build and the relevant physical sanity check. Repeat gates only for changed scope,
-failures or unresolved evidence. Keep runtime candidates local until buildable
-and physically sanity-checked unless the owner authorizes earlier publication.
+The owner selected best-effort automatic stopping for browser/other-client
+continuation: only after actual receiver start, recheck the original session and
+send one stop if it still matches. Report unsupported, changed or unconfirmed
+source control honestly. Preserve reported queue order/duplicate occurrences;
+never claim unavailable original shuffle state, silently truncate, or transfer
+credentials. Keep the stronger native Handoff safeguards intact.
 
-All agents currently using one GitHub account are one GitHub identity. Their
-independent reports are useful evidence but cannot satisfy an approving review
-from a different account. Never impersonate another reviewer or bypass a required
-review. Configure required approval counts only when eligible reviewers exist;
-otherwise record agent review and the owner's merge decision explicitly.
+Validate server/user/source ownership and server permissions before async results
+or mutations. Do not weaken file protection to make tests pass. No new player,
+retry/polling/watchdog framework, hidden whole-catalog scan or unrelated provider.
+The optional pin-sync configuration remains off; no Cloud container/capability or
+workflow change is implied.
 
-## Local development, alpha publication and promotion
+The repository is public. Stage explicit reviewed paths, never broad `git add .`
+or `git add -A`. Keep credentials, private server/media/account/device details,
+profiles, signed apps, raw traces, receipts, local inventories, generated Xcode
+state and Cloud registration manifests out of commits. Legal drafts are not
+effective agreements. Read `SECURITY.md` and `docs/publication-safety.md`.
 
-The normal flow is **issue → local task branch/worktree → accepted local
-integration → alpha publication → alpha → beta PR**. Beta is the validation
-stage. Promotion from beta into main and tagged distribution needs a separate
-owner-authorized release decision; preview is not a mandatory stage.
-
-1. Read the assigned issue and latest relevant comments. Record outcome, user
-   behavior, boundaries, acceptance, dependencies, verification and P0–P3 priority.
-2. Fetch alpha. Confirm dependencies and worktree ownership. Start one clean,
-   isolated local branch/worktree per issue from current `origin/alpha`; record
-   its full base SHA. Never reuse another worker's dirty tree. Do not publish
-   temporary task branches or any `codex/*` branch to GitHub. Review locally and
-   publish accepted integration only to alpha.
-3. Implement the issue contract and commit only explicit owned paths. Run focused
-   checks and `git diff --check`; preserve others' dirty work and references.
-4. Acceptance and audit review the exact local candidate. Resolve discussions and
-   scoped P0/P1 findings, and complete relevant physical checks or record an
-   owner-approved pending gate. A task assignment alone is not acceptance or
-   permission to publish unreviewed work.
-5. The maintainer integrates accepted local commits serially from current alpha.
-   If alpha advanced, integrate its changes locally and rerun affected checks.
-   Review the complete publication diff and sanitized issue evidence before writing.
-6. Publish accepted integration to alpha with a normal fast-forward push or the
-   GitHub connector's non-force ref update guarded by the expected old SHA. Never
-   force-push or bypass actual protection. If a rule blocks publication, report
-   the rule; do not weaken settings or create a remote task branch as a workaround.
-7. Verify the published source/tree and record its integrated SHA, local evidence
-   and remaining gates in the issue or development record. Do not publish local
-   signed apps, private evidence, credentials or raw traces.
-8. Freeze an owner-selected alpha candidate. Run the required hosted release gate
-   on its exact SHA, then open/merge **alpha → beta** with a merge commit after
-   success and the owner-authorized promotion decision. Recheck head/base before
-   merging. If alpha changes, freeze and validate the new candidate rather than
-   silently promoting untested changes. No separate remote candidate branch is
-   required. Use immutable candidate tags when tagging is authorized.
-9. Update issues/milestones after integration and actual acceptance. Keep
-   implementation, accepted behavior and distribution separate. Remove local
-   task worktrees only after proving integration and preserving needed evidence.
-
-Do not squash long-lived promotion branches or rebase/force-push shared branches.
-Retain existing beta/preview/recovery branches until explicitly retired. Independent
-agent review is useful evidence, not an approving review from another GitHub account.
-
-## GitHub access and enforcement
-
-Before a GitHub write verify the authenticated account, intended repository and
-write permission using the available interface. The authenticated GitHub plugin
-is an approved interface for repository/issues/PRs and supported Git data writes.
-Authenticated `gh` or Git may also be used when already available; CLI sign-in is
-not a prerequisite when the plugin can perform the task. Use an authenticated
-browser only for capabilities the connector does not expose, such as workflow
-manual dispatch. Never extract or copy tokens/cookies between interfaces.
-
-Private Project work requires appropriate access; query field/option IDs rather
-than copying stale values. Stop on actual missing authorization or a rejected
-write. Diagnose sandbox/network failures through the normal permission mechanism
-before asking for reauthentication. Do not change credentials, bypass protection
-or retry a rejected write blindly.
-
-Desired alpha policy permits the maintainer's accepted non-force publication,
-with no force pushes/deletion or routine bypass. Beta/main promotions use PRs,
-resolved discussions and the applicable exact-candidate hosted gate. Require
-eligible independent approvals when configured; never impersonate a reviewer.
-Until settings enforce a rule, agents enforce it procedurally and report that
-distinction. Documentation does not install or change GitHub protection.
-
-Check actual rulesets/protection and required-check names before changing settings.
-Do not mark a job required simply because a workflow calls it a gate; do not treat
-an advisory failure as success of that advisory. The OS 27 gate is the current
-product gate; legacy toolchain advisory status is reported separately. Never
-remove tests or make failures optional to merge a change.
-
-## Public publication boundary
-
-The repository is **public**; the development Project is private. A private
-Project does not make linked issues, PRs, commits, Actions logs or release assets
-private. Follow [Publication safety](docs/publication-safety.md) before staging
-or posting. Inspect exact owned paths, stage them explicitly, then review the
-staged names and complete diff locally. Never use broad `git add .`, `git add -A`
-or force-add ignored local material as a shortcut.
-
-Ignored/untracked files are not tracked release content. Ignore rules do not
-remove already tracked files or sanitize history. Inventory local artifacts
-without publishing contents or identifying paths; keep deliberate source,
-examples and synthetic test fixtures trackable. Review the exact candidate and
-intended release artifacts, not the entire private filesystem. Report bounded
-categories/counts and limitations, never credentials, private origins, personal
-media, stable device/account IDs, raw traces or unnecessary local home paths.
-
-Sanitize issue/PR/comment text before posting: an edit can leave the earlier
-value visible in GitHub revision history. If remediation is needed, use GitHub's
-revision-removal workflow or an authorized sanitized replacement plus removal
-of the old comment; verify the exposed revisions are no longer visible. Do not
-quote the value again, rewrite Git history or change credentials without the
-separately authorized response. Local review, PR publication and owner-approved
-merge remain separate steps; this guardrail grants no publication permission.
-
-Keep publication exposure, runtime data handling and server/proxy logging separate
-in privacy reports. State the reviewed snapshots/artifacts, categories and limits;
-use “no secrets found in the reviewed scope,” not “everything is sanitized.”
-GitHub source archives contain the tracked tag snapshot, not live Keychain or
-UserDefaults contents. Synthetic API routes/test fixtures are not evidence of
-private data solely because a broad scanner matches them. Review matches locally
-before reporting, without copying their contents into public evidence. HTTPS
-protects transit; it does not establish safe endpoint logging or local retention.
-
-The current LICENSE makes VelaCanto public-source proprietary software, not an
-open-source-licensed app. Check the candidate LICENSE and third-party notices;
-do not change licensing, grant rights or describe dependencies as covered by the
-app's license without authorization.
-
-## Builds, devices and release provenance
-
-Use per-worktree derived data from `./scripts/build.sh`. The maintainer serializes
-Xcode builds and simulator/physical tests. Explicitly select an existing authorized
-destination using `VELACANTO_IOS_SIMULATOR_DESTINATION`; a script default may be
-stale. Keep only the retained iPhone and iPad simulators; do not create more for
-parallel testing. Protect original-reference apps and Foundation106. Physical
-**iPhone 17 Pro is excluded** from testing and cleanup. Do not overwrite a reference
-or delete archives/unintegrated work to make room for tests.
-
-Local checks include `./scripts/preflight.sh --skip-xcode`, `git diff --check`,
-lint and relevant tests/builds. Ordinary patches, documentation changes
-and development integrations use local verification; do not dispatch, wait for or
-rerun hosted quality gates for them. Scope verification proportionately for
-documentation; runtime/interface changes require relevant regression, platform
-and physical evidence. Compiler/test success does
-not prove streaming, audibility, signed distribution or accessibility.
-
-Hosted quality gates are reserved for owner-approved release candidates/builds,
-including prereleases and hotfix releases. Run them on the frozen exact source SHA
-before publication, record the result and rerun only if that candidate changes or
-a diagnosed failure requires it. The workflow runs for immutable `rc-*` candidate
-tags; creating such a tag requires release-candidate authorization. Manual dispatch
-is also supported once the workflow's dispatch trigger is integrated into GitHub's
-default branch. Never create a candidate tag just to check a routine patch. A local
-Release configuration build is not, by itself, a release candidate. Keep hosted
-validation, signed distribution and TestFlight authorization separate.
-
-For physical checks, record the installed candidate, action order, debugger and
-Mirroring state, route and user-confirmed audible outcome in sanitized evidence.
-If the installed build or intervening actions are uncertain, mark the result
-unverified and repeat only the affected check. A defect absent in TestFlight is
-an observation, not proof of an SDK/compiler cause or a fix; retain its disposition
-until controlled comparison establishes the result. Do not start TestFlight or
-release publication merely to verify a local patch.
-
-Freeze an exact release candidate from accepted alpha. Record source SHA,
-version/build, toolchain, signing mode, artifact hashes, test results, known issues
-and physical acceptance. Label beta/preview candidates with immutable tags/build
-identities. Do not move published tags. Any source change produces a new candidate
-and invalidates affected evidence; re-signing/rebuilding produces a new artifact
-whose provenance must be recorded. TestFlight acceptance names the actual upload.
-
-Open a release PR from beta into main after full candidate acceptance and a
-separate owner-authorized main promotion decision. Verify its final integrated
-source and checks, retain the candidate-to-release mapping,
-and tag the accepted release. Build signed artifacts from recorded source and
-verify distribution separately; an unsigned CI build is not a TestFlight build.
-Keep alpha frozen through release promotion or use a separately approved release
-branch strategy if continued development is necessary. Hotfixes use a focused PR
-from current main, then reconcile the accepted fix locally and publish it to alpha
-before further release promotion. No routine cherry-pick-only divergence between
-shared branches.
-
-## Playback protection
-
-Read [Playback and Now Playing protection](docs/playback-protection.md) before
-changing playback, Now Playing, shared catalog/artwork loading, caching or async
-ownership. This owner-established contract applies even when the visible change
-is on a browsing screen. Only playback and Now Playing receive preferential
-admission; all browsing screens remain equal and publish independently. Audio
-must never depend on optional content or its admission queue. Preserve protected
-capacity, shared-request promotion, cancellation and recoverable artwork.
-
-Shared loading changes require affected regression checks and exact-candidate
-physical playback acceptance; untouched player files do not exempt them. Record
-initial acceptance separately from exhaustive validation and root-cause proof.
-Silent playback with persistent loading is a P1 acceptance blocker. Use the
-document's verification matrix and diagnostic boundaries; do not mask stalls with
-speculative retries, transport replacement, cache purges or global serialization.
-
-## Quality, privacy and completion
-
-Prefer one owner per mutable state, explicit task lifetime/cancellation, complete
-user-visible async outcomes and small justified abstractions. Apply the reusable
-rubric when it is present in the integrated source; never claim local-only rubric
-or planning files are canonical. Use P0 (critical), P1 (release blocker), P2
-(normal correction/investigation), P3 (cleanup/polish). Separate confirmed defects,
-hypotheses and unverified gates; no grade substitutes for acceptance.
-
-Provider-neutral catalog/actions remain the boundary; Jellyfin account UI is
-provider-specific. No speculative retry/session-retirement/watchdog/player layer,
-offline audio, playlist mutation, CarPlay, new providers or reporting outside the
-assigned scope. Keep credentials, origins, full request URLs, personal media and
-account/item IDs out of issues, PRs and shared logs. Detailed diagnostics stay
-bounded and DEBUG-only; use sanitized aggregate evidence.
-
-Account privacy changes must preserve coherent credential, account-model, task and
-account-owned metadata lifetimes, including explicit cleanup/failure outcomes.
-Read [Sign-out privacy](docs/sign-out-privacy.md) and
-[Pin storage privacy](docs/pin-storage-privacy.md) when changing those paths.
-Successful local cleanup does not erase old backups or prove server revocation.
-Keep playback credential/delivery changes isolated from account-cleanup patches;
-follow [Playback URL privacy](docs/playback-url-privacy.md), use supported Apple
-APIs and require seeking, background, queue and AirPlay acceptance before combining
-transport changes. Do not replace media delivery speculatively to satisfy an audit.
-
-Final handoff: base and final SHA, PR/issue, owned paths, tests/results, privacy
-review, pending gates, integration status and next owner. Report local, published,
-merged, accepted and distributed as distinct states. Never mark documentation or
-implementation Done merely because a local commit or draft PR exists.
-
-## Delivery clarification — 2026-10-23
-
-Automatic TestFlight delivery is main-only. Keep an owner's explicitly started
-manual Cloud/TestFlight push separate from automatic branch-triggered delivery;
-do not remove its post-actions or promote branches as a workaround. For the
-0.5.0 preview the owner handles that manual push while GitHub checks are resolved
-independently. No Cloud workflow edits/removals were saved during this cleanup.
-Do not change tester groups, agreements or public-release scope. Record actual
-source, checks, Apple processing and availability separately; TestFlight activity
-does not turn a failed GitHub quality gate into a pass.
+Every handoff names the exact base/final source, changed paths, tests, integration
+state, privacy review, known gaps and next owner. Distinguish implemented, tested,
+installed, published, accepted and distributed.

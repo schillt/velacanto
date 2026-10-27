@@ -331,17 +331,11 @@ struct FoundationArtistSuggestedSongs: View {
     }
 
     private func play(_ index: Int) {
-        guard let selection = model.trackQueue(selecting: index) else { return }
-        if connectivity.localOnly {
-            guard downloads.isReady(selection.items[selection.index]) else { return }
-            let ready = selection.items.filter { downloads.isReady($0) }
-            let index = selection.items.prefix(selection.index).filter { downloads.isReady($0) }
-                .count
-            player.setQueue(ready, selectedIndex: index)
-        } else {
-            player.setQueue(selection.items, selectedIndex: selection.index)
-        }
-
+        guard
+            let selection = model.trackQueue(
+                selecting: index, isAvailable: { !connectivity.localOnly || downloads.isReady($0) })
+        else { return }
+        player.setQueue(selection.items, selectedIndex: selection.index)
     }
 }
 

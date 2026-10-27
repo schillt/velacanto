@@ -27,6 +27,7 @@ struct FoundationDownloadsView: View {
             }
             if let error = downloads.errorMessage { Text(error).foregroundStyle(.red) }
         }
+        .foundationBottomChromeListClearance()
         .foundationCatalogHeader("Downloads")
     }
 

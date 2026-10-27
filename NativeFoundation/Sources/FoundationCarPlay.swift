@@ -3,6 +3,235 @@
     import Combine
     import UIKit
 
+    #if DEBUG
+        /// Explicit local diagnosis only. No query text, media or account identifiers enter this schema.
+        @MainActor
+        final class FoundationCarPlayInputDiagnostic {
+            enum Event: String, Codable, Sendable {
+                case connected, disconnected, keyboardPush, keyboardPushCompleted
+                case update, rejected, inputContext, queryStarted, completed
+                case searchPressed, disappeared, retired
+                case cancelWork, delegateRemoval, keyboardRestrictions, sceneActivation
+            }
+            enum Top: String, Codable, Sendable {
+                case unknown, none, keyboard, tabs, options, list, nowPlaying, other
+            }
+            enum RemovalReason: Int, Codable, Sendable {
+                case disconnect = 1
+                case prepare = 2
+                case stalePushCompletion = 3
+            }
+            enum SceneEvent: Int, Codable, Sendable {
+                case becameActive = 1
+                case resigningActive = 2
+                case enteringForeground = 3
+                case enteredBackground = 4
+            }
+            struct Record: Codable, Sendable {
+                let elapsed: TimeInterval
+                let event: Event
+                let sequence: Int?
+                let queryLength: Int?
+                let owned: Bool?
+                let current: Bool?
+                let top: Top
+                let navigating: Bool
+                let success: Bool?
+                let rows: Int?
+                let completions: Int
+                let removalReason: RemovalReason?
+                let contextMismatch: Int?
+                let contextRetained: Bool?
+                let delegateOwned: Bool?
+                let keyboardRestricted: Bool?
+                let sceneEvent: SceneEvent?
+            }
+            struct Snapshot: Codable, Sendable {
+                let version: Int
+                let build: Int
+                let appVersionComponents: [Int]
+                let osVersionComponents: [Int]
+                let records: [Record]
+                let recordLimitReached: Bool
+                let expired: Bool
+            }
+
+            static let flag = "-diagnosticCarPlaySearch"
+            private let build: Int
+            private let appVersionComponents: [Int]
+            private let osVersionComponents: [Int]
+            private let clock: () -> TimeInterval
+            private let writer: Writer
+            private var started: TimeInterval?
+            private var sequence = 0
+            private var completions = 0
+            private var records: [Record] = []
+            private var expired = false
+
+            static func make(
+                arguments: [String] = ProcessInfo.processInfo.arguments,
+                destination: () -> URL = {
+                    FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+                        .appendingPathComponent("CarPlaySearchDiagnostics", isDirectory: true)
+                        .appendingPathComponent("current.json")
+                }
+            ) -> FoundationCarPlayInputDiagnostic? {
+                guard arguments.contains(flag) else { return nil }
+                let appVersion =
+                    Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString")
+                    as? String ?? "0.0.0"
+                let build =
+                    Int(
+                        Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion")
+                            as? String ?? "0") ?? 0
+                let os = ProcessInfo.processInfo.operatingSystemVersion
+                return FoundationCarPlayInputDiagnostic(
+                    destination: destination(), build: build,
+                    appVersionComponents: appVersion.split(separator: ".").map { Int($0) ?? 0 },
+                    osVersionComponents: [os.majorVersion, os.minorVersion, os.patchVersion])
+            }
+
+            init(
+                destination: URL, build: Int = 0,
+                appVersionComponents: [Int] = [0, 0, 0],
+                osVersionComponents: [Int] = [0, 0, 0],
+                clock: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
+            ) {
+                self.build = max(0, build)
+                self.appVersionComponents = Self.components(appVersionComponents)
+                self.osVersionComponents = Self.components(osVersionComponents)
+                self.clock = clock
+                writer = Writer(destination: destination)
+            }
+
+            var snapshot: Snapshot {
+                Snapshot(
+                    version: 2, build: build, appVersionComponents: appVersionComponents,
+                    osVersionComponents: osVersionComponents,
+                    records: records, recordLimitReached: records.count == 128,
+                    expired: expired)
+            }
+
+            private static func components(_ values: [Int]) -> [Int] {
+                (0..<3).map { $0 < values.count ? max(0, values[$0]) : 0 }
+            }
+
+            func beginQuery(length: Int, owned: Bool, navigating: Bool) -> Int? {
+                guard canRecord else { return nil }
+                sequence += 1
+                note(
+                    .update, sequence: sequence, length: length, owned: owned,
+                    navigating: navigating)
+                return sequence
+            }
+
+            func completed(sequence: Int?, rows: Int, navigating: Bool) {
+                guard let sequence, canRecord else { return }
+                completions += 1
+                note(.completed, sequence: sequence, navigating: navigating, rows: rows)
+            }
+
+            func note(
+                _ event: Event, sequence: Int? = nil, length: Int? = nil,
+                owned: Bool? = nil, current: Bool? = nil, top: Top = .unknown,
+                navigating: Bool, success: Bool? = nil, rows: Int? = nil,
+                removalReason: RemovalReason? = nil, contextMismatch: Int? = nil,
+                contextRetained: Bool? = nil, delegateOwned: Bool? = nil,
+                keyboardRestricted: Bool? = nil, sceneEvent: SceneEvent? = nil
+            ) {
+                guard canRecord, let started else { return }
+                records.append(
+                    Record(
+                        elapsed: max(0, clock() - started), event: event, sequence: sequence,
+                        queryLength: length.map { min(4_096, max(0, $0)) }, owned: owned,
+                        current: current, top: top, navigating: navigating, success: success,
+                        rows: rows.map { min(10_000, max(0, $0)) }, completions: completions,
+                        removalReason: removalReason,
+                        contextMismatch: contextMismatch.map { max(0, min(127, $0)) },
+                        contextRetained: contextRetained, delegateOwned: delegateOwned,
+                        keyboardRestricted: keyboardRestricted, sceneEvent: sceneEvent))
+                writer.schedule(snapshot)
+            }
+
+            func waitForWrites() async {
+                await writer.waitUntilIdle()
+            }
+
+            private var canRecord: Bool {
+                guard !expired, records.count < 128 else { return false }
+                let now = clock()
+                if started == nil { started = now }
+                guard let started, now - started <= 300 else {
+                    expired = true
+                    writer.schedule(snapshot)
+                    return false
+                }
+                return true
+            }
+
+            /// The lock owns only the one pending typed snapshot and scheduling bit.
+            /// Encoding and protected atomic replacement run on the utility queue.
+            private final class Writer: @unchecked Sendable {
+                let destination: URL
+                let queue = DispatchQueue(label: "VelaCanto.CarPlayInputDiagnostic", qos: .utility)
+                let lock = NSLock()
+                private var pending: Snapshot?
+                private var scheduled = false
+
+                init(destination: URL) { self.destination = destination }
+
+                func schedule(_ snapshot: Snapshot) {
+                    let enqueue = lock.withLock {
+                        pending = snapshot
+                        guard !scheduled else { return false }
+                        scheduled = true
+                        return true
+                    }
+                    if enqueue { queue.async { self.drain() } }
+                }
+
+                func waitUntilIdle() async {
+                    await withCheckedContinuation { continuation in
+                        queue.async { continuation.resume() }
+                    }
+                }
+
+                private func drain() {
+                    while let snapshot = lock.withLock({
+                        let next = pending
+                        pending = nil
+                        if next == nil { scheduled = false }
+                        return next
+                    }) {
+                        do {
+                            let data = try JSONEncoder().encode(snapshot)
+                            guard data.count <= 1_048_576 else { continue }
+                            var directory = destination.deletingLastPathComponent()
+                            try FileManager.default.createDirectory(
+                                at: directory, withIntermediateDirectories: true,
+                                attributes: [
+                                    .protectionKey: FileProtectionType
+                                        .completeUntilFirstUserAuthentication
+                                ])
+                            var excluded = URLResourceValues()
+                            excluded.isExcludedFromBackup = true
+                            try directory.setResourceValues(excluded)
+                            try data.write(
+                                to: destination,
+                                options: [
+                                    .atomic, .completeFileProtectionUntilFirstUserAuthentication,
+                                ])
+                            var file = destination
+                            try file.setResourceValues(excluded)
+                        } catch {
+                            // Failure remains local; diagnostics never gate native callbacks or playback.
+                        }
+                    }
+                }
+            }
+        }
+    #endif
+
     /// Routes CarPlay without recycling SwiftUI's phone-scene delegate proxy.
     @MainActor
     final class FoundationCarPlayApplicationDelegate: NSObject, UIApplicationDelegate {
@@ -11,7 +240,21 @@
             configurationForConnecting connectingSceneSession: UISceneSession,
             options: UIScene.ConnectionOptions
         ) -> UISceneConfiguration {
-            Self.sceneConfiguration(for: connectingSceneSession.configuration)
+            if connectingSceneSession.role == .windowApplication {
+                // Request native continuation streams before asynchronous account
+                // preparation. Keep SwiftUI's phone-scene delegate proxy intact.
+                for activity in options.userActivities {
+                    _ = FoundationAppRuntime.model.receiveHandoff(activity)
+                }
+            }
+            return Self.sceneConfiguration(for: connectingSceneSession.configuration)
+        }
+
+        func application(
+            _ application: UIApplication, continue userActivity: NSUserActivity,
+            restorationHandler: @escaping ([any UIUserActivityRestoring]?) -> Void
+        ) -> Bool {
+            FoundationAppRuntime.model.receiveHandoff(userActivity)
         }
 
         static func sceneConfiguration(
@@ -30,7 +273,7 @@
     /// Native templates project the phone-owned catalog and playback session.
     @MainActor
     final class FoundationCarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate,
-        CPInterfaceControllerDelegate, CPNowPlayingTemplateObserver, CPSearchTemplateDelegate,
+        CPInterfaceControllerDelegate, CPNowPlayingTemplateObserver,
         CPTabBarTemplateDelegate, CPSessionConfigurationDelegate
     {
         private typealias Route = FoundationCarPlayCatalog.Route
@@ -40,6 +283,7 @@
             let player: FoundationPlayer
             let actions: FoundationLibraryActions
             let downloads: FoundationDownloads?
+            let primaryGenres: FoundationPrimaryGenresModel?
             let localOnly: Bool
             let generation: Int
         }
@@ -48,20 +292,6 @@
             let item: FoundationItem
             let size: CGSize
             let apply: (UIImage) -> Void
-        }
-
-        final class SearchResponse {
-            private var completion: (([CPListItem]) -> Void)?
-
-            init(_ completion: @escaping ([CPListItem]) -> Void) {
-                self.completion = completion
-            }
-
-            func finish(_ items: [CPListItem]) {
-                let callback = completion
-                completion = nil
-                callback?(items)
-            }
         }
 
         private var interfaceController: CPInterfaceController?
@@ -74,21 +304,16 @@
         private var playRequestID: UUID?
         private var playbackRevision = 0
         private var reconcileTask: Task<Void, Never>?
-        private var searchTask: Task<Void, Never>?
-        private var searchResponse: SearchResponse?
-        private var searchTemplate: CPSearchTemplate?
+        private var searchOrigins: [ObjectIdentifier: CPTemplate] = [:]
+        private var libraryRootTemplate: CPListTemplate?
         private var rootSearchTemplate: CPListTemplate?
-        private var searchOptionsTemplate: CPListTemplate?
-        private var searchOrigin: CPTemplate?
         private var lastContentTab: CPTemplate?
-        private var searchContext: Context?
-        private var searchQueryID = UUID()
-        private var searchQuery = ""
-        private var searchSnapshot: FoundationCarPlayCatalog.SearchSnapshot?
-        private var requestedSearchResultsID: UUID?
         private var subscriptions: Set<AnyCancellable> = []
         private var sessionSubscription: AnyCancellable?
         private var pinSubscription: AnyCancellable?
+        private var genreSubscription: AnyCancellable?
+        private var genreRefreshTask: Task<Void, Never>?
+        private var genreRoutes: [ObjectIdentifier: (route: Route, offset: Int)] = [:]
         private var policySubscription: AnyCancellable?
         private var visibilitySubscription: AnyCancellable?
         private var visibilityTask: Task<Void, Never>?
@@ -107,6 +332,7 @@
         private var isReprojecting = false
         private var lists: [ObjectIdentifier: CPListTemplate] = [:]
         private var isNavigating = false
+        private var initialNowPlayingPending = true
         private let collectionOwner = UUID()
         private var queueTemplate: CPListTemplate?
         private var queueOffset = 0
@@ -150,6 +376,7 @@
 
         private func disconnect() {
             cancelWork()
+            initialNowPlayingPending = true
             reconcileTask?.cancel()
             reconcileTask = nil
             subscriptions.removeAll()
@@ -175,27 +402,20 @@
             playRequestID = nil
             sessionSubscription = nil
             pinSubscription = nil
+            genreSubscription = nil
+            genreRefreshTask?.cancel()
+            genreRefreshTask = nil
+            genreRoutes.removeAll()
             policySubscription = nil
             visibilitySubscription = nil
             visibilityTask?.cancel()
             visibilityTask = nil
             rootShelfProjection = nil
             playbackErrorSubscription = nil
-            searchResponse?.finish([])
-            searchResponse = nil
-            searchTask?.cancel()
-            searchTask = nil
-            searchTemplate?.delegate = nil
-            searchTemplate = nil
-            searchContext = nil
             rootSearchTemplate = nil
-            searchOptionsTemplate = nil
-            searchOrigin = nil
+            libraryRootTemplate = nil
+            searchOrigins.removeAll()
             lastContentTab = nil
-            searchQueryID = UUID()
-            searchQuery = ""
-            searchSnapshot = nil
-            requestedSearchResultsID = nil
             for task in pageTasks.values { task.cancel() }
             for task in artworkTasks.values { task.cancel() }
             pageTasks.removeAll()
@@ -225,6 +445,7 @@
                 let model = FoundationAppRuntime.model
                 if let context = self.context,
                     model.player === context.player, model.actions === context.actions,
+                    model.primaryGenres === context.primaryGenres,
                     model.browseLibrary?.catalogScopeID == context.library.catalogScopeID,
                     (model.connectivity?.localOnly ?? true) == context.localOnly
                 {
@@ -259,6 +480,7 @@
                 }
                 let context = Context(
                     library: library, player: player, actions: actions, downloads: model.downloads,
+                    primaryGenres: model.primaryGenres,
                     localOnly: model.connectivity?.localOnly ?? true, generation: epoch)
                 self.context = context
                 self.policySubscription = model.connectivity?.objectWillChange.sink { [weak self] in
@@ -297,6 +519,24 @@
                         self.reprojectCaches(context)
                     }
                 }
+                if let primaryGenres = context.primaryGenres {
+                    var observedRevision = primaryGenres.publicationRevision
+                    self.genreSubscription = primaryGenres.$publicationRevision
+                        .combineLatest(primaryGenres.$readySongIDs).dropFirst().sink {
+                            [weak self] revision, _ in
+                            let censusChanged = revision != observedRevision
+                            observedRevision = revision
+                            guard censusChanged || context.localOnly,
+                                let self, self.genreRefreshTask == nil
+                            else { return }
+                            self.genreRefreshTask = Task { @MainActor [weak self] in
+                                guard let self else { return }
+                                self.genreRefreshTask = nil
+                                guard !Task.isCancelled, self.isCurrent(context) else { return }
+                                self.refreshGenreTemplates(context)
+                            }
+                        }
+                }
                 self.installRoots(context)
             }
         }
@@ -305,6 +545,7 @@
             let model = FoundationAppRuntime.model
             return interfaceController != nil && generation == context.generation
                 && model.player === context.player && model.actions === context.actions
+                && model.primaryGenres === context.primaryGenres
                 && model.browseLibrary?.catalogScopeID == context.library.catalogScopeID
                 && (model.connectivity?.localOnly ?? true) == context.localOnly
         }
@@ -316,12 +557,15 @@
             return template
         }
 
-        private func setRoot(_ template: CPTemplate) {
+        private func setRoot(
+            _ template: CPTemplate, completion: @escaping (Bool) -> Void = { _ in }
+        ) {
             let epoch = generation
             interfaceController?.setRootTemplate(template, animated: false) {
                 [weak self] success, _ in
                 guard let self, self.generation == epoch else { return }
                 if !success { self.showMessage("The requested screen is unavailable.") }
+                completion(success)
             }
         }
 
@@ -333,6 +577,7 @@
             new.tabTitle = "New"
             new.tabImage = symbol("sparkles")
             let library = makeList("Library", context: context)
+            libraryRootTemplate = library
             library.tabTitle = "Library"
             library.tabImage = symbol("music.note.house.fill")
             let search = makeList("Search", context: context, includesPins: false)
@@ -346,7 +591,14 @@
             tabs.delegate = self
             if templates.contains(where: { $0 === library }) { tabs.select(library) }
             self.setBodySections([CPListSection(items: [libraryControls(context)])], for: library)
-            setRoot(tabs)
+            setRoot(tabs) { [weak self] success in
+                guard let self, success, let controller = self.interfaceController,
+                    self.consumeInitialNowPlaying(
+                        root: tabs, currentRoot: controller.rootTemplate,
+                        top: controller.topTemplate, contextIsCurrent: self.isCurrent(context))
+                else { return }
+                self.showNowPlaying(context)
+            }
             rootTask = Task { [weak self, weak home, weak new, weak library] in
                 do {
                     let snapshot = try await FoundationCarPlayCatalog.snapshot(
@@ -580,37 +832,39 @@
             template.trailingNavigationBarButtons = buttons
         }
 
-        /// Native controls remain usable without a provider lookup, including at zero list capacity.
+        /// Audio apps use the native play-media assistant and browse templates.
+        /// CPSearchTemplate belongs to the navigation entitlement, regardless of push success.
         static func configureSearchOptions(
-            _ template: CPListTemplate, keyboardLimited: Bool, siriAuthorized: Bool,
-            typeSearch: @escaping () -> Void, close: @escaping () -> Void
+            _ template: CPListTemplate, siriAuthorized: Bool, isRootTab: Bool,
+            isActive: @escaping () -> Bool, browse: @escaping () -> Void,
+            close: @escaping () -> Void
         ) {
             template.assistantCellConfiguration =
                 siriAuthorized
                 ? CPAssistantCellConfiguration(
                     position: .top, visibility: .always, assistantAction: .playMedia)
                 : nil
-            let closeButton: CPBarButton
-            if let image = UIImage(systemName: "chevron.backward") {
-                closeButton = CPBarButton(image: image) { _ in close() }
-            } else {
-                closeButton = CPBarButton(title: "Back") { _ in close() }
+            let returnButton = CPBarButton(title: isRootTab ? "Close" : "Back") { _ in
+                guard isActive() else { return }
+                close()
             }
-            closeButton.accessibilityLabel = "Back"
-            template.leadingNavigationBarButtons = []
-            template.backButton = closeButton
+            returnButton.accessibilityLabel = isRootTab ? "Close Search" : "Back"
+            template.leadingNavigationBarButtons = isRootTab ? [returnButton] : []
+            template.backButton = isRootTab ? nil : returnButton
             template.trailingNavigationBarButtons = []
             let row = CPListItem(
-                text: "Type to Search", detailText: "Find music in your library",
-                image: UIImage(systemName: "keyboard"))
+                text: "Browse Library", detailText: "Albums, artists, playlists, and songs",
+                image: UIImage(systemName: "music.note.house.fill"))
             row.handler = { _, completion in
-                defer { completion() }
-                typeSearch()
+                completion()
+                guard isActive() else { return }
+                browse()
             }
-            var rows = keyboardLimited ? [] : [row]
+            var rows = [row]
             if !siriAuthorized {
                 let guidance = CPListItem(
-                    text: "Enable Siri on iPhone", detailText: "Open VelaCanto Profile & Settings.")
+                    text: "Enable Siri on iPhone",
+                    detailText: "Enable Siri for VelaCanto in the iPhone app.")
                 guidance.isEnabled = false
                 rows.append(guidance)
             }
@@ -618,13 +872,11 @@
                 CPListTemplate.maximumItemCount == 0 || CPListTemplate.maximumSectionCount == 0
                     ? []
                     : [CPListSection(items: Array(rows.prefix(CPListTemplate.maximumItemCount)))])
-            template.emptyViewTitleVariants = [
-                keyboardLimited ? "Use Siri to Find Music" : "Search Music"
-            ]
+            template.emptyViewTitleVariants = ["Find Music"]
             template.emptyViewSubtitleVariants = [
-                keyboardLimited
-                    ? "Typing is unavailable on this display right now."
-                    : "Ask Siri to play music, or type a search."
+                siriAuthorized
+                    ? "Ask Siri to play music, or browse your library."
+                    : "Browse your library, or enable Siri in VelaCanto on iPhone."
             ]
         }
 
@@ -645,32 +897,22 @@
             return tabs.first ?? stack.first
         }
 
-        private var keyboardLimited: Bool {
-            sessionConfiguration?.limitedUserInterfaces.contains(.keyboard) ?? true
-        }
-
         private func configureSearchOptions(_ template: CPListTemplate, context: Context) {
             Self.configureSearchOptions(
-                template, keyboardLimited: keyboardLimited,
-                siriAuthorized: FoundationSiriAuthorization.isAuthorized,
-                typeSearch: { [weak self, weak template] in
-                    guard let self, let template, self.isCurrent(context),
-                        self.visibleList === template, !self.keyboardLimited
+                template, siriAuthorized: FoundationSiriAuthorization.isAuthorized,
+                isRootTab: template === rootSearchTemplate,
+                isActive: { [weak self, weak template] in
+                    guard let self, let template else { return false }
+                    return self.isCurrent(context) && self.visibleList === template
+                },
+                browse: { [weak self] in
+                    guard let self, self.isCurrent(context), let library = self.libraryRootTemplate
                     else { return }
-                    self.searchOptionsTemplate = template
-                    if template === self.rootSearchTemplate {
-                        self.searchOrigin = self.lastContentTab
-                    }
-                    self.openKeyboardSearch(context)
+                    self.returnFromSearch(to: library, context: context)
                 },
                 close: { [weak self, weak template] in
-                    guard let self, let template, self.isCurrent(context),
-                        self.visibleList === template
-                    else { return }
-                    if template === self.rootSearchTemplate {
-                        self.searchOrigin = self.lastContentTab
-                    }
-                    self.closeSearch(context)
+                    guard let self, let template else { return }
+                    self.closeSearch(template, context: context)
                 })
         }
 
@@ -678,30 +920,37 @@
             guard isCurrent(context), let controller = interfaceController, !isNavigating else {
                 return
             }
-            if let existing = searchOptionsTemplate, isRetained(existing),
-                existing !== rootSearchTemplate
-                    || (controller.rootTemplate as? CPTabBarTemplate)?.selectedTemplate === existing
+            if let visible = visibleList,
+                visible === rootSearchTemplate || searchOrigins[ObjectIdentifier(visible)] != nil
             {
-                if visibleList === existing { return }
-                returnFromSearch(to: existing, context: context)
                 return
             }
+            guard
+                let origin = Self.searchEntryOrigin(
+                    root: controller.rootTemplate as? CPTabBarTemplate, top: controller.topTemplate)
+            else { return }
             let template = makeList("Search", context: context, includesPins: false)
+            searchOrigins[ObjectIdentifier(template)] = origin
             configureSearchOptions(template, context: context)
-            let origin = controller.topTemplate
-            push(template, context: context) { [weak self] success in
-                guard let self, success, self.isCurrent(context) else { return }
-                self.searchOptionsTemplate = template
-                self.searchOrigin = origin
-            }
+            push(template, context: context)
         }
 
-        private func closeSearch(_ context: Context) {
-            guard isCurrent(context), let controller = interfaceController else { return }
-            let tabs = (controller.rootTemplate as? CPTabBarTemplate)?.templates ?? []
+        /// A selected root Search tab must not capture entry from a pushed Now Playing screen.
+        static func searchEntryOrigin(root: CPTabBarTemplate?, top: CPTemplate?) -> CPTemplate? {
+            if top === root { return root?.selectedTemplate }
+            return top
+        }
+
+        private func closeSearch(_ template: CPListTemplate, context: Context) {
+            guard isCurrent(context), visibleList === template, let controller = interfaceController
+            else { return }
+            let tabs = ((controller.rootTemplate as? CPTabBarTemplate)?.templates ?? []).filter {
+                $0 !== rootSearchTemplate
+            }
             guard
                 let target = Self.searchReturnTarget(
-                    origin: searchOrigin, lastContentTab: lastContentTab,
+                    origin: searchOrigins[ObjectIdentifier(template)],
+                    lastContentTab: lastContentTab,
                     stack: controller.templates, tabs: tabs)
             else { return }
             returnFromSearch(to: target, context: context)
@@ -777,259 +1026,6 @@
                     controller.popTemplate(animated: true, completion: completion)
                 }
             }
-        }
-
-        private func openKeyboardSearch(_ context: Context) {
-            guard isCurrent(context), !keyboardLimited else { return }
-            if let template = searchTemplate, isRetained(template) {
-                returnFromSearch(to: template, context: context)
-                return
-            }
-            let template = CPSearchTemplate()
-            template.delegate = self
-            // Set ownership before the push: CarPlay can ask for initial rows during presentation.
-            searchTemplate = template
-            searchContext = context
-            push(template, context: context) { [weak self] success in
-                guard let self, self.isCurrent(context) else {
-                    template.delegate = nil
-                    return
-                }
-                if !success, self.searchTemplate === template { self.clearSearchOwnership() }
-                if success, self.keyboardLimited, let options = self.searchOptionsTemplate,
-                    self.isRetained(options)
-                {
-                    self.returnFromSearch(to: options, context: context)
-                }
-            }
-        }
-
-        static func searchRows(_ items: [CPListItem], budget: Int) -> [CPListItem] {
-            guard budget > 0 else { return [] }
-            // CPSearchTemplate owns its native Cancel/X and search-field layout.
-            return Array(items.prefix(budget))
-        }
-
-        func searchTemplate(
-            _ searchTemplate: CPSearchTemplate, updatedSearchText searchText: String,
-            completionHandler: @escaping ([CPListItem]) -> Void
-        ) {
-            guard self.searchTemplate === searchTemplate, let context = searchContext,
-                isCurrent(context), interfaceController?.topTemplate === searchTemplate
-            else {
-                completionHandler([])
-                return
-            }
-            searchQueryID = UUID()
-            let queryID = searchQueryID
-            searchSnapshot = nil
-            requestedSearchResultsID = nil
-            searchResponse?.finish([])
-            searchTask?.cancel()
-            let searchID = ObjectIdentifier(searchTemplate)
-            artworkTasks[searchID]?.cancel()
-            artworkTasks[searchID] = nil
-            rowArtwork[searchID] = []
-            let response = SearchResponse { [weak self] items in
-                guard let self, self.searchTemplate === searchTemplate,
-                    self.isCurrent(context)
-                else {
-                    completionHandler([])
-                    return
-                }
-                completionHandler(Self.searchRows(items, budget: self.nativeItemBudget))
-            }
-            searchResponse = response
-            let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-            searchQuery = query
-            guard !query.isEmpty else {
-                searchSnapshot = .init(items: [], partialFailure: nil)
-                response.finish([])
-                return
-            }
-            searchTask = Task { [weak self] in
-                defer { response.finish([]) }
-                do {
-                    let snapshot = try await FoundationCarPlayCatalog.search(
-                        query: query, library: context.library, downloads: context.downloads,
-                        localOnly: context.localOnly)
-                    guard let self, !Task.isCancelled, self.isCurrent(context),
-                        self.searchTemplate === searchTemplate,
-                        self.searchResponse === response, self.searchQueryID == queryID,
-                        self.isRetained(searchTemplate)
-                    else { return }
-                    context.actions.observeTrackCopies(snapshot.items)
-                    self.searchSnapshot = snapshot
-                    let limit = self.nativeItemBudget
-                    let reserve = snapshot.partialFailure == nil ? 0 : 1
-                    var rows = self.projected(snapshot.items, context: context).prefix(
-                        max(0, limit - reserve)
-                    ).map { item in
-                        let row = CPListItem(
-                            text: item.title, detailText: item.subtitle,
-                            image: self.placeholder(item, size: CPListItem.maximumImageSize))
-                        row.userInfo = item
-                        self.rowArtwork[searchID, default: []].append(
-                            ArtworkRequest(
-                                item: item, size: CPListItem.maximumImageSize,
-                                apply: { [weak row] image in row?.setImage(image) }))
-                        return row
-                    }
-                    if let failure = snapshot.partialFailure, limit > 0 {
-                        let status = CPListItem(
-                            text: snapshot.items.isEmpty
-                                ? "Search Unavailable" : "Some Results Unavailable",
-                            detailText: failure.errorDescription)
-                        status.isEnabled = false
-                        rows.append(status)
-                    }
-                    response.finish(rows)
-                    self.startArtwork(searchTemplate, context: context)
-                    if self.requestedSearchResultsID == queryID {
-                        self.showSearchResults(context: context, queryID: queryID)
-                    }
-                } catch {
-                    guard let self, !Task.isCancelled, self.isCurrent(context),
-                        self.searchResponse === response, self.searchQueryID == queryID
-                    else { return }
-                    self.searchSnapshot = .init(
-                        items: [], partialFailure: FoundationLibraryError.category(error))
-                    let row = CPListItem(
-                        text: "Search Unavailable",
-                        detailText: FoundationLibraryError.category(error).errorDescription)
-                    row.isEnabled = false
-                    response.finish(self.nativeItemBudget > 0 ? [row] : [])
-                    if self.requestedSearchResultsID == queryID {
-                        self.showSearchResults(context: context, queryID: queryID)
-                    }
-                }
-            }
-        }
-
-        func searchTemplate(
-            _ searchTemplate: CPSearchTemplate, selectedResult item: CPListItem,
-            completionHandler: @escaping () -> Void
-        ) {
-            defer { completionHandler() }
-            guard self.searchTemplate === searchTemplate, let context = searchContext,
-                isCurrent(context), interfaceController?.topTemplate === searchTemplate
-            else { return }
-            guard let media = item.userInfo as? FoundationItem else { return }
-            open(media, context: context)
-        }
-
-        func searchTemplateSearchButtonPressed(_ searchTemplate: CPSearchTemplate) {
-            guard self.searchTemplate === searchTemplate, let context = searchContext,
-                isCurrent(context), interfaceController?.topTemplate === searchTemplate,
-                !isNavigating
-            else { return }
-            requestedSearchResultsID = searchQueryID
-            if searchSnapshot == nil, searchTask == nil {
-                searchSnapshot = .init(items: [], partialFailure: nil)
-            }
-            if searchSnapshot != nil {
-                showSearchResults(context: context, queryID: searchQueryID)
-            }
-        }
-
-        /// Use the current query's snapshot; the keyboard action never issues a second lookup.
-        private func showSearchResults(context: Context, queryID: UUID) {
-            guard isCurrent(context), searchQueryID == queryID,
-                requestedSearchResultsID == queryID, let snapshot = searchSnapshot,
-                let searchTemplate, interfaceController?.topTemplate === searchTemplate
-            else { return }
-            requestedSearchResultsID = nil
-            let template = makeList("Search Results", context: context)
-            template.backButton =
-                CPBarButton(image: symbol("chevron.backward")) { [weak self, weak template] _ in
-                    guard let self, let template, self.isCurrent(context),
-                        self.visibleList === template
-                    else { return }
-                    self.closeSearch(context)
-                }
-            template.backButton?.accessibilityLabel = "Back"
-            renderSearchResults(
-                snapshot, offset: 0, in: template, context: context, queryID: queryID)
-            push(template, context: context)
-        }
-
-        private func renderSearchResults(
-            _ snapshot: FoundationCarPlayCatalog.SearchSnapshot, offset: Int,
-            in template: CPListTemplate, context: Context, queryID: UUID
-        ) {
-            guard isCurrent(context), searchQueryID == queryID else { return }
-            let id = ObjectIdentifier(template)
-            let projection = UUID()
-            projectionIDs[id] = projection
-            cachedProjections[id] = { [weak self, weak template] in
-                guard let self, let template, self.isCurrent(context), self.isRetained(template),
-                    self.searchQueryID == queryID
-                else { return }
-                self.renderSearchResults(
-                    snapshot, offset: offset, in: template,
-                    context: context, queryID: queryID)
-            }
-            artworkTasks[id]?.cancel()
-            rowArtwork[id] = []
-            let items = Array(snapshot.items.prefix(40))
-            let maximum = bodyCapacity(template)
-            let statusCount =
-                snapshot.partialFailure != nil
-                    && (maximum >= 3 || items.isEmpty && maximum > 0) ? 1 : 0
-            let available = max(0, maximum - statusCount)
-            let remaining = max(0, items.count - offset)
-            let needsMore = remaining > available
-            let count = min(remaining, max(0, available - (needsMore && available > 1 ? 1 : 0)))
-            let shown = projected(Array(items.dropFirst(offset).prefix(count)), context: context)
-            var rows = shown.map { mediaRow($0, template: template, context: context) }
-            let failureTitle = items.isEmpty ? "Search Unavailable" : "Some Results Unavailable"
-            if let failure = snapshot.partialFailure, statusCount > 0 {
-                let status = CPListItem(text: failureTitle, detailText: failure.errorDescription)
-                status.isEnabled = false
-                rows.append(status)
-            }
-            let next = offset + count
-            var continuation: (() -> Void)?
-            if needsMore, next > offset {
-                continuation = { [weak self, weak template] in
-                    guard let self, let template, self.isCurrent(context),
-                        self.searchQueryID == queryID, self.isRetained(template),
-                        self.projectionIDs[ObjectIdentifier(template)] == projection
-                    else { return }
-                    self.renderSearchResults(
-                        snapshot, offset: next, in: template,
-                        context: context, queryID: queryID)
-                    self.startArtwork(template, context: context)
-                }
-                if available > 1 {
-                    let more = CPListItem(text: "More", detailText: "Next page of search results")
-                    more.handler = { _, completion in
-                        defer { completion() }
-                        continuation?()
-                    }
-                    rows.append(more)
-                }
-            }
-            setMoreNavigation(available == 1 ? continuation : nil, in: template, context: context)
-            self.setBodySections(
-                [
-                    CPListSection(
-                        items: rows,
-                        header: snapshot.partialFailure != nil && statusCount == 0
-                            ? failureTitle : nil,
-                        sectionIndexTitle: nil)
-                ], for: template)
-            template.emptyViewTitleVariants = [
-                snapshot.partialFailure != nil && items.isEmpty
-                    ? "Search Unavailable"
-                    : searchQuery.isEmpty ? "Enter a Search" : "No Matches"
-            ]
-            template.emptyViewSubtitleVariants = [
-                snapshot.partialFailure?.errorDescription
-                    ?? (searchQuery.isEmpty
-                        ? "Enter a search term to find music." : "No matching music is available.")
-            ]
-            applySections(template)
         }
 
         private func installShelf(
@@ -1153,15 +1149,47 @@
             guard isCurrent(context) else { return }
             switch item.kind {
             case .track: playTrack(item, context: context)
-            case .genre: openRoute(.genre(item), title: item.title, context: context)
+            case .genre:
+                let current: FoundationItem?
+                if item.primaryGenreCensusID != nil {
+                    current =
+                        context.primaryGenres?.canonicalRecord(
+                            for: item, libraryScope: context.library.primaryGenreIndexScope) == nil
+                        ? nil : item
+                } else {
+                    current = context.primaryGenres?.resolvePinnedGenre(
+                        item, libraryScope: context.library.primaryGenreIndexScope)
+                }
+                guard let current else {
+                    showMessage(
+                        "Build or refresh primary genres on iPhone or Mac, then select the genre again."
+                    )
+                    return
+                }
+                openRoute(.genre(current), title: current.title, context: context)
             case .artist: openRoute(.artistAlbums(item), title: item.title, context: context)
             case .album, .playlist:
                 openRoute(.collection(item), title: item.title, context: context)
             }
         }
 
-        private func openPinned(_ item: FoundationItem, context: Context) {
+        private func openPinned(_ saved: FoundationItem, context: Context) {
             guard isCurrent(context), let controller = interfaceController else { return }
+            let item: FoundationItem
+            if saved.kind == .genre {
+                guard
+                    let current = context.primaryGenres?.resolvePinnedGenre(
+                        saved, libraryScope: context.library.primaryGenreIndexScope)
+                else {
+                    showMessage(
+                        "Build or refresh primary genres on iPhone or Mac. Your saved pin is retained."
+                    )
+                    return
+                }
+                item = current
+            } else {
+                item = saved
+            }
             if item.kind == .track || controller.templates.count <= 1 {
                 open(item, context: context)
                 return
@@ -1187,7 +1215,8 @@
             template.emptyViewSubtitleVariants = ["Your music is loading."]
             let playableCollection: FoundationItem?
             switch route {
-            case .collection(let item), .artistAlbums(let item): playableCollection = item
+            case .collection(let item) where item.kind != .genre: playableCollection = item
+            case .artistAlbums(let item): playableCollection = item
             default: playableCollection = nil
             }
             if let item = playableCollection {
@@ -1211,6 +1240,7 @@
             _ route: Route, offset: Int, template: CPListTemplate, context: Context
         ) {
             let id = ObjectIdentifier(template)
+            if route.isPrimaryGenre { genreRoutes[id] = (route, offset) }
             cachedProjections[id] = nil
             projectionIDs[id] = nil
             setMoreNavigation(nil, in: template, context: context)
@@ -1221,7 +1251,8 @@
                 do {
                     let page = try await FoundationCarPlayCatalog.page(
                         route: route, startIndex: offset, library: context.library,
-                        downloads: context.downloads, localOnly: context.localOnly)
+                        downloads: context.downloads, localOnly: context.localOnly,
+                        primaryGenres: context.primaryGenres)
                     guard let self, let template, !Task.isCancelled, self.isCurrent(context),
                         self.isRetained(template)
                     else { return }
@@ -1245,7 +1276,9 @@
                         [
                             CPListSection(
                                 items: [retry],
-                                header: FoundationLibraryError.category(error).errorDescription,
+                                header: route.isPrimaryGenre
+                                    ? "Build or refresh primary genres on iPhone or Mac, then select the genre again."
+                                    : FoundationLibraryError.category(error).errorDescription,
                                 sectionIndexTitle: nil)
                         ], for: template)
                 }
@@ -1317,7 +1350,14 @@
                     self.setBodySections([CPListSection(items: rows)], for: template)
                 }
             } else {
-                self.setBodySections([CPListSection(items: rows)], for: template)
+                self.setBodySections(
+                    [
+                        CPListSection(
+                            items: rows,
+                            header: route.isPrimaryGenre && context.localOnly
+                                ? context.primaryGenres?.offlineErrorMessage : nil,
+                            sectionIndexTitle: nil)
+                    ], for: template)
             }
             template.emptyViewTitleVariants = ["No Items"]
             template.emptyViewSubtitleVariants = [
@@ -1471,6 +1511,18 @@
                 return
             }
             push(CPNowPlayingTemplate.shared, context: context)
+        }
+
+        /// One initial presentation per connection; later account/model updates cannot redirect browsing.
+        func consumeInitialNowPlaying(
+            root: CPTabBarTemplate, currentRoot: CPTemplate?, top: CPTemplate?,
+            contextIsCurrent: Bool
+        ) -> Bool {
+            guard contextIsCurrent, currentRoot === root, initialNowPlayingPending else {
+                return false
+            }
+            initialNowPlayingPending = false
+            return top === root || root.templates.contains(where: { $0 === top })
         }
 
         /// Reserve space for both native Now Playing and its Up Next list at deep browse routes.
@@ -1769,12 +1821,16 @@
                 !isReprojecting
             else { return }
             reprojectCaches(context)
-            if limitedUserInterfaces.contains(.keyboard), let searchTemplate,
-                interfaceController?.topTemplate === searchTemplate, let searchOptionsTemplate,
-                isRetained(searchOptionsTemplate)
-            {
-                // A vehicle restriction is authoritative; never infer motion or start Siri automatically.
-                returnFromSearch(to: searchOptionsTemplate, context: context)
+        }
+
+        /// Completed-index and ready-download changes refresh genre templates only.
+        private func refreshGenreTemplates(_ context: Context) {
+            guard isCurrent(context) else { return }
+            pruneRetiredTemplates()
+            for (id, request) in Array(genreRoutes) {
+                guard let template = lists[id], isRetained(template) else { continue }
+                loadPage(
+                    request.route, offset: request.offset, template: template, context: context)
             }
         }
 
@@ -1793,10 +1849,10 @@
             if let rootSearchTemplate {
                 configureSearchOptions(rootSearchTemplate, context: context)
             }
-            if let searchOptionsTemplate, searchOptionsTemplate !== rootSearchTemplate,
-                isRetained(searchOptionsTemplate)
-            {
-                configureSearchOptions(searchOptionsTemplate, context: context)
+            for id in Array(searchOrigins.keys) {
+                if let template = lists[id], isRetained(template) {
+                    configureSearchOptions(template, context: context)
+                }
             }
             isReprojecting = false
             if let visible = visibleList {
@@ -1813,9 +1869,6 @@
             else { return }
             if selectedTemplate !== rootSearchTemplate {
                 lastContentTab = selectedTemplate
-            } else {
-                searchOptionsTemplate = rootSearchTemplate
-                searchOrigin = lastContentTab
             }
             for (id, task) in artworkTasks where id != ObjectIdentifier(selectedTemplate) {
                 task.cancel()
@@ -1848,49 +1901,20 @@
             cachedProjections[id] = nil
             projectionIDs[id] = nil
             sectionOffsets[id] = nil
+            genreRoutes[id] = nil
             lists[id] = nil
             if queueTemplate === template { queueTemplate = nil }
-            if searchOptionsTemplate === template {
-                searchOptionsTemplate = nil
-                searchOrigin = nil
-            }
+            searchOrigins[id] = nil
         }
 
         private func pruneRetiredTemplates() {
             for template in Array(lists.values) where !isRetained(template) {
                 discardUnretained(template)
             }
-            if let searchTemplate, !isRetained(searchTemplate) { clearSearchOwnership() }
-        }
-
-        private func clearSearchOwnership() {
-            if let searchTemplate {
-                let id = ObjectIdentifier(searchTemplate)
-                artworkTasks[id]?.cancel()
-                artworkTasks[id] = nil
-                rowArtwork[id] = nil
-                searchTemplate.delegate = nil
-            }
-            searchResponse?.finish([])
-            searchResponse = nil
-            searchTask?.cancel()
-            searchTask = nil
-            searchTemplate = nil
-            searchContext = nil
-            searchSnapshot = nil
-            requestedSearchResultsID = nil
-            searchQuery = ""
-            searchQueryID = UUID()
         }
 
         func templateDidAppear(_ template: CPTemplate, animated: Bool) {
             guard let context, isCurrent(context) else { return }
-            if template === searchTemplate, keyboardLimited, let searchOptionsTemplate,
-                isRetained(searchOptionsTemplate)
-            {
-                returnFromSearch(to: searchOptionsTemplate, context: context)
-                return
-            }
             if let list = template as? CPListTemplate {
                 startArtwork(list, context: context)
             } else if let list = visibleList {
@@ -1902,17 +1926,7 @@
             let id = ObjectIdentifier(template)
             artworkTasks[id]?.cancel()
             artworkTasks[id] = nil
-            if searchTemplate === template {
-                requestedSearchResultsID = nil
-                searchResponse?.finish([])
-                searchResponse = nil
-                searchTask?.cancel()
-                searchTask = nil
-            }
             guard !isRetained(template) else { return }
-            if searchTemplate === template {
-                clearSearchOwnership()
-            }
             discardUnretained(template)
         }
 

@@ -72,6 +72,7 @@ final class FoundationPlayer: ObservableObject {
 
     func removeUpcoming(_ id: UUID) {
         guard upcoming.contains(where: { $0.id == id }) else { return }
+        continuationVisibleIDs?.remove(id)
         rawQueue.removeAll { $0.id == id }
         sessionChanged.send()
     }
@@ -101,6 +102,7 @@ final class FoundationPlayer: ObservableObject {
         guard snapshot.isValid else { return }
         discardSelection()
         selectedEntryID = nil
+        continuationVisibleIDs = snapshot.visibleEntryIDs.map(Set.init)
         rawQueue = snapshot.entries.map(\.entry)
         // The saved current occurrence stays selected even when an older alternative copy
         // is preferred by the browsing projection; restoration must not jump into history.
@@ -109,6 +111,68 @@ final class FoundationPlayer: ObservableObject {
         repeatMode = snapshot.repeatMode
         state = selectedEntryID == nil ? .idle : .paused
         sessionChanged.send()
+    }
+
+    /// A confirmed Handoff preserves occurrence identity and order. Paused continuation
+    /// retains only a deferred position until the user explicitly requests playback.
+    @discardableResult
+    func continueSession(
+        _ snapshot: FoundationPlaybackSnapshot, position: Double, wasPlaying: Bool,
+        finalPosition: (@MainActor @Sendable () async throws -> Double)? = nil
+    ) -> Bool {
+        guard snapshot.isValid, let selected = snapshot.selectedEntryID,
+            snapshot.entries.contains(where: { $0.id == selected }), position.isFinite,
+            position >= 0, position <= Double(Int64.max / 600) - 1
+        else { return false }
+        restoreSession(snapshot)
+        pausedContinuationPosition = (selected, position)
+        refreshTime()
+        if wasPlaying {
+            select(
+                selected, retainingEndedItem: false, initialPosition: position,
+                finalPosition: finalPosition)
+        }
+        return true
+    }
+
+    /// Reads the native clock at the transfer boundary, not the periodically published UI time.
+    func nativeContinuationPosition(generation expected: UInt64, occurrence: UUID) throws -> Double
+    {
+        guard generation == expected, selectedEntryID == occurrence,
+            selectionTask == nil, initialContinuationSeek == nil,
+            nativePlayer.currentItem?.status == .readyToPlay
+        else { throw FoundationHandoffError.changed }
+        let value = nativePlayer.currentTime().seconds
+        guard value.isFinite, value >= 0, value <= Double(Int64.max / 600) - 1 else {
+            throw FoundationHandoffError.positionUnavailable
+        }
+        return value
+    }
+
+    /// Retirement may cancel only this unstarted continuation, never a newer selection
+    /// or playback that has already completed its readiness/seek boundary.
+    func cancelPendingContinuation(generation expected: UInt64) {
+        guard generation == expected,
+            !(state == .playing && nativePlayer.timeControlStatus == .playing
+                && nativePlayer.rate > 0),
+            initialContinuationSeek?.finalPosition != nil || continuationPositionTask != nil
+                || selectionTask != nil || playTask != nil || wantsPlayback
+        else { return }
+        nativePlayer.currentItem?.cancelPendingSeeks()
+        // Use the existing generation/resource boundary. Keep an already prepared
+        // native item available for the user's new explicit seek or Play command.
+        discardSelection(retainingNativeItem: true)
+        nativePlayer.pause()
+        state = selectedEntryID == nil ? .idle : .paused
+        refreshTime()
+    }
+
+    var continuationGeneration: UInt64 { generation }
+
+    func isNativeContinuationPlaying(generation expected: UInt64, occurrence: UUID) -> Bool {
+        generation == expected && selectedEntryID == occurrence && wantsPlayback
+            && state == .playing && nativePlayer.timeControlStatus == .playing
+            && nativePlayer.rate > 0 && nativePlayer.currentItem?.status == .readyToPlay
     }
 
     @Published private var rawQueue: [FoundationQueueEntry] = [] {
@@ -121,6 +185,21 @@ final class FoundationPlayer: ObservableObject {
     private var observeTrackCopies: ([FoundationItem]) -> Void = { _ in }
     @Published private(set) var queue: [FoundationQueueEntry] = []
     var persistedQueue: [FoundationQueueEntry] { rawQueue }
+    // A transferred queue keeps its own effective copy selection. Ordinary metadata
+    // learning never changes this queue's visibility or the device's preferences.
+    private var continuationVisibleIDs: Set<UUID>?
+    var persistedVisibleEntryIDs: [UUID]? {
+        continuationVisibleIDs.map { visible in
+            rawQueue.filter { visible.contains($0.id) }.map(\.id)
+        }
+    }
+
+    func clearContinuationVisibilityForPreferenceChange() {
+        guard continuationVisibleIDs != nil else { return }
+        continuationVisibleIDs = nil
+        refreshTrackVisibility()
+        sessionChanged.send()
+    }
 
     func configureTrackProjection(
         project: @escaping ([FoundationItem]) -> [FoundationItem],
@@ -133,8 +212,7 @@ final class FoundationPlayer: ObservableObject {
     }
 
     func refreshTrackVisibility() {
-        let visible = projectedEntries(rawQueue)
-        let visibleIDs = Set(visible.map(\.id))
+        let visibleIDs = continuationVisibleIDs ?? Set(projectedEntries(rawQueue).map(\.id))
         let projection = rawQueue.filter { visibleIDs.contains($0.id) || $0.id == selectedEntryID }
         if projection != queue { queue = projection }
     }
@@ -184,6 +262,9 @@ final class FoundationPlayer: ObservableObject {
     @Published private(set) var duration: Double = 0
     @Published private(set) var isInterrupted = false
     let playbackPositionChanged = PassthroughSubject<Void, Never>()
+    /// Explicit commands supersede an outstanding continuation even when state
+    /// already equals the requested value or a native seek has not completed.
+    let playbackCommandReceived = PassthroughSubject<Void, Never>()
 
     // Internal access lets tests await the exact selection, including an obsolete task.
     private(set) var selectionTask: Task<Void, Never>?
@@ -209,6 +290,17 @@ final class FoundationPlayer: ObservableObject {
     func suspendReporting() { reporting?.cancelPending() }
 
     private var generation: UInt64 = 0
+    private var pausedContinuationPosition: (occurrence: UUID, seconds: Double)?
+    private struct InitialContinuationSeek: Sendable {
+        let id = UUID()
+        let generation: UInt64
+        let occurrence: UUID
+        let seconds: Double
+        var issued = false
+        var finalPosition: (@MainActor @Sendable () async throws -> Double)? = nil
+    }
+    private var initialContinuationSeek: InitialContinuationSeek?
+    private var continuationPositionTask: Task<Void, Never>?
     private let resolve: @Sendable (FoundationItem) async throws -> FoundationPlaybackResource
     private var installedResource: FoundationPlaybackResource?
     private let makeItem: (URL) -> AVPlayerItem
@@ -228,6 +320,8 @@ final class FoundationPlayer: ObservableObject {
     // AVAudioSession is process-wide; retiring account owners must finish before a new owner activates.
     private static var lastSessionOperation: Task<Void, Never>?
     private let startPlayback: (AVPlayer) -> Void
+    private let seekForContinuation:
+        @MainActor (AVPlayer, CMTime, @escaping @Sendable (Bool) -> Void) -> Void
     private var isStartingPlayback = false
     private var rejectionDuringStart = false
     private var observations: [NSKeyValueObservation] = []
@@ -276,9 +370,18 @@ final class FoundationPlayer: ObservableObject {
             #endif
         },
         startPlayback: @escaping (AVPlayer) -> Void = { $0.play() },
+        seekForContinuation:
+            @escaping @MainActor (
+                AVPlayer, CMTime, @escaping @Sendable (Bool) -> Void
+            ) -> Void = { player, time, completion in
+                player.seek(
+                    to: time, toleranceBefore: .zero, toleranceAfter: .zero,
+                    completionHandler: completion)
+            },
         reportPlayback: (@Sendable (FoundationPlaybackReport) async throws -> Void)? = nil,
         reportingAllowed: @escaping @MainActor @Sendable () -> Bool = { true }
     ) {
+        self.seekForContinuation = seekForContinuation
         self.reportingAllowed = reportingAllowed
         if let reportPlayback {
             reporting = FoundationPlaybackReporting { event in
@@ -427,6 +530,7 @@ final class FoundationPlayer: ObservableObject {
         reporting?.invalidate()
         playTask?.cancel()
         selectionTask?.cancel()
+        continuationPositionTask?.cancel()
         if let timeObserver { nativePlayer.removeTimeObserver(timeObserver) }
         notifications.forEach(NotificationCenter.default.removeObserver)
         nativePlayer.pause()
@@ -441,6 +545,7 @@ final class FoundationPlayer: ObservableObject {
         #endif
         guard items.allSatisfy({ $0.kind == .track }) else { return }
         if items.isEmpty {
+            continuationVisibleIDs = nil
             discardSelection()
             selectedEntryID = nil
             rawQueue = []
@@ -474,6 +579,7 @@ final class FoundationPlayer: ObservableObject {
         }
         discardSelection()
         selectedEntryID = nil
+        continuationVisibleIDs = nil
         rawQueue = retained + replacements
         // An old alternative copy may win the normal duplicate projection. Keep the explicitly
         // requested new occurrence visible as current before select validates its identity.
@@ -493,6 +599,7 @@ final class FoundationPlayer: ObservableObject {
             ? selectedEntryID.flatMap { id in rawQueue.firstIndex { $0.id == id }.map { $0 + 1 } }
                 ?? 0
             : rawQueue.endIndex
+        continuationVisibleIDs?.formUnion(entries.map(\.id))
         rawQueue.insert(contentsOf: entries, at: insertion)
         if selectedEntryID == nil { select(entries[0].id) }
         sessionChanged.send()
@@ -511,7 +618,10 @@ final class FoundationPlayer: ObservableObject {
 
     /// Natural successors replace the exhausted item directly, preserving native playback continuity.
     /// Manual selections retain their existing immediate-discard behavior.
-    private func select(_ id: UUID, retainingEndedItem: Bool) {
+    private func select(
+        _ id: UUID, retainingEndedItem: Bool, initialPosition: Double? = nil,
+        finalPosition: (@MainActor @Sendable () async throws -> Double)? = nil
+    ) {
         guard let entry = queue.first(where: { $0.id == id }) else { return }
         discardSelection(retainingNativeItem: retainingEndedItem)
         isInterrupted = false
@@ -520,6 +630,11 @@ final class FoundationPlayer: ObservableObject {
         wantsPlayback = true
         state = .loading
         let selectionGeneration = generation
+        if let initialPosition {
+            initialContinuationSeek = .init(
+                generation: selectionGeneration, occurrence: id, seconds: initialPosition,
+                finalPosition: finalPosition)
+        }
         let resolve = resolve
         #if DEBUG
             comparisonAccessEvents = 0
@@ -554,7 +669,13 @@ final class FoundationPlayer: ObservableObject {
                     self.recordSnapshot("item.installed")
                 #endif
                 self.selectionTask = nil
-                if self.wantsPlayback { self.play() } else { self.refreshNativeState() }
+                if self.initialContinuationSeek != nil {
+                    self.refreshNativeState()
+                } else if self.wantsPlayback {
+                    self.play(allowSessionResumption: true)
+                } else {
+                    self.refreshNativeState()
+                }
             } catch {
                 guard let self, self.generation == selectionGeneration else { return }
                 self.selectionTask = nil
@@ -602,6 +723,31 @@ final class FoundationPlayer: ObservableObject {
 
     /// A completed user scrub applies only to the occurrence that began the gesture.
     func seek(to seconds: Double, entryID: UUID) {
+        guard entryID == selectedEntryID, seconds.isFinite else { return }
+        playbackCommandReceived.send()
+        if let deferred = pausedContinuationPosition, deferred.occurrence == entryID,
+            nativePlayer.currentItem == nil
+        {
+            guard seconds <= Double(Int64.max / 600) - 1 else { return }
+            let requested = max(0, seconds)
+            pausedContinuationPosition = (
+                entryID, duration > 0 ? min(requested, duration) : requested
+            )
+            refreshTime()
+            playbackPositionChanged.send()
+            return
+        }
+        if let pending = initialContinuationSeek, pending.occurrence == entryID {
+            guard seconds <= Double(Int64.max / 600) - 1 else { return }
+            nativePlayer.currentItem?.cancelPendingSeeks()
+            continuationPositionTask?.cancel()
+            continuationPositionTask = nil
+            initialContinuationSeek = .init(
+                generation: generation, occurrence: entryID, seconds: max(0, seconds))
+            refreshNativeState()
+            playbackPositionChanged.send()
+            return
+        }
         guard entryID == selectedEntryID, seconds.isFinite, duration > 0,
             nativePlayer.currentItem?.status == .readyToPlay
         else { return }
@@ -668,6 +814,7 @@ final class FoundationPlayer: ObservableObject {
     /// Requests playback explicitly, retaining the current occurrence when native start was rejected.
     /// Repeated commands during an active start do not reactivate the session or replace the item.
     func play() {
+        playbackCommandReceived.send()
         play(allowSessionResumption: true)
     }
 
@@ -676,6 +823,11 @@ final class FoundationPlayer: ObservableObject {
         #if DEBUG
             recordSnapshot("command.play")
         #endif
+        if initialContinuationSeek != nil {
+            wantsPlayback = true
+            refreshNativeState()
+            return
+        }
         if state == .failed, let selectedEntryID {
             select(selectedEntryID)
             return
@@ -688,7 +840,10 @@ final class FoundationPlayer: ObservableObject {
         }
         guard let item = nativePlayer.currentItem else {
             if let selectedEntryID {
-                select(selectedEntryID)
+                let position = pausedContinuationPosition.flatMap {
+                    $0.occurrence == selectedEntryID ? $0.seconds : nil
+                }
+                select(selectedEntryID, retainingEndedItem: false, initialPosition: position)
             }
             return
         }
@@ -848,6 +1003,10 @@ final class FoundationPlayer: ObservableObject {
     /// Cancels playback intent, including a pending resolution, without discarding the occurrence.
     /// A later explicit Play may resume the same item; inactivity never resumes it automatically.
     func pause() {
+        playbackCommandReceived.send()
+        if initialContinuationSeek?.finalPosition != nil || continuationPositionTask != nil {
+            cancelPendingContinuation(generation: generation)
+        }
         isInterrupted = false
         #if DEBUG
             recordSnapshot("command.pause")
@@ -891,6 +1050,10 @@ final class FoundationPlayer: ObservableObject {
     }
 
     private func discardSelection(retainingNativeItem: Bool = false) {
+        continuationPositionTask?.cancel()
+        continuationPositionTask = nil
+        pausedContinuationPosition = nil
+        initialContinuationSeek = nil
         #if DEBUG
             if let item = nativePlayer.currentItem { recordComparisonAccess(item, retiring: true) }
         #endif
@@ -948,6 +1111,44 @@ final class FoundationPlayer: ObservableObject {
             fail(.nativeItem, error: item.error)
             return
         }
+        if var pending = initialContinuationSeek {
+            guard pending.generation == generation, pending.occurrence == selectedEntryID else {
+                initialContinuationSeek = nil
+                return
+            }
+            state = wantsPlayback ? .loading : .paused
+            guard !pending.issued, item.status == .readyToPlay else { return }
+            pending.issued = true
+            initialContinuationSeek = pending
+            if let finalPosition = pending.finalPosition {
+                let request = pending
+                continuationPositionTask = Task { [weak self] in
+                    do {
+                        let seconds = try await finalPosition()
+                        try Task.checkCancellation()
+                        guard let self, self.matchesContinuation(request, item: item) else {
+                            return
+                        }
+                        self.continuationPositionTask = nil
+                        guard seconds.isFinite, seconds >= 0,
+                            seconds <= Double(Int64.max / 600) - 1
+                        else { throw FoundationHandoffError.positionUnavailable }
+                        self.issueContinuationSeek(request, item: item, seconds: seconds)
+                    } catch {
+                        guard !Task.isCancelled, let self,
+                            self.matchesContinuation(request, item: item)
+                        else { return }
+                        self.continuationPositionTask = nil
+                        self.fail(.resolution, error: nil)
+                        self.errorMessage =
+                            FoundationHandoffError.positionUnavailable.errorDescription
+                    }
+                }
+            } else {
+                issueContinuationSeek(pending, item: item, seconds: pending.seconds)
+            }
+            return
+        }
         #if os(iOS)
             if pendingSessionResumption != nil, wantsPlayback {
                 state = .waiting
@@ -975,6 +1176,39 @@ final class FoundationPlayer: ObservableObject {
         reporting?.progress(position: elapsed, paused: !wantsPlayback)
     }
 
+    private func matchesContinuation(_ request: InitialContinuationSeek, item: AVPlayerItem) -> Bool
+    {
+        generation == request.generation && selectedEntryID == request.occurrence
+            && initialContinuationSeek?.id == request.id && nativePlayer.currentItem === item
+    }
+
+    private func issueContinuationSeek(
+        _ request: InitialContinuationSeek, item: AVPlayerItem, seconds: Double
+    ) {
+        guard matchesContinuation(request, item: item) else { return }
+        let length = item.duration.seconds
+        let target = length.isFinite && length > 0 ? min(seconds, length) : seconds
+        seekForContinuation(
+            nativePlayer, CMTime(seconds: target, preferredTimescale: 600)
+        ) { [weak self] finished in
+            Task { @MainActor [weak self] in
+                guard let self, self.matchesContinuation(request, item: item) else { return }
+                self.initialContinuationSeek = nil
+                self.refreshTime()
+                guard finished else {
+                    self.fail(.resolution, error: nil)
+                    self.errorMessage = FoundationHandoffError.positionUnavailable.errorDescription
+                    return
+                }
+                if self.wantsPlayback {
+                    self.play(allowSessionResumption: true)
+                } else {
+                    self.refreshNativeState()
+                }
+            }
+        }
+    }
+
     private func finishReporting() {
         let position = nativePlayer.currentTime().seconds
         reporting?.stop(position: position.isFinite ? max(0, position) : elapsed)
@@ -982,6 +1216,14 @@ final class FoundationPlayer: ObservableObject {
 
     private func refreshTime() {
         guard selectionTask == nil else { return }
+        if nativePlayer.currentItem == nil, let deferred = pausedContinuationPosition,
+            deferred.occurrence == selectedEntryID
+        {
+            elapsed = deferred.seconds
+            let length = queue.first(where: { $0.id == deferred.occurrence })?.item.duration ?? 0
+            duration = length.isFinite ? max(0, length) : 0
+            return
+        }
         let seconds = nativePlayer.currentTime().seconds
         let length = nativePlayer.currentItem?.duration.seconds ?? 0
         elapsed = seconds.isFinite ? max(0, seconds) : 0
@@ -1022,6 +1264,10 @@ final class FoundationPlayer: ObservableObject {
     }
 
     private func fail(_ category: FailureCategory, error: Error?) {
+        continuationPositionTask?.cancel()
+        continuationPositionTask = nil
+        initialContinuationSeek = nil
+        pausedContinuationPosition = nil
         finishReporting()
         cancelPendingPlay()
         wantsPlayback = false
@@ -1238,6 +1484,7 @@ struct FoundationPlaybackSnapshot: Codable {
     let selectedEntryID: UUID?
     let shuffleEnabled: Bool
     let repeatMode: FoundationPlayer.RepeatMode
+    let visibleEntryIDs: [UUID]?
 
     @MainActor init(player: FoundationPlayer) {
         version = 1
@@ -1245,10 +1492,32 @@ struct FoundationPlaybackSnapshot: Codable {
         selectedEntryID = player.selectedEntryID
         shuffleEnabled = player.shuffleEnabled
         repeatMode = player.repeatMode
+        visibleEntryIDs = player.persistedVisibleEntryIDs
+    }
+
+    init(
+        entries: [FoundationQueueEntry], selectedEntryID: UUID, shuffleEnabled: Bool,
+        repeatMode: FoundationPlayer.RepeatMode, visibleEntryIDs: [UUID]? = nil
+    ) {
+        version = 1
+        self.entries = entries.map(Entry.init)
+        self.selectedEntryID = selectedEntryID
+        self.shuffleEnabled = shuffleEnabled
+        self.repeatMode = repeatMode
+        self.visibleEntryIDs = visibleEntryIDs
     }
 
     var isValid: Bool {
         version == 1 && Set(entries.map(\.id)).count == entries.count
             && (selectedEntryID == nil || entries.contains { $0.id == selectedEntryID })
+            && validVisibility
+    }
+
+    private var validVisibility: Bool {
+        guard let visibleEntryIDs else { return true }
+        let visible = Set(visibleEntryIDs)
+        return visible.count == visibleEntryIDs.count
+            && entries.filter { visible.contains($0.id) }.map(\.id) == visibleEntryIDs
+            && (selectedEntryID.map { visible.contains($0) } ?? true)
     }
 }

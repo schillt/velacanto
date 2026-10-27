@@ -1,0 +1,51 @@
+--- a/docs/privacy-policy.md
++++ b/docs/privacy-policy.md
+@@ -8,7 +8,7 @@
+
+ VelaCanto connects your iPhone, iPad or Mac to a Jellyfin music server you choose.
+ It lets you browse and play music, manage supported playlists and favorites,
+-save local pins and queues, and download music for offline listening. NovoLuxor
++save pins and queues, and download music for offline listening. NovoLuxor
+ does not provide the music library or operate your chosen server simply because
+ you use this app.
+
+@@ -59,9 +59,18 @@
+ reported problems; information may also need to be retained or disclosed when
+ required by law or necessary to address a security incident.
+
+-The current app does not synchronize pins through iCloud, transfer playback
+-through Handoff, provide additional music-server providers or index local folders.
+-Those planned features will require updated disclosures before they ship.
++Optional iCloud pin sync is off by default and is available only in configured
++builds. If you enable it, the app sends minimal pin identifiers and order,
++server/account scope digests, random device identifiers, logical edit/removal
++markers and a reset identifier to your private CloudKit database through Apple.
++These identifiers can describe your library choices; hashes are not encryption
++or a promise of anonymity. Pin titles, artwork, server addresses, credentials,
++playback, queues and downloaded media are not included in this pin-sync payload.
++Each device resolves pin references using its own authorized library. Apple
++processes iCloud account and service information under its own policies.
++
++Pin sync does not enable Handoff or synchronize other library/account data.
++Other new features require their own accurate disclosures before they ship.
+
+ ## Connections and security
+
+@@ -88,6 +97,17 @@
+ server logs, server accounts or server-held listening history. Local sign-out is
+ not a guarantee that a server revoked every previously issued token.
+
++Turning pin sync off keeps the device's current local pins and stops new sync
++operations; already-submitted requests may finish. Cloud pins remain after you
++disable sync or sign out of VelaCanto. Delete Cloud-Saved Pins is a separate
++confirmed action for the current library/account: it clears cloud pin identities
++and order and retains an empty reset record so stale offline devices do not
++restore the old pins. Other enabled devices reconcile on their next sync. This
++does not promise removal from Apple's historical backups or storage history.
++Local sync journals use ordinary device preferences and are removed with local
++account cleanup; older device backups may retain them. You can keep using local
++pins during iCloud outages. An iCloud account change stops sync pending review.
++
+ Control permissions, connected devices, storage and Apple diagnostic sharing
+ through the app and system settings. The app signs in to an existing server
+ account; it does not create or delete that server account. Contact the server

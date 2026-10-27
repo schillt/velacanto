@@ -20,7 +20,9 @@ enum FoundationPinStorage {
     ) -> Bool {
         let retainedKey = sourceScope.map(key(for:))
         let keys = defaults.dictionaryRepresentation().keys.filter {
-            $0.hasPrefix(keyPrefix) && $0 != retainedKey
+            ($0.hasPrefix(keyPrefix) && $0 != retainedKey)
+                || ($0.hasPrefix(FoundationPinSync.storagePrefix)
+                    && $0 != sourceScope.map { FoundationPinSync.storagePrefix + $0 })
         }
         for key in keys { defaults.removeObject(forKey: key) }
         return keys.allSatisfy { defaults.object(forKey: $0) == nil }
@@ -31,6 +33,15 @@ enum FoundationPinStorage {
 @MainActor
 final class FoundationLibraryActions: ObservableObject {
     enum CollectionOperation: Sendable, Equatable { case playback, enqueue }
+
+    /// Native presenters retain a snapshot without discarding its account-owned retry.
+    struct CollectionOutcome: Equatable {
+        fileprivate let owner: UUID?
+        fileprivate let revision: UInt
+        let message: String
+        let isError: Bool
+        let canRetry: Bool
+    }
 
     struct FavoriteRead {
         fileprivate let owner: UUID
@@ -114,6 +125,7 @@ final class FoundationLibraryActions: ObservableObject {
     private var tasks: [Key: Task<Void, Error>] = [:]
     private var favoriteReads: [UUID: Task<FoundationItem?, Error>] = [:]
     private var active = true
+    private(set) var pinSync: FoundationPinSync?
     private let favoriteOwner = UUID()
     private var favoriteSequence: UInt = 0
     private var favoriteVersions: [Key: UInt] = [:]
@@ -168,10 +180,77 @@ final class FoundationLibraryActions: ObservableObject {
         do {
             try write(storageKey, JSONEncoder().encode(updated.map(Pin.init)))
             pins = updated
+            pinSync?.pinsChanged()
             pinErrorMessage = nil
         } catch {
             pinErrorMessage = "Pins could not be saved. Try again."
         }
+    }
+
+    func canMovePin(_ item: FoundationItem, earlier: Bool) -> Bool {
+        guard active, let index = pins.firstIndex(where: { Key($0) == Key(item) }) else {
+            return false
+        }
+        return earlier ? index > 0 : index + 1 < pins.count
+    }
+
+    func movePin(_ item: FoundationItem, earlier: Bool) {
+        guard canMovePin(item, earlier: earlier),
+            let index = pins.firstIndex(where: { Key($0) == Key(item) })
+        else { return }
+        var updated = pins
+        updated.swapAt(index, index + (earlier ? -1 : 1))
+        do {
+            try write(storageKey, JSONEncoder().encode(updated.map(Pin.init)))
+            pins = updated
+            pinSync?.pinsChanged()
+            pinErrorMessage = nil
+        } catch {
+            pinErrorMessage = "Pin order could not be saved. Try again."
+        }
+    }
+
+    func configurePinSync(
+        sourceScope: String, containerIdentifier: String?,
+        resolve: @escaping (FoundationItem) async throws -> FoundationItem?
+    ) {
+        pinSync?.invalidate()
+        pinSync = FoundationPinSync(
+            scope: sourceScope, containerIdentifier: containerIdentifier,
+            currentPins: { [weak self] in
+                self?.pins.map { .init(id: $0.id, kind: String(describing: $0.kind)) } ?? []
+            },
+            apply: { [weak self] identities, isCurrent in
+                guard let self, self.active, isCurrent() else { return }
+                var resolved: [FoundationItem] = []
+                for identity in identities {
+                    guard self.active, isCurrent() else { return }
+                    if let existing = self.pins.first(where: {
+                        $0.id == identity.id && String(describing: $0.kind) == identity.kind
+                    }) {
+                        resolved.append(existing)
+                        continue
+                    }
+                    let kind: FoundationItem.Kind
+                    switch identity.kind {
+                    case "album": kind = .album
+                    case "artist": kind = .artist
+                    case "playlist": kind = .playlist
+                    case "genre": kind = .genre
+                    default: continue
+                    }
+                    let reference = FoundationItem(
+                        id: identity.id, title: "", subtitle: "", kind: kind, duration: nil)
+                    if let item = try await resolve(reference),
+                        item.id == identity.id, item.kind == kind
+                    {
+                        resolved.append(item)
+                    }
+                }
+                guard self.active, isCurrent() else { return }
+                try self.write(self.storageKey, JSONEncoder().encode(resolved.map(Pin.init)))
+                self.pins = resolved
+            })
     }
 
     func favoriteState(for item: FoundationItem, initial: Bool?) -> Bool? {
@@ -183,16 +262,13 @@ final class FoundationLibraryActions: ObservableObject {
         items.filter { favoriteState(for: $0, initial: $0.isFavorite) != false }
     }
 
-    func favoriteTrackQueue(in items: [FoundationItem], selecting index: Int)
-        -> (items: [FoundationItem], index: Int)?
-    {
-        guard items.indices.contains(index), items[index].kind == .track,
-            favoriteState(for: items[index], initial: items[index].isFavorite) != false
-        else { return nil }
-        let tracks = favoriteItems(in: items).filter { $0.kind == .track }
-        let selected = favoriteItems(in: Array(items.prefix(index))).filter { $0.kind == .track }
-            .count
-        return (tracks, selected)
+    func favoriteTrackQueue(
+        in items: [FoundationItem], selecting index: Int,
+        isAvailable: (FoundationItem) -> Bool = { _ in true }
+    ) -> FoundationTrackQueueSelection? {
+        FoundationTrackQueueSelection(in: items, selecting: index) {
+            favoriteState(for: $0, initial: $0.isFavorite) != false && isAvailable($0)
+        }
     }
 
     /// Capture before starting a remote read, never when rendering retained items.
@@ -342,6 +418,7 @@ final class FoundationLibraryActions: ObservableObject {
         owner: UUID? = nil
     ) {
         guard active, !isQueueLoading else { return }
+        queueActionRevision &+= 1
         dismissQueueOutcome()
         if item.kind == .track {
             player.enqueue([item], position: position)
@@ -368,6 +445,7 @@ final class FoundationLibraryActions: ObservableObject {
         player: FoundationPlayer, owner: UUID? = nil, shouldCommit: (() -> Bool)? = nil
     ) {
         guard active, !isQueueLoading else { return }
+        queueActionRevision &+= 1
         playbackPreparation = player.sessionChanged.sink { [weak self] in
             self?.cancelQueueAddition()
         }
@@ -468,6 +546,28 @@ final class FoundationLibraryActions: ObservableObject {
     private enum CollectionLimit: Error { case reached }
 
     private var queueOwner: UUID?
+    /// New operations can produce the same message for the same surface owner.
+    private var queueActionRevision: UInt = 0
+
+    func collectionOutcome(ownedBy owner: UUID?) -> CollectionOutcome? {
+        guard active, queueOwner == owner, !isQueueLoading,
+            let message = queueErrorMessage ?? queueNotice
+        else { return nil }
+        return .init(
+            owner: owner, revision: queueActionRevision,
+            message: message, isError: queueErrorMessage != nil,
+            canRetry: canRetryQueueAddition)
+    }
+
+    func retryQueueAddition(matching outcome: CollectionOutcome) {
+        guard collectionOutcome(ownedBy: outcome.owner) == outcome else { return }
+        retryQueueAddition()
+    }
+
+    func dismissQueueOutcome(matching outcome: CollectionOutcome) {
+        guard collectionOutcome(ownedBy: outcome.owner) == outcome else { return }
+        dismissQueueOutcome()
+    }
 
     /// A departing surface may cancel its own work, never a newer destination's work.
     func cancelQueueAdditionOwned(by owner: UUID?, file: String = #fileID, line: Int = #line) {
@@ -504,8 +604,15 @@ final class FoundationLibraryActions: ObservableObject {
         retryQueueAdditionAction = nil
     }
 
+    /// Read-only authority check for source-aware native controls. Invalidation
+    /// remains owned by the account runtime; no new lifetime or cached scope.
+    func acceptsCatalogAccount(_ scope: String) -> Bool {
+        active && storageKey == FoundationPinStorage.key(for: scope)
+    }
+
     /// Called by the source owner before replacing or dismissing this source.
     func invalidate() {
+        pinSync?.invalidate()
         active = false
         canonicalTracks = [:]
         knownTrackKeys = [:]

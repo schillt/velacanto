@@ -2,6 +2,7 @@ import SwiftUI
 
 /// Use identical content in a visible Menu and the native contextMenu modifier.
 struct FoundationItemMenu: View {
+    @Environment(\.foundationHandoff) private var handoff
     let item: FoundationItem
     @ObservedObject var actions: FoundationLibraryActions
     let initialFavorite: Bool?
@@ -16,6 +17,7 @@ struct FoundationItemMenu: View {
     var currentPageKind: FoundationItem.Kind?
     var removeFromPlaylist: (() -> Void)?
     var removalPending = false
+    var canPerform: @MainActor @Sendable (FoundationCatalogCapabilities) -> Bool = { _ in true }
     @Environment(\.foundationCollectionOperationOwner) private var collectionOperationOwner
     @EnvironmentObject private var downloads: FoundationDownloads
     @EnvironmentObject private var connectivity: FoundationConnectivity
@@ -29,9 +31,11 @@ struct FoundationItemMenu: View {
                     favorite == true ? "Unfavorite" : "Favorite",
                     systemImage: favorite == true ? "star.slash" : "star"
                 ) {
-                    guard !connectivity.localOnly, let favorite else { return }
+                    guard canPerform(.favorites), !connectivity.localOnly, let favorite else {
+                        return
+                    }
                     Task {
-                        guard !connectivity.localOnly else { return }
+                        guard canPerform(.favorites), !connectivity.localOnly else { return }
                         await actions.setFavorite(for: item, isFavorite: !favorite)
                     }
                 }
@@ -41,22 +45,38 @@ struct FoundationItemMenu: View {
                 Button(
                     actions.isPinned(item) ? "Unpin" : "Pin",
                     systemImage: actions.isPinned(item) ? "pin.slash" : "pin"
-                ) { actions.togglePin(item) }
+                ) { if canPerform(.catalogPresence) { actions.togglePin(item) } }
+                if actions.isPinned(item) {
+                    Button("Move Pin Earlier", systemImage: "arrow.up") {
+                        guard canPerform(.catalogPresence) else { return }
+                        actions.movePin(item, earlier: true)
+                    }.disabled(!actions.canMovePin(item, earlier: true))
+                    Button("Move Pin Later", systemImage: "arrow.down") {
+                        guard canPerform(.catalogPresence) else { return }
+                        actions.movePin(item, earlier: false)
+                    }.disabled(!actions.canMovePin(item, earlier: false))
+                }
             }
         }
         Section {
             if let open {
+                let performOpen = {
+                    guard canPerform(.catalogPresence) else { return }
+                    handoff?.navigationChangedByUser()
+                    open()
+                }
                 switch item.kind {
-                case .album: Button("View Album", systemImage: "square.stack", action: open)
-                case .artist: Button("View Artist", systemImage: "music.mic", action: open)
+                case .album: Button("View Album", systemImage: "square.stack", action: performOpen)
+                case .artist: Button("View Artist", systemImage: "music.mic", action: performOpen)
                 case .playlist:
-                    Button("View Playlist", systemImage: "music.note.list", action: open)
-                case .genre: Button("View Genre", systemImage: "guitars", action: open)
+                    Button("View Playlist", systemImage: "music.note.list", action: performOpen)
+                case .genre: Button("View Genre", systemImage: "guitars", action: performOpen)
                 case .track: EmptyView()
                 }
             }
             if let play {
                 Button("Play", systemImage: "play.fill") {
+                    guard canPerform(.playback) else { return }
                     if connectivity.localOnly, item.kind != .track, let player {
                         let ready = actions.collectionTracks(
                             downloads.browseTracks(for: item), for: item)
@@ -71,6 +91,7 @@ struct FoundationItemMenu: View {
                     || ((item.kind == .album || item.kind == .playlist) && library != nil)
             {
                 Button("Play Next", systemImage: "text.line.first.and.arrowtriangle.forward") {
+                    guard canPerform(.playback) else { return }
                     if connectivity.localOnly {
                         player.enqueue(
                             actions.collectionTracks(downloads.browseTracks(for: item), for: item),
@@ -84,6 +105,7 @@ struct FoundationItemMenu: View {
                     actions.isQueueLoading
                         || (connectivity.localOnly && downloads.browseTracks(for: item).isEmpty))
                 Button("Play Last", systemImage: "text.line.last.and.arrowtriangle.forward") {
+                    guard canPerform(.playback) else { return }
                     if connectivity.localOnly {
                         player.enqueue(
                             actions.collectionTracks(downloads.browseTracks(for: item), for: item),
@@ -99,16 +121,23 @@ struct FoundationItemMenu: View {
             }
             if item.kind == .track || item.kind == .album, let navigate {
                 FoundationRelatedDestinations(
-                    item: item, navigate: navigate, currentPageKind: currentPageKind)
+                    item: item, navigate: navigate, currentPageKind: currentPageKind,
+                    canPerform: canPerform)
             }
             if !connectivity.localOnly, item.kind == .track || item.kind == .album,
                 let addToPlaylist
             {
-                Button("Add to Playlist", systemImage: "music.note.list") { addToPlaylist(item) }
+                Button("Add to Playlist", systemImage: "music.note.list") {
+                    guard canPerform(.catalogPresence), !connectivity.localOnly,
+                        library?.supportsPlaylistManagement != false
+                    else { return }
+                    addToPlaylist(item)
+                }
             }
             if item.kind == .track || item.kind == .album || item.kind == .playlist {
                 if !downloads.hasDownloadedData(for: item) {
-                    FoundationDownloadActionButton(item: item, showsTitle: true)
+                    FoundationDownloadActionButton(
+                        item: item, showsTitle: true, canPerform: canPerform)
                 }
                 if let owner = downloads.owners.first(where: {
                     $0.item.id == item.id && $0.item.kind == item.kind
@@ -116,10 +145,12 @@ struct FoundationItemMenu: View {
                     switch owner.state {
                     case .queued, .expanding, .waitingForWiFi, .downloading:
                         Button("Cancel Download", systemImage: "xmark.circle") {
+                            guard canPerform(.downloads) else { return }
                             downloads.cancel(ownerID: owner.id)
                         }
                     case .cancelled, .failed:
                         Button("Retry Download", systemImage: "arrow.clockwise") {
+                            guard canPerform(.downloads), !connectivity.localOnly else { return }
                             downloads.retry(ownerID: owner.id)
                         }.disabled(connectivity.localOnly)
                     case .ready:
@@ -133,12 +164,13 @@ struct FoundationItemMenu: View {
                 if downloads.hasDownloadedData(for: item),
                     item.kind == .track || item.kind == .album || item.kind == .playlist
                 {
-                    FoundationDownloadActionButton(item: item, showsTitle: true)
+                    FoundationDownloadActionButton(
+                        item: item, showsTitle: true, canPerform: canPerform)
                 }
                 if let removeFromPlaylist {
                     Button(
                         "Remove from Playlist", systemImage: "minus.circle", role: .destructive,
-                        action: removeFromPlaylist
+                        action: { if canPerform(.catalogPresence) { removeFromPlaylist() } }
                     )
                     .disabled(connectivity.localOnly || removalPending)
                 }
@@ -150,22 +182,32 @@ struct FoundationItemMenu: View {
 
 /// Navigate using supplied identities only; opening a menu performs no lookup.
 struct FoundationRelatedDestinations: View {
+    @Environment(\.foundationHandoff) private var handoff
     let item: FoundationItem
     let navigate: (FoundationItem) -> Void
     var currentPageKind: FoundationItem.Kind?
+    var canPerform: @MainActor @Sendable (FoundationCatalogCapabilities) -> Bool = { _ in true }
     @EnvironmentObject private var connectivity: FoundationConnectivity
     @EnvironmentObject private var downloads: FoundationDownloads
 
     var body: some View {
         if currentPageKind != .album, let album = item.relatedAlbum {
-            Button("View Album", systemImage: "square.stack") { navigate(album) }
-                .disabled(connectivity.localOnly && downloads.browseTracks(for: album).isEmpty)
+            Button("View Album", systemImage: "square.stack") {
+                guard canPerform(.catalogPresence) else { return }
+                handoff?.navigationChangedByUser()
+                navigate(album)
+            }
+            .disabled(connectivity.localOnly && downloads.browseTracks(for: album).isEmpty)
         }
         if currentPageKind != .artist, let artist = item.relatedArtist {
-            Button("View Artist", systemImage: "music.mic") { navigate(artist) }
-                .disabled(
-                    connectivity.localOnly
-                        && downloads.downloadedAlbums(artistID: artist.id).isEmpty)
+            Button("View Artist", systemImage: "music.mic") {
+                guard canPerform(.catalogPresence) else { return }
+                handoff?.navigationChangedByUser()
+                navigate(artist)
+            }
+            .disabled(
+                connectivity.localOnly
+                    && downloads.downloadedAlbums(artistID: artist.id).isEmpty)
         }
     }
 }
@@ -189,6 +231,7 @@ struct FoundationDownloadActionButton: View {
     let item: FoundationItem
     var showsTitle = false
     var iconFont: Font = .caption
+    var canPerform: @MainActor @Sendable (FoundationCatalogCapabilities) -> Bool = { _ in true }
     @State private var confirmingRemoval = false
 
     private var hasDownload: Bool { downloads.hasDownloadedData(for: item) }
@@ -206,8 +249,14 @@ struct FoundationDownloadActionButton: View {
 
     var body: some View {
         Button(role: hasDownload && showsTitle ? .destructive : nil) {
+            guard canPerform(.downloads) else { return }
             if hasDownload {
-                if let requestRemoval { requestRemoval(item) } else { confirmingRemoval = true }
+                if let requestRemoval {
+                    requestRemoval(
+                        .init(item: item, isCurrent: { [canPerform] in canPerform(.downloads) }))
+                } else {
+                    confirmingRemoval = true
+                }
             } else {
                 downloads.downloadAgain(item)
             }
@@ -232,7 +281,10 @@ struct FoundationDownloadActionButton: View {
             "Remove downloads?", isPresented: $confirmingRemoval,
             titleVisibility: .visible
         ) {
-            Button("Remove", role: .destructive) { downloads.removeDownloads(for: item) }
+            Button("Remove", role: .destructive) {
+                guard canPerform(.downloads) else { return }
+                downloads.removeDownloads(for: item)
+            }
             Button("Cancel", role: .cancel) {}
         } message: {
             Text(foundationDownloadRemovalMessage(item: item, downloads: downloads))
@@ -243,26 +295,27 @@ struct FoundationDownloadActionButton: View {
 /// Native menus dismiss before an alert appears; their removal request belongs to a stable host.
 struct FoundationDownloadRemovalPresentation: ViewModifier {
     @EnvironmentObject private var downloads: FoundationDownloads
-    @State private var item: FoundationItem?
+    @State private var request: FoundationDownloadRemovalRequest?
 
     func body(content: Content) -> some View {
         content
-            .environment(\.foundationRequestDownloadRemoval, { item = $0 })
+            .environment(\.foundationRequestDownloadRemoval, { request = $0 })
             .confirmationDialog(
                 "Remove downloads?",
                 isPresented: Binding(
-                    get: { item != nil }, set: { if !$0 { item = nil } }), titleVisibility: .visible
+                    get: { request != nil }, set: { if !$0 { request = nil } }),
+                titleVisibility: .visible
             ) {
-                if let item {
+                if let request {
                     Button("Remove", role: .destructive) {
-                        downloads.removeDownloads(for: item)
-                        self.item = nil
+                        if request.isCurrent() { downloads.removeDownloads(for: request.item) }
+                        self.request = nil
                     }
                 }
-                Button("Cancel", role: .cancel) { item = nil }
+                Button("Cancel", role: .cancel) { request = nil }
             } message: {
-                if let item {
-                    Text(foundationDownloadRemovalMessage(item: item, downloads: downloads))
+                if let request {
+                    Text(foundationDownloadRemovalMessage(item: request.item, downloads: downloads))
                 }
             }
     }
@@ -280,12 +333,20 @@ private func foundationDownloadRemovalMessage(item: FoundationItem, downloads: F
         "This changes downloaded music on this device. Your server library and playlists are unchanged. Music currently playing is removed after playback releases it."
 }
 
+struct FoundationDownloadRemovalRequest: Sendable {
+    let item: FoundationItem
+    let isCurrent: @MainActor @Sendable () -> Bool
+}
+
 private struct FoundationRequestDownloadRemovalKey: EnvironmentKey {
-    static let defaultValue: (@MainActor @Sendable (FoundationItem) -> Void)? = nil
+    static let defaultValue: (@MainActor @Sendable (FoundationDownloadRemovalRequest) -> Void)? =
+        nil
 }
 
 extension EnvironmentValues {
-    var foundationRequestDownloadRemoval: (@MainActor @Sendable (FoundationItem) -> Void)? {
+    var foundationRequestDownloadRemoval:
+        (@MainActor @Sendable (FoundationDownloadRemovalRequest) -> Void)?
+    {
         get { self[FoundationRequestDownloadRemovalKey.self] }
         set { self[FoundationRequestDownloadRemovalKey.self] = newValue }
     }

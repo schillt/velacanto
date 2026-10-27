@@ -50,8 +50,12 @@ struct VelacantoFoundationApp: App {
     #if os(iOS)
         @UIApplicationDelegateAdaptor(FoundationCarPlayApplicationDelegate.self) private
             var carPlayDelegate
+    #else
+        @NSApplicationDelegateAdaptor(FoundationHandoffApplicationDelegate.self) private
+            var handoffDelegate
     #endif
     @StateObject private var model = FoundationAppRuntime.model
+    @State private var localLibrary = FoundationLocalLibraryModel.appOwned()
 
     var body: some Scene {
         WindowGroup {
@@ -66,10 +70,14 @@ struct VelacantoFoundationApp: App {
                     }
                 } else {
                     FoundationRootView(model: model)
+                        .environment(\.foundationLocalLibrary, localLibrary)
+                        .task { await localLibrary.restore().value }
                         .frame(minWidth: 320, minHeight: 480)
                 }
             #else
                 FoundationRootView(model: model)
+                    .environment(\.foundationLocalLibrary, localLibrary)
+                    .task { await localLibrary.restore().value }
                     #if os(macOS)
                         .frame(minWidth: 1080, minHeight: 640)
                     #else
@@ -166,6 +174,16 @@ struct FoundationAccountRetention {
 
 @MainActor
 final class FoundationAppModel: ObservableObject {
+    let handoff = FoundationHandoffController()
+    let continueListeningDismissals = FoundationContinueListeningDismissals()
+
+    @discardableResult
+    func receiveHandoff(_ activity: NSUserActivity) -> Bool {
+        handoff.receive(activity) { [weak self] in
+            guard let self else { return false }
+            return await self.ensureReady() == .ready
+        }
+    }
     enum Readiness: Equatable {
         case ready, signedOut, unavailable, cancelled
     }
@@ -215,6 +233,7 @@ final class FoundationAppModel: ObservableObject {
     }
 
     @Published private(set) var library: FoundationJellyfinLibrary?
+    @Published private(set) var primaryGenres: FoundationPrimaryGenresModel?
     @Published private(set) var browseLibrary: FoundationJellyfinLibrary?
     @Published private(set) var librarySelection: FoundationMusicLibrarySelection?
     @Published private(set) var player: FoundationPlayer?
@@ -238,6 +257,7 @@ final class FoundationAppModel: ObservableObject {
         func requireMacSignIn() {
             player?.stop()
             requiresSignIn = true
+            primaryGenres?.cancel()
             settingsShowsSignIn = true
         }
     #endif
@@ -254,6 +274,7 @@ final class FoundationAppModel: ObservableObject {
     isolated deinit {
         startupTask?.cancel()
         accountCleanupTask?.cancel()
+        retirePrimaryGenres()
         FoundationAlphabetAccountLifecycle.retire(library)
         librarySelection?.invalidate()
         if let cache = library?.artworkCache {
@@ -328,6 +349,8 @@ final class FoundationAppModel: ObservableObject {
 
     /// Retire suspended startup work together with an account's local ownership.
     func invalidateAccountReadiness() {
+        continueListeningDismissals.configure(scope: nil)
+        handoff.invalidate()
         cancelCredentialUpgrade()
         accountCleanupTask?.cancel()
         accountEpoch += 1
@@ -543,8 +566,12 @@ final class FoundationAppModel: ObservableObject {
     }
 
     private func open(_ session: FoundationSession, sourceScope: String) {
+        continueListeningDismissals.configure(
+            scope: FoundationMusicLibraryStore.digest(sourceScope + "\0" + session.deviceID))
+        if library != nil { handoff.invalidate() }
         cancelCredentialUpgrade()
         accountCleanupTask?.cancel()
+        retirePrimaryGenres()
         FoundationAlphabetAccountLifecycle.retire(library)
         playbackSessionSubscription = nil
         accountEpoch += 1
@@ -585,7 +612,7 @@ final class FoundationAppModel: ObservableObject {
             retiringPages: retiringPages)
         librarySelection?.invalidate()
         let library = FoundationJellyfinLibrary(
-            session: session,
+            session: session, deviceName: FoundationClientDeviceName.current,
             streamingQuality: { [weak self, playbackPreferences] in
                 #if os(macOS)
                     return await playbackPreferences.resolvedStreamingQuality(
@@ -621,7 +648,9 @@ final class FoundationAppModel: ObservableObject {
             allowsNetwork: { [weak self] in self?.connectivity?.localOnly == false },
             apply: { [weak self] id, available in
                 guard let self, self.accountEpoch == epoch else { return }
-                self.browseLibrary = library.scoped(to: id, available: available)
+                let scoped = library.scoped(to: id, available: available)
+                self.configurePrimaryGenres(scoped)
+                self.browseLibrary = scoped
             })
         self.actions = FoundationLibraryActions(
             sourceScope: sourceScope,
@@ -629,6 +658,11 @@ final class FoundationAppModel: ObservableObject {
             mutateFavorite: { item, favorite in
                 try await library.setFavorite(for: item, isFavorite: favorite)
             })
+        self.actions?.configurePinSync(
+            sourceScope: sourceScope,
+            containerIdentifier: Bundle.main.object(
+                forInfoDictionaryKey: "VelacantoPinSyncContainerIdentifier") as? String,
+            resolve: { try await library.itemDetails(for: $0) })
         self.library = library
         let downloads = FoundationDownloads(
             scope: sourceScope, library: library, monitorConnectivity: false,
@@ -648,6 +682,7 @@ final class FoundationAppModel: ObservableObject {
                     })
             })
         self.downloads = downloads
+        configurePrimaryGenres(browseLibrary ?? library)
         let connectivity = FoundationConnectivity {
             _ = try await library.songs(startIndex: 0)
         }
@@ -673,6 +708,7 @@ final class FoundationAppModel: ObservableObject {
                 guard let self, let downloads, let connectivity,
                     self.connectivity === connectivity
                 else { return }
+                if connectivity.localOnly { self.primaryGenres?.cancel() }
                 if connectivity.localOnly { self.player?.suspendReporting() }
                 if self.currentArtworkLocalOnly != connectivity.localOnly {
                     self.currentArtworkLocalOnly = connectivity.localOnly
@@ -693,6 +729,13 @@ final class FoundationAppModel: ObservableObject {
             }
         }.store(in: &policySubscriptions)
         if let player = self.player {
+            preferences.$showDuplicateAlbumTracks.removeDuplicates().dropFirst().sink {
+                [weak player] _ in
+                // Retire ownership at the preference event, not in a delayed task
+                // that could clear a newer restored queue. The ordinary preference
+                // observation refreshes the projection after Published assignment.
+                player?.clearContinuationVisibilityForPreferenceChange()
+            }.store(in: &policySubscriptions)
             if let actions = self.actions {
                 player.configureTrackProjection(
                     project: { [weak actions] in actions?.visibleTracks($0) ?? [] },
@@ -745,17 +788,46 @@ final class FoundationAppModel: ObservableObject {
             self.nowPlaying = bridge
             self.mediaSession = mediaSession
             bridge.attach(mediaSession)
+            handoff.configure(
+                scope: sourceScope, player: player,
+                resolve: { item in
+                    try await FoundationHandoffResolution.resolve(
+                        item, library: library, localOnly: connectivity.localOnly,
+                        localItem: { item in
+                            downloads.localCatalogItems(kind: item.kind)
+                                .first(where: { $0.id == item.id })
+                        })
+                }, navigate: { [weak handoff] item in handoff?.requestBrowse(item) })
         }
+    }
+
+    func retirePrimaryGenres() {
+        primaryGenres?.retire()
+        primaryGenres = nil
+    }
+
+    /// One account/runtime owner shared by every window; binding never starts a census.
+    func configurePrimaryGenres(_ library: any FoundationLibrary) {
+        if let primaryGenres {
+            primaryGenres.bind(library)
+        } else {
+            primaryGenres = FoundationPrimaryGenresModel(library: library)
+        }
+        guard let primaryGenres else { return }
+        primaryGenres.bindDownloads(downloads)
+        Task { await primaryGenres.restoreBoundCache() }
     }
 
     func signOut() {
         guard let session = library?.session else { return }
         player?.stop()
+        let deviceName = FoundationClientDeviceName.current
         let attempt = FoundationSignOutPolicy.begin {
             // Keep the captured session until this bounded attempt completes.
             Task.detached(priority: .userInitiated) {
                 let adapter = FoundationJellyfinLibrary(
-                    session: session, load: FoundationJellyfinLibrary.signOutLoad)
+                    session: session, deviceName: deviceName,
+                    load: FoundationJellyfinLibrary.signOutLoad)
                 do {
                     try await adapter.endSession()
                     return true
@@ -765,6 +837,7 @@ final class FoundationAppModel: ObservableObject {
             }
         } clear: {
             try FoundationCredentials.clear(operations: credentialOperations)
+            actions?.invalidate()
         } clearPins: {
             FoundationPinStorage.removeStoredPins()
         }
@@ -776,6 +849,7 @@ final class FoundationAppModel: ObservableObject {
         }
         invalidateAccountReadiness()
         let epoch = accountEpoch
+        retirePrimaryGenres()
         FoundationAlphabetAccountLifecycle.retire(library)
         let retiringCache = library?.artworkCache
         let retiringPages = library?.catalogPageCache
@@ -793,7 +867,6 @@ final class FoundationAppModel: ObservableObject {
         librarySelection?.invalidate()
         librarySelection = nil
         browseLibrary = nil
-        actions?.invalidate()
         actions = nil
         nowPlaying?.invalidate()
         currentArtwork?.invalidate()
@@ -889,17 +962,19 @@ struct FoundationRootView: View {
                     Button("Retry") { model.retryCachePreparation() }
                 }
             } else if !model.requiresSignIn, let library = model.library, let player = model.player,
-                let actions = model.actions,
+                let actions = model.actions, let primaryGenres = model.primaryGenres,
                 let artwork = model.currentArtwork, let downloads = model.downloads,
                 let connectivity = model.connectivity
             {
                 FoundationLibraryView(
                     library: model.browseLibrary ?? library, accountLibrary: library,
-                    player: player, signOut: model.signOut, librarySelection: model.librarySelection
+                    player: player, primaryGenres: primaryGenres,
+                    signOut: model.signOut, librarySelection: model.librarySelection
                 )
                 #if os(macOS)
                     .environmentObject(model)
                 #endif
+                .environmentObject(model.continueListeningDismissals)
                 .environmentObject(actions)
                 .environmentObject(artwork)
                 .environmentObject(downloads)
@@ -917,8 +992,19 @@ struct FoundationRootView: View {
                 FoundationSignInView(model: model)
             }
         }
+        .modifier(
+            FoundationHandoffPresentation(
+                controller: model.handoff, accountAlert: accountAlertPresented.wrappedValue)
+        )
+        .environment(\.foundationHandoff, model.handoff)
         .task { _ = await model.ensureReady() }
         #if os(iOS)
+            .onContinueUserActivity(FoundationHandoffPayload.activityType) { activity in
+                // Preserve SwiftUI's phone scene proxy. Native cold/appdelegate
+                // forwarding and this warm fallback share synchronous registration
+                // and nonce deduplication in the existing account owner.
+                _ = model.receiveHandoff(activity)
+            }
             .task(id: scenePhase) {
                 FoundationSiriStartupAuthorization.shared.foreground(
                     isActive: scenePhase == .active,
@@ -958,7 +1044,8 @@ struct FoundationSignInView: View {
             authenticate: { url, username, password in
                 try await model.prepareSignIn {
                     try await FoundationJellyfinLibrary.signIn(
-                        serverURL: url, username: username, password: password)
+                        serverURL: url, username: username, password: password,
+                        deviceName: FoundationClientDeviceName.current)
                 }
             }, confirmUpgrade: { try model.confirmCredentialUpgrade($0) },
             cancelUpgrade: { model.cancelCredentialUpgrade() })
@@ -1290,5 +1377,25 @@ struct FoundationPlaybackSessionStore {
             return try manager.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
                 .allSatisfy { $0.lastPathComponent == scope }
         } catch { return false }
+    }
+}
+
+/// The application continuation seam resolves metadata in the receiver's account.
+/// It never resolves audio or mutates a queue; the controller owns confirmation
+/// and rejects cancelled/retired account or intent results after this await.
+@MainActor
+enum FoundationHandoffResolution {
+    static func resolve(
+        _ item: FoundationItem, library: FoundationJellyfinLibrary, localOnly: Bool,
+        localItem: (FoundationItem) -> FoundationItem?
+    ) async throws -> FoundationItem {
+        try Task.checkCancellation()
+        if localOnly {
+            guard let local = localItem(item), local.id == item.id, local.kind == item.kind else {
+                throw FoundationHandoffError.unavailable
+            }
+            return local
+        }
+        return try await library.handoffItem(for: item)
     }
 }

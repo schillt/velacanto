@@ -799,6 +799,151 @@ final class FoundationDownloadsTests: XCTestCase {
         _ = await manager.clearAccount()
     }
 
+    #if DEBUG
+        func testRemovedAndRecreatedPlaylistRejectsOldReconciliationSnapshot() async throws {
+            let oldTrack = item("old-owner-track")
+            let newTrack = item("new-owner-track")
+            let playlist = item("recreated-playlist", kind: .playlist)
+            let library = DownloadsLibrary(tracks: [oldTrack])
+            let manager = FoundationDownloads(
+                scope: "recreated-owner", library: library, root: try root(), transfer: transfer,
+                monitorConnectivity: false)
+            manager.updateConnectivity(isAllowed: true)
+            manager.download(playlist)
+            try await waitUntil { manager.owners.first?.state == .ready }
+            let canonical = manager.collectionModel(for: playlist)
+            XCTAssertEqual(canonical.items.map(\.id), [oldTrack.id])
+
+            // Snapshot A has completed before the real manager awaits permissions.
+            let gate = DownloadGate()
+            await library.setPermissionGate(gate)
+            manager.reconcilePlaylists()
+            try await waitUntilAsync { await gate.started }
+            manager.remove(ownerID: "playlist:" + playlist.id)
+            await library.setTracks([newTrack])
+            manager.download(playlist)
+            try await waitUntil {
+                manager.owners.first?.state == .ready && manager.isReady(newTrack)
+            }
+            let resource = try await manager.playbackResource(
+                for: newTrack, allowsRemoteFallback: false)
+            let newFile = resource.url
+            await resource.release()
+            XCTAssertTrue(FileManager.default.fileExists(atPath: newFile.path))
+            XCTAssertEqual(canonical.items.map(\.id), [newTrack.id])
+
+            // Join actual reconciliation, without a sleep or synthetic publication callback.
+            await gate.resume()
+            await manager.waitForCurrentReconciliationForTesting()
+            XCTAssertEqual(manager.owners.first?.tracks.map(\.id), [newTrack.id])
+            XCTAssertEqual(canonical.items.map(\.id), [newTrack.id])
+            XCTAssertEqual(manager.knownCollectionTracks(for: playlist).map(\.id), [newTrack.id])
+            XCTAssertTrue(manager.isReady(newTrack))
+            XCTAssertTrue(FileManager.default.fileExists(atPath: newFile.path))
+            let requestedTracks = await library.downloadSourceIDs
+            XCTAssertEqual(requestedTracks, [oldTrack.id, newTrack.id])
+            _ = await manager.clearAccount()
+        }
+        func testExplicitPlaylistReacquisitionRejectsOlderReconciliationSnapshot() async throws {
+            let oldTrack = item("old-owner-track")
+            let newTrack = item("new-owner-track")
+            let playlist = item("reacquired-playlist", kind: .playlist)
+            let library = DownloadsLibrary(tracks: [oldTrack])
+            let manager = FoundationDownloads(
+                scope: "reacquired-owner", library: library, root: try root(), transfer: transfer,
+                monitorConnectivity: false)
+            manager.updateConnectivity(isAllowed: true)
+            manager.download(playlist)
+            try await waitUntil { manager.owners.first?.state == .ready }
+            let canonical = manager.collectionModel(for: playlist)
+            XCTAssertEqual(canonical.items.map(\.id), [oldTrack.id])
+
+            // Snapshot A has completed before the real manager awaits permissions.
+            let gate = DownloadGate()
+            await library.setPermissionGate(gate)
+            manager.reconcilePlaylists()
+            try await waitUntilAsync { await gate.started }
+            await library.setTracks([newTrack])
+            // The same retained owner receives a newer explicit Download Again intent.
+            manager.downloadAgain(playlist)
+            try await waitUntil {
+                manager.owners.first?.state == .ready && manager.isReady(newTrack)
+            }
+            let resource = try await manager.playbackResource(
+                for: newTrack, allowsRemoteFallback: false)
+            let newFile = resource.url
+            await resource.release()
+            XCTAssertTrue(FileManager.default.fileExists(atPath: newFile.path))
+            XCTAssertEqual(canonical.items.map(\.id), [newTrack.id])
+
+            // Join actual reconciliation, without a sleep or synthetic publication callback.
+            await gate.resume()
+            await manager.waitForCurrentReconciliationForTesting()
+            XCTAssertEqual(manager.owners.first?.tracks.map(\.id), [newTrack.id])
+            XCTAssertEqual(canonical.items.map(\.id), [newTrack.id])
+            XCTAssertEqual(manager.knownCollectionTracks(for: playlist).map(\.id), [newTrack.id])
+            XCTAssertTrue(manager.isReady(newTrack))
+            XCTAssertTrue(FileManager.default.fileExists(atPath: newFile.path))
+            let requestedTracks = await library.downloadSourceIDs
+            XCTAssertEqual(requestedTracks, [oldTrack.id, newTrack.id])
+            _ = await manager.clearAccount()
+        }
+        func testFailedExplicitPlaylistReacquisitionPreservesCurrentReconciliation() async throws {
+            let directory = try root()
+            let first = item("original-track")
+            let refreshed = item("valid-refresh-track")
+            let rejected = item("failed-intent-track")
+            let playlist = item("failed-reacquisition", kind: .playlist)
+            let library = DownloadsLibrary(tracks: [first])
+            let manager = FoundationDownloads(
+                scope: "failed-reacquisition", library: library, root: directory,
+                transfer: transfer,
+                monitorConnectivity: false)
+            manager.updateConnectivity(isAllowed: true)
+            manager.download(playlist)
+            try await waitUntil { manager.owners.first?.state == .ready }
+            let canonical = manager.collectionModel(for: playlist)
+
+            // B is a valid in-flight refresh of the retained owner A.
+            await library.setTracks([refreshed])
+            let gate = DownloadGate()
+            await library.setPermissionGate(gate)
+            manager.reconcilePlaylists()
+            try await waitUntilAsync { await gate.started }
+
+            // C's newer explicit intent cannot commit because its real manifest save fails.
+            await library.setTracks([rejected])
+            let target = FoundationDownloadStorage.directory(
+                scope: "failed-reacquisition", root: directory
+            ).appendingPathComponent("manifest.json")
+            let saved = try Data(contentsOf: target)
+            try FileManager.default.removeItem(at: target)
+            try FileManager.default.createDirectory(at: target, withIntermediateDirectories: false)
+            manager.downloadAgain(playlist)
+            XCTAssertNotNil(manager.errorMessage)
+            XCTAssertEqual(manager.owners.first?.tracks.map(\.id), [first.id])
+            XCTAssertEqual(canonical.items.map(\.id), [first.id])
+            XCTAssertTrue(manager.isReady(first))
+            try FileManager.default.removeItem(at: target)
+            try saved.write(to: target)
+
+            await gate.resume()
+            await manager.waitForCurrentReconciliationForTesting()
+            try await waitUntil { manager.isReady(refreshed) }
+            XCTAssertEqual(manager.owners.first?.tracks.map(\.id), [refreshed.id])
+            XCTAssertEqual(canonical.items.map(\.id), [refreshed.id])
+            XCTAssertEqual(manager.knownCollectionTracks(for: playlist).map(\.id), [refreshed.id])
+            let resource = try await manager.playbackResource(
+                for: refreshed, allowsRemoteFallback: false)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: resource.url.path))
+            await resource.release()
+            XCTAssertFalse(manager.isReady(rejected))
+            let requestedTracks = await library.downloadSourceIDs
+            XCTAssertEqual(requestedTracks, [first.id, refreshed.id])
+            _ = await manager.clearAccount()
+        }
+    #endif
+
     func testUnreadableManifestOffersExplicitLiveRecovery() async throws {
         let directory = try root()
         let account = FoundationDownloadStorage.directory(scope: "fixture", root: directory)
@@ -2032,6 +2177,9 @@ private actor DownloadsLibrary: FoundationLibrary {
     private var failingPlaylistOffset: Int?
     func setFailingPlaylistOffset(_ offset: Int?) { failingPlaylistOffset = offset }
     private var playlistGate: DownloadGate?
+    private var permissionGate: DownloadGate?
+    func setPermissionGate(_ gate: DownloadGate) { permissionGate = gate }
+    private(set) var downloadSourceIDs: [String] = []
     private(set) var playlistOffsets: [Int] = []
     func setPlaylistPageSize(_ size: Int) { playlistPageSize = size }
     func setPlaylistGate(_ gate: DownloadGate) { playlistGate = gate }
@@ -2079,6 +2227,10 @@ private actor DownloadsLibrary: FoundationLibrary {
             }, nextStartIndex: end < tracks.count ? end : nil)
     }
     func playlistPermissions(id: String) async throws -> FoundationPlaylistPermissions {
+        if let gate = permissionGate {
+            permissionGate = nil
+            await gate.wait()
+        }
         if fails { throw FoundationLibraryError.unavailable }
         return .init(name: "Synthetic playlist", canEdit: true, canDelete: true)
     }
@@ -2087,6 +2239,7 @@ private actor DownloadsLibrary: FoundationLibrary {
         return URL(string: "https://example.invalid/stream")!
     }
     func downloadSource(for item: FoundationItem) async throws -> FoundationDownloadSource {
+        downloadSourceIDs.append(item.id)
         var request = URLRequest(url: URL(string: "https://example.invalid/original")!)
         request.setValue("fixture-secret", forHTTPHeaderField: "Authorization")
         return FoundationDownloadSource(request: request, fileExtension: "mp3", expectedBytes: nil)
