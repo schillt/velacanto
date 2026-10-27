@@ -4,11 +4,12 @@ VelaCanto is a native Jellyfin music app for iPhone, iPad and Mac. Development i
 working toward **0.6**, including shared iOS/macOS feature parity, playlist and
 CarPlay refinement, native continuity, consistent UI/loading and maintainability.
 
-The next usable alpha checkpoint is being frozen and verified. Its final build,
-source publication and installation record are **pending** in the
-[checkpoint](docs/0.6.0-alpha-checkpoint.md). The currently recorded internal
-installed build is 228; newer source/test evidence is not an installed artifact.
-No 0.6 release or TestFlight availability is claimed by this working tree.
+The current local alpha checkpoint is **0.6.0 (233)**, signed and installed on Mac
+and iPhone, with runtime source published in `5718da7`. Read the
+[checkpoint](docs/0.6.0-alpha-checkpoint.md) for verification limits and the
+[30-issue status matrix](docs/0.6.0-issue-status.md) for remaining work. Native UI
+failures/skips remain open; this is not a completed0.6 release or TestFlight
+availability record.
 
 Use the [live milestone](https://github.com/schillt/velacanto/milestone/9),
 [current agent handoff](docs/0.6.0-agent-handoff.md), and [instructions](AGENTS.md)

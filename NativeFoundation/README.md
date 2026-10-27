@@ -2,8 +2,8 @@
 
 This is the maintained iOS/macOS app for active 0.6 development. Read the
 [current checkpoint](../docs/0.6.0-alpha-checkpoint.md) for exact source, build,
-verification and installation status; final checkpoint fields remain pending until
-the maintainer records them. Historical 0.3/0.5 documents describe their own builds.
+verification and installation status. The current local signed/installed checkpoint
+is0.6.0(233); the [issue matrix](../docs/0.6.0-issue-status.md) records remaining work. Historical 0.3/0.5 documents describe their own builds.
 
 Open `VelacantoFoundation.xcodeproj`, scheme `VelacantoFoundation`. Use root
 `scripts/build.sh` and the [agent handoff](../docs/0.6.0-agent-handoff.md) for
