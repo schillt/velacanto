@@ -1672,6 +1672,57 @@ final class FoundationPlayerTests: XCTestCase {
         player.stop()
     }
 
+    func testClearHistoryPreservesCurrentResolutionUpcomingModesAndRestoration() async throws {
+        let resolver = PlayerResolutionProbe()
+        let player = FoundationPlayer(resolve: { _ in try await resolver.resolve() })
+        player.enqueue(Array(repeating: track, count: 6), position: .last)
+        player.select(player.queue[2].id)
+        let selection = player.selectionTask
+        try await resolver.waitForCalls(1, timeout: .seconds(5))
+        player.setShuffle(true)
+        player.setRepeat(.all)
+        let current = player.selectedEntryID
+        let upcoming = player.upcoming
+        let intent = player.wantsPlayback
+        let state = player.state
+        var changes = 0
+        let subscription = player.sessionChanged.sink { changes += 1 }
+        player.clearHistory()
+        XCTAssertTrue(player.history.isEmpty)
+        XCTAssertEqual(player.queue.map(\.id), [try XCTUnwrap(current)] + upcoming.map(\.id))
+        XCTAssertEqual(player.selectedEntryID, current)
+        XCTAssertEqual(player.upcoming, upcoming)
+        XCTAssertEqual(player.wantsPlayback, intent)
+        XCTAssertEqual(player.state, state)
+        XCTAssertTrue(player.shuffleEnabled)
+        XCTAssertEqual(player.repeatMode, .all)
+        XCTAssertFalse(selection?.isCancelled ?? true)
+        XCTAssertEqual(changes, 1)
+        player.clearHistory()
+        XCTAssertEqual(changes, 1)
+        let restored = FoundationPlayer(resolve: { _ in throw CancellationError() })
+        restored.restoreSession(FoundationPlaybackSnapshot(player: player))
+        XCTAssertEqual(restored.queue, player.queue)
+        XCTAssertTrue(restored.history.isEmpty)
+        XCTAssertEqual(restored.selectedEntryID, current)
+        XCTAssertEqual(restored.upcoming, upcoming)
+        XCTAssertEqual(restored.repeatMode, .all)
+        XCTAssertTrue(restored.shuffleEnabled)
+        withExtendedLifetime(subscription) {}
+        await resolver.fail(0)
+        await selection?.value
+        player.stop()
+        restored.stop()
+    }
+
+    func testClearHistoryWithoutCurrentDoesNotDiscardQueue() {
+        let player = FoundationPlayer(resolve: { _ in throw CancellationError() })
+        player.clearHistory()
+        XCTAssertTrue(player.queue.isEmpty)
+        XCTAssertNil(player.selectedEntryID)
+        XCTAssertEqual(player.state, .idle)
+    }
+
     func testUpcomingEditsPreserveCurrentHistoryDuplicatesAndRejectStaleDrag() async throws {
         let resolver = PlayerResolutionProbe()
         let player = FoundationPlayer(resolve: { _ in try await resolver.resolve() })

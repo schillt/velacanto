@@ -117,7 +117,9 @@ struct FoundationPlayerView: View {
                                 .transition(.opacity)
                             }
                             if showingQueue {
-                                FoundationQueueView(player: player, isPresented: $showingQueue) {
+                                FoundationQueueView(
+                                    player: player, library: library, isPresented: $showingQueue
+                                ) {
                                     item in
                                     guard showingQueue else { return }
                                     sheetDestination = .related(item)
@@ -549,8 +551,8 @@ struct FoundationPlayerView: View {
 
 private struct FoundationQueueView: View {
     @ObservedObject var player: FoundationPlayer
+    let library: any FoundationLibrary
     @Binding var isPresented: Bool
-    var showsTitle = true
     let openItem: (FoundationItem) -> Void
 
     @EnvironmentObject private var connectivity: FoundationConnectivity
@@ -558,6 +560,7 @@ private struct FoundationQueueView: View {
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     @State private var hasAnchoredOnOpen = false
+    @State private var currentHeaderHeight: CGFloat = 0
 
     private enum ScrollTarget: Hashable {
         case current
@@ -566,42 +569,29 @@ private struct FoundationQueueView: View {
     var body: some View {
         let upcoming = player.upcoming
         VStack(spacing: 0) {
-            HStack {
-                if showsTitle { Text("Queue").font(.headline) }
-                Spacer()
-                Button {
-                    player.setShuffle(!player.shuffleEnabled)
-                } label: {
-                    Image(systemName: "shuffle").frame(width: 44, height: 44)
-                }
-                .opacity(player.shuffleEnabled ? 1 : 0.5)
-                .accessibilityLabel("Shuffle")
-                .accessibilityValue(player.shuffleEnabled ? "On" : "Off")
-                .accessibilityAddTraits(player.shuffleEnabled ? .isSelected : [])
-                Menu {
-                    ForEach(FoundationPlayer.RepeatMode.allCases, id: \.self) { mode in
-                        Button(mode.rawValue.capitalized) { player.setRepeat(mode) }
-                    }
-                } label: {
-                    Image(systemName: player.repeatMode == .one ? "repeat.1" : "repeat")
-                        .frame(width: 44, height: 44)
-                }
-                .opacity(player.repeatMode == .off ? 0.5 : 1)
-                .accessibilityLabel("Repeat")
-                .accessibilityValue(player.repeatMode.rawValue.capitalized)
-            }
-            .buttonStyle(.plain)
-            .padding(.horizontal, 24)
-            .padding(.vertical, 12)
             #if os(iOS)
                 FoundationQueueReorderList(
                     history: player.history,
-                    current: player.queue.first(where: { $0.id == player.selectedEntryID }),
+                    current: player.queue.first { $0.id == player.selectedEntryID },
                     upcoming: upcoming,
                     dynamicTypeSize: dynamicTypeSize,
+                    shuffleEnabled: player.shuffleEnabled, repeatMode: player.repeatMode,
                     move: { id, boundary in
                         guard isPresented else { return }
                         player.reorderUpcoming([id], before: boundary)
+                    },
+                    header: {
+                        currentHeader
+                            .environmentObject(connectivity)
+                            .environmentObject(downloads)
+                            .environment(\.dynamicTypeSize, dynamicTypeSize)
+                            .environment(\.colorScheme, .dark)
+                            .foregroundStyle(.white).tint(.white)
+                    },
+                    historyHeader: {
+                        historyHeader
+                            .environment(\.colorScheme, .dark)
+                            .foregroundStyle(.white).tint(.white)
                     },
                     row: { entry, canReorder in
                         row(entry, canReorder: canReorder)
@@ -612,34 +602,38 @@ private struct FoundationQueueView: View {
                             .foregroundStyle(.white).tint(.white)
                     }
                 )
+                .padding(.top, FoundationPlayerArtworkPresentationModel.dismissalHeaderHeight)
                 .modifier(FoundationQueueFixtureIdentifier(kind: "list", entryID: nil))
                 .clipped()
-                .mask { FoundationPlayerContentFade() }
             #else
                 GeometryReader { geometry in
                     ScrollViewReader { proxy in
                         ScrollView {
-                            LazyVStack(alignment: .leading, spacing: 8) {
+                            LazyVStack(
+                                alignment: .leading, spacing: 8, pinnedViews: [.sectionHeaders]
+                            ) {
                                 if !player.history.isEmpty {
-                                    queueHeading("History")
+                                    historyHeader
                                     ForEach(player.history) { row($0) }
                                 }
-                                LazyVStack(alignment: .leading, spacing: 8) {
-                                    if let current = player.queue.first(where: {
-                                        $0.id == player.selectedEntryID
-                                    }) {
-                                        queueHeading("Now Playing")
-                                        row(current)
+                                Section {
+                                    VStack(alignment: .leading, spacing: 8) {
+                                        ForEach(upcoming) { row($0, canReorder: true) }
+                                            .reorderable()
                                     }
-                                    queueHeading("Up Next")
-                                    ForEach(upcoming) { row($0, canReorder: true) }
-                                        .reorderable()
+                                    .frame(
+                                        minHeight: max(
+                                            0, geometry.size.height - currentHeaderHeight),
+                                        alignment: .top)
+                                } header: {
+                                    currentHeader
+                                        .onGeometryChange(for: CGFloat.self) {
+                                            $0.size.height
+                                        } action: {
+                                            currentHeaderHeight = $0
+                                        }
+                                        .id(ScrollTarget.current)
                                 }
-                                // Keep the heading below the queue's existing 24-point fade.
-                                .padding(.top, 24)
-                                // Keep the opening heading at the top even with a short Up Next.
-                                .frame(minHeight: geometry.size.height, alignment: .top)
-                                .id(ScrollTarget.current)
                             }
                             .reorderContainer(
                                 for: FoundationQueueEntry.self, isEnabled: isPresented
@@ -651,7 +645,6 @@ private struct FoundationQueueView: View {
                                 }
                                 player.reorderUpcoming(difference.sources, before: boundary)
                             }
-                            .padding(.horizontal, 16)
                             .padding(.bottom, 12)
                         }
                         .scrollContentBackground(.hidden)
@@ -668,12 +661,109 @@ private struct FoundationQueueView: View {
                 }
                 .modifier(FoundationQueueFixtureIdentifier(kind: "list", entryID: nil))
                 .clipped()
-                .mask { FoundationPlayerContentFade() }
             #endif
         }
         .disabled(!isPresented)
         .allowsHitTesting(isPresented)
         .accessibilityHidden(!isPresented)
+    }
+
+    private var historyHeader: some View {
+        HStack {
+            Text("History").font(.headline).foregroundStyle(.secondary)
+                .accessibilityAddTraits(.isHeader)
+            Spacer()
+            Button("Clear") {
+                guard isPresented else { return }
+                player.clearHistory()
+            }
+            .buttonStyle(.plain)
+            .frame(minWidth: 44, minHeight: 44)
+            .accessibilityLabel("Clear History")
+        }
+        .padding(.horizontal, 16)
+    }
+
+    private var currentHeader: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let current = player.queue.first(where: { $0.id == player.selectedEntryID }) {
+                if dynamicTypeSize.isAccessibilitySize {
+                    VStack(alignment: .leading, spacing: 4) {
+                        currentTrack(current)
+                        modeControls.frame(maxWidth: .infinity, alignment: .trailing)
+                    }
+                } else {
+                    HStack(spacing: 8) {
+                        currentTrack(current)
+                        modeControls
+                    }
+                }
+            } else {
+                modeControls.frame(maxWidth: .infinity, alignment: .trailing)
+            }
+            queueHeading("Up Next")
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 8)
+        .padding(.bottom, 4)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.regularMaterial)
+    }
+
+    private func currentTrack(_ entry: FoundationQueueEntry) -> some View {
+        Button {
+            guard isPresented else { return }
+            player.select(entry.id)
+        } label: {
+            HStack(spacing: 12) {
+                queueArtwork(entry, size: 64)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Now Playing").font(.caption).foregroundStyle(.secondary)
+                    Text(entry.item.title).font(.headline).lineLimit(2)
+                    Text(entry.item.subtitle).font(.caption).foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityValue("Current track")
+        .accessibilityAddTraits(.isSelected)
+        .modifier(FoundationQueueFixtureIdentifier(kind: "select", entryID: entry.id))
+        .contextMenu { menu(entry) }
+    }
+
+    private func queueArtwork(_ entry: FoundationQueueEntry, size: CGFloat) -> some View {
+        FoundationCatalogArtwork(
+            item: entry.item, library: library, isActive: isPresented, size: size)
+    }
+
+    private var modeControls: some View {
+        HStack(spacing: 0) {
+            Button {
+                player.setShuffle(!player.shuffleEnabled)
+            } label: {
+                Image(systemName: "shuffle").frame(width: 44, height: 44)
+            }
+            .opacity(player.shuffleEnabled ? 1 : 0.5)
+            .accessibilityLabel("Shuffle")
+            .accessibilityValue(player.shuffleEnabled ? "On" : "Off")
+            .accessibilityAddTraits(player.shuffleEnabled ? .isSelected : [])
+            Menu {
+                ForEach(FoundationPlayer.RepeatMode.allCases, id: \.self) { mode in
+                    Button(mode.rawValue.capitalized) { player.setRepeat(mode) }
+                }
+            } label: {
+                Image(systemName: player.repeatMode == .one ? "repeat.1" : "repeat")
+                    .frame(width: 44, height: 44)
+            }
+            .opacity(player.repeatMode == .off ? 0.5 : 1)
+            .accessibilityLabel("Repeat")
+            .accessibilityValue(player.repeatMode.rawValue.capitalized)
+        }
+        .buttonStyle(.plain)
+        .fixedSize()
     }
 
     private func queueHeading(_ title: String) -> some View {
@@ -688,7 +778,8 @@ private struct FoundationQueueView: View {
                 guard isPresented else { return }
                 player.select(entry.id)
             } label: {
-                HStack {
+                HStack(spacing: 12) {
+                    queueArtwork(entry, size: 40)
                     VStack(alignment: .leading) {
                         Text(entry.item.title).font(.body.weight(.semibold)).lineLimit(2)
                         Text(entry.item.subtitle).font(.caption).foregroundStyle(.secondary)
@@ -1043,7 +1134,7 @@ extension EnvironmentValues {
                 if mode == .queue {
                     // Inspectors can retain content after closing; reset only on a queue opening.
                     FoundationQueueView(
-                        player: player, isPresented: .constant(true), showsTitle: false
+                        player: player, library: library, isPresented: .constant(true)
                     ) {
                         relatedItem = $0
                     }

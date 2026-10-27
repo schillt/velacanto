@@ -77,6 +77,17 @@ final class FoundationPlayer: ObservableObject {
         sessionChanged.send()
     }
 
+    /// Explicitly clear played occurrences without replacing the current native item.
+    func clearHistory() {
+        guard let selectedEntryID,
+            let index = rawQueue.firstIndex(where: { $0.id == selectedEntryID }), index > 0
+        else { return }
+        let removed = Set(rawQueue.prefix(index).map(\.id))
+        continuationVisibleIDs?.subtract(removed)
+        rawQueue.removeFirst(index)
+        sessionChanged.send()
+    }
+
     /// IDs are validated against the live upcoming region, rejecting stale drag results.
     func reorderUpcoming(_ ids: [UUID], before destination: UUID?) {
         let live = upcoming

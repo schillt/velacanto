@@ -707,6 +707,58 @@ final class FoundationDownloadsUITests: XCTestCase {
         capture("Repeated occurrence drag keeps current playback and dismissal", in: app)
     }
 
+    func testQueuePinnedCurrentRevealsAndClearsHistoryWithoutChangingPlayback() {
+        continueAfterFailure = false
+        let app = launch(
+            productionShell: true, canonicalDownloadState: "full", longPlayback: true,
+            queuePresentation: true)
+        selectTab("Library", in: app)
+        openCanonicalCollection("album", fromDownloads: false, in: app)
+        tapVisible(app.buttons["collection-track-0"], in: app)
+        openNowPlaying(app)
+        let modal = app.descendants(matching: .any)["foundation-now-playing"]
+        modal.buttons["Next"].tap()
+        modal.buttons["Next"].tap()
+        app.buttons["Show queue"].tap()
+        let before = queueSnapshot(app)
+        let selected = before["selected"] as? String ?? ""
+        XCTAssertEqual((before["history"] as? [String])?.count, 2)
+        let current = app.buttons["fixture-queue-select-" + selected]
+        XCTAssertTrue(current.waitForExistence(timeout: 5))
+        XCTAssertTrue(current.isHittable)
+        let openingY = current.frame.minY
+        let shuffle = modal.buttons["Shuffle"]
+        let repeatControl = modal.buttons["Repeat"]
+        capture("Queue opening current and mode controls", in: app)
+        XCTAssertTrue(shuffle.isHittable && repeatControl.isHittable)
+        XCTAssertEqual(shuffle.frame.midY, current.frame.midY, accuracy: 2)
+        capture("Queue current artwork and modes at opening", in: app)
+        let list = app.descendants(matching: .any)["fixture-queue-list"]
+        list.swipeUp()
+        XCTAssertTrue(current.isHittable && shuffle.isHittable)
+        XCTAssertEqual(current.frame.minY, openingY, accuracy: 2)
+        let clear = app.buttons["Clear History"]
+        for _ in 0..<4 {
+            if clear.isHittable { break }
+            list.swipeDown()
+        }
+        XCTAssertTrue(clear.isHittable)
+        XCTAssertGreaterThan(current.frame.minY, openingY + 8)
+        XCTAssertEqual(shuffle.frame.midY, current.frame.midY, accuracy: 2)
+        capture("Queue history reveal carries current artwork and modes together", in: app)
+        let identity = app.staticTexts["fixture-player-playback-identity"]
+        let playback = identity.label
+        clear.tap()
+        let after = queueSnapshot(app)
+        XCTAssertEqual(after["history"] as? [String], [])
+        XCTAssertEqual(after["selected"] as? String, selected)
+        XCTAssertEqual(after["upcoming"] as? [String], before["upcoming"] as? [String])
+        XCTAssertEqual(identity.label, playback)
+        XCTAssertTrue(current.isSelected)
+        XCTAssertFalse(clear.exists)
+        capture("Queue clear history preserves current playback and Up Next", in: app)
+    }
+
     func testMiniPlayerControlsRemainInteractiveAboveAlbumNavigation() {
         continueAfterFailure = false
         let app = launch(
@@ -754,7 +806,8 @@ final class FoundationDownloadsUITests: XCTestCase {
         XCTAssertEqual(identity.label, startingIdentity)
         // Check menu semantics with a paused clock; advancing playback is covered
         // separately by repeated handle reorder and interrupted dismissal tests.
-        app.buttons["Pause"].tap()
+        let modal = app.descendants(matching: .any)["foundation-now-playing"]
+        modal.buttons["Pause"].tap()
         let paused = expectation(
             for: NSPredicate(format: "label CONTAINS %@", "state paused"),
             evaluatedWith: identity)
@@ -835,17 +888,17 @@ final class FoundationDownloadsUITests: XCTestCase {
             queueSnapshot(app)["upcoming"] as? [String],
             reordered.filter { $0 != initial[2] })
         XCTAssertEqual(identity.label, originalIdentity)
-        app.buttons["Shuffle"].tap()
+        modal.buttons["Shuffle"].tap()
         XCTAssertEqual(queueSnapshot(app)["shuffle"] as? Bool, true)
         XCTAssertEqual(
             Set(queueSnapshot(app)["upcoming"] as? [String] ?? []),
             Set(reordered.filter { $0 != initial[2] }))
-        app.buttons["Shuffle"].tap()
+        modal.buttons["Shuffle"].tap()
         XCTAssertEqual(queueSnapshot(app)["shuffle"] as? Bool, false)
-        app.buttons["Repeat"].tap()
+        modal.buttons["Repeat"].tap()
         app.cells.buttons["One"].tap()
         XCTAssertEqual(queueSnapshot(app)["repeat"] as? String, "one")
-        app.buttons["Repeat"].tap()
+        modal.buttons["Repeat"].tap()
         app.cells.buttons["Off"].tap()
         XCTAssertEqual(queueSnapshot(app)["repeat"] as? String, "off")
         XCTAssertEqual(identity.label, originalIdentity)

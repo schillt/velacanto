@@ -149,6 +149,32 @@ final class FoundationHandoffQueueVisibilityTests: XCTestCase {
         XCTAssertTrue(try JSONDecoder().decode(FoundationPlaybackSnapshot.self, from: data).isValid)
     }
 
+    func testClearHistoryRetiresHiddenPlayedCopiesAndPreservesTransferredUpcoming() {
+        let value = Fixture()
+        let player = makePlayer()
+        defer { player.stop() }
+        let snapshot = FoundationPlaybackSnapshot(
+            entries: value.entries, selectedEntryID: value.entries[2].id,
+            shuffleEnabled: false, repeatMode: .all, visibleEntryIDs: value.visible)
+        XCTAssertTrue(player.continueSession(snapshot, position: 2, wasPlaying: false))
+        let upcoming = player.upcoming
+        player.clearHistory()
+        XCTAssertTrue(player.history.isEmpty)
+        XCTAssertEqual(player.persistedQueue, Array(value.entries.dropFirst(2)))
+        XCTAssertEqual(player.selectedEntryID, value.entries[2].id)
+        XCTAssertEqual(player.upcoming, upcoming)
+        XCTAssertEqual(player.persistedVisibleEntryIDs, player.queue.map(\.id))
+        XCTAssertEqual(player.repeatMode, .all)
+        XCTAssertFalse(player.wantsPlayback)
+        XCTAssertEqual(player.elapsed, 2, accuracy: 0.001)
+        let restored = makePlayer()
+        defer { restored.stop() }
+        restored.restoreSession(FoundationPlaybackSnapshot(player: player))
+        XCTAssertEqual(restored.queue, player.queue)
+        XCTAssertEqual(restored.upcoming, upcoming)
+        XCTAssertTrue(restored.history.isEmpty)
+    }
+
     private func assertVisibility(
         _ player: FoundationPlayer, visible: Set<UUID>, hidden: UUID,
         file: StaticString = #filePath, line: UInt = #line

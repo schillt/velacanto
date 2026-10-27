@@ -137,6 +137,7 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
         private var surfaceIdentity: String?
         var allowsInteractiveDismissal = true
         var interactiveDismissalHeaderOnly = false
+        static let dismissalHeaderHeight: CGFloat = 64
         private var compact: Anchor?
         private var expanded: Anchor?
         private var generation: UInt = 0
@@ -226,7 +227,7 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
             else { return false }
             // Header dismissal never depends on artwork attachment. Queue playback can
             // replace the hidden artwork anchor while a different album is resolving.
-            if location.y <= view.safeAreaInsets.top + 64 { return true }
+            if location.y <= view.safeAreaInsets.top + Self.dismissalHeaderHeight { return true }
             guard !interactiveDismissalHeaderOnly else { return false }
             if let artView = expanded?.view, artView.window === view.window {
                 return artView.convert(artView.bounds, to: view).contains(location)
@@ -833,7 +834,11 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
             if gestureRecognizer === edgePan { return true }
             // The grabber is also a button. Let a downward pan begin on that
             // header while keeping queue rows, sliders and other controls native.
-            if touch.location(in: view).y <= view.safeAreaInsets.top + 64 { return true }
+            if touch.location(in: view).y <= view.safeAreaInsets.top
+                + FoundationPlayerArtworkPresentationModel.dismissalHeaderHeight
+            {
+                return true
+            }
             var touched = touch.view
             while let candidate = touched, candidate !== view {
                 if candidate is UIControl || candidate is UIScrollView { return false }
@@ -1182,12 +1187,18 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
 
 #if os(iOS)
     /// Native movement is restricted to the queue handle; rows keep their own actions.
-    struct FoundationQueueReorderList<Row: View>: UIViewRepresentable {
+    struct FoundationQueueReorderList<Row: View, Header: View, HistoryHeader: View>:
+        UIViewRepresentable
+    {
         let history: [FoundationQueueEntry]
         let current: FoundationQueueEntry?
         let upcoming: [FoundationQueueEntry]
         let dynamicTypeSize: DynamicTypeSize
+        let shuffleEnabled: Bool
+        let repeatMode: FoundationPlayer.RepeatMode
         let move: (UUID, UUID?) -> Void
+        let header: () -> Header
+        let historyHeader: () -> HistoryHeader
         let row: (FoundationQueueEntry, Bool) -> Row
 
         func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
@@ -1205,10 +1216,12 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
                     ? .supplementary : .none
                 let listSection = NSCollectionLayoutSection.list(
                     using: configuration, layoutEnvironment: environment)
-                // Section insets reduce each row's width; scroll-view horizontal
-                // content insets would add overflow beyond the visible viewport.
-                listSection.contentInsets.leading = 16
-                listSection.contentInsets.trailing = 16
+                // One native pinned header travels with Now Playing and its controls.
+                if section == 2 {
+                    for header in listSection.boundarySupplementaryItems {
+                        header.pinToVisibleBounds = true
+                    }
+                }
                 return listSection
             }
             let view = QueueCollectionView(frame: .zero, collectionViewLayout: layout)
@@ -1218,13 +1231,14 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
             view.alwaysBounceVertical = true
             view.alwaysBounceHorizontal = false
             view.isDirectionalLockEnabled = true
-            // Match the queue mask's top fade, keeping the opening heading fully readable.
-            view.contentInset = UIEdgeInsets(top: 24, left: 0, bottom: 12, right: 0)
+            view.contentInset = UIEdgeInsets(top: 0, left: 0, bottom: 12, right: 0)
             view.register(UICollectionViewListCell.self, forCellWithReuseIdentifier: "queue-row")
-            view.register(
-                QueueHeader.self,
-                forSupplementaryViewOfKind: UICollectionView.elementKindSectionHeader,
-                withReuseIdentifier: "queue-header")
+            for identifier in ["queue-header", "queue-history-header"] {
+                view.register(
+                    QueueHeader.self,
+                    forSupplementaryViewOfKind: UICollectionView.elementKindSectionHeader,
+                    withReuseIdentifier: identifier)
+            }
             view.dataSource = coordinator
             view.delegate = coordinator
             let gesture = UILongPressGestureRecognizer(
@@ -1238,10 +1252,13 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
 
         func updateUIView(_ view: UICollectionView, context: Context) {
             let coordinator = context.coordinator
-            let incoming = [history, current.map { [$0] } ?? [], upcoming]
+            let incoming = [history, [], upcoming]
             let needsReload =
                 incoming != coordinator.sections
                 || dynamicTypeSize != coordinator.parent.dynamicTypeSize
+                || shuffleEnabled != coordinator.parent.shuffleEnabled
+                || repeatMode != coordinator.parent.repeatMode
+                || current != coordinator.parent.current
             coordinator.parent = self
             guard needsReload else { return }
             // A playback advance, removal, or shuffle invalidates this drag's boundaries.
@@ -1264,7 +1281,6 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
             var sections: [[FoundationQueueEntry]]
             weak var collectionView: UICollectionView?
             private var needsOpeningAnchor = true
-            private let openingEntryID: UUID?
             private var movingID: UUID?
             private var dragMembership: [[UUID]]?
             private var fingerOffset = CGPoint.zero
@@ -1272,17 +1288,15 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
 
             init(parent: FoundationQueueReorderList) {
                 self.parent = parent
-                openingEntryID = parent.current?.id
-                sections = [parent.history, parent.current.map { [$0] } ?? [], parent.upcoming]
+                sections = [parent.history, [], parent.upcoming]
             }
 
             func anchorOnOpenIfNeeded() {
                 guard needsOpeningAnchor, let collectionView,
                     collectionView.bounds.width > 0, collectionView.bounds.height > 0
                 else { return }
-                // Capture the occurrence at creation; playback updates never request another jump.
-                let section =
-                    sections[1].first?.id == openingEntryID && openingEntryID != nil ? 1 : 2
+                // Open at current + Up Next; native scrolling reveals prior history.
+                let section = 2
                 guard
                     let heading = collectionView.collectionViewLayout
                         .layoutAttributesForSupplementaryView(
@@ -1330,9 +1344,16 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
                 viewForSupplementaryElementOfKind kind: String, at indexPath: IndexPath
             ) -> UICollectionReusableView {
                 let header = collectionView.dequeueReusableSupplementaryView(
-                    ofKind: kind, withReuseIdentifier: "queue-header", for: indexPath)
+                    ofKind: kind,
+                    withReuseIdentifier: indexPath.section == 0
+                        ? "queue-history-header" : "queue-header",
+                    for: indexPath)
                 if let header = header as? QueueHeader {
-                    header.label.text = ["History", "Now Playing", "Up Next"][indexPath.section]
+                    if indexPath.section == 0 {
+                        header.setContent(parent.historyHeader())
+                    } else {
+                        header.setContent(parent.header())
+                    }
                 }
                 return header
             }
@@ -1447,25 +1468,39 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
         }
 
         final class QueueHeader: UICollectionReusableView {
-            let label = UILabel()
+            private var hostedContent: (UIView & UIContentView)?
 
-            override init(frame: CGRect) {
-                super.init(frame: frame)
-                label.font = .preferredFont(forTextStyle: .headline)
-                label.adjustsFontForContentSizeCategory = true
-                label.textColor = .secondaryLabel
-                label.accessibilityTraits.insert(.header)
-                label.translatesAutoresizingMaskIntoConstraints = false
-                addSubview(label)
-                NSLayoutConstraint.activate([
-                    label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
-                    label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
-                    label.topAnchor.constraint(equalTo: topAnchor, constant: 12),
-                    label.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -4),
-                ])
+            func setContent<Content: View>(_ content: Content) {
+                let configuration = UIHostingConfiguration { content }.margins(.all, 0)
+                if let hostedContent {
+                    hostedContent.configuration = configuration
+                } else {
+                    let view = configuration.makeContentView()
+                    view.translatesAutoresizingMaskIntoConstraints = false
+                    addSubview(view)
+                    NSLayoutConstraint.activate([
+                        view.leadingAnchor.constraint(equalTo: leadingAnchor),
+                        view.trailingAnchor.constraint(equalTo: trailingAnchor),
+                        view.topAnchor.constraint(equalTo: topAnchor),
+                        view.bottomAnchor.constraint(equalTo: bottomAnchor),
+                    ])
+                    hostedContent = view
+                }
             }
 
-            required init?(coder: NSCoder) { nil }
+            override func preferredLayoutAttributesFitting(
+                _ layoutAttributes: UICollectionViewLayoutAttributes
+            ) -> UICollectionViewLayoutAttributes {
+                let attributes = super.preferredLayoutAttributesFitting(layoutAttributes)
+                attributes.size.height =
+                    systemLayoutSizeFitting(
+                        CGSize(width: attributes.size.width, height: 0),
+                        withHorizontalFittingPriority: .required,
+                        verticalFittingPriority: .fittingSizeLevel
+                    ).height
+                return attributes
+            }
         }
+
     }
 #endif
