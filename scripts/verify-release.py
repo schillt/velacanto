@@ -22,7 +22,7 @@ assert expected_display_name in ("VelaCanto Alpha", "VelaCanto")
 assert info["CFBundleDisplayName"] == expected_display_name
 assert info["CFBundleName"] == expected_display_name
 assert info["CFBundleShortVersionString"] == "0.6.0"
-assert info["CFBundleVersion"] == os.environ.get("VELACANTO_BUILD_NUMBER", "235")
+assert info["CFBundleVersion"] == os.environ.get("VELACANTO_BUILD_NUMBER", "236")
 assert info["ITSAppUsesNonExemptEncryption"] is False
 assert "com.chameleonenterprise.velacanto.continuation.v1" in info.get("NSUserActivityTypes", []), "Missing Handoff activity registration"
 privacy_path = app / "PrivacyInfo.xcprivacy"
@@ -58,7 +58,7 @@ else:
     assert attributes["SupportedMediaCategories"] == ["INMediaCategoryMusic"]
     extension_binaries.append(extension / extension_info["CFBundleExecutable"])
 markers = (
-    b"player.siri", b"audioSession.activation.denied",
+    b"player.siri", b"audioSession.activation.denied", b"queueMorph", b"queueCompleted", b"queuePhase",
     b"player.hls.copy", b"player.hls.playlist", b"player.hls.negotiation",
     b"player.hls.source", b"player.hls.selection", b"player.comparison.access",
     b"foundationDeliveryComparison", b"player.hls.cleanup", b"MP3 HLS",
@@ -71,7 +71,7 @@ markers = (
     b"-diagnosticCarPlaySearch", b"-diagnosticCarPlayNativeSearch",
     b"FoundationCarPlayInputDiagnostic", b"CarPlaySearchDiagnostics",
     b"-diagnosticHomeRebound", b"HomeReboundDiagnostics", b"FoundationHomeReboundDiagnostic",
-    b"-fixtureSharedChromeEvidence", b"-fixtureRemoteListening", b"FoundationChromeUIScrollProbe",
+    b"-fixtureQueueArtworkTransition", b"-fixtureSharedChromeEvidence", b"-fixtureRemoteListening", b"FoundationChromeUIScrollProbe",
 )
 for binary in [executable, *extension_binaries, *app.rglob("*.dylib")]:
     content = binary.read_bytes()

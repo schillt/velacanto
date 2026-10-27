@@ -146,15 +146,7 @@ struct FoundationPlayerView: View {
                         volumeControl
                         HStack {
                             Button {
-                                showingQueue = false
-                                lyricsPresentation?.model.cancel()
-                                if lyricsPresentation == nil {
-                                    lyricsPresentation = player.queue.first {
-                                        $0.id == player.selectedEntryID
-                                    }.map { FoundationLyricsPresentation(entry: $0) }
-                                } else {
-                                    lyricsPresentation = nil
-                                }
+                                toggleLyrics()
                             } label: {
                                 Image(systemName: "quote.bubble")
                                     .font(.title2)
@@ -170,9 +162,7 @@ struct FoundationPlayerView: View {
                                 .frame(width: 44, height: 44)
                             Spacer()
                             Button {
-                                lyricsPresentation?.model.cancel()
-                                lyricsPresentation = nil
-                                showingQueue.toggle()
+                                toggleQueue()
                             } label: {
                                 Image(systemName: "list.bullet")
                                     .font(.title2)
@@ -284,13 +274,36 @@ struct FoundationPlayerView: View {
         )
         .accessibilityAction(.escape) { dismissPlayer() }
         #if os(iOS)
-            .onAppear { updateArtworkDismissalAvailability() }
-            .onDisappear { artworkPresentation?.interactiveDismissalHeaderOnly = false }
-            .onChange(of: scrubbing) { _, _ in updateArtworkDismissalAvailability() }
-            .onChange(of: showingQueue) { _, _ in updateArtworkDismissalAvailability() }
-            .onChange(of: lyricsPresentation != nil) { _, _ in updateArtworkDismissalAvailability()
+            .onAppear {
+                artworkPresentation?.queuePresentationChanged(showing: showingQueue)
+                updateArtworkDismissalAvailability()
             }
-            .onChange(of: sheetDestination != nil) { _, _ in updateArtworkDismissalAvailability() }
+            .onDisappear {
+                artworkPresentation?.cancelQueueTransition()
+                artworkPresentation?.queuePresentationChanged(showing: false)
+                artworkPresentation?.interactiveDismissalHeaderOnly = false
+            }
+            .onChange(of: currentArtwork.result?.revision) { _, _ in
+                artworkPresentation?.queueArtworkChanged(
+                    identity: current?.sharedArtworkIdentity,
+                    imageID: current.flatMap { currentArtwork.result(for: $0)?.id })
+            }
+            .onChange(of: reduceMotion) { _, reduced in
+                if reduced { artworkPresentation?.cancelQueueTransition() }
+            }
+            .onChange(of: scrubbing) { _, _ in updateArtworkDismissalAvailability() }
+            .onChange(of: showingQueue) { _, shown in
+                artworkPresentation?.queuePresentationChanged(showing: shown)
+                updateArtworkDismissalAvailability()
+            }
+            .onChange(of: lyricsPresentation != nil) { _, presented in
+                if presented { artworkPresentation?.cancelQueueTransition() }
+                updateArtworkDismissalAvailability()
+            }
+            .onChange(of: sheetDestination != nil) { _, presented in
+                if presented { artworkPresentation?.cancelQueueTransition() }
+                updateArtworkDismissalAvailability()
+            }
         #endif
         .onAppear { currentArtwork.retryMissingArtwork() }
         .task(id: LoadingCueKey(entryID: player.selectedEntryID, waiting: isWaitingForAudio)) {
@@ -326,11 +339,41 @@ struct FoundationPlayerView: View {
             artworkFill = nil
         }
         .onChange(of: player.selectedEntryID) { _, _ in
+            #if os(iOS)
+                artworkPresentation?.cancelQueueTransition()
+            #endif
             scrubbing = false
             scrubEntryID = nil
             lyricsPresentation?.model.cancel()
             lyricsPresentation = nil
         }
+    }
+
+    private func toggleLyrics() {
+        showingQueue = false
+        lyricsPresentation?.model.cancel()
+        if lyricsPresentation == nil {
+            let entry = player.queue.first { $0.id == player.selectedEntryID }
+            lyricsPresentation = entry.map { FoundationLyricsPresentation(entry: $0) }
+        } else {
+            lyricsPresentation = nil
+        }
+    }
+
+    private func toggleQueue() {
+        lyricsPresentation?.model.cancel()
+        lyricsPresentation = nil
+        #if os(iOS)
+            let image: FoundationPlayerArtworkPresentationModel.Artwork?
+            if let current, let result = currentArtwork.result(for: current) {
+                image = .init(identity: current.sharedArtworkIdentity, result: result)
+            } else {
+                image = nil
+            }
+            artworkPresentation?.prepareQueueTransition(
+                showing: !showingQueue, artwork: image, reduceMotion: reduceMotion)
+        #endif
+        showingQueue.toggle()
     }
 
     private func dismissPlayer() {
@@ -555,8 +598,16 @@ private struct FoundationQueueView: View {
     @Binding var isPresented: Bool
     let openItem: (FoundationItem) -> Void
 
+    @EnvironmentObject private var actions: FoundationLibraryActions
+    @Environment(\.foundationAddToPlaylist) private var addToPlaylist
+    @Environment(\.foundationRequestDownloadRemoval) private var requestDownloadRemoval
+    @Environment(\.foundationHandoff) private var handoff
     @EnvironmentObject private var connectivity: FoundationConnectivity
     @EnvironmentObject private var downloads: FoundationDownloads
+    @EnvironmentObject private var currentArtwork: FoundationCurrentArtwork
+    #if os(iOS)
+        @Environment(\.foundationPlayerArtworkPresentation) private var artworkPresentation
+    #endif
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     @State private var hasAnchoredOnOpen = false
@@ -576,12 +627,25 @@ private struct FoundationQueueView: View {
                     upcoming: upcoming,
                     dynamicTypeSize: dynamicTypeSize,
                     shuffleEnabled: player.shuffleEnabled, repeatMode: player.repeatMode,
+                    play: { id, position in
+                        guard isPresented else { return }
+                        player.moveQueuedEntry(id, position: position)
+                    },
+                    remove: { id in
+                        guard isPresented else { return }
+                        player.removeUpcoming(id)
+                    },
+                    geometryReady: { artworkPresentation?.queueGeometryReady() },
                     move: { id, boundary in
                         guard isPresented else { return }
                         player.reorderUpcoming([id], before: boundary)
                     },
                     header: {
                         currentHeader
+                            .environment(\.foundationPlayerArtworkPresentation, artworkPresentation)
+                            .environment(\.foundationAddToPlaylist, addToPlaylist)
+                            .environment(\.foundationRequestDownloadRemoval, requestDownloadRemoval)
+                            .environment(\.foundationHandoff, handoff)
                             .environmentObject(connectivity)
                             .environmentObject(downloads)
                             .environment(\.dynamicTypeSize, dynamicTypeSize)
@@ -595,6 +659,9 @@ private struct FoundationQueueView: View {
                     },
                     row: { entry, canReorder in
                         row(entry, canReorder: canReorder)
+                            .environment(\.foundationAddToPlaylist, addToPlaylist)
+                            .environment(\.foundationRequestDownloadRemoval, requestDownloadRemoval)
+                            .environment(\.foundationHandoff, handoff)
                             .environmentObject(connectivity)
                             .environmentObject(downloads)
                             .environment(\.dynamicTypeSize, dynamicTypeSize)
@@ -707,7 +774,13 @@ private struct FoundationQueueView: View {
         .padding(.top, 8)
         .padding(.bottom, 4)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.regularMaterial)
+        .background {
+            #if os(iOS)
+                Color.clear
+            #else
+                Rectangle().fill(.background)
+            #endif
+        }
     }
 
     private func currentTrack(_ entry: FoundationQueueEntry) -> some View {
@@ -716,7 +789,12 @@ private struct FoundationQueueView: View {
             player.select(entry.id)
         } label: {
             HStack(spacing: 12) {
-                queueArtwork(entry, size: 64)
+                queueArtwork(entry, size: 64, isCurrent: true)
+                    #if os(iOS)
+                        .foundationPlayerArtworkRegistration(
+                            role: .queue, identity: entry.item.sharedArtworkIdentity,
+                            cornerRadius: 6)
+                    #endif
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Now Playing").font(.caption).foregroundStyle(.secondary)
                     Text(entry.item.title).font(.headline).lineLimit(2)
@@ -734,8 +812,11 @@ private struct FoundationQueueView: View {
         .contextMenu { menu(entry) }
     }
 
-    private func queueArtwork(_ entry: FoundationQueueEntry, size: CGFloat) -> some View {
+    private func queueArtwork(
+        _ entry: FoundationQueueEntry, size: CGFloat, isCurrent: Bool = false
+    ) -> some View {
         FoundationCatalogArtwork(
+            source: isCurrent ? .current(currentArtwork.result(for: entry.item)) : .catalog,
             item: entry.item, library: library, isActive: isPresented, size: size)
     }
 
@@ -823,7 +904,11 @@ private struct FoundationQueueView: View {
         .contentShape(.dragPreview, RoundedRectangle(cornerRadius: 16, style: .continuous))
         #if os(iOS)
             .contentShape(
-                .contextMenuPreview, RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .contextMenuPreview, RoundedRectangle(cornerRadius: 16, style: .continuous)
+            )
+            .overlay(alignment: .bottom) {
+                Divider().padding(.leading, 68).padding(.trailing, 16)
+            }
         #endif
         .id(entry.id)
     }
@@ -837,20 +922,40 @@ private struct FoundationQueueView: View {
         player.reorderUpcoming([id], before: boundary < entries.count ? entries[boundary].id : nil)
     }
 
-    @ViewBuilder private func menu(_ entry: FoundationQueueEntry) -> some View {
+    private func queueEntry(_ entry: FoundationQueueEntry, position: FoundationPlayer.QueuePosition)
+    {
+        guard isPresented, player.queue.contains(where: { $0.id == entry.id }) else { return }
         if player.upcoming.contains(where: { $0.id == entry.id }) {
-            Button("Play Next") { player.moveQueuedEntry(entry.id, position: .next) }
-            Button("Play Last") { player.moveQueuedEntry(entry.id, position: .last) }
-            if let index = player.upcoming.firstIndex(where: { $0.id == entry.id }) {
-                Button("Move Up") { moveAccessibleEntry(entry.id, offset: -1) }
-                    .disabled(index == 0)
-                Button("Move Down") { moveAccessibleEntry(entry.id, offset: 1) }
-                    .disabled(index + 1 == player.upcoming.count)
-            }
-            Button("Remove from Up Next", role: .destructive) { player.removeUpcoming(entry.id) }
+            player.moveQueuedEntry(entry.id, position: position)
+        } else {
+            // Replaying history adds a new occurrence; played/current identity stays intact.
+            player.enqueue([entry.item], position: position)
         }
-        FoundationRelatedDestinations(item: entry.item, navigate: openItem)
     }
+
+    @ViewBuilder private func menu(_ entry: FoundationQueueEntry) -> some View {
+        Section {
+            Button("Play Next", systemImage: "text.line.first.and.arrowtriangle.forward") {
+                queueEntry(entry, position: .next)
+            }
+            Button("Play Last", systemImage: "text.line.last.and.arrowtriangle.forward") {
+                queueEntry(entry, position: .last)
+            }
+            if player.upcoming.contains(where: { $0.id == entry.id }) {
+                Button("Remove from Up Next", systemImage: "minus", role: .destructive) {
+                    guard isPresented else { return }
+                    player.removeUpcoming(entry.id)
+                }
+            }
+        }
+        FoundationItemMenu(
+            item: entry.item, actions: actions, initialFavorite: entry.item.isFavorite,
+            showsQueueActions: false, library: library, player: player, navigate: openItem,
+            canPerform: { _ in
+                isPresented && player.queue.contains(where: { $0.id == entry.id })
+            })
+    }
+
 }
 
 private struct FoundationQueueFixtureIdentifier: ViewModifier {

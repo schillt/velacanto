@@ -377,7 +377,8 @@ final class FoundationDownloadsUITests: XCTestCase {
         playlistReorder: Bool = false, playlistReorderFailOnce: Bool = false,
         primaryGenres: Bool = false, heldPrimaryGenreMetadata: Bool = false,
         primaryGenreScopedQuery: Bool = false,
-        sharedChromeEvidence: Bool = false, remoteListening: Bool = false
+        sharedChromeEvidence: Bool = false, remoteListening: Bool = false,
+        queueArtworkTransition: Bool = false
     )
         -> XCUIApplication
     {
@@ -408,6 +409,7 @@ final class FoundationDownloadsUITests: XCTestCase {
         if favoritesCatalog { app.launchArguments.append("-fixtureFavoritesCatalog") }
         if emptyFavoritePreview { app.launchArguments.append("-fixtureEmptyFavoritePreview") }
         if queuePresentation { app.launchArguments.append("-fixtureQueuePresentation") }
+        if queueArtworkTransition { app.launchArguments.append("-fixtureQueueArtworkTransition") }
         if detachedPlayerArtwork { app.launchArguments.append("-fixtureDetachedPlayerArtwork") }
         if holdPlayerGlass { app.launchArguments.append("-fixtureHoldPlayerGlass") }
         if heldAlphabetPage { app.launchArguments.append("-fixtureHoldOrdinaryAlphabetPage") }
@@ -705,6 +707,97 @@ final class FoundationDownloadsUITests: XCTestCase {
         app.buttons["Collapse Now Playing"].tap()
         XCTAssertTrue(app.buttons["Show Now Playing"].waitForExistence(timeout: 5))
         capture("Repeated occurrence drag keeps current playback and dismissal", in: app)
+    }
+
+    func testQueueArtworkZoomAndNativeSwipeActionsPreserveOccurrencePlayback() {
+        continueAfterFailure = false
+        let app = launch(
+            productionShell: true, canonicalDownloadState: "full", longPlayback: true,
+            queuePresentation: true, queueArtworkTransition: true)
+        selectTab("Library", in: app)
+        openCanonicalCollection("album", fromDownloads: false, in: app)
+        tapVisible(app.buttons["collection-track-0"], in: app)
+        openNowPlaying(app)
+        let modal = app.descendants(matching: .any)["foundation-now-playing"]
+        let identity = app.staticTexts["fixture-player-playback-identity"]
+        let startingIdentity = identity.label
+        app.buttons["Show queue"].tap()
+        let transition = app.staticTexts["fixture-player-artwork-transition"]
+        let zoomed = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label CONTAINS %@", "queueCompleted 1"),
+            object: transition)
+        XCTAssertEqual(XCTWaiter.wait(for: [zoomed], timeout: 5), .completed, transition.label)
+        let before = queueSnapshot(app)
+        let upcoming = before["upcoming"] as? [String] ?? []
+        XCTAssertEqual(upcoming.count, 14)
+        guard upcoming.count == 14 else { return }
+        let first = app.buttons["fixture-queue-select-" + upcoming[0]]
+        first.swipeRight()
+        let playNext = modal.buttons["Play Next"]
+        let playLast = modal.buttons["Play Last"]
+        XCTAssertTrue(playNext.waitForExistence(timeout: 5) && playNext.isHittable)
+        XCTAssertTrue(playLast.isHittable)
+        capture("Queue native right swipe exposes Next and Last", in: app)
+        playLast.tap()
+        XCTAssertEqual(
+            queueSnapshot(app)["upcoming"] as? [String], Array(upcoming.dropFirst()) + [upcoming[0]]
+        )
+        let removeEntry = app.buttons["fixture-queue-select-" + upcoming[1]]
+        removeEntry.swipeLeft()
+        let remove = modal.buttons["Remove from Up Next"]
+        XCTAssertTrue(remove.waitForExistence(timeout: 5) && remove.isHittable)
+        capture("Queue native left swipe exposes minus removal", in: app)
+        remove.tap()
+        XCTAssertEqual(
+            queueSnapshot(app)["upcoming"] as? [String],
+            Array(upcoming.dropFirst(2)) + [upcoming[0]])
+        XCTAssertEqual(queueSnapshot(app)["selected"] as? String, before["selected"] as? String)
+        XCTAssertEqual(queueSnapshot(app)["history"] as? [String], [])
+        XCTAssertEqual(identity.label, startingIdentity)
+        let queue = app.descendants(matching: .any)["fixture-queue-list"]
+        queue.swipeUp()
+        let current = app.buttons["fixture-queue-select-" + (before["selected"] as? String ?? "")]
+        XCTAssertTrue(current.isHittable && modal.buttons["Shuffle"].isHittable)
+        capture("Queue rows disappear below the transparent pinned current header", in: app)
+        app.buttons["Show artwork"].tap()
+        let expanded = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label CONTAINS %@", "queueCompleted 2"),
+            object: transition)
+        XCTAssertEqual(XCTWaiter.wait(for: [expanded], timeout: 5), .completed, transition.label)
+        XCTAssertEqual(identity.label, startingIdentity)
+        capture("Queue artwork expands back without replacing playback", in: app)
+    }
+
+    func testQueueHistoryContextMenuOffersReplayAndSharedTrackActions() {
+        continueAfterFailure = false
+        let app = launch(
+            productionShell: true, canonicalDownloadState: "full", longPlayback: true,
+            queuePresentation: true)
+        selectTab("Library", in: app)
+        openCanonicalCollection("album", fromDownloads: false, in: app)
+        tapVisible(app.buttons["collection-track-0"], in: app)
+        openNowPlaying(app)
+        let modal = app.descendants(matching: .any)["foundation-now-playing"]
+        modal.buttons["Next"].tap()
+        app.buttons["Show queue"].tap()
+        let before = queueSnapshot(app)
+        let history = before["history"] as? [String] ?? []
+        XCTAssertEqual(history.count, 1)
+        guard let id = history.first else { return }
+        let historyRow = app.buttons["fixture-queue-select-" + id]
+        revealQueueControl(historyRow, entryID: id, in: app)
+        historyRow.press(forDuration: 1)
+        XCTAssertTrue(app.cells.buttons["Play Next"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.cells.buttons["Play Last"].exists)
+        XCTAssertTrue(app.cells.buttons["View Album"].exists)
+        XCTAssertTrue(app.cells.buttons["View Artist"].exists)
+        XCTAssertTrue(app.cells.buttons["Favorite"].exists)
+        XCTAssertFalse(app.cells.buttons["Move Up"].exists)
+        XCTAssertFalse(app.cells.buttons["Move Down"].exists)
+        XCTAssertFalse(app.cells.buttons["Remove from Up Next"].exists)
+        capture("Queue History has icon-labelled replay and shared track menu", in: app)
+        XCTAssertEqual(queueSnapshot(app)["history"] as? [String], history)
+        XCTAssertEqual(queueSnapshot(app)["selected"] as? String, before["selected"] as? String)
     }
 
     func testQueuePinnedCurrentRevealsAndClearsHistoryWithoutChangingPlayback() {

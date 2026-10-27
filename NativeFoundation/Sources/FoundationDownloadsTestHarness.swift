@@ -609,8 +609,14 @@
             )
             self.player.configureTrackProjection(
                 project: { actions.visibleTracks($0) }, observe: { actions.observeTrackCopies($0) })
+            let queueArtworkTransition = ProcessInfo.processInfo.arguments.contains(
+                "-fixtureQueueArtworkTransition")
             self.artwork = FoundationCurrentArtwork(player: player) { item in
-                await downloads.retainedArtwork(for: item)
+                if let retained = await downloads.retainedArtwork(for: item) { return retained }
+                // Only this opt-in scenario mirrors production's current-artwork fallback.
+                // Other fixtures retain their original cache/read-count behavior.
+                guard queueArtworkTransition else { return nil }
+                return try await library.artwork(for: item)
             }
             let connectivity = self.connectivity
             actions.configureTrackAvailability { [weak connectivity, weak downloads] item in
@@ -1267,7 +1273,11 @@
         private var orderedTracks: [FoundationItem] {
             if canonical && ProcessInfo.processInfo.arguments.contains("-fixtureQueuePresentation")
             {
-                return [track, missing, track, missing, track]
+                let entries = [track, missing, track, missing, track]
+                if ProcessInfo.processInfo.arguments.contains("-fixtureQueueArtworkTransition") {
+                    return Array(repeating: entries, count: 3).flatMap { $0 }
+                }
+                return entries
             }
             return canonical ? [track, missing, track] : [track, track]
         }

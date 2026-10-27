@@ -2,8 +2,74 @@ import XCTest
 
 @testable import VelacantoFoundation
 
+#if os(iOS)
+    import SwiftUI
+    import UIKit
+#endif
+
 @MainActor
 final class FoundationPresentationTests: XCTestCase {
+    #if os(iOS)
+        func testQueueNativeSwipesProtectHistoryAndRejectRetiredOccurrenceActions() throws {
+            let item = FoundationItem(
+                id: "same-track", title: "Song", subtitle: "Artist", kind: .track, duration: 60)
+            let history = FoundationQueueEntry(item: item)
+            let current = FoundationQueueEntry(item: item)
+            let upcoming = [FoundationQueueEntry(item: item), FoundationQueueEntry(item: item)]
+            var played: [UUID] = []
+            var positions: [String] = []
+            var removed: [UUID] = []
+            func list(_ entries: [FoundationQueueEntry]) -> FoundationQueueReorderList<
+                Text, Text, Text
+            > {
+                .init(
+                    history: [history], current: current, upcoming: entries,
+                    dynamicTypeSize: .large, shuffleEnabled: false, repeatMode: .off,
+                    play: { id, position in
+                        played.append(id)
+                        positions.append(position == .next ? "next" : "last")
+                    }, remove: { removed.append($0) }, geometryReady: {}, move: { _, _ in },
+                    header: { Text("Current") }, historyHeader: { Text("History") },
+                    row: { _, _ in Text("Song") })
+            }
+            let coordinator = FoundationQueueReorderList<Text, Text, Text>.Coordinator(
+                parent: list(upcoming))
+            XCTAssertNil(
+                coordinator.swipeActions(at: IndexPath(item: 0, section: 0), leading: true))
+            XCTAssertNil(
+                coordinator.swipeActions(at: IndexPath(item: 0, section: 1), leading: false))
+            XCTAssertNil(
+                coordinator.swipeActions(at: IndexPath(item: 3, section: 2), leading: true))
+            let leading = try XCTUnwrap(
+                coordinator.swipeActions(at: IndexPath(item: 0, section: 2), leading: true))
+            XCTAssertEqual(leading.actions.map(\.title), ["Play Next", "Play Last"])
+            XCTAssertFalse(leading.performsFirstActionWithFullSwipe)
+            var completed: [Bool] = []
+            for action in leading.actions {
+                action.handler(action, UIView()) { completed.append($0) }
+            }
+            XCTAssertEqual(played, [upcoming[0].id, upcoming[0].id])
+            XCTAssertEqual(positions, ["next", "last"])
+            XCTAssertEqual(completed, [true, true])
+            let trailing = try XCTUnwrap(
+                coordinator.swipeActions(at: IndexPath(item: 1, section: 2), leading: false))
+            XCTAssertFalse(trailing.performsFirstActionWithFullSwipe)
+            let remove = try XCTUnwrap(trailing.actions.first)
+            XCTAssertEqual(remove.style, .destructive)
+            XCTAssertNotNil(remove.image)
+            remove.handler(remove, UIView()) { completed.append($0) }
+            XCTAssertEqual(removed, [upcoming[1].id])
+            // A captured action must not mutate an occurrence that is no longer upcoming.
+            coordinator.parent = list([])
+            let oldPlay = leading.actions[0]
+            oldPlay.handler(oldPlay, UIView()) { completed.append($0) }
+            remove.handler(remove, UIView()) { completed.append($0) }
+            XCTAssertEqual(played.count, 2)
+            XCTAssertEqual(removed.count, 1)
+            XCTAssertEqual(Array(completed.suffix(2)), [false, false])
+        }
+    #endif
+
     #if os(macOS)
         func testHandoffBrowseRoutesWithoutAMountedRootCollectionBinding() async throws {
             let audio = FoundationMacHandoffAudioProbe()

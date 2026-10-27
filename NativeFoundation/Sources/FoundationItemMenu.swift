@@ -8,6 +8,7 @@ struct FoundationItemMenu: View {
     let initialFavorite: Bool?
     /// Detail pages with a primary Favorite control can omit its duplicate menu action.
     var showsFavoriteAction = true
+    var showsQueueActions = true
     var open: (() -> Void)?
     var play: (() -> Void)?
 
@@ -86,7 +87,7 @@ struct FoundationItemMenu: View {
                     }
                 }.disabled(connectivity.localOnly && downloads.browseTracks(for: item).isEmpty)
             }
-            if let player,
+            if showsQueueActions, let player,
                 item.kind == .track
                     || ((item.kind == .album || item.kind == .playlist) && library != nil)
             {
