@@ -44,6 +44,16 @@ final class FoundationPinSyncLifecycleTests: XCTestCase {
         sync.invalidate()
     }
 
+    func testOnlyReviewedExplicitContainerConfigurationCanEnableAvailability() {
+        for value in [nil, "", "$(VELACANTO_PIN_SYNC_CONTAINER_IDENTIFIER)", "iCloud.other.app"] {
+            XCTAssertNil(FoundationPinSyncConfiguration.containerIdentifier(value))
+        }
+        XCTAssertEqual(
+            FoundationPinSyncConfiguration.containerIdentifier(
+                "iCloud.com.chameleonenterprise.velacanto"),
+            FoundationPinSyncConfiguration.developmentContainerIdentifier)
+    }
+
     func testDisableAndRetirementRejectLateCloudResults() async {
         for retire in [false, true] {
             let gate = Gate()

@@ -1,5 +1,39 @@
 # Optional iCloud pins — issue #198 development candidate
 
+## Resumed development configuration — 2026-10-27
+
+The owner approved the proposed container and development signing for iPhone/Mac
+testing. The Apple portal now shows `iCloud.com.chameleonenterprise.velacanto`
+registered and associated with the canonical app and retained Mac Alpha identity.
+The canonical app's existing Siri/CarPlay capabilities were retained. The Mac
+Alpha identity is unchanged. Fresh embedded profiles/signatures and actual sync
+acceptance remain pending; registration is not runtime acceptance.
+
+Candidate234 adds separate `Velacanto-iOS-PinSyncDevelopment.entitlements` and
+`Velacanto-macOS-PinSyncDevelopment.entitlements`, retaining existing keys and
+adding only this container, CloudKit and the Development environment. The Intents
+extension receives no cloud entitlement. Ordinary entitlement files are unchanged.
+Both Info plists use `$(VELACANTO_PIN_SYNC_CONTAINER_IDENTIFIER)`, empty by default;
+the application accepts only the reviewed exact identifier and rejects empty,
+unexpanded or unrelated settings before constructing a container.
+
+Development package overrides (in addition to retained identity/signing settings):
+
+```text
+VELACANTO_PIN_SYNC_CONTAINER_IDENTIFIER=iCloud.com.chameleonenterprise.velacanto
+VELACANTO_IOS_ENTITLEMENTS_FILE=Resources/Velacanto-iOS-PinSyncDevelopment.entitlements
+VELACANTO_MACOS_ENTITLEMENTS_FILE=Resources/Velacanto-macOS-PinSyncDevelopment.entitlements
+```
+
+The user still opts in explicitly. Production schema deployment is separate.
+Focused candidate234 checks passed61 Mac and64 iOS tests, zero failures, across
+pin state/lifecycle/configuration, remote listening and bottom geometry. Canonical
+lint passed with zero findings. The produced ordinary Mac234 Info plist has an
+empty setting, confirming that ordinary builds remain unconfigured. These checks
+do not establish signed iCloud account access or device convergence.
+
+## Original source checkpoint (historical)
+
 Live issue and all comments checked 2026-10-26: issue #198 remains open with no
 comments. Base is local integration `7f1e028`; remote alpha is a separate lineage.
 This is source implementation for review, not feature acceptance. No container,

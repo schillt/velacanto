@@ -8,6 +8,16 @@ import Foundation
     import AppKit
 #endif
 
+enum FoundationPinSyncConfiguration {
+    static let developmentContainerIdentifier = "iCloud.com.chameleonenterprise.velacanto"
+
+    /// Ordinary builds leave the setting empty. Never construct a default or
+    /// unintended CloudKit container from an empty/unexpanded build setting.
+    static func containerIdentifier(_ configured: String?) -> String? {
+        configured == developmentContainerIdentifier ? configured : nil
+    }
+}
+
 /// Optional account-owned work. The pin owner remains the only writer of visible pins.
 @MainActor
 final class FoundationPinSync: ObservableObject {

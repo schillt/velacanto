@@ -4666,8 +4666,8 @@ final class FoundationDownloadsUITests: XCTestCase {
     private enum ChromeObservationError: Error { case conditionNotMet(String) }
 
     private func chromeFacts(_ app: XCUIApplication, _ context: String) -> [String: Double] {
-        let probe = app.staticTexts["fixture-chrome-" + context]
-        guard let value = probe.value as? String,
+        let probe = app.descendants(matching: .any)["fixture-chrome-" + context].firstMatch
+        guard probe.exists, let value = probe.value as? String,
             let data = value.data(using: .utf8),
             let values = try? JSONDecoder().decode([String: Double].self, from: data)
         else { return [:] }
@@ -4696,6 +4696,14 @@ final class FoundationDownloadsUITests: XCTestCase {
         attachment.name = "Shared chrome unresolved observation"
         attachment.lifetime = .keepAlways
         add(attachment)
+        let hierarchy = XCTAttachment(string: app.debugDescription)
+        hierarchy.name = "Synthetic shared chrome accessibility hierarchy"
+        hierarchy.lifetime = .keepAlways
+        add(hierarchy)
+        guard !facts.isEmpty else {
+            XCTFail("Required synthetic numeric chrome probe is missing: \(context)")
+            throw ChromeObservationError.conditionNotMet(context)
+        }
         if facts["found"] == 1, facts["ambiguousNativeScroll"] == 0, !optionalCondition {
             XCTFail("Observed native geometry failed its bounded condition: \(context); \(facts)")
             throw ChromeObservationError.conditionNotMet(context)
@@ -5043,7 +5051,11 @@ final class FoundationDownloadsUITests: XCTestCase {
         app.buttons["How to continue listening here"].tap()
         let suppress = app.switches["Don’t show this guide again"].firstMatch
         XCTAssertTrue(suppress.waitForExistence(timeout: 5))
-        suppress.tap()
+        XCTAssertEqual(suppress.value as? String, "0")
+        suppress.switches.firstMatch.tap()
+        let suppressed = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "value == %@", "1"), object: suppress)
+        XCTAssertEqual(XCTWaiter.wait(for: [suppressed], timeout: 5), .completed)
         app.buttons["Done"].firstMatch.tap()
         media.tap()
         XCTAssertTrue(app.buttons["Handoff Help"].waitForExistence(timeout: 5))

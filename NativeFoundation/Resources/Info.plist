@@ -27,4 +27,5 @@
 <key>UISceneDelegateClassName</key><string>$(PRODUCT_MODULE_NAME).FoundationCarPlaySceneDelegate</string>
 </dict></array>
 </dict></dict>
+<key>VelacantoPinSyncContainerIdentifier</key><string>$(VELACANTO_PIN_SYNC_CONTAINER_IDENTIFIER)</string>
 </dict></plist>

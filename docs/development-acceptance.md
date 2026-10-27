@@ -41,7 +41,11 @@ Host-orchestrated UI cases must be explicitly opt-in, with execution versus skip
 verified in the result. Keep ordinary suites independent of an external operator;
 restore any controlled simulator appearance after the case, including failures.
 Keep builds/tests serialized on existing authorized destinations; do not create
-extra simulators, overwrite references or use the excluded physical iPhone 17 Pro.
+extra simulators or overwrite references. On 2026-10-27 the owner authorized the
+physical iPhone 17 Pro for v0.6 release testing and in-place development build
+updates, superseding its earlier exclusion. Preserve the installed app identity
+and data; verify the exact candidate, signing/profile coverage and installation
+before reporting a build as available. This does not authorize distribution.
 Real server mutations require an authorized disposable test scope.
 
 ## Security and privacy acceptance

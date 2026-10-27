@@ -660,8 +660,9 @@ final class FoundationAppModel: ObservableObject {
             })
         self.actions?.configurePinSync(
             sourceScope: sourceScope,
-            containerIdentifier: Bundle.main.object(
-                forInfoDictionaryKey: "VelacantoPinSyncContainerIdentifier") as? String,
+            containerIdentifier: FoundationPinSyncConfiguration.containerIdentifier(
+                Bundle.main.object(forInfoDictionaryKey: "VelacantoPinSyncContainerIdentifier")
+                    as? String),
             resolve: { try await library.itemDetails(for: $0) })
         self.library = library
         let downloads = FoundationDownloads(

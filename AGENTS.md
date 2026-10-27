@@ -89,8 +89,11 @@ credentials. Keep the stronger native Handoff safeguards intact.
 Validate server/user/source ownership and server permissions before async results
 or mutations. Do not weaken file protection to make tests pass. No new player,
 retry/polling/watchdog framework, hidden whole-catalog scan or unrelated provider.
-The optional pin-sync configuration remains off; no Cloud container/capability or
-workflow change is implied.
+Ordinary builds keep pin sync unconfigured. On 2026-10-27 the owner explicitly
+authorized the reviewed container and development signing for iPhone/Mac pin-sync
+testing. Use the dedicated Development entitlements and explicit container build
+setting; preserve runtime opt-in, existing identities and the default-off ordinary
+build. Production schema deployment and workflow changes remain separate.
 
 The repository is public. Stage explicit reviewed paths, never broad `git add .`
 or `git add -A`. Keep credentials, private server/media/account/device details,

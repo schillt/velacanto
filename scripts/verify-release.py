@@ -10,13 +10,19 @@ info_path = app / "Info.plist"
 if not info_path.exists():
     info_path = app / "Contents/Info.plist"
 info = plistlib.loads(info_path.read_bytes())
-assert info["CFBundleIdentifier"] == "com.chameleonenterprise.velacanto"
+canonical_bundle_id = "com.chameleonenterprise.velacanto"
+expected_bundle_id = os.environ.get("VELACANTO_APP_BUNDLE_IDENTIFIER", canonical_bundle_id)
+is_mac = (app / "Contents").exists()
+assert expected_bundle_id == canonical_bundle_id or (
+    is_mac and expected_bundle_id == canonical_bundle_id + ".siri-validation"
+), "Unexpected application identity"
+assert info["CFBundleIdentifier"] == expected_bundle_id
 expected_display_name = os.environ.get("VELACANTO_APP_DISPLAY_NAME", "VelaCanto")
 assert expected_display_name in ("VelaCanto Alpha", "VelaCanto")
 assert info["CFBundleDisplayName"] == expected_display_name
 assert info["CFBundleName"] == expected_display_name
 assert info["CFBundleShortVersionString"] == "0.6.0"
-assert info["CFBundleVersion"] == os.environ.get("VELACANTO_BUILD_NUMBER", "233")
+assert info["CFBundleVersion"] == os.environ.get("VELACANTO_BUILD_NUMBER", "234")
 assert info["ITSAppUsesNonExemptEncryption"] is False
 assert "com.chameleonenterprise.velacanto.continuation.v1" in info.get("NSUserActivityTypes", []), "Missing Handoff activity registration"
 privacy_path = app / "PrivacyInfo.xcprivacy"
