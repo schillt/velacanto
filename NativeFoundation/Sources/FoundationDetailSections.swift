@@ -167,11 +167,13 @@ private struct FoundationOverviewSheet: View {
             #if os(iOS)
                 .navigationBarTitleDisplayMode(.inline)
             #endif
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done", action: dismiss)
+            #if os(macOS)
+                .toolbar {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Done", action: dismiss)
+                    }
                 }
-            }
+            #endif
         }
         // Immersive detail controls may use a white tint; native sheet actions use the app accent.
         .tint(.accentColor)

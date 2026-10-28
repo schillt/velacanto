@@ -114,11 +114,14 @@ struct FoundationItemMetadataView: View {
             .foregroundStyle(.primary)
             .tint(.accentColor)
             .navigationTitle("Song Credits")
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
-            }
+            #if os(macOS)
+                .toolbar {
+                    ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
+                }
+            #endif
         }
         .presentationDragIndicator(.visible)
+        .accessibilityAction(.escape) { dismiss() }
         #if os(macOS)
             .frame(minWidth: 360, idealWidth: 460, minHeight: 360, idealHeight: 520)
         #endif

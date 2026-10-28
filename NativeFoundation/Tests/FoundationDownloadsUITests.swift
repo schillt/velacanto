@@ -3,6 +3,28 @@ import XCTest
 
 @MainActor
 final class FoundationDownloadsUITests: XCTestCase {
+    func testSongCreditsGrabberDismissesWithoutDuplicateDone() {
+        continueAfterFailure = false
+        let app = launch(
+            productionShell: true, canonicalDownloadState: "full", longPlayback: true)
+        selectTab("Library", in: app)
+        openCanonicalCollection("album", fromDownloads: false, in: app)
+        tapVisible(app.buttons["Play"], in: app)
+        openNowPlaying(app)
+        tapVisible(app.buttons["More playback options"], in: app)
+        tapVisible(app.buttons["Song Credits"], in: app)
+        let navigation = app.navigationBars["Song Credits"]
+        XCTAssertTrue(navigation.waitForExistence(timeout: 5))
+        XCTAssertFalse(navigation.buttons["Done"].exists)
+        capture("Song Credits retains native grabber without duplicate dismissal button", in: app)
+        navigation.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+            .press(
+                forDuration: 0.1,
+                thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.98)))
+        XCTAssertFalse(navigation.exists)
+        XCTAssertTrue(app.buttons["More playback options"].waitForExistence(timeout: 5))
+    }
+
     func testMissingLyricsShowsUnavailableControlAfterClosingPane() {
         continueAfterFailure = false
         let app = launch(
@@ -619,6 +641,10 @@ final class FoundationDownloadsUITests: XCTestCase {
             for reopening in 0..<2 {
                 tapVisibleCenter(more, in: app)
                 XCTAssertTrue(navigation.waitForExistence(timeout: 5))
+                XCTAssertFalse(
+                    navigation.buttons["Done"].exists,
+                    "The native-grabber flyout uses swipe dismissal without a duplicate Done button"
+                )
                 let body = app.staticTexts.matching(
                     NSPredicate(format: "label BEGINSWITH %@", "Synthetic " + kind + " overview")
                 ).firstMatch
