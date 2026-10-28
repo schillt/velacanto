@@ -22,7 +22,7 @@ assert expected_display_name in ("VelaCanto Alpha", "VelaCanto")
 assert info["CFBundleDisplayName"] == expected_display_name
 assert info["CFBundleName"] == expected_display_name
 assert info["CFBundleShortVersionString"] == "0.6.0"
-assert info["CFBundleVersion"] == os.environ.get("VELACANTO_BUILD_NUMBER", "236")
+assert info["CFBundleVersion"] == os.environ.get("VELACANTO_BUILD_NUMBER", "237")
 assert info["ITSAppUsesNonExemptEncryption"] is False
 assert "com.chameleonenterprise.velacanto.continuation.v1" in info.get("NSUserActivityTypes", []), "Missing Handoff activity registration"
 privacy_path = app / "PrivacyInfo.xcprivacy"

@@ -42,8 +42,9 @@ final class FoundationPresentationTests: XCTestCase {
                 coordinator.swipeActions(at: IndexPath(item: 3, section: 2), leading: true))
             let leading = try XCTUnwrap(
                 coordinator.swipeActions(at: IndexPath(item: 0, section: 2), leading: true))
-            XCTAssertEqual(leading.actions.map(\.title), ["Play Next", "Play Last"])
-            XCTAssertFalse(leading.performsFirstActionWithFullSwipe)
+            XCTAssertEqual(leading.actions.map(\.accessibilityLabel), ["Play Next", "Play Last"])
+            XCTAssertTrue(leading.actions.allSatisfy { $0.title == nil && $0.image != nil })
+            XCTAssertTrue(leading.performsFirstActionWithFullSwipe)
             var completed: [Bool] = []
             for action in leading.actions {
                 action.handler(action, UIView()) { completed.append($0) }
@@ -53,7 +54,7 @@ final class FoundationPresentationTests: XCTestCase {
             XCTAssertEqual(completed, [true, true])
             let trailing = try XCTUnwrap(
                 coordinator.swipeActions(at: IndexPath(item: 1, section: 2), leading: false))
-            XCTAssertFalse(trailing.performsFirstActionWithFullSwipe)
+            XCTAssertTrue(trailing.performsFirstActionWithFullSwipe)
             let remove = try XCTUnwrap(trailing.actions.first)
             XCTAssertEqual(remove.style, .destructive)
             XCTAssertNotNil(remove.image)

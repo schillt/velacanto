@@ -9,6 +9,7 @@ struct FoundationItemMenu: View {
     /// Detail pages with a primary Favorite control can omit its duplicate menu action.
     var showsFavoriteAction = true
     var showsQueueActions = true
+    var showsDownloadActions = true
     var open: (() -> Void)?
     var play: (() -> Void)?
 
@@ -135,7 +136,9 @@ struct FoundationItemMenu: View {
                     addToPlaylist(item)
                 }
             }
-            if item.kind == .track || item.kind == .album || item.kind == .playlist {
+            if showsDownloadActions,
+                item.kind == .track || item.kind == .album || item.kind == .playlist
+            {
                 if !downloads.hasDownloadedData(for: item) {
                     FoundationDownloadActionButton(
                         item: item, showsTitle: true, canPerform: canPerform)
@@ -160,9 +163,11 @@ struct FoundationItemMenu: View {
                 }
             }
         }
-        if downloads.hasDownloadedData(for: item) || removeFromPlaylist != nil {
+        if (showsDownloadActions && downloads.hasDownloadedData(for: item))
+            || removeFromPlaylist != nil
+        {
             Section {
-                if downloads.hasDownloadedData(for: item),
+                if showsDownloadActions, downloads.hasDownloadedData(for: item),
                     item.kind == .track || item.kind == .album || item.kind == .playlist
                 {
                     FoundationDownloadActionButton(

@@ -727,12 +727,17 @@ final class FoundationDownloadsUITests: XCTestCase {
             predicate: NSPredicate(format: "label CONTAINS %@", "queueCompleted 1"),
             object: transition)
         XCTAssertEqual(XCTWaiter.wait(for: [zoomed], timeout: 5), .completed, transition.label)
+        XCTAssertFalse(modal.buttons["More playback options"].exists)
         let before = queueSnapshot(app)
         let upcoming = before["upcoming"] as? [String] ?? []
         XCTAssertEqual(upcoming.count, 14)
         guard upcoming.count == 14 else { return }
         let first = app.buttons["fixture-queue-select-" + upcoming[0]]
-        first.swipeRight()
+        first.coordinate(withNormalizedOffset: CGVector(dx: 0.25, dy: 0.5))
+            .press(
+                forDuration: 0.05,
+                thenDragTo:
+                    first.coordinate(withNormalizedOffset: CGVector(dx: 0.60, dy: 0.5)))
         let playNext = modal.buttons["Play Next"]
         let playLast = modal.buttons["Play Last"]
         XCTAssertTrue(playNext.waitForExistence(timeout: 5) && playNext.isHittable)
@@ -743,7 +748,11 @@ final class FoundationDownloadsUITests: XCTestCase {
             queueSnapshot(app)["upcoming"] as? [String], Array(upcoming.dropFirst()) + [upcoming[0]]
         )
         let removeEntry = app.buttons["fixture-queue-select-" + upcoming[1]]
-        removeEntry.swipeLeft()
+        removeEntry.coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: 0.5))
+            .press(
+                forDuration: 0.05,
+                thenDragTo:
+                    removeEntry.coordinate(withNormalizedOffset: CGVector(dx: 0.6, dy: 0.5)))
         let remove = modal.buttons["Remove from Up Next"]
         XCTAssertTrue(remove.waitForExistence(timeout: 5) && remove.isHittable)
         capture("Queue native left swipe exposes minus removal", in: app)
@@ -753,6 +762,28 @@ final class FoundationDownloadsUITests: XCTestCase {
             Array(upcoming.dropFirst(2)) + [upcoming[0]])
         XCTAssertEqual(queueSnapshot(app)["selected"] as? String, before["selected"] as? String)
         XCTAssertEqual(queueSnapshot(app)["history"] as? [String], [])
+        XCTAssertEqual(identity.label, startingIdentity)
+        let fullNext = app.buttons["fixture-queue-select-" + upcoming[3]]
+        fullNext.coordinate(withNormalizedOffset: CGVector(dx: 0.03, dy: 0.5))
+            .press(
+                forDuration: 0.05,
+                thenDragTo:
+                    fullNext.coordinate(withNormalizedOffset: CGVector(dx: 0.97, dy: 0.5)),
+                withVelocity: .slow, thenHoldForDuration: 0.05)
+        capture("Queue full leading swipe default", in: app)
+        var expected = Array(upcoming.dropFirst(2)) + [upcoming[0]]
+        expected.removeAll { $0 == upcoming[3] }
+        expected.insert(upcoming[3], at: 0)
+        XCTAssertEqual(queueSnapshot(app)["upcoming"] as? [String], expected)
+        fullNext.coordinate(withNormalizedOffset: CGVector(dx: 0.97, dy: 0.5))
+            .press(
+                forDuration: 0.05,
+                thenDragTo:
+                    fullNext.coordinate(withNormalizedOffset: CGVector(dx: 0.03, dy: 0.5)),
+                withVelocity: .slow, thenHoldForDuration: 0.05)
+        capture("Queue full trailing swipe default", in: app)
+        expected.removeFirst()
+        XCTAssertEqual(queueSnapshot(app)["upcoming"] as? [String], expected)
         XCTAssertEqual(identity.label, startingIdentity)
         let queue = app.descendants(matching: .any)["fixture-queue-list"]
         queue.swipeUp()
@@ -765,6 +796,7 @@ final class FoundationDownloadsUITests: XCTestCase {
             object: transition)
         XCTAssertEqual(XCTWaiter.wait(for: [expanded], timeout: 5), .completed, transition.label)
         XCTAssertEqual(identity.label, startingIdentity)
+        XCTAssertTrue(modal.buttons["More playback options"].exists)
         capture("Queue artwork expands back without replacing playback", in: app)
     }
 
@@ -792,6 +824,8 @@ final class FoundationDownloadsUITests: XCTestCase {
         XCTAssertTrue(app.cells.buttons["View Album"].exists)
         XCTAssertTrue(app.cells.buttons["View Artist"].exists)
         XCTAssertTrue(app.cells.buttons["Favorite"].exists)
+        XCTAssertFalse(app.cells.buttons["Download"].exists)
+        XCTAssertFalse(app.cells.buttons["Remove Downloads"].exists)
         XCTAssertFalse(app.cells.buttons["Move Up"].exists)
         XCTAssertFalse(app.cells.buttons["Move Down"].exists)
         XCTAssertFalse(app.cells.buttons["Remove from Up Next"].exists)
@@ -804,18 +838,17 @@ final class FoundationDownloadsUITests: XCTestCase {
         continueAfterFailure = false
         let app = launch(
             productionShell: true, canonicalDownloadState: "full", longPlayback: true,
-            queuePresentation: true)
+            queuePresentation: true, queueArtworkTransition: true)
         selectTab("Library", in: app)
         openCanonicalCollection("album", fromDownloads: false, in: app)
         tapVisible(app.buttons["collection-track-0"], in: app)
         openNowPlaying(app)
         let modal = app.descendants(matching: .any)["foundation-now-playing"]
-        modal.buttons["Next"].tap()
-        modal.buttons["Next"].tap()
+        for _ in 0..<4 { modal.buttons["Next"].tap() }
         app.buttons["Show queue"].tap()
         let before = queueSnapshot(app)
         let selected = before["selected"] as? String ?? ""
-        XCTAssertEqual((before["history"] as? [String])?.count, 2)
+        XCTAssertEqual((before["history"] as? [String])?.count, 4)
         let current = app.buttons["fixture-queue-select-" + selected]
         XCTAssertTrue(current.waitForExistence(timeout: 5))
         XCTAssertTrue(current.isHittable)

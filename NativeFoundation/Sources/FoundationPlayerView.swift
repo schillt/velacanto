@@ -139,7 +139,7 @@ struct FoundationPlayerView: View {
                     }
                     VStack(alignment: .leading, spacing: geometry.size.height < 700 ? 8 : 14) {
                         VStack(spacing: 0) {
-                            trackDetails
+                            if !showingQueue { trackDetails }
                             timeline
                         }
                         transport
@@ -612,6 +612,7 @@ private struct FoundationQueueView: View {
 
     @State private var hasAnchoredOnOpen = false
     @State private var currentHeaderHeight: CGFloat = 0
+    @State private var historyIsVisible = false
 
     private enum ScrollTarget: Hashable {
         case current
@@ -627,6 +628,8 @@ private struct FoundationQueueView: View {
                     upcoming: upcoming,
                     dynamicTypeSize: dynamicTypeSize,
                     shuffleEnabled: player.shuffleEnabled, repeatMode: player.repeatMode,
+                    historyIsVisible: historyIsVisible,
+                    historyVisibilityChanged: { historyIsVisible = $0 },
                     play: { id, position in
                         guard isPresented else { return }
                         player.moveQueuedEntry(id, position: position)
@@ -669,7 +672,7 @@ private struct FoundationQueueView: View {
                             .foregroundStyle(.white).tint(.white)
                     }
                 )
-                .padding(.top, FoundationPlayerArtworkPresentationModel.dismissalHeaderHeight)
+                .padding(.top, 40)
                 .modifier(FoundationQueueFixtureIdentifier(kind: "list", entryID: nil))
                 .clipped()
             #else
@@ -685,8 +688,46 @@ private struct FoundationQueueView: View {
                                 }
                                 Section {
                                     VStack(alignment: .leading, spacing: 8) {
-                                        ForEach(upcoming) { row($0, canReorder: true) }
-                                            .reorderable()
+                                        ForEach(upcoming) { entry in
+                                            row(entry, canReorder: true)
+                                                .swipeActions(
+                                                    edge: .leading, allowsFullSwipe: true,
+                                                    content: {
+                                                        Button(
+                                                            "Play Next",
+                                                            systemImage:
+                                                                "text.line.first.and.arrowtriangle.forward"
+                                                        ) {
+                                                            queueEntry(entry, position: .next)
+                                                        }.tint(.indigo).labelStyle(.iconOnly)
+                                                        Button(
+                                                            "Play Last",
+                                                            systemImage:
+                                                                "text.line.last.and.arrowtriangle.forward"
+                                                        ) {
+                                                            queueEntry(entry, position: .last)
+                                                        }.tint(.blue).labelStyle(.iconOnly)
+                                                    }, onPresentationChanged: { _ in }
+                                                )
+                                                .swipeActions(
+                                                    edge: .trailing, allowsFullSwipe: true,
+                                                    content: {
+                                                        Button(
+                                                            "Remove from Up Next",
+                                                            systemImage: "minus", role: .destructive
+                                                        ) {
+                                                            guard isPresented else { return }
+                                                            player.removeUpcoming(entry.id)
+                                                        }
+                                                        .font(
+                                                            .system(
+                                                                .body, design: .rounded,
+                                                                weight: .bold)
+                                                        )
+                                                        .labelStyle(.iconOnly)
+                                                    }, onPresentationChanged: { _ in })
+                                        }
+                                        .reorderable()
                                     }
                                     .frame(
                                         minHeight: max(
@@ -698,6 +739,11 @@ private struct FoundationQueueView: View {
                                             $0.size.height
                                         } action: {
                                             currentHeaderHeight = $0
+                                        }
+                                        .onGeometryChange(for: Bool.self) {
+                                            $0.frame(in: .named("queue-scroll")).minY > 2
+                                        } action: {
+                                            historyIsVisible = $0
                                         }
                                         .id(ScrollTarget.current)
                                 }
@@ -715,6 +761,8 @@ private struct FoundationQueueView: View {
                             .padding(.bottom, 12)
                         }
                         .scrollContentBackground(.hidden)
+                        .swipeActionsContainer()
+                        .coordinateSpace(name: "queue-scroll")
                         .onGeometryChange(for: CGSize.self) {
                             $0.size
                         } action: { size in
@@ -778,7 +826,7 @@ private struct FoundationQueueView: View {
             #if os(iOS)
                 Color.clear
             #else
-                Rectangle().fill(.background)
+                Color(nsColor: .windowBackgroundColor)
             #endif
         }
     }
@@ -796,7 +844,9 @@ private struct FoundationQueueView: View {
                             cornerRadius: 6)
                     #endif
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("Now Playing").font(.caption).foregroundStyle(.secondary)
+                    if historyIsVisible {
+                        Text("Now Playing").font(.caption).foregroundStyle(.secondary)
+                    }
                     Text(entry.item.title).font(.headline).lineLimit(2)
                     Text(entry.item.subtitle).font(.caption).foregroundStyle(.secondary)
                         .lineLimit(1)
@@ -821,30 +871,41 @@ private struct FoundationQueueView: View {
     }
 
     private var modeControls: some View {
-        HStack(spacing: 0) {
-            Button {
-                player.setShuffle(!player.shuffleEnabled)
-            } label: {
-                Image(systemName: "shuffle").frame(width: 44, height: 44)
-            }
-            .opacity(player.shuffleEnabled ? 1 : 0.5)
-            .accessibilityLabel("Shuffle")
-            .accessibilityValue(player.shuffleEnabled ? "On" : "Off")
-            .accessibilityAddTraits(player.shuffleEnabled ? .isSelected : [])
-            Menu {
-                ForEach(FoundationPlayer.RepeatMode.allCases, id: \.self) { mode in
-                    Button(mode.rawValue.capitalized) { player.setRepeat(mode) }
+        GlassEffectContainer(spacing: 8) {
+            HStack(spacing: 8) {
+                Button {
+                    player.setShuffle(!player.shuffleEnabled)
+                } label: {
+                    modeIcon("shuffle", active: player.shuffleEnabled)
                 }
-            } label: {
-                Image(systemName: player.repeatMode == .one ? "repeat.1" : "repeat")
-                    .frame(width: 44, height: 44)
+                .accessibilityLabel("Shuffle")
+                .accessibilityValue(player.shuffleEnabled ? "On" : "Off")
+                .accessibilityAddTraits(player.shuffleEnabled ? .isSelected : [])
+                Menu {
+                    ForEach(FoundationPlayer.RepeatMode.allCases, id: \.self) { mode in
+                        Button(mode.rawValue.capitalized) { player.setRepeat(mode) }
+                    }
+                } label: {
+                    modeIcon(
+                        player.repeatMode == .one ? "repeat.1" : "repeat",
+                        active: player.repeatMode != .off)
+                }
+                .accessibilityLabel("Repeat")
+                .accessibilityValue(player.repeatMode.rawValue.capitalized)
+                .accessibilityAddTraits(player.repeatMode == .off ? [] : .isSelected)
             }
-            .opacity(player.repeatMode == .off ? 0.5 : 1)
-            .accessibilityLabel("Repeat")
-            .accessibilityValue(player.repeatMode.rawValue.capitalized)
+            .buttonStyle(.plain)
         }
-        .buttonStyle(.plain)
         .fixedSize()
+    }
+
+    private func modeIcon(_ symbol: String, active: Bool) -> some View {
+        Image(systemName: symbol)
+            .font(.body.weight(.semibold))
+            .foregroundStyle(active ? Color.black : Color.white.opacity(0.85))
+            .frame(width: 44, height: 44)
+            .background(active ? Color.white.opacity(0.92) : .clear, in: Circle())
+            .glassEffect(.regular.interactive(), in: .circle)
     }
 
     private func queueHeading(_ title: String) -> some View {
@@ -950,7 +1011,8 @@ private struct FoundationQueueView: View {
         }
         FoundationItemMenu(
             item: entry.item, actions: actions, initialFavorite: entry.item.isFavorite,
-            showsQueueActions: false, library: library, player: player, navigate: openItem,
+            showsQueueActions: false, showsDownloadActions: false, library: library, player: player,
+            navigate: openItem,
             canPerform: { _ in
                 isPresented && player.queue.contains(where: { $0.id == entry.id })
             })

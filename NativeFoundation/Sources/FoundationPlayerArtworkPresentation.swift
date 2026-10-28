@@ -153,6 +153,7 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
         private weak var queueContainer: UIView?
         private var queueTarget: Role?
         private var queueGeometryScheduled = false
+        private var queueRestingHero: (identity: String, frame: CGRect, bounds: CGRect)?
         private var generation: UInt = 0
         private var activeAnimator: FoundationPlayerArtworkAnimator?
         fileprivate weak var host: FoundationPlayerArtworkHost?
@@ -192,10 +193,16 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
             guard frame.width > 0, frame.height > 0, container.bounds.intersects(frame) else {
                 return
             }
+            if showing, priorIdentity == nil || queueRestingHero?.identity != image.identity {
+                queueRestingHero = (
+                    image.identity, view.convert(view.bounds, to: container), container.bounds
+                )
+            }
             let snapshot = UIImageView(image: UIImage(cgImage: image.image))
             snapshot.contentMode = .scaleAspectFill
             snapshot.clipsToBounds = true
-            snapshot.layer.cornerRadius = priorRadius ?? source.cornerRadius
+            snapshot.layer.cornerCurve = .continuous
+            snapshot.layer.cornerRadius = priorRadius ?? (showing ? 24 : source.cornerRadius)
             snapshot.isUserInteractionEnabled = false
             snapshot.isAccessibilityElement = false
             snapshot.frame = frame
@@ -264,8 +271,20 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
                 #endif
                 return
             }
-            let destination = target == .queue ? queueFrame : expandedFrame
-            let radius = target == .queue ? queueArtwork.cornerRadius : expanded.cornerRadius
+            let destination: CGRect
+            if target == .expanded {
+                guard let resting = queueRestingHero, resting.identity == image.identity,
+                    resting.bounds == container.bounds
+                else {
+                    cancelQueueTransition()
+                    return
+                }
+                destination = resting.frame
+            } else {
+                destination = queueFrame
+            }
+            let radius =
+                target == .queue ? queueArtwork.cornerRadius : max(24, expanded.cornerRadius)
             let animator = UIViewPropertyAnimator(duration: 0.35, curve: .easeInOut) {
                 snapshot.frame = destination
                 snapshot.layer.cornerRadius = radius
@@ -475,6 +494,7 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
             expanded = nil
             queueArtwork = nil
             queueDisplayed = false
+            queueRestingHero = nil
             compactSurface = nil
             surfaceToken = nil
             surfaceIdentity = nil
@@ -1379,6 +1399,8 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
         let dynamicTypeSize: DynamicTypeSize
         let shuffleEnabled: Bool
         let repeatMode: FoundationPlayer.RepeatMode
+        var historyIsVisible = false
+        var historyVisibilityChanged: (Bool) -> Void = { _ in }
         let play: (UUID, FoundationPlayer.QueuePosition) -> Void
         let remove: (UUID) -> Void
         let geometryReady: () -> Void
@@ -1410,7 +1432,7 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
                 let listSection = NSCollectionLayoutSection.list(
                     using: configuration, layoutEnvironment: environment)
                 // One native pinned header travels with Now Playing and its controls.
-                if section == 2 {
+                if section == 0 || section == 2 {
                     for header in listSection.boundarySupplementaryItems {
                         header.pinToVisibleBounds = true
                     }
@@ -1456,7 +1478,15 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
                 || shuffleEnabled != coordinator.parent.shuffleEnabled
                 || repeatMode != coordinator.parent.repeatMode
                 || current != coordinator.parent.current
+            let historyVisibilityChanged = historyIsVisible != coordinator.parent.historyIsVisible
             coordinator.parent = self
+            if historyVisibilityChanged,
+                let header = view.supplementaryView(
+                    forElementKind: UICollectionView.elementKindSectionHeader,
+                    at: IndexPath(item: 0, section: 2)) as? QueueHeader
+            {
+                header.setContent(coordinator.parent.header())
+            }
             guard needsReload else { return }
             // A playback advance, removal, or shuffle invalidates this drag's boundaries.
             coordinator.cancelMovement()
@@ -1478,6 +1508,7 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
             var sections: [[FoundationQueueEntry]]
             weak var collectionView: UICollectionView?
             private var needsOpeningAnchor = true
+            private var reportedHistoryVisibility = false
             private var movingID: UUID?
             private var dragMembership: [[UUID]]?
             private var fingerOffset = CGPoint.zero
@@ -1598,17 +1629,34 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
             /// Keep the player's own backdrop visible through the pinned header.
             /// Only visible native rows are clipped; no content extent or offset changes.
             func clipRowsBelowHeader() {
-                guard let collectionView,
-                    let heading = collectionView.supplementaryView(
-                        forElementKind: UICollectionView.elementKindSectionHeader,
-                        at: IndexPath(item: 0, section: 2))
-                else { return }
+                guard let collectionView else { return }
+                let currentHeader = collectionView.supplementaryView(
+                    forElementKind: UICollectionView.elementKindSectionHeader,
+                    at: IndexPath(item: 0, section: 2))
+                let historyVisible =
+                    !sections[0].isEmpty
+                    && (currentHeader.map {
+                        $0.frame.minY > collectionView.contentOffset.y
+                            + collectionView.adjustedContentInset.top + 2
+                    } ?? true)
+                if historyVisible != reportedHistoryVisibility {
+                    reportedHistoryVisibility = historyVisible
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self, self.reportedHistoryVisibility == historyVisible else {
+                            return
+                        }
+                        self.parent.historyVisibilityChanged(historyVisible)
+                    }
+                }
                 CATransaction.begin()
                 CATransaction.setDisableActions(true)
                 defer { CATransaction.commit() }
                 for cell in collectionView.visibleCells {
                     guard cell !== movingCell,
-                        collectionView.indexPath(for: cell)?.section == 2
+                        let section = collectionView.indexPath(for: cell)?.section,
+                        let heading = collectionView.supplementaryView(
+                            forElementKind: UICollectionView.elementKindSectionHeader,
+                            at: IndexPath(item: 0, section: section))
                     else {
                         if cell.layer.mask is QueueRowMask { cell.layer.mask = nil }
                         continue
@@ -1670,8 +1718,23 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
                     remove.image = UIImage(systemName: "minus")
                     actions = [remove]
                 }
+                for action in actions {
+                    let label = action.title ?? ""
+                    let symbol =
+                        label == "Play Next"
+                        ? "text.line.first.and.arrowtriangle.forward"
+                        : label == "Play Last"
+                            ? "text.line.last.and.arrowtriangle.forward" : "minus"
+                    action.title = nil
+                    action.accessibilityLabel = label
+                    action.image = UIImage(
+                        systemName: symbol,
+                        withConfiguration: UIImage.SymbolConfiguration(
+                            pointSize: 20, weight: symbol == "minus" ? .bold : .semibold))
+                    action.image?.accessibilityLabel = label
+                }
                 let configuration = UISwipeActionsConfiguration(actions: actions)
-                configuration.performsFirstActionWithFullSwipe = false
+                configuration.performsFirstActionWithFullSwipe = true
                 return configuration
             }
 
