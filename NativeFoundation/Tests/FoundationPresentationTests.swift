@@ -82,7 +82,14 @@ final class FoundationPresentationTests: XCTestCase {
                     styleMask: [.titled], backing: .buffered, defer: false)
                 window.isReleasedWhenClosed = false
                 let beganSheet = expectation(
-                    forNotification: NSWindow.didBeginSheetNotification, object: window)
+                    for: NSPredicate { _, _ in
+                        MainActor.assumeIsolated {
+                            guard let sheet = window.attachedSheet, let content = sheet.contentView
+                            else { return false }
+                            return sheet.isVisible && content.bounds.width > 0
+                                && content.bounds.height > 0
+                        }
+                    }, evaluatedWith: window)
                 window.contentView = NSHostingView(
                     rootView: FoundationOverviewAppearanceHost(scheme: scheme))
                 window.orderFront(nil)
@@ -91,6 +98,7 @@ final class FoundationPresentationTests: XCTestCase {
                 let sheet = try XCTUnwrap(window.attachedSheet)
                 let content = try XCTUnwrap(sheet.contentView)
                 content.layoutSubtreeIfNeeded()
+                content.displayIfNeeded()
                 let bitmap = try XCTUnwrap(
                     content.bitmapImageRepForCachingDisplay(in: content.bounds))
                 content.cacheDisplay(in: content.bounds, to: bitmap)
