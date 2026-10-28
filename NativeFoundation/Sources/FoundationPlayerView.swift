@@ -803,6 +803,15 @@ private struct FoundationQueueView: View {
                             }
                             .padding(.bottom, 12)
                         }
+                        .toolbar {
+                            ToolbarItem(placement: .principal) {
+                                currentRow
+                                    .frame(width: max(0, geometry.size.width - 32))
+                                    .padding(.vertical, 8)
+                            }
+                            .sharedBackgroundVisibility(.hidden)
+                        }
+                        .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
                         .scrollContentBackground(.hidden)
                         .swipeActionsContainer()
                         .coordinateSpace(name: "queue-scroll")
@@ -844,21 +853,9 @@ private struct FoundationQueueView: View {
 
     private var currentHeader: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if let current = player.queue.first(where: { $0.id == player.selectedEntryID }) {
-                if dynamicTypeSize.isAccessibilitySize {
-                    VStack(alignment: .leading, spacing: 4) {
-                        currentTrack(current)
-                        modeControls.frame(maxWidth: .infinity, alignment: .trailing)
-                    }
-                } else {
-                    HStack(spacing: 8) {
-                        currentTrack(current)
-                        modeControls
-                    }
-                }
-            } else {
-                modeControls.frame(maxWidth: .infinity, alignment: .trailing)
-            }
+            #if os(iOS)
+                currentRow
+            #endif
             queueHeading("Up Next")
         }
         .padding(.horizontal, 16)
@@ -866,6 +863,24 @@ private struct FoundationQueueView: View {
         .padding(.bottom, 4)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.clear)
+    }
+
+    @ViewBuilder private var currentRow: some View {
+        if let current = player.queue.first(where: { $0.id == player.selectedEntryID }) {
+            if dynamicTypeSize.isAccessibilitySize {
+                VStack(alignment: .leading, spacing: 4) {
+                    currentTrack(current)
+                    modeControls.frame(maxWidth: .infinity, alignment: .trailing)
+                }
+            } else {
+                HStack(spacing: 8) {
+                    currentTrack(current)
+                    modeControls
+                }
+            }
+        } else {
+            modeControls.frame(maxWidth: .infinity, alignment: .trailing)
+        }
     }
 
     #if os(macOS)

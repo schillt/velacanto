@@ -4214,7 +4214,7 @@ private struct FoundationMiniPlayerLabel: View {
 #endif
 
 #if os(macOS)
-    /// Omit Queue's toolbar scope entirely so its root owns the top interactive region.
+    /// Lyrics owns a text title; Queue supplies its current-track toolbar row.
     private struct FoundationMacPlaybackToolbar: ViewModifier {
         let showsLyricsTitle: Bool
         @ViewBuilder func body(content: Content) -> some View {
@@ -4227,7 +4227,7 @@ private struct FoundationMiniPlayerLabel: View {
                 }
                 .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
             } else {
-                content.ignoresSafeArea(.container, edges: .top)
+                content
             }
         }
     }
