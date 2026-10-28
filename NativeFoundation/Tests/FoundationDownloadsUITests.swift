@@ -1959,7 +1959,8 @@ final class FoundationDownloadsUITests: XCTestCase {
                     MainActor.assumeIsolated {
                         let banners = app.descendants(matching: .any).matching(
                             identifier: "browsing-offline-status")
-                        return !title.exists
+                        // The safe-area header stays mounted while its visible surface fades.
+                        return !title.isHittable
                             && banners.allElementsBoundByIndex.allSatisfy { !$0.isHittable }
                     }
                 }, object: nil)
