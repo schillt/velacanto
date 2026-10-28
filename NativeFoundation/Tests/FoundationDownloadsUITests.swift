@@ -12,7 +12,7 @@ final class FoundationDownloadsUITests: XCTestCase {
         tapVisible(app.buttons["Play"], in: app)
         openNowPlaying(app)
         tapVisible(app.buttons["More playback options"], in: app)
-        tapVisible(app.buttons["Song Credits"], in: app)
+        tapNativeChrome(app.buttons["Song Credits"], in: app)
         let navigation = app.navigationBars["Song Credits"]
         XCTAssertTrue(navigation.waitForExistence(timeout: 5))
         XCTAssertFalse(navigation.buttons["Done"].exists)
@@ -2620,6 +2620,15 @@ final class FoundationDownloadsUITests: XCTestCase {
         tapVisibleCenter(app.buttons["Favorites"], in: app)
         let catalog = app.descendants(matching: .any)["favorites-catalog"].firstMatch
         XCTAssertTrue(catalog.waitForExistence(timeout: 5))
+        // Fail a blank initial destination promptly instead of cycling through scroll discovery.
+        let initialShelf = catalog.descendants(matching: .button).matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "favorites-see-all-")
+        ).firstMatch
+        guard initialShelf.waitForExistence(timeout: 10) else {
+            capture("Favorites missing initial loading shell", in: app)
+            XCTFail("Favorites must mount its initial shelf owners")
+            return
+        }
         let songs = catalog.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Songs"))
             .firstMatch
         tapVisibleCenter(songs, in: app)

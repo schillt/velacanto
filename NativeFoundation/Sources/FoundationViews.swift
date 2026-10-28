@@ -1525,7 +1525,8 @@ private struct FoundationFavoriteShelf: View {
 
     private var showsShelf: Bool {
         !displayedItems.isEmpty
-            || (!connectivity.localOnly && (model.isLoading || model.errorMessage != nil))
+            || (!connectivity.localOnly
+                && (!model.loaded || model.isLoading || model.errorMessage != nil))
     }
 
     private var favoritesActivation: Bool {
@@ -1598,7 +1599,8 @@ private struct FoundationFavoriteShelf: View {
                         }
                     }.scrollIndicators(.hidden)
                         .foundationMacContainedShelf()
-                } else if model.isLoading {
+                } else if model.isLoading || !model.loaded {
+                    // An unloaded lazy shelf needs a visible loading shell to start its owner.
                     FoundationLoadingPlaceholder(layout: kind == .track ? .rows : .albumGrid)
                         .padding(.horizontal, 16)
                 }
