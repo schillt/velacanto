@@ -708,6 +708,7 @@ private struct FoundationSearchCategory: View {
 
 private struct FoundationPlaylistLookupView: View {
     @EnvironmentObject private var connectivity: FoundationConnectivity
+    @EnvironmentObject private var downloads: FoundationDownloads
     let title: String
     let context: FoundationMusicSearchContext
     let library: any FoundationLibrary
@@ -718,6 +719,11 @@ private struct FoundationPlaylistLookupView: View {
     @State private var handledRequest = 0
     @State private var visible = false
     @State private var openedItem: FoundationItem?
+
+    private var displayedItems: [FoundationItem] {
+        connectivity.localOnly
+            ? downloads.itemsWithDownloadedMusic(in: model.items) : model.items
+    }
 
     init(
         title: String, context: FoundationMusicSearchContext, seed: FoundationPlaylistContentPage,
@@ -735,17 +741,21 @@ private struct FoundationPlaylistLookupView: View {
     var body: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 16) {
-                ForEach(model.items) { item in
+                ForEach(displayedItems) { item in
                     FoundationLibraryItemRow(
                         item: item, library: library,
                         isActive: isActive && visible, open: { openedItem = item },
                         player: player, showsTrackArtwork: true, navigate: { openedItem = $0 })
                 }
-                if model.loading { FoundationLoadingPlaceholder() }
-                if let error = model.error {
+                if model.loading, !connectivity.localOnly { FoundationLoadingPlaceholder() }
+                if let error = model.error, !connectivity.localOnly {
                     Text(error.localizedDescription).foregroundStyle(.secondary)
                 }
-                if model.cursor != nil {
+                if connectivity.localOnly {
+                    if displayedItems.isEmpty {
+                        Text("No downloaded music in these playlists.").foregroundStyle(.secondary)
+                    }
+                } else if model.cursor != nil {
                     Text("More playlists or tracks remain to be checked.")
                         .font(.caption).foregroundStyle(.secondary)
                     Button(model.error == nil ? "Check more playlists" : "Retry playlist check") {
