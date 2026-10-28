@@ -61,7 +61,7 @@ private struct FoundationPrimaryGenreSongs: View {
             title: genre.title, model: songs, library: library, player: player,
             isActive: isActive, showsTrackArtwork: true,
             coverageMessage:
-                "Refresh primary genres if songs have changed on your server.",
+                "Rebuild Genres in Library Settings if songs have changed on your server.",
             localItems: { readySongs }
         ) { offset in
             try await record.songPage(genreID: genre.id, startIndex: offset, library: library)

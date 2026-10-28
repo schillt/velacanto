@@ -154,6 +154,10 @@ struct FoundationLibraryIndexView: View {
             selectedLetter = nil
             awaitingLetterAnchor = false
         }
+        .foundationLibraryRefresh(
+            revision: actions.libraryRefreshRevision,
+            active: isActive && isVisible && (!connectivity.localOnly || downloadedOnly)
+        ) { requestVisibleRefresh() }
         .onChange(of: refreshToken) { _, _ in
             selectedLetter = nil
             awaitingLetterAnchor = false
@@ -312,11 +316,7 @@ struct FoundationLibraryIndexView: View {
             #endif
             .accessibilityIdentifier("library-index-\(kind)")
             .refreshable {
-                guard isActive, isVisible, !usesLocalCatalog else { return }
-                selectedLetter = nil
-                awaitingLetterAnchor = false
-                displayed.request(.refresh)
-                revision += 1
+                requestVisibleRefresh()
             }
             .onChange(of: anchorRevision) { _, _ in
                 if let anchorRowID { proxy.scrollTo(anchorRowID, anchor: .top) }
@@ -426,9 +426,7 @@ struct FoundationLibraryIndexView: View {
         #endif
         .accessibilityIdentifier("library-index-\(kind)")
         .refreshable {
-            guard isActive, isVisible, !usesLocalCatalog else { return }
-            displayed.request(.refresh)
-            revision += 1
+            requestVisibleRefresh()
         }
     }
 
@@ -470,6 +468,15 @@ struct FoundationLibraryIndexView: View {
         case .genre:
             return primaryGenres.page(startIndex: offset, localOnly: usesLocalCatalog)
         }
+    }
+
+    private func requestVisibleRefresh() {
+        guard isActive, isVisible else { return }
+        selectedLetter = nil
+        awaitingLetterAnchor = false
+        if !usesLocalCatalog { displayed.request(.refresh) }
+        // Local indexes reinstall only their downloaded snapshot through the existing task.
+        revision += 1
     }
 
     private func offlineSortKey(_ item: FoundationItem) -> String {
@@ -539,11 +546,7 @@ struct FoundationLibraryIndexView: View {
                     anchorRevision: anchorRevision,
                     onDemandNextPage: { demandRevision += 1 },
                     onRefresh: {
-                        guard isActive, isVisible, !usesLocalCatalog else { return }
-                        selectedLetter = nil
-                        awaitingLetterAnchor = false
-                        displayed.request(.refresh)
-                        revision += 1
+                        requestVisibleRefresh()
                     }
                 ) { entry in
                     Group {

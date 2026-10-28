@@ -42,6 +42,15 @@ struct FoundationNewView<Profile: View>: View {
             trackRevision += 1
             albumRevision += 1
         }
+        .foundationLibraryRefresh(
+            revision: actions.libraryRefreshRevision,
+            active: isActive && isVisible && !connectivity.localOnly
+        ) {
+            tracks.request(.refresh)
+            albums.request(.refresh)
+            trackRevision += 1
+            albumRevision += 1
+        }
         .onChange(of: connectivity.successfulRetryRevision) { _, _ in
             guard isActive else { return }
             tracks.request(.refresh)
@@ -202,8 +211,11 @@ struct FoundationNewView<Profile: View>: View {
         } else if !connectivity.localOnly,
             primaryGenres.completedRecord(libraryScope: library.primaryGenreIndexScope) == nil
         {
-            Text("Build primary genres in Library to browse new music by genre.")
-                .font(.subheadline).foregroundStyle(.secondary)
+            Text(
+                primaryGenres.isBuilding
+                    ? "Preparing genres…" : "Genres are prepared automatically for your library."
+            )
+            .font(.subheadline).foregroundStyle(.secondary)
         }
         if !connectivity.localOnly,
             let record = primaryGenres.completedRecord(
@@ -214,7 +226,7 @@ struct FoundationNewView<Profile: View>: View {
                     && record.snapshot.primaryBySongID[$0.id] == nil
             })
         {
-            Text("Some recent songs are not in this index. Refresh primary genres in Library.")
+            Text("Rebuild Genres in Library Settings to include the latest song tags.")
                 .font(.subheadline).foregroundStyle(.secondary)
         }
     }
@@ -279,6 +291,8 @@ struct FoundationLibraryMostPlayedAlbums: View {
     let library: any FoundationLibrary
     @ObservedObject var player: FoundationPlayer
     let isActive: Bool
+    var refreshRevision = 0
+    @State private var consumedRefreshRevision = 0
     @State private var isVisible = false
     @State private var revision = 0
     @State private var openedItem: FoundationItem?
@@ -336,8 +350,15 @@ struct FoundationLibraryMostPlayedAlbums: View {
         .foundationCollectionDestination(
             item: $openedItem, library: library, player: player, isActive: isActive
         )
-        .task(id: isActive && isVisible && !connectivity.localOnly ? revision : nil) {
+        .task(
+            id: isActive && isVisible && !connectivity.localOnly
+                ? "\(revision)-\(refreshRevision)" : nil
+        ) {
             guard isActive, isVisible, !Task.isCancelled else { return }
+            if refreshRevision != consumedRefreshRevision {
+                consumedRefreshRevision = refreshRevision
+                model.request(.refresh)
+            }
             #if DEBUG
                 await FoundationTrace.withPage(origin: .library, page: .shelf) {
                     await model.loadPending(

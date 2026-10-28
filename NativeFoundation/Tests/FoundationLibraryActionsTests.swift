@@ -7,6 +7,27 @@ final class FoundationLibraryActionsTests: XCTestCase {
     private let album = FoundationItem(
         id: "synthetic", title: "Synthetic", subtitle: "", kind: .album, duration: nil)
 
+    func testLibraryRefreshIsClientIntentAndRetiredAccountCannotEmitIt() async {
+        let mutations = RefreshMutationCounter()
+        let actions = FoundationLibraryActions(
+            sourceScope: "refresh-fixture", read: { _ in nil }, write: { _, _ in },
+            mutateFavorite: { _, _ in await mutations.record() })
+        actions.requestLibraryRefresh()
+        XCTAssertEqual(actions.libraryRefreshRevision, 1)
+        let beforeRetirement = await mutations.count
+        XCTAssertEqual(beforeRetirement, 0)
+        actions.invalidate()
+        actions.requestLibraryRefresh()
+        XCTAssertEqual(actions.libraryRefreshRevision, 1)
+        let afterRetirement = await mutations.count
+        XCTAssertEqual(afterRetirement, 0, "Client refresh cannot invoke a server mutation")
+    }
+
+    private actor RefreshMutationCounter {
+        private(set) var count = 0
+        func record() { count += 1 }
+    }
+
     func testPlaybackCommitGateRunsImmediatelyBeforeReplacingQueue() async throws {
         for shouldAllow in [false, true] {
             let gate = CollectionGate()

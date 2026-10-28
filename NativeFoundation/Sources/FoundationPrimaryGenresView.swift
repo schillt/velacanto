@@ -88,12 +88,26 @@ struct FoundationPrimaryGenresView: View {
                 .foundationBottomChromeScrollClearance()
             }
         }
+        #if os(iOS)
+            .refreshable { await refreshSavedGenres() }
+        #endif
+        .foundationLibraryRefresh(
+            revision: actions.libraryRefreshRevision,
+            active: isActive && visible && !connectivity.localOnly
+        ) { await refreshSavedGenres() }
         .onAppear { visible = true }
         .onDisappear { visible = false }
         .onChange(of: query) { _, _ in visibleCount = 50 }
         .onChange(of: genres.publicationRevision) { _, _ in visibleCount = 50 }
         .foundationCollectionDestination(
             item: $openedGenre, library: library, player: player, isActive: isActive)
+    }
+
+    private func refreshSavedGenres() async {
+        guard isActive, visible else { return }
+        visibleCount = 50
+        // Pull refresh reads the existing index. Rebuild Genres is the explicit full metadata action.
+        await genres.restoreBoundCache()
     }
 
     @ViewBuilder private var status: some View {
@@ -108,22 +122,22 @@ struct FoundationPrimaryGenresView: View {
                     .accessibilityIdentifier("primary-genres-cancel")
             }
         } else if genres.isSupported {
-            Button(genres.record == nil ? "Build primary genres" : "Refresh primary genres") {
+            Button("Rebuild Genres") {
                 genres.start()
             }.disabled(connectivity.localOnly)
                 .accessibilityIdentifier("primary-genres-build")
         }
         if let record = genres.record {
             Text(
-                "Indexed \(record.snapshot.completedAt.formatted(date: .abbreviated, time: .shortened)). Refresh after changing song tags on your server."
+                "Indexed \(record.snapshot.completedAt.formatted(date: .abbreviated, time: .shortened)). Rebuild Genres in Library Settings after changing song tags on your server."
             )
             .font(.caption).foregroundStyle(.secondary)
             if items.isEmpty { Text("No primary genres found.").foregroundStyle(.secondary) }
         } else {
             Text(
                 connectivity.localOnly
-                    ? "Connect and build primary genres to browse your downloaded songs by genre."
-                    : "Build an index to choose up to two common tags for each song. Only song metadata is read."
+                    ? "Genres will be prepared when you are online."
+                    : "Genres are prepared automatically. You can rebuild them in Library Settings."
             )
             .foregroundStyle(.secondary)
         }

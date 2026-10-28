@@ -21,6 +21,8 @@ struct FoundationSettingsView: View {
     var librarySelection: FoundationMusicLibrarySelection? = nil
     var signInAgain: (() -> Void)? = nil
     var pinSync: FoundationPinSync? = nil
+    var primaryGenres: FoundationPrimaryGenresModel? = nil
+    var refreshLibrary: (() -> Void)? = nil
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var preferences: FoundationPlaybackPreferences
     @EnvironmentObject private var connectivity: FoundationConnectivity
@@ -202,6 +204,13 @@ struct FoundationSettingsView: View {
 
     private var librarySection: some View {
         Section("Library") {
+            NavigationLink {
+                FoundationLibrarySettingsView(
+                    primaryGenres: primaryGenres, refreshLibrary: refreshLibrary)
+            } label: {
+                Label("Library Settings", systemImage: "books.vertical")
+            }
+            .accessibilityIdentifier("settings-library-options")
             if let librarySelection {
                 FoundationMusicLibrarySettingsRow(selection: librarySelection)
                     .disabled(connectivity.localOnly)
@@ -235,6 +244,75 @@ struct FoundationSettingsView: View {
 }
 
 /// The account owns committed scope; this destination owns only an uncommitted draft.
+private struct FoundationLibrarySettingsView: View {
+    let primaryGenres: FoundationPrimaryGenresModel?
+    let refreshLibrary: (() -> Void)?
+    @EnvironmentObject private var connectivity: FoundationConnectivity
+    @State private var requestedRefresh = false
+
+    var body: some View {
+        Form {
+            Section {
+                Button("Refresh Library", systemImage: "arrow.clockwise") {
+                    refreshLibrary?()
+                    requestedRefresh = true
+                }
+                .disabled(connectivity.localOnly || refreshLibrary == nil)
+                .accessibilityIdentifier("settings-refresh-library")
+                if requestedRefresh {
+                    Text("Your library will refresh as you browse.").foregroundStyle(.secondary)
+                }
+            }
+            if let primaryGenres {
+                FoundationGenreSettingsSection(genres: primaryGenres)
+            } else {
+                Section("Genres") {
+                    Text("Genre preparation is unavailable for this music source.")
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .navigationTitle("Library Settings")
+        .foundationOfflineBrowsingBanner()
+    }
+}
+
+private struct FoundationGenreSettingsSection: View {
+    @ObservedObject var genres: FoundationPrimaryGenresModel
+    @EnvironmentObject private var connectivity: FoundationConnectivity
+
+    var body: some View {
+        Section("Genres") {
+            Button("Rebuild Genres", systemImage: "arrow.clockwise") { genres.start() }
+                .disabled(connectivity.localOnly || !genres.isSupported || genres.isBuilding)
+                .accessibilityIdentifier("settings-rebuild-genres")
+            if genres.isBuilding {
+                ProgressView(
+                    "Preparing genres…", value: Double(genres.processedSongs),
+                    total: Double(max(1, genres.totalSongs ?? 1)))
+                Text("\(genres.processedSongs) songs checked").font(.caption).foregroundStyle(
+                    .secondary)
+                Button("Cancel") { genres.cancel() }
+                    .accessibilityIdentifier("settings-cancel-genres")
+            } else if let record = genres.record {
+                LabeledContent(
+                    "Last Updated",
+                    value:
+                        record.snapshot.completedAt.formatted(date: .abbreviated, time: .shortened))
+            } else {
+                Text(
+                    connectivity.localOnly
+                        ? "Genres will be prepared when you are online."
+                        : "Genres are prepared automatically for your library."
+                )
+                .foregroundStyle(.secondary)
+            }
+            if let error = genres.errorMessage { Text(error).foregroundStyle(.secondary) }
+        }
+    }
+}
+
 private struct FoundationMusicLibrarySettingsRow: View {
     @ObservedObject var selection: FoundationMusicLibrarySelection
 
@@ -764,7 +842,9 @@ private struct FoundationLicensesView: View {
                         },
                         library: library, librarySelection: model.librarySelection,
                         signInAgain: { model.settingsShowsSignIn = true },
-                        pinSync: model.actions?.pinSync
+                        pinSync: model.actions?.pinSync,
+                        primaryGenres: model.primaryGenres,
+                        refreshLibrary: { model.actions?.requestLibraryRefresh() }
                     )
                     .environmentObject(model.playbackPreferences)
                     .environmentObject(downloads)

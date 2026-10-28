@@ -419,13 +419,14 @@ final class FoundationDownloadsUITests: XCTestCase {
         primaryGenreScopedQuery: Bool = false,
         sharedChromeEvidence: Bool = false, remoteListening: Bool = false,
         queueArtworkTransition: Bool = false, lyricsPresentation: Bool = false,
-        missingLyrics: Bool = false
+        missingLyrics: Bool = false, remoteFavoriteRefresh: Bool = false
     )
         -> XCUIApplication
     {
         let app = XCUIApplication(bundleIdentifier: "com.chameleonenterprise.velacanto.uitesting")
         app.launchArguments = ["-foundationDownloadsUITesting", "-foundationTesting"]
         if lyricsPresentation { app.launchArguments.append("-fixtureLyricsPresentation") }
+        if remoteFavoriteRefresh { app.launchArguments.append("-fixtureRemoteFavoriteRefresh") }
         if missingLyrics { app.launchArguments.append("-fixtureMissingLyrics") }
         if sharedChromeEvidence { app.launchArguments.append("-fixtureSharedChromeEvidence") }
         if remoteListening { app.launchArguments.append("-fixtureRemoteListening") }
@@ -2574,6 +2575,37 @@ final class FoundationDownloadsUITests: XCTestCase {
                 .waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["Play"].exists)
         XCTAssertTrue(app.buttons["Unfavorite"].exists)
+    }
+
+    func testPullRefreshShowsRemoteFavoriteWithoutLeavingFullSongsView() {
+        continueAfterFailure = false
+        let app = launch(
+            productionShell: true, canonicalDownloadState: "full", longPlayback: true,
+            compactFixtureControls: true, favoritesCatalog: true, remoteFavoriteRefresh: true)
+        selectTab("Library", in: app)
+        tapVisibleCenter(app.buttons["Favorites"], in: app)
+        let catalog = app.descendants(matching: .any)["favorites-catalog"].firstMatch
+        XCTAssertTrue(catalog.waitForExistence(timeout: 5))
+        let songs = catalog.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Songs"))
+            .firstMatch
+        tapVisibleCenter(songs, in: app)
+        XCTAssertTrue(app.navigationBars["Favorite Songs"].waitForExistence(timeout: 5))
+        let changed = app.buttons["fixture-change-remote-favorite"]
+        tapNativeChrome(changed, in: app)
+        let acknowledged = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "value == %@", "changed"), object: changed)
+        XCTAssertEqual(XCTWaiter.wait(for: [acknowledged], timeout: 5), .completed)
+        let remoteSong = app.buttons.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "Fixture Remote Favorite")
+        ).firstMatch
+        XCTAssertFalse(
+            remoteSong.exists, "The fixture changes only server data, not local favorite state")
+        scrollContent(in: app, upward: false)
+        XCTAssertTrue(remoteSong.waitForExistence(timeout: 10))
+        XCTAssertTrue(app.navigationBars["Favorite Songs"].exists)
+        capture(
+            "Native pull refresh discovers remote favorite in the current Songs destination",
+            in: app)
     }
 
     func testFavoritesUsesLibraryCardsAndRowsAndKeepsSongPlaybackIdentity() {

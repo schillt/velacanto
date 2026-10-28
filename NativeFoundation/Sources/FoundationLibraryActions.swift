@@ -89,6 +89,14 @@ final class FoundationLibraryActions: ObservableObject {
         }
     }
 
+    /// Client browsing intent only. Existing visible model owners decide what to reload.
+    @Published private(set) var libraryRefreshRevision = 0
+
+    func requestLibraryRefresh() {
+        guard active else { return }
+        libraryRefreshRevision &+= 1
+    }
+
     @Published private(set) var pins: [FoundationItem] = []
     @Published private(set) var favoriteRevision: UInt = 0
     @Published private var favorites: [Key: Bool] = [:]

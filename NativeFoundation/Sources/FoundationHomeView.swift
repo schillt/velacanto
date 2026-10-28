@@ -93,6 +93,15 @@ struct FoundationHomeView<Profile: View>: View {
                 recentAlbums.request(.refresh)
                 refreshRevision += 1
             }
+            .foundationLibraryRefresh(
+                revision: actions.libraryRefreshRevision,
+                active: isActive && isVisible && !connectivity.localOnly
+            ) {
+                recentTracks.request(.refresh)
+                favorites.request(.refresh)
+                recentAlbums.request(.refresh)
+                refreshRevision += 1
+            }
             .onChange(of: connectivity.successfulRetryRevision) { _, _ in
                 guard isActive else { return }
                 recentTracks.request(.refresh)
@@ -283,8 +292,12 @@ struct FoundationHomeView<Profile: View>: View {
         } else if !connectivity.localOnly {
             VStack(alignment: .leading, spacing: 12) {
                 Text("Primary Genres").font(.title2.bold())
-                Text("Build primary genres to browse music by its common song tags.")
-                    .foregroundStyle(.secondary)
+                if primaryGenres.isBuilding {
+                    ProgressView("Preparing genres…")
+                } else {
+                    Text("Genres are prepared automatically for your library.")
+                        .foregroundStyle(.secondary)
+                }
                 Button {
                     showingGenreIndex = true
                 } label: {

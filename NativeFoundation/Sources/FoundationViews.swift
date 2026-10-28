@@ -177,6 +177,8 @@ struct FoundationLibraryView: View {
     @Environment(\.foundationHandoff) private var handoff
     @State private var openedItem: FoundationItem?
     @State private var offlineSurface: Color?
+    @State private var libraryOverviewVisible = false
+    @State private var libraryOverviewRefreshRevision = 0
 
     init(
         library: any FoundationLibrary, accountLibrary: (any FoundationLibrary)? = nil,
@@ -300,7 +302,8 @@ struct FoundationLibraryView: View {
         .foundationSettingsPresentation(isPresented: $showingSettings) {
             FoundationSettingsView(
                 name: profileName, image: profileImage, signOut: signOut, library: accountLibrary,
-                librarySelection: librarySelection, pinSync: actions.pinSync)
+                librarySelection: librarySelection, pinSync: actions.pinSync,
+                primaryGenres: primaryGenres, refreshLibrary: actions.requestLibraryRefresh)
         }
         .sheet(
             isPresented: Binding(
@@ -1075,11 +1078,21 @@ struct FoundationLibraryView: View {
                 }
                 FoundationLibraryMostPlayedAlbums(
                     model: mostPlayedAlbums, library: library, player: player,
-                    isActive: catalogIsActive(.library))
+                    isActive: catalogIsActive(.library),
+                    refreshRevision: libraryOverviewRefreshRevision)
             }.padding(.horizontal, 16).padding(.bottom, 20)
                 .foundationBottomChromeEndPadding()
         }
         .foundationBottomChromeScrollClearance()
+        .onAppear { libraryOverviewVisible = true }
+        .onDisappear { libraryOverviewVisible = false }
+        #if os(iOS)
+            .refreshable { refreshLibraryOverview() }
+        #endif
+        .foundationLibraryRefresh(
+            revision: actions.libraryRefreshRevision,
+            active: catalogIsActive(.library) && libraryOverviewVisible && !connectivity.localOnly
+        ) { refreshLibraryOverview() }
         .buttonStyle(.plain)
         .foundationHeader("Library", profile: profileButton(isActive: catalogIsActive(.library)))
         #if os(iOS)
@@ -1099,6 +1112,14 @@ struct FoundationLibraryView: View {
         .foundationCollectionDestination(
             item: $openedItem, library: library, player: player, isActive: catalogIsActive(.library)
         )
+    }
+
+    private func refreshLibraryOverview() {
+        guard catalogIsActive(.library), libraryOverviewVisible, !connectivity.localOnly else {
+            return
+        }
+        mostPlayedAlbums.request(.refresh)
+        libraryOverviewRefreshRevision += 1
     }
 
     private func pinnedDestination(_ item: FoundationItem) -> FoundationItem? {
@@ -1418,6 +1439,10 @@ struct FoundationLibraryView: View {
 /// Each favorite type owns its cursor so a large album collection cannot hide favorite songs.
 struct FoundationFavoritesView: View {
     @EnvironmentObject private var actions: FoundationLibraryActions
+    @EnvironmentObject private var connectivity: FoundationConnectivity
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var isVisible = false
+    @State private var refreshRevision = 0
     @Environment(\.foundationReduceMotion) private var reduceMotion
     @State private var collectionOperationOwner = UUID()
     let library: any FoundationLibrary
@@ -1430,12 +1455,21 @@ struct FoundationFavoritesView: View {
                 ForEach([FoundationItem.Kind.playlist, .album, .track, .artist], id: \.self) {
                     kind in
                     FoundationFavoriteShelf(
-                        kind: kind, library: library, player: player, isActive: isActive)
+                        kind: kind, library: library, player: player, isActive: isActive,
+                        refreshRevision: refreshRevision)
                 }
             }.padding(.vertical, 12)
                 .foundationBottomChromeEndPadding()
         }
         .foundationBottomChromeScrollClearance()
+        .onAppear { isVisible = true }
+        #if os(iOS)
+            .refreshable { requestRefresh() }
+        #endif
+        .foundationLibraryRefresh(
+            revision: actions.libraryRefreshRevision,
+            active: isActive && isVisible && scenePhase == .active && !connectivity.localOnly
+        ) { requestRefresh() }
         .foundationCatalogHeader("Favorites")
         .accessibilityIdentifier("favorites-catalog")
         .animation(
@@ -1443,7 +1477,15 @@ struct FoundationFavoritesView: View {
         )
         .environment(\.foundationCollectionOperationOwner, collectionOperationOwner)
         .foundationCollectionOutcomePresentation(owner: collectionOperationOwner)
-        .onDisappear { actions.cancelQueueAdditionOwned(by: collectionOperationOwner) }
+        .onDisappear {
+            isVisible = false
+            actions.cancelQueueAdditionOwned(by: collectionOperationOwner)
+        }
+    }
+
+    private func requestRefresh() {
+        guard isActive, isVisible, !connectivity.localOnly else { return }
+        refreshRevision += 1
     }
 }
 
@@ -1455,6 +1497,8 @@ private struct FoundationFavoriteShelf: View {
     let library: any FoundationLibrary
     let player: FoundationPlayer
     let isActive: Bool
+    var refreshRevision = 0
+    @State private var consumedRefreshRevision = 0
     @StateObject private var model = FoundationBrowseModel()
     @EnvironmentObject private var actions: FoundationLibraryActions
     @EnvironmentObject private var connectivity: FoundationConnectivity
@@ -1606,7 +1650,7 @@ private struct FoundationFavoriteShelf: View {
         }
         .task(
             id:
-                "\(isActive && isVisible && scenePhase == .active)-\(connectivity.localOnly)-\(revision)"
+                "\(isActive && isVisible && scenePhase == .active)-\(connectivity.localOnly)-\(revision)-\(refreshRevision)"
         ) {
             guard isActive, isVisible, scenePhase == .active, !connectivity.localOnly else {
                 return
@@ -1614,6 +1658,10 @@ private struct FoundationFavoriteShelf: View {
             if favoritesActivation, refreshOnActivation {
                 refreshOnActivation = false
                 if model.loaded { model.request(.refresh) }
+            }
+            if consumedRefreshRevision != refreshRevision {
+                consumedRefreshRevision = refreshRevision
+                model.request(.refresh)
             }
             model.configureFavoriteObservations(actions, knownFavorites: true)
             await model.loadPending { try await library.favorites(kind: kind, startIndex: $0) }
@@ -1757,6 +1805,16 @@ struct FoundationCatalogView: View {
                 .listStyle(.plain)
             }
         }
+        #if os(iOS)
+            .refreshable { requestVisibleRefresh() }
+        #endif
+        .foundationLibraryRefresh(
+            revision: actions.libraryRefreshRevision,
+            active: isActive && isVisible && scenePhase == .active && !connectivity.localOnly
+        ) { requestVisibleRefresh() }
+        .onChange(of: connectivity.localOnly) { _, offline in
+            if offline { model.request(.initial) }
+        }
         .animation(
             isFavorites && !reduceMotion ? .easeInOut(duration: 0.22) : nil,
             value: isFavorites ? displayedItems.map(\.id) : []
@@ -1886,6 +1944,13 @@ struct FoundationCatalogView: View {
                 }.foundationEllipsisMenuIndicator().accessibilityLabel("More actions")
             }
         }
+    }
+
+    private func requestVisibleRefresh() {
+        guard isActive, isVisible, scenePhase == .active, !connectivity.localOnly else { return }
+        model.configureFavoriteObservations(actions, knownFavorites: isFavorites)
+        model.request(.refresh)
+        revision += 1
     }
 
     private var displayedItems: [FoundationItem] {
@@ -2399,6 +2464,13 @@ struct FoundationTrackList: View {
 
     var body: some View {
         trackSurface
+            #if os(iOS)
+                .refreshable { requestVisibleRefresh() }
+            #endif
+            .foundationLibraryRefresh(
+                revision: actions.libraryRefreshRevision,
+                active: isActive && isVisible && !connectivity.localOnly
+            ) { requestVisibleRefresh() }
             .foundationDetailPresentation(
                 title: title, immersive: collection != nil, tint: detailTint,
                 scrollTitle: collection?.kind == .album
@@ -2454,7 +2526,10 @@ struct FoundationTrackList: View {
                     items, albumID: collection?.kind == .album ? collection?.id : nil)
             }
             .onChange(of: connectivity.localOnly) { _, offline in
-                if offline, playlistRemoval.isPending { playlistRemoval.cancel() }
+                if offline {
+                    if playlistRemoval.isPending { playlistRemoval.cancel() }
+                    tracks.request(.initial)
+                }
             }
             .onChange(of: connectivity.localOnly ? localItems?() : nil) { _, items in
                 if let items {
@@ -2490,6 +2565,12 @@ struct FoundationTrackList: View {
             }
             .foundationCollectionDestination(
                 item: $openedCollection, library: library, player: player, isActive: isActive)
+    }
+
+    private func requestVisibleRefresh() {
+        guard isActive, isVisible, !connectivity.localOnly else { return }
+        tracks.request(.refresh)
+        revision += 1
     }
 
     @ViewBuilder private var collectionActions: some View {
@@ -4338,3 +4419,28 @@ private struct FoundationMiniPlayerLabel: View {
         }
     }
 #endif
+
+/// A Settings refresh waits for this screen's next active appearance; no hidden screen fetches.
+private struct FoundationLibraryRefreshTrigger: ViewModifier {
+    let revision: Int
+    let active: Bool
+    let refresh: @MainActor () async -> Void
+    @State private var consumedRevision = 0
+
+    func body(content: Content) -> some View {
+        content.task(id: [revision, active ? 1 : 0]) {
+            guard active, revision != consumedRevision, !Task.isCancelled else { return }
+            consumedRevision = revision
+            await refresh()
+        }
+    }
+}
+
+extension View {
+    func foundationLibraryRefresh(
+        revision: Int, active: Bool, refresh: @escaping @MainActor () async -> Void
+    ) -> some View {
+        modifier(
+            FoundationLibraryRefreshTrigger(revision: revision, active: active, refresh: refresh))
+    }
+}

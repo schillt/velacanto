@@ -519,6 +519,13 @@ final class FoundationDownloads: ObservableObject {
         }
     }
 
+    func refreshPresentation() {
+        guard isLive, storageUsable else { return }
+        refreshStates()
+        refreshBytes()
+        catalogRevision &+= 1
+    }
+
     /// Shared account-owned catalog projection for local browsing and search.
     func localCatalogItems(kind: FoundationItem.Kind? = nil) -> [FoundationItem] {
         guard isLive, storageUsable else { return [] }

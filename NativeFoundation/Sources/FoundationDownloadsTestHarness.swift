@@ -146,6 +146,16 @@
                     .frame(minWidth: 44, minHeight: 44)
                     .modifier(
                         FoundationFixtureConnectivityValue(connectivity: fixture.connectivity))
+                if ProcessInfo.processInfo.arguments.contains("-fixtureRemoteFavoriteRefresh") {
+                    Button("Remote Fav") {
+                        Task {
+                            await fixture.catalogLibrary.simulateRemoteFavorite()
+                            remoteFavoriteFixtureChanged = true
+                        }
+                    }
+                    .accessibilityIdentifier("fixture-change-remote-favorite")
+                    .accessibilityValue(remoteFavoriteFixtureChanged ? "changed" : "unchanged")
+                }
                 Button("Read catalog counts") {
                     Task { catalogCounts = await fixture.library.catalogCounts() }
                 }
@@ -188,6 +198,7 @@
 
         @State private var artworkCounts = ""
         @State private var catalogCounts = ""
+        @State private var remoteFavoriteFixtureChanged = false
         @State private var primaryGenreCounts = ""
         @State private var remoteFixtureRevision = 0
         @State private var remoteFixtureState = "playing"
@@ -1468,6 +1479,9 @@
         func recentlyPlayed(startIndex: Int) async throws -> FoundationPage {
             .init(items: [track], nextStartIndex: nil)
         }
+        private var remoteFavoriteVisible = false
+        func simulateRemoteFavorite() { remoteFavoriteVisible = true }
+
         func favorites(kind: FoundationItem.Kind, startIndex: Int) async throws -> FoundationPage {
             guard ProcessInfo.processInfo.arguments.contains("-fixtureFavoritesCatalog"),
                 [.album, .artist, .track, .playlist].contains(kind)
@@ -1485,7 +1499,7 @@
                     id: "artist", title: "Fixture Artist", subtitle: "", kind: .artist,
                     duration: nil, primaryImageTag: "synthetic")
             }
-            let items = (0..<8).map { index in
+            var items = (0..<8).map { index in
                 var item =
                     index == 0
                     ? base
@@ -1496,6 +1510,15 @@
                         primaryImageTag: base.primaryImageTag)
                 item.isFavorite = true
                 return item
+            }
+            if ProcessInfo.processInfo.arguments.contains("-fixtureRemoteFavoriteRefresh"),
+                kind == .track, remoteFavoriteVisible
+            {
+                items.insert(
+                    FoundationItem(
+                        id: "remote-added-favorite", title: "Fixture Remote Favorite",
+                        subtitle: "Synthetic remote change",
+                        kind: .track, duration: nil, isFavorite: true), at: 0)
             }
             guard startIndex < items.count else { return .init(items: [], nextStartIndex: nil) }
             let end = min(startIndex + 6, items.count)

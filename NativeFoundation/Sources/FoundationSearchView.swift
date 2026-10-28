@@ -343,6 +343,13 @@ private struct FoundationSearchOverview: View {
                 .foundationBottomChromeEndPadding()
         }
         .foundationBottomChromeScrollClearance()
+        #if os(iOS)
+            .refreshable { requestVisibleRefresh() }
+        #endif
+        .foundationLibraryRefresh(
+            revision: actions.libraryRefreshRevision,
+            active: isActive && isVisible && !connectivity.localOnly
+        ) { requestVisibleRefresh() }
         .environment(\.foundationCollectionOperationOwner, collectionOperationOwner)
         .foundationCollectionOutcomePresentation(owner: collectionOperationOwner)
         .onAppear { isVisible = true }
@@ -375,6 +382,12 @@ private struct FoundationSearchOverview: View {
                 await loadSections()
             #endif
         }
+    }
+
+    private func requestVisibleRefresh() {
+        guard isActive, isVisible, !connectivity.localOnly else { return }
+        resolvedRevision = nil
+        retrySearch()
     }
 
     private func retrySearch() {

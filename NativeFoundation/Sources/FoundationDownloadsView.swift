@@ -3,6 +3,8 @@ import SwiftUI
 /// Downloads selects existing catalog identities; every result uses the normal destination.
 struct FoundationDownloadsView: View {
     @EnvironmentObject private var downloads: FoundationDownloads
+    @EnvironmentObject private var actions: FoundationLibraryActions
+    @State private var isVisible = false
     let library: any FoundationLibrary
     let player: FoundationPlayer
     var isActive = true
@@ -78,6 +80,17 @@ struct FoundationDownloadsView: View {
             .foundationBottomChromeEndPadding()
         }
         .foundationBottomChromeScrollClearance()
+        .onAppear { isVisible = true }
+        .onDisappear { isVisible = false }
+        #if os(iOS)
+            .refreshable {
+                guard isActive, isVisible else { return }
+                downloads.refreshPresentation()
+            }
+        #endif
+        .foundationLibraryRefresh(
+            revision: actions.libraryRefreshRevision, active: isActive && isVisible
+        ) { downloads.refreshPresentation() }
         .buttonStyle(.plain)
         .foundationCatalogHeader("Downloads")
     }
