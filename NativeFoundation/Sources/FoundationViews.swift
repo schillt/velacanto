@@ -1418,6 +1418,7 @@ struct FoundationLibraryView: View {
 /// Each favorite type owns its cursor so a large album collection cannot hide favorite songs.
 struct FoundationFavoritesView: View {
     @EnvironmentObject private var actions: FoundationLibraryActions
+    @Environment(\.foundationReduceMotion) private var reduceMotion
     @State private var collectionOperationOwner = UUID()
     let library: any FoundationLibrary
     let player: FoundationPlayer
@@ -1437,6 +1438,9 @@ struct FoundationFavoritesView: View {
         .foundationBottomChromeScrollClearance()
         .foundationCatalogHeader("Favorites")
         .accessibilityIdentifier("favorites-catalog")
+        .animation(
+            reduceMotion ? nil : .easeInOut(duration: 0.22), value: actions.favoriteRevision
+        )
         .environment(\.foundationCollectionOperationOwner, collectionOperationOwner)
         .foundationCollectionOutcomePresentation(owner: collectionOperationOwner)
         .onDisappear { actions.cancelQueueAdditionOwned(by: collectionOperationOwner) }
@@ -1445,6 +1449,7 @@ struct FoundationFavoritesView: View {
 
 private struct FoundationFavoriteShelf: View {
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.foundationReduceMotion) private var reduceMotion
     @State private var refreshOnActivation = true
     let kind: FoundationItem.Kind
     let library: any FoundationLibrary
@@ -1517,18 +1522,20 @@ private struct FoundationFavoriteShelf: View {
                                 spacing: 16
                             ) {
                                 ForEach(
-                                    Array(displayedItems.enumerated()).prefix(6), id: \.offset
+                                    Array(displayedItems.enumerated()).prefix(6), id: \.element.id
                                 ) {
-                                    index, item in
+                                    _, item in
                                     FoundationLibraryItemRow(
                                         item: item, library: library,
                                         isActive: isActive && isVisible,
-                                        open: { openedItem = item }, play: { play(index) },
+                                        open: { openedItem = item }, play: { playFavorite(item) },
                                         player: player,
                                         showsTrackArtwork: true, navigate: { openedItem = $0 }
                                     )
                                     .lineLimit(1).frame(
-                                        width: dynamicTypeSize.isAccessibilitySize ? 360 : 300)
+                                        width: dynamicTypeSize.isAccessibilitySize ? 360 : 300
+                                    )
+                                    .transition(reduceMotion ? .identity : .opacity)
                                 }
                             }.padding(.horizontal, 16)
                         } else {
@@ -1541,6 +1548,7 @@ private struct FoundationFavoriteShelf: View {
                                         navigate: { openedItem = $0 }
                                     )
                                     .frame(width: dynamicTypeSize.isAccessibilitySize ? 240 : 160)
+                                    .transition(reduceMotion ? .identity : .opacity)
                                 }
                             }.padding(.horizontal, 16)
                         }
@@ -1565,6 +1573,9 @@ private struct FoundationFavoriteShelf: View {
         .padding(.bottom, showsShelf ? 28 : 0)
         .accessibilityIdentifier("favorites-section-" + kind.rawValue)
         .accessibilityHidden(!showsShelf)
+        .animation(
+            reduceMotion ? nil : .easeInOut(duration: 0.22), value: displayedItems.map(\.id)
+        )
         .foundationCollectionDestination(
             item: $openedItem, library: library, player: player, isActive: isActive
         )
@@ -1607,6 +1618,12 @@ private struct FoundationFavoriteShelf: View {
             model.configureFavoriteObservations(actions, knownFavorites: true)
             await model.loadPending { try await library.favorites(kind: kind, startIndex: $0) }
         }
+    }
+
+    private func playFavorite(_ item: FoundationItem) {
+        // A retiring row cannot use its old offset to start a different surviving favorite.
+        guard let index = displayedItems.firstIndex(where: { $0.id == item.id }) else { return }
+        play(index)
     }
 
     private func play(_ index: Int) {
@@ -1687,9 +1704,16 @@ struct FoundationCatalogView: View {
                                     columns: foundationCollectionColumns(for: dynamicTypeSize),
                                     alignment: .leading, spacing: 22
                                 ) {
-                                    ForEach(Array(displayedItems.enumerated()), id: \.offset) {
-                                        _, item in
-                                        collectionCard(item)
+                                    if isFavorites {
+                                        ForEach(displayedItems) { item in
+                                            collectionCard(item)
+                                                .transition(reduceMotion ? .identity : .opacity)
+                                        }
+                                    } else {
+                                        ForEach(Array(displayedItems.enumerated()), id: \.offset) {
+                                            _, item in
+                                            collectionCard(item)
+                                        }
                                     }
                                 }.padding().transition(.opacity)
                             }
@@ -1733,6 +1757,10 @@ struct FoundationCatalogView: View {
                 .listStyle(.plain)
             }
         }
+        .animation(
+            isFavorites && !reduceMotion ? .easeInOut(duration: 0.22) : nil,
+            value: isFavorites ? displayedItems.map(\.id) : []
+        )
         #if DEBUG
             .onAppear {
                 FoundationTrace.event(
@@ -1921,11 +1949,18 @@ struct FoundationCatalogView: View {
             open: { openedItem = item }, navigate: { openedItem = $0 })
     }
 
-    private var resultRows: some View {
-        ForEach(
-            Array(displayedItems.enumerated()), id: \.offset
-        ) { index, item in
-            resultRow(item, at: index)
+    @ViewBuilder private var resultRows: some View {
+        if isFavorites {
+            // This source-scoped favorite catalog has unique provider item identities.
+            // Offsets remain playback positions, never the identity of an animating row.
+            ForEach(Array(displayedItems.enumerated()), id: \.element.id) { index, item in
+                resultRow(item, at: index)
+                    .transition(reduceMotion ? .identity : .opacity)
+            }
+        } else {
+            ForEach(Array(displayedItems.enumerated()), id: \.offset) { index, item in
+                resultRow(item, at: index)
+            }
         }
     }
 
@@ -1934,11 +1969,18 @@ struct FoundationCatalogView: View {
             item: item, library: library, isActive: isActive && isVisible,
             open: { openedItem = item },
             play: item.kind == .track
-                ? { play(index) } : nil, player: player,
+                ? {
+                    if isFavorites { playFavorite(item) } else { play(index) }
+                } : nil, player: player,
             showsTrackArtwork: showsTrackArtwork || isFavorites,
             navigate: { openedItem = $0 }, currentPageKind: headerItem?.kind
         )
         .foundationLibraryListRow()
+    }
+
+    private func playFavorite(_ item: FoundationItem) {
+        guard let index = displayedItems.firstIndex(where: { $0.id == item.id }) else { return }
+        play(index)
     }
 
     private func play(_ index: Int) {
