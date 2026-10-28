@@ -340,6 +340,12 @@ struct FoundationLibraryView: View {
             }
         #endif
         .environment(\.foundationOpenLibrary, libraryPresentation)
+        #if os(iOS)
+            .environment(
+                \.foundationOfflineBannerContext,
+                FoundationOfflineBannerContext(
+                    isOffline: connectivity.localOnly, cache: library.catalogPageCache))
+        #endif
         .background {
             if let handoff {
                 FoundationHandoffRouteObserver(controller: handoff) { item in
@@ -542,11 +548,6 @@ struct FoundationLibraryView: View {
                     Tab(value: destination, role: destination == .search ? .search : nil) {
                         NavigationStack {
                             browsingContent(destination)
-                        }
-                        .safeAreaInset(edge: .top, spacing: 0) {
-                            if connectivity.localOnly {
-                                FoundationOfflineStatus(cache: library.catalogPageCache)
-                            }
                         }
                         .id(library.catalogScopeID + String(destination.rawValue))
                     } label: {
@@ -2945,7 +2946,10 @@ private struct FoundationScreenHeader<Profile: View, Search: View>: ViewModifier
             if #available(iOS 26.0, *) {
                 content
                     .safeAreaBar(edge: .top, spacing: 0) {
-                        visibleHeader(headerContent.background { searchReadabilityBackground })
+                        VStack(spacing: 0) {
+                            visibleHeader(headerContent.background { searchReadabilityBackground })
+                            FoundationOfflineBrowsingBanner()
+                        }
                     }
                     .scrollEdgeEffectStyle(.soft, for: .top)
                     .scrollEdgeEffectHidden(!showsHeader || isAtTop, for: .top)
@@ -2953,7 +2957,10 @@ private struct FoundationScreenHeader<Profile: View, Search: View>: ViewModifier
                 content
                     .contentMargins(.top, 56 + searchHeight, for: .scrollContent)
                     .overlay(alignment: .top) {
-                        visibleHeader(headerContent.background { legacyBackground })
+                        VStack(spacing: 0) {
+                            visibleHeader(headerContent.background { legacyBackground })
+                            FoundationOfflineBrowsingBanner()
+                        }
                     }
             }
         }
@@ -3221,6 +3228,7 @@ extension View {
             #if os(iOS)
                 .navigationBarTitleDisplayMode(.large)
                 .toolbar(.visible, for: .navigationBar)
+                .foundationOfflineBrowsingBanner()
             #else
                 .foundationMacTransportClearance()
             #endif
@@ -4196,6 +4204,7 @@ private struct FoundationDetailPresentation: ViewModifier {
                     .toolbarBackground(.hidden, for: .navigationBar)
                     .toolbarColorScheme(resolvedScheme, for: .navigationBar)
                     .toolbar(.visible, for: .navigationBar)
+                    .foundationOfflineBrowsingBanner()
                 #endif
         } else {
             content.foundationCatalogHeader(title)

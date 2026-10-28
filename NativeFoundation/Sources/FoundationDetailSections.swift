@@ -89,6 +89,7 @@ struct FoundationOverviewSection: View {
                                 .textSelection(.enabled).padding()
                         }
                         .navigationTitle("About " + item.title)
+                        .foundationOfflineBrowsingBanner()
                         #if os(iOS)
                             .navigationBarTitleDisplayMode(.inline)
                             .toolbarBackground(.hidden, for: .navigationBar)

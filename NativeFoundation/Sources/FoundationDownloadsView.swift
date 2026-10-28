@@ -145,32 +145,106 @@ private struct FoundationDownloadFilteredCatalog: View {
     }
 }
 
-/// Quiet browsing-only status. It is mounted by navigation, outside player presentations.
+/// Optional browsing context avoids coupling reusable title helpers to an account object.
+/// Player presentations do not install the browsing banner modifier.
+struct FoundationOfflineBannerContext: Sendable {
+    let isOffline: Bool
+    let cache: FoundationCatalogPageCache?
+}
+
+private struct FoundationOfflineBannerContextKey: EnvironmentKey {
+    static let defaultValue: FoundationOfflineBannerContext? = nil
+}
+
+extension EnvironmentValues {
+    var foundationOfflineBannerContext: FoundationOfflineBannerContext? {
+        get { self[FoundationOfflineBannerContextKey.self] }
+        set { self[FoundationOfflineBannerContextKey.self] = newValue }
+    }
+}
+
+/// Render at the title owner, never above the enclosing NavigationStack's toolbar.
+struct FoundationOfflineBrowsingBanner: View {
+    @Environment(\.foundationOfflineBannerContext) private var context
+
+    var body: some View {
+        if let context, context.isOffline {
+            FoundationOfflineStatus(cache: context.cache)
+        }
+    }
+}
+
+private struct FoundationOfflineBrowsingBannerPlacement: ViewModifier {
+    func body(content: Content) -> some View {
+        #if os(iOS)
+            content.safeAreaInset(edge: .top, spacing: 0) {
+                FoundationOfflineBrowsingBanner()
+            }
+        #else
+            content
+        #endif
+    }
+}
+
+extension View {
+    /// Native-title browsing pages attach this to their content inside NavigationStack.
+    func foundationOfflineBrowsingBanner() -> some View {
+        modifier(FoundationOfflineBrowsingBannerPlacement())
+    }
+}
+
+/// Quiet browsing-only status. It is mounted below the title, outside player presentations.
 struct FoundationOfflineStatus: View {
     let cache: FoundationCatalogPageCache?
     @State private var lastRefresh: Date?
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 10) {
-            Label("Offline Mode", systemImage: "icloud.slash")
-                .fontWeight(.medium)
-            Spacer(minLength: 0)
-            if let lastRefresh {
-                Text(
-                    "Last refreshed \(lastRefresh.formatted(date: .abbreviated, time: .shortened))")
-            } else {
-                Text("Content refresh unavailable")
+        statusContent
+            .background(.bar)
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("browsing-offline-status")
+            .task(id: cache?.scope) {
+                let date = await cache?.latestSavedAt()
+                guard !Task.isCancelled else { return }
+                lastRefresh = date
             }
-        }
-        .font(.caption).foregroundStyle(.secondary)
-        .padding(.horizontal, 16).padding(.vertical, 8)
-        .background(.bar)
-        .accessibilityElement(children: .combine)
-        .accessibilityIdentifier("browsing-offline-status")
-        .task(id: cache?.scope) {
-            let date = await cache?.latestSavedAt()
-            guard !Task.isCancelled else { return }
-            lastRefresh = date
-        }
+    }
+
+    @ViewBuilder private var statusContent: some View {
+        #if os(iOS)
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Label("Offline Mode", systemImage: "icloud.slash")
+                    .fontWeight(.medium).fixedSize(horizontal: true, vertical: false)
+                Spacer(minLength: 0)
+                if let lastRefresh {
+                    Text(
+                        "Last refresh \(lastRefresh.formatted(.dateTime.month(.abbreviated).day().hour().minute()))"
+                    )
+                    .lineLimit(1)
+                    .accessibilityLabel(
+                        "Last refreshed \(lastRefresh.formatted(date: .complete, time: .shortened))"
+                    )
+                } else {
+                    Text("Refresh time unavailable").lineLimit(1)
+                }
+            }
+            .font(.caption2).foregroundStyle(.secondary)
+            .padding(.horizontal, 16).padding(.vertical, 4)
+        #else
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                Label("Offline Mode", systemImage: "icloud.slash")
+                    .fontWeight(.medium)
+                Spacer(minLength: 0)
+                if let lastRefresh {
+                    Text(
+                        "Last refreshed \(lastRefresh.formatted(date: .abbreviated, time: .shortened))"
+                    )
+                } else {
+                    Text("Content refresh unavailable")
+                }
+            }
+            .font(.caption).foregroundStyle(.secondary)
+            .padding(.horizontal, 16).padding(.vertical, 8)
+        #endif
     }
 }
