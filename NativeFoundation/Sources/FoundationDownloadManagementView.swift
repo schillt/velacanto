@@ -28,6 +28,7 @@ struct FoundationDownloadManagementView: View {
             #endif
         }
         .navigationTitle("Downloaded Music")
+        .foundationOfflineBrowsingBanner()
         #if os(macOS)
             .toolbarTitleDisplayMode(.inline)
         #endif

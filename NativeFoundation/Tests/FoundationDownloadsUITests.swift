@@ -1819,7 +1819,9 @@ final class FoundationDownloadsUITests: XCTestCase {
 
     func testOfflineModeSettingsFiltersDownloadsAndKeepsPlayerBannerFree() {
         continueAfterFailure = false
-        let app = launch(productionShell: true, canonicalDownloadState: "full", longPlayback: true)
+        let app = launch(
+            productionShell: true, canonicalDownloadState: "full", longPlayback: true,
+            compactFixtureControls: true)
         selectTab("Home", in: app)
         tapNativeChrome(app.buttons["Profile and settings"], in: app)
         XCTAssertTrue(app.navigationBars["Profile & Settings"].waitForExistence(timeout: 5))
@@ -1829,25 +1831,50 @@ final class FoundationDownloadsUITests: XCTestCase {
         XCTAssertEqual(toggle.value as? String, "0")
         toggle.switches.firstMatch.tap()
         XCTAssertEqual(toggle.value as? String, "1")
+        assertOfflineBannerBelow(app.navigationBars["Profile & Settings"], in: app)
         tapNativeChrome(app.navigationBars["Profile & Settings"].buttons["Done"], in: app)
-        XCTAssertTrue(
-            app.descendants(matching: .any)["browsing-offline-status"].waitForExistence(timeout: 5))
+        assertOfflineBannerBelow(app.staticTexts["Home"].firstMatch, in: app)
         XCTAssertFalse(app.buttons["offline-retry"].exists)
         XCTAssertFalse(app.buttons["offline-status-retry"].exists)
+        capture("Offline banner below Home title", in: app)
         selectTab("Library", in: app)
-        tapVisible(
-            app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Downloads"))
-                .firstMatch, in: app)
+        assertOfflineBannerBelow(app.staticTexts["Library"].firstMatch, in: app)
+        tapVisible(app.buttons["library-category-downloads"], in: app)
         XCTAssertTrue(app.navigationBars["Downloads"].waitForExistence(timeout: 5))
-        capture("Offline Downloads overview", in: app)
+        assertOfflineBannerBelow(app.navigationBars["Downloads"], in: app)
+        capture("Offline banner below native Downloads title", in: app)
         tapVisible(app.buttons["downloads-category-track"], in: app)
         XCTAssertTrue(app.navigationBars["Songs"].waitForExistence(timeout: 5))
+        assertOfflineBannerBelow(app.navigationBars["Songs"], in: app)
+        capture("Offline banner persists below Songs title", in: app)
         let song = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Fixture Tone"))
             .firstMatch
         tapVisible(song, in: app)
         openNowPlaying(app)
-        XCTAssertFalse(app.descendants(matching: .any)["browsing-offline-status"].isHittable)
+        XCTAssertTrue(
+            app.descendants(matching: .any).matching(identifier: "browsing-offline-status")
+                .allElementsBoundByIndex.allSatisfy { !$0.isHittable })
         capture("Now Playing excludes browsing offline banner", in: app)
+    }
+
+    private func assertOfflineBannerBelow(
+        _ title: XCUIElement, in app: XCUIApplication,
+        file: StaticString = #filePath, line: UInt = #line
+    ) {
+        let banners = app.descendants(matching: .any).matching(
+            identifier: "browsing-offline-status")
+        XCTAssertTrue(banners.firstMatch.waitForExistence(timeout: 5), file: file, line: line)
+        let visible = banners.allElementsBoundByIndex.filter { $0.isHittable }
+        XCTAssertEqual(
+            visible.count, 1, "Exactly one browsing banner is visible", file: file, line: line)
+        guard let banner = visible.first else { return }
+        XCTAssertTrue(title.exists, file: file, line: line)
+        XCTAssertGreaterThanOrEqual(
+            banner.frame.minY, title.frame.maxY - 1,
+            "Offline banner must start below the title bar", file: file, line: line)
+        XCTAssertLessThanOrEqual(
+            banner.frame.height, 32,
+            "The default-size iPhone banner remains a slim strip", file: file, line: line)
     }
 
     func testOfflinePreservesAlbumHomeAndPlayerWithoutPlaybackBadges() {

@@ -82,6 +82,7 @@ struct FoundationLocalLibraryView: View {
                 }
             }
             .navigationTitle("Local Library")
+            .foundationOfflineBrowsingBanner()
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") { dismiss() }

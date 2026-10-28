@@ -128,6 +128,7 @@ struct FoundationSettingsView: View {
             .formStyle(.grouped)
             .accessibilityIdentifier("foundation-profile-form")
             .navigationTitle("Profile & Settings")
+            .foundationOfflineBrowsingBanner()
             #if os(iOS)
                 .navigationBarTitleDisplayMode(.inline)
             #endif
@@ -221,6 +222,7 @@ struct FoundationSettingsView: View {
         Form { accountSections }
             .formStyle(.grouped)
             .navigationTitle("Server & Account")
+            .foundationOfflineBrowsingBanner()
             #if os(iOS)
                 .navigationBarTitleDisplayMode(.inline)
             #endif
@@ -332,6 +334,7 @@ private struct FoundationMusicLibrarySelectionView: View {
             if isApplying { ProgressView("Saving library selection…") }
         }
         .navigationTitle("Music Libraries")
+        .foundationOfflineBrowsingBanner()
         #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
         #endif
@@ -466,6 +469,7 @@ private struct FoundationCachedMediaView: View {
         }
         .formStyle(.grouped)
         .navigationTitle("Cached Media")
+        .foundationOfflineBrowsingBanner()
         #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
         #endif
@@ -543,6 +547,7 @@ private struct FoundationLicensesView: View {
                                 .frame(maxWidth: .infinity, alignment: .leading).padding()
                         }
                         .navigationTitle(notice.title)
+                        .foundationOfflineBrowsingBanner()
                         #if os(iOS)
                             .navigationBarTitleDisplayMode(.inline)
                         #endif
@@ -562,6 +567,7 @@ private struct FoundationLicensesView: View {
             }
         }
         .navigationTitle("Open-source licenses")
+        .foundationOfflineBrowsingBanner()
         #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
         #endif
@@ -612,6 +618,7 @@ private struct FoundationLicensesView: View {
             NavigationStack {
                 FoundationJournalTextView(text: text)
                     .navigationTitle("Diagnostic snapshot")
+                    .foundationOfflineBrowsingBanner()
                     #if os(iOS)
                         .navigationBarTitleDisplayMode(.inline)
                     #endif
