@@ -939,7 +939,7 @@ private struct FoundationQueueView: View {
                 Button {
                     player.setShuffle(!player.shuffleEnabled)
                 } label: {
-                    modeIcon("shuffle")
+                    modeIcon("shuffle", active: player.shuffleEnabled)
                 }
                 .modifier(FoundationQueueModeControlStyle(active: player.shuffleEnabled))
                 .accessibilityLabel("Shuffle")
@@ -952,7 +952,9 @@ private struct FoundationQueueView: View {
                             ? .all : player.repeatMode == .all ? .one : .off
                         player.setRepeat(next)
                     } label: {
-                        modeIcon(player.repeatMode == .one ? "repeat.1" : "repeat")
+                        modeIcon(
+                            player.repeatMode == .one ? "repeat.1" : "repeat",
+                            active: player.repeatMode != .off)
                     }
                     .modifier(FoundationQueueModeControlStyle(active: player.repeatMode != .off))
                     .accessibilityLabel("Repeat")
@@ -964,7 +966,9 @@ private struct FoundationQueueView: View {
                             Button(mode.rawValue.capitalized) { player.setRepeat(mode) }
                         }
                     } label: {
-                        modeIcon(player.repeatMode == .one ? "repeat.1" : "repeat")
+                        modeIcon(
+                            player.repeatMode == .one ? "repeat.1" : "repeat",
+                            active: player.repeatMode != .off)
                     }
                     .modifier(FoundationQueueModeControlStyle(active: player.repeatMode != .off))
                     .accessibilityLabel("Repeat")
@@ -976,10 +980,12 @@ private struct FoundationQueueView: View {
         .fixedSize()
     }
 
-    private func modeIcon(_ symbol: String) -> some View {
+    private func modeIcon(_ symbol: String, active: Bool) -> some View {
         Image(systemName: symbol)
             .font(.body.weight(.semibold))
+            .foregroundStyle(active ? Color.white : Color.primary)
             .frame(width: 32, height: 32)
+            .background(active ? Color.accentColor : .clear, in: Circle())
     }
 
     private func queueHeading(_ title: String) -> some View {
