@@ -1930,6 +1930,57 @@ final class FoundationDownloadsUITests: XCTestCase {
         capture("Now Playing excludes browsing offline banner", in: app)
     }
 
+    func testOfflineCustomHeaderAndBannerFadeTogetherWhenScrolling() {
+        continueAfterFailure = false
+        // A short viewport makes both production browsing roots scrollable with saved fixtures.
+        XCUIDevice.shared.orientation = .landscapeLeft
+        addTeardownBlock { @MainActor in XCUIDevice.shared.orientation = .portrait }
+        let app = launch(
+            productionShell: true, canonicalDownloadState: "full", compactFixtureControls: true)
+        selectTab("Home", in: app)
+        tapNativeChrome(app.buttons["Profile and settings"], in: app)
+        let settings = app.navigationBars["Profile & Settings"]
+        XCTAssertTrue(settings.waitForExistence(timeout: 5))
+        let toggle = app.switches["settings-offline-mode"].firstMatch
+        reveal(toggle, in: app)
+        toggle.switches.firstMatch.tap()
+        XCTAssertEqual(toggle.value as? String, "1")
+        tapNativeChrome(settings.buttons["Done"], in: app)
+
+        for name in ["Home", "Library"] {
+            selectTab(name, in: app)
+            let title = app.staticTexts[name].firstMatch
+            assertOfflineBannerBelow(title, in: app)
+            scrollContent(in: app)
+            let hiddenTogether = XCTNSPredicateExpectation(
+                predicate: NSPredicate { _, _ in
+                    MainActor.assumeIsolated {
+                        let banners = app.descendants(matching: .any).matching(
+                            identifier: "browsing-offline-status")
+                        return !title.exists
+                            && banners.allElementsBoundByIndex.allSatisfy { !$0.isHittable }
+                    }
+                }, object: nil)
+            XCTAssertEqual(
+                XCTWaiter.wait(for: [hiddenTogether], timeout: 5), .completed,
+                "\(name) title and offline strip must leave the browsing surface together")
+            capture("\(name) offline strip fades with its custom header", in: app)
+            scrollContent(in: app, upward: false)
+            let returnedTogether = XCTNSPredicateExpectation(
+                predicate: NSPredicate { _, _ in
+                    MainActor.assumeIsolated {
+                        title.exists && title.isHittable
+                            && app.descendants(matching: .any).matching(
+                                identifier: "browsing-offline-status"
+                            ).allElementsBoundByIndex.contains { $0.isHittable }
+                    }
+                }, object: nil)
+            XCTAssertEqual(XCTWaiter.wait(for: [returnedTogether], timeout: 5), .completed)
+            assertOfflineBannerBelow(title, in: app)
+            capture("\(name) title and offline strip return below the same header surface", in: app)
+        }
+    }
+
     private func assertOfflineBannerBelow(
         _ title: XCUIElement, in app: XCUIApplication,
         file: StaticString = #filePath, line: UInt = #line
