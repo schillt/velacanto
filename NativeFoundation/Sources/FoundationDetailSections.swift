@@ -135,7 +135,7 @@ struct FoundationOverviewSection: View {
 }
 
 /// A text reading surface follows the window, rather than the presenting artwork's tint.
-private struct FoundationOverviewSheet: View {
+struct FoundationOverviewSheet: View {
     let item: FoundationItem
     let overview: String
     let dismiss: () -> Void
@@ -168,6 +168,10 @@ private struct FoundationOverviewSheet: View {
                 .navigationBarTitleDisplayMode(.inline)
             #endif
             #if os(macOS)
+                .toolbarColorScheme(
+                    browsingColorScheme ?? inheritedColorScheme, for: .windowToolbar
+                )
+                .toolbarBackground(.background, for: .windowToolbar)
                 .toolbar {
                     ToolbarItem(placement: .confirmationAction) {
                         Button("Done", action: dismiss)
@@ -175,6 +179,10 @@ private struct FoundationOverviewSheet: View {
                 }
             #endif
         }
+        #if os(macOS)
+            // Reset the immersive presenter's style before resolving hierarchical text and actions.
+            .foregroundStyle(Color.primary)
+        #endif
         // Immersive detail controls may use a white tint; native sheet actions use the app accent.
         .tint(.accentColor)
         .preferredColorScheme(browsingColorScheme ?? inheritedColorScheme)

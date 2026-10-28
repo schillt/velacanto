@@ -5,6 +5,9 @@ import XCTest
 #if os(iOS)
     import SwiftUI
     import UIKit
+#else
+    import AppKit
+    import SwiftUI
 #endif
 
 @MainActor
@@ -72,6 +75,61 @@ final class FoundationPresentationTests: XCTestCase {
     #endif
 
     #if os(macOS)
+        func testOverviewSheetResetsImmersiveForegroundAndNativeBarAppearance() async throws {
+            for scheme in [ColorScheme.light, .dark] {
+                let window = NSWindow(
+                    contentRect: NSRect(x: 0, y: 0, width: 800, height: 700),
+                    styleMask: [.titled], backing: .buffered, defer: false)
+                window.isReleasedWhenClosed = false
+                let beganSheet = expectation(
+                    forNotification: NSWindow.didBeginSheetNotification, object: window)
+                window.contentView = NSHostingView(
+                    rootView: FoundationOverviewAppearanceHost(scheme: scheme))
+                window.orderFront(nil)
+                defer { window.close() }
+                await fulfillment(of: [beganSheet], timeout: 5)
+                let sheet = try XCTUnwrap(window.attachedSheet)
+                let content = try XCTUnwrap(sheet.contentView)
+                content.layoutSubtreeIfNeeded()
+                let bitmap = try XCTUnwrap(
+                    content.bitmapImageRepForCachingDisplay(in: content.bounds))
+                content.cacheDisplay(in: content.bounds, to: bitmap)
+                let image = NSImage(size: content.bounds.size)
+                image.addRepresentation(bitmap)
+                let attachment = XCTAttachment(image: image)
+                attachment.name = "Native Mac overview \(scheme) from dark white-text presenter"
+                attachment.lifetime = .keepAlways
+                add(attachment)
+
+                // Sample only the reading interior, excluding native chrome, edges and scrollbar.
+                // White-on-white inherited text cannot satisfy this contrast check.
+                var foregroundPixels = 0
+                var backgroundPixels = 0
+                for y in stride(from: bitmap.pixelsHigh / 4, to: bitmap.pixelsHigh * 3 / 4, by: 2) {
+                    for x in stride(
+                        from: bitmap.pixelsWide / 8, to: bitmap.pixelsWide * 7 / 8, by: 2)
+                    {
+                        let color = try XCTUnwrap(
+                            bitmap.colorAt(x: x, y: y)?.usingColorSpace(.sRGB))
+                        let luma =
+                            0.2126 * color.redComponent + 0.7152 * color.greenComponent
+                            + 0.0722 * color.blueComponent
+                        if scheme == .light ? luma < 0.35 : luma > 0.65 {
+                            foregroundPixels += 1
+                        }
+                        if scheme == .light ? luma > 0.8 : luma < 0.2 {
+                            backgroundPixels += 1
+                        }
+                    }
+                }
+                XCTAssertGreaterThan(
+                    foregroundPixels, 100, "Overview words must contrast with the sheet")
+                XCTAssertGreaterThan(
+                    backgroundPixels, 1000, "The reading surface must follow \(scheme)")
+                window.endSheet(sheet)
+            }
+        }
+
         func testHandoffBrowseRoutesWithoutAMountedRootCollectionBinding() async throws {
             let audio = FoundationMacHandoffAudioProbe()
             let player = FoundationPlayer(
@@ -706,6 +764,29 @@ private actor SongAlphabetFixture {
 }
 
 #if os(macOS)
+    private struct FoundationOverviewAppearanceHost: View {
+        let scheme: ColorScheme
+        @State private var presented = false
+
+        var body: some View {
+            Color.black
+                .sheet(isPresented: $presented) {
+                    FoundationOverviewSheet(
+                        item: .init(
+                            id: "synthetic-overview", title: "Synthetic Album", subtitle: "",
+                            kind: .album, duration: nil),
+                        overview: (1...12).map {
+                            "Overview paragraph \($0). Native reading text remains legible when an immersive artwork page uses white controls."
+                        }.joined(separator: "\n\n")
+                    ) { presented = false }
+                }
+                .foregroundStyle(Color.white)
+                .environment(\.colorScheme, .dark)
+                .environment(\.foundationBrowsingColorScheme, scheme)
+                .onAppear { presented = true }
+        }
+    }
+
     private actor FoundationMacHandoffAudioProbe {
         private(set) var count = 0
         func resolve(_ item: FoundationItem) throws -> URL {
