@@ -1,7 +1,7 @@
 import Combine
 import Foundation
 
-/// Shared account/library owner. Only an explicit start schedules network reads.
+/// Shared account/library owner for automatic app-version preparation and explicit rebuilds.
 @MainActor
 final class FoundationPrimaryGenresModel: ObservableObject {
     @Published private(set) var record: FoundationPrimaryGenreRecord?
@@ -20,17 +20,31 @@ final class FoundationPrimaryGenresModel: ObservableObject {
     private var permit = FoundationPageWritePermit()
     private var restoreID = UUID()
     private var restored = false
+    private var restoreTask: Task<Void, Never>?
+    private let appVersion: String
+    private var automaticNetworkAllowed = false
+    private var automaticAttempt: (scope: FoundationPrimaryGenreIndex.Scope, version: String)?
+    private var activeBuildIsAutomatic = false
     private weak var boundDownloads: FoundationDownloads?
     private var downloadObservation: AnyCancellable?
     private var downloadBindingID = UUID()
 
-    init(library: any FoundationLibrary) {
+    init(library: any FoundationLibrary, appVersion: String? = nil) {
         self.library = library
+        self.appVersion = appVersion ?? Self.applicationVersion
         scope = library.primaryGenreIndexScope
+    }
+
+    private static var applicationVersion: String {
+        let info = Bundle.main.infoDictionary ?? [:]
+        let version = info["CFBundleShortVersionString"] as? String ?? "unknown"
+        let build = info["CFBundleVersion"] as? String ?? "unknown"
+        return "\(version)(\(build))"
     }
 
     deinit {
         job?.cancel()
+        restoreTask?.cancel()
         permit.revoke()
     }
 
@@ -48,6 +62,9 @@ final class FoundationPrimaryGenresModel: ObservableObject {
             record = nil
             errorMessage = nil
             restored = false
+            restoreTask?.cancel()
+            restoreTask = nil
+            automaticAttempt = nil
             restoreID = UUID()
             publicationRevision += 1
             Task { await departing.retire() }
@@ -61,30 +78,73 @@ final class FoundationPrimaryGenresModel: ObservableObject {
     }
 
     func restoreBoundCache() async {
-        let library = library
-        guard !restored, let scope else { return }
-        restored = true
-        let owner = restoreID
-        do {
-            let saved = try await library.catalogPageCache?.readPrimaryGenres(
-                key: library.catalogCacheKey("primary-genres-v\(scope.policyVersion)"), scope: scope
-            )
-            guard owner == restoreID, self.scope == scope, !isBuilding else { return }
-            if let saved {
-                record = saved
-                publicationRevision += 1
-            }
-        } catch {
-            guard owner == restoreID, self.scope == scope else { return }
-            errorMessage = "The saved primary genre index could not be read. Build it again."
+        if let restoreTask {
+            await restoreTask.value
+            return
         }
+        guard !restored, let scope else { return }
+        let library = library
+        let owner = restoreID
+        let task = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let saved = try await library.catalogPageCache?.readPrimaryGenres(
+                    key: library.catalogCacheKey("primary-genres-v\(scope.policyVersion)"),
+                    scope: scope)
+                guard owner == self.restoreID, self.scope == scope, !self.isBuilding else { return }
+                if let saved {
+                    self.record = saved
+                    self.publicationRevision += 1
+                }
+            } catch {
+                guard owner == self.restoreID, self.scope == scope else { return }
+                self.errorMessage =
+                    "The saved primary genre index could not be read. Build it again."
+            }
+        }
+        restoreTask = task
+        await task.value
+        guard owner == restoreID, self.scope == scope else { return }
+        restored = true
+        restoreTask = nil
     }
 
-    func start() {
+    /// App/connectivity boundaries call this owner; ordinary view appearances never schedule a census.
+    /// A failed automatic attempt can be retried explicitly or after the next app launch.
+    func prepareAutomaticallyIfNeeded(allowsNetwork: Bool) async {
+        automaticNetworkAllowed = allowsNetwork
+        guard let scope else { return }
+        await restoreBoundCache()
+        guard allowsNetwork, automaticNetworkAllowed, self.scope == scope, !Task.isCancelled,
+            !isBuilding, record?.builtWithAppVersion != appVersion
+        else { return }
+        if let automaticAttempt, automaticAttempt.scope == scope,
+            automaticAttempt.version == appVersion
+        {
+            return
+        }
+        automaticAttempt = (scope, appVersion)
+        start(automatic: true)
+    }
+
+    /// Offline policy pauses network work without discarding previously published genres.
+    func suspendForOffline() {
+        automaticNetworkAllowed = false
+        if activeBuildIsAutomatic, isBuilding { automaticAttempt = nil }
+        cancel()
+    }
+
+    func start() { start(automatic: false) }
+
+    private func start(automatic: Bool) {
         guard !isBuilding, let scope else { return }
         let owner = UUID()
         operationID = owner
+        activeBuildIsAutomatic = automatic
         restoreID = UUID()
+        restoreTask?.cancel()
+        restoreTask = nil
+        restored = true
         permit.revoke()
         permit = FoundationPageWritePermit()
         let writePermit = permit
@@ -152,11 +212,16 @@ final class FoundationPrimaryGenresModel: ObservableObject {
                 self.record = result
                 self.publicationRevision += 1
                 if let cache = library.catalogPageCache {
+                    let saved = FoundationPrimaryGenreRecord(
+                        snapshot: result.snapshot, descriptors: result.descriptors,
+                        builtWithAppVersion: self.appVersion)
                     do {
                         try await cache.writePrimaryGenres(
-                            result,
+                            saved,
                             key: library.catalogCacheKey("primary-genres-v\(scope.policyVersion)"),
                             permit: writePermit)
+                        guard self.operationID == owner, self.scope == scope else { return }
+                        self.record = saved
                     } catch {
                         guard self.operationID == owner, self.scope == scope else { return }
                         self.errorMessage =
@@ -172,6 +237,7 @@ final class FoundationPrimaryGenresModel: ObservableObject {
             }
             guard self.operationID == owner else { return }
             self.isBuilding = false
+            self.activeBuildIsAutomatic = false
             self.job = nil
         }
     }
@@ -182,6 +248,7 @@ final class FoundationPrimaryGenresModel: ObservableObject {
         job?.cancel()
         job = nil
         isBuilding = false
+        activeBuildIsAutomatic = false
     }
 
     func retire() {
@@ -191,7 +258,11 @@ final class FoundationPrimaryGenresModel: ObservableObject {
         readySongIDs = []
         scope = nil
         restoreID = UUID()
+        restoreTask?.cancel()
+        restoreTask = nil
         restored = false
+        automaticNetworkAllowed = false
+        automaticAttempt = nil
         let departing = index
         Task { await departing.retire() }
     }

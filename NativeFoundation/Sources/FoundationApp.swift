@@ -709,7 +709,7 @@ final class FoundationAppModel: ObservableObject {
                 guard let self, let downloads, let connectivity,
                     self.connectivity === connectivity
                 else { return }
-                if connectivity.localOnly { self.primaryGenres?.cancel() }
+                if connectivity.localOnly { self.primaryGenres?.suspendForOffline() }
                 if connectivity.localOnly { self.player?.suspendReporting() }
                 if self.currentArtworkLocalOnly != connectivity.localOnly {
                     self.currentArtworkLocalOnly = connectivity.localOnly
@@ -719,6 +719,7 @@ final class FoundationAppModel: ObservableObject {
                 downloads.updateConnectivity(
                     isConnected: connectivity.isConnected,
                     usesWiFi: connectivity.usesWiFiOrWired)
+                await self.preparePrimaryGenresIfNeeded()
             }
         }.store(in: &policySubscriptions)
         preferences.$offlineMode.removeDuplicates().dropFirst().sink {
@@ -813,7 +814,7 @@ final class FoundationAppModel: ObservableObject {
         primaryGenres = nil
     }
 
-    /// One account/runtime owner shared by every window; binding never starts a census.
+    /// One account/runtime owner shared by every window; automatic preparation is version-scoped.
     func configurePrimaryGenres(_ library: any FoundationLibrary) {
         if let primaryGenres {
             primaryGenres.bind(library)
@@ -822,7 +823,17 @@ final class FoundationAppModel: ObservableObject {
         }
         guard let primaryGenres else { return }
         primaryGenres.bindDownloads(downloads)
-        Task { await primaryGenres.restoreBoundCache() }
+        Task { [weak self, weak primaryGenres] in
+            guard let self, let primaryGenres, self.primaryGenres === primaryGenres else { return }
+            await self.preparePrimaryGenresIfNeeded()
+        }
+    }
+
+    func preparePrimaryGenresIfNeeded() async {
+        guard let primaryGenres else { return }
+        if connectivity?.localOnly == true { primaryGenres.suspendForOffline() }
+        await primaryGenres.prepareAutomaticallyIfNeeded(
+            allowsNetwork: connectivity?.isConnected == true)
     }
 
     func signOut() {
@@ -1026,6 +1037,7 @@ struct FoundationRootView: View {
             if phase == .active {
                 model.playbackPreferences.refresh()
                 model.downloads?.reconcilePlaylists()
+                Task { await model.preparePrimaryGenresIfNeeded() }
             }
         }
         .alert(

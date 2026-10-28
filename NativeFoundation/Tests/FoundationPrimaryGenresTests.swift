@@ -277,7 +277,7 @@ final class FoundationPrimaryGenresTests: XCTestCase {
     private func library(
         recorder: PrimaryGenreRequests = PrimaryGenreRequests(),
         cache: FoundationCatalogPageCache? = nil,
-        failSecond: Bool = false
+        failSecond: Bool = false, gate: PrimaryGenreGate? = nil
     ) throws -> FoundationJellyfinLibrary {
         let first = try Self.body(start: 0, sets: [[1, 2, 3], [1, 2]], total: 4)
         let second = try Self.body(start: 2, sets: [[1], []], total: 4)
@@ -290,6 +290,7 @@ final class FoundationPrimaryGenresTests: XCTestCase {
                     ?? []
                 let searching = query.contains { $0.name == "searchTerm" }
                 let offset = query.first { $0.name == "startIndex" }?.value ?? "0"
+                if offset == "0", let gate { await gate.wait() }
                 if failSecond, offset == "2" { throw URLError(.timedOut) }
                 let data =
                     searching
@@ -368,6 +369,123 @@ final class FoundationPrimaryGenresTests: XCTestCase {
             _ = try await library.primaryGenreMetadataPage(startIndex: 0)
             XCTFail("Missing fields were interpreted as untagged")
         } catch { XCTAssertEqual(error as? FoundationPrimaryGenreIndex.Failure, .unknownMetadata) }
+    }
+
+    func testAutomaticPreparationWaitsForOnlineAndPersistsOneSuccessfulAppVersion() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let cache = FoundationCatalogPageCache(scope: "automatic-primary", root: root)
+        let requests = PrimaryGenreRequests()
+        let library = try library(recorder: requests, cache: cache)
+        let first = FoundationPrimaryGenresModel(library: library, appVersion: "0.6.0(247)")
+        await first.prepareAutomaticallyIfNeeded(allowsNetwork: false)
+        XCTAssertFalse(first.isBuilding)
+        let offlineReads = await requests.requests.count
+        XCTAssertEqual(offlineReads, 0)
+        async let one: Void = first.prepareAutomaticallyIfNeeded(allowsNetwork: true)
+        async let two: Void = first.prepareAutomaticallyIfNeeded(allowsNetwork: true)
+        _ = await (one, two)
+        await first.buildCompletion?.value
+        XCTAssertEqual(first.record?.builtWithAppVersion, "0.6.0(247)")
+        let afterFirst = await requests.requests.count
+        XCTAssertEqual(afterFirst, 2, "Concurrent app/connectivity boundaries share one census")
+        let nextLaunch = FoundationPrimaryGenresModel(library: library, appVersion: "0.6.0(247)")
+        await nextLaunch.prepareAutomaticallyIfNeeded(allowsNetwork: true)
+        XCTAssertFalse(nextLaunch.isBuilding)
+        XCTAssertEqual(nextLaunch.record, first.record)
+        let afterRelaunch = await requests.requests.count
+        XCTAssertEqual(
+            afterRelaunch, afterFirst, "A persisted successful marker suppresses duplicate work")
+    }
+
+    func testAppUpdatePublishesPreviousGenresWhileBuildingReplacement() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let cache = FoundationCatalogPageCache(scope: "automatic-update", root: root)
+        let firstLibrary = try library(cache: cache)
+        let first = FoundationPrimaryGenresModel(library: firstLibrary, appVersion: "0.6.0(246)")
+        await first.prepareAutomaticallyIfNeeded(allowsNetwork: true)
+        await first.buildCompletion?.value
+        let previous = try XCTUnwrap(first.record)
+        let gate = PrimaryGenreGate()
+        let updatedLibrary = try library(cache: cache, gate: gate)
+        let updated = FoundationPrimaryGenresModel(
+            library: updatedLibrary, appVersion: "0.6.0(247)")
+        await updated.prepareAutomaticallyIfNeeded(allowsNetwork: true)
+        await gate.started()
+        XCTAssertTrue(updated.isBuilding)
+        XCTAssertEqual(updated.record, previous)
+        await gate.release()
+        await updated.buildCompletion?.value
+        XCTAssertEqual(updated.record?.builtWithAppVersion, "0.6.0(247)")
+        XCTAssertNotEqual(updated.record?.snapshot.censusID, previous.snapshot.censusID)
+    }
+
+    func testFailedAutomaticBuildDoesNotMarkVersionOrLoopAndManualRebuildCanRecover() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let cache = FoundationCatalogPageCache(scope: "automatic-failure", root: root)
+        let requests = PrimaryGenreRequests()
+        let good = try library(recorder: requests, cache: cache)
+        let previous = FoundationPrimaryGenresModel(library: good, appVersion: "0.6.0(246)")
+        await previous.prepareAutomaticallyIfNeeded(allowsNetwork: true)
+        await previous.buildCompletion?.value
+        let accepted = try XCTUnwrap(previous.record)
+        let failing = try library(recorder: requests, cache: cache, failSecond: true)
+        let updated = FoundationPrimaryGenresModel(library: failing, appVersion: "0.6.0(247)")
+        await updated.prepareAutomaticallyIfNeeded(allowsNetwork: true)
+        await updated.buildCompletion?.value
+        XCTAssertEqual(updated.record, accepted)
+        XCTAssertNotNil(updated.errorMessage)
+        let failedReads = await requests.requests.count
+        await updated.prepareAutomaticallyIfNeeded(allowsNetwork: true)
+        await updated.prepareAutomaticallyIfNeeded(allowsNetwork: true)
+        let repeatedReads = await requests.requests.count
+        XCTAssertEqual(
+            repeatedReads, failedReads,
+            "Foreground/appearance changes cannot endlessly retry failure")
+        updated.bind(good)
+        updated.start()
+        await updated.buildCompletion?.value
+        XCTAssertEqual(updated.record?.builtWithAppVersion, "0.6.0(247)")
+    }
+
+    func testOfflineSuspensionRejectsLateAutomaticResultAndResumesAfterOnlineReturn() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let cache = FoundationCatalogPageCache(scope: "automatic-suspend", root: root)
+        let gate = PrimaryGenreGate()
+        let held = try library(cache: cache, gate: gate)
+        let model = FoundationPrimaryGenresModel(library: held, appVersion: "0.6.0(247)")
+        await model.prepareAutomaticallyIfNeeded(allowsNetwork: true)
+        await gate.started()
+        let old = model.buildCompletion
+        model.suspendForOffline()
+        await model.prepareAutomaticallyIfNeeded(allowsNetwork: false)
+        XCTAssertFalse(model.isBuilding)
+        await gate.release()
+        await old?.value
+        XCTAssertNil(model.record)
+        let good = try library(cache: cache)
+        model.bind(good)
+        await model.prepareAutomaticallyIfNeeded(allowsNetwork: true)
+        await model.buildCompletion?.value
+        XCTAssertEqual(model.record?.builtWithAppVersion, "0.6.0(247)")
+    }
+
+    func testFailedCacheWriteDoesNotPublishSuccessfulVersionMarker() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let cache = FoundationCatalogPageCache(scope: "automatic-write-failure", root: root)
+        _ = await cache.invalidate()
+        let library = try library(cache: cache)
+        let model = FoundationPrimaryGenresModel(library: library, appVersion: "0.6.0(247)")
+        await model.prepareAutomaticallyIfNeeded(allowsNetwork: true)
+        await model.buildCompletion?.value
+        XCTAssertNotNil(
+            model.record, "Complete in-memory data remains useful after a cache write failure")
+        XCTAssertNil(model.record?.builtWithAppVersion)
+        XCTAssertNotNil(model.errorMessage)
     }
 
     func testCompletedCacheRestoresWithoutNetworkAndFailedRefreshKeepsPreviousResult() async throws

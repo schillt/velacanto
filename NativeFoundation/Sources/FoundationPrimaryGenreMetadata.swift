@@ -16,6 +16,17 @@ struct FoundationPrimaryGenreMetadataPage: Sendable {
 struct FoundationPrimaryGenreRecord: Equatable, Codable, Sendable {
     let snapshot: FoundationPrimaryGenreIndex.Snapshot
     let descriptors: [FoundationItem]
+    /// Optional for records saved by earlier app versions. Persisted only after a complete census.
+    let builtWithAppVersion: String?
+
+    init(
+        snapshot: FoundationPrimaryGenreIndex.Snapshot, descriptors: [FoundationItem],
+        builtWithAppVersion: String? = nil
+    ) {
+        self.snapshot = snapshot
+        self.descriptors = descriptors
+        self.builtWithAppVersion = builtWithAppVersion
+    }
 
     func page(
         query: String = "", startIndex: Int = 0, limit: Int = 50,
@@ -92,7 +103,12 @@ struct FoundationPrimaryGenreRecord: Equatable, Codable, Sendable {
     /// Disk restoration is subject to the same bounds and source/policy checks as publication.
     func isValid(for scope: FoundationPrimaryGenreIndex.Scope) -> Bool {
         let limits = FoundationPrimaryGenreIndex.Limits()
-        guard snapshot.scope == scope,
+        guard
+            builtWithAppVersion.map({
+                !$0.isEmpty && $0.utf8.count <= 128
+                    && !$0.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains)
+            }) ?? true,
+            snapshot.scope == scope,
             scope.policyVersion == FoundationPrimaryGenreIndex.currentPolicyVersion,
             snapshot.songCount >= 0, snapshot.songCount <= limits.songs,
             snapshot.primaryBySongID.count == snapshot.songCount,
