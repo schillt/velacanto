@@ -806,12 +806,21 @@ private struct FoundationQueueView: View {
                         .toolbar {
                             if isPresented {
                                 ToolbarItem(placement: .principal) {
-                                    currentRow
-                                        .frame(width: max(0, geometry.size.width - 32), height: 44)
-                                        .padding(.vertical, 4)
-                                        .accessibilityElement(children: .contain)
+                                    if let current = player.queue.first(where: {
+                                        $0.id == player.selectedEntryID
+                                    }) {
+                                        currentTrack(current)
+                                            .frame(
+                                                width: max(0, geometry.size.width - 112), height: 36
+                                            )
+                                            .padding(.vertical, 8)
+                                            .accessibilityElement(children: .contain)
+                                    }
                                 }
                                 .sharedBackgroundVisibility(.hidden)
+                                ToolbarItemGroup(placement: .primaryAction) {
+                                    macModeControls
+                                }
                             }
                         }
                         .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
@@ -900,7 +909,7 @@ private struct FoundationQueueView: View {
 
     private var currentArtworkSize: CGFloat {
         #if os(macOS)
-            44
+            36
         #else
             64
         #endif
@@ -968,6 +977,40 @@ private struct FoundationQueueView: View {
             source: isCurrent ? .current(currentArtwork.result(for: entry.item)) : .catalog,
             item: entry.item, library: library, isActive: isPresented, size: size)
     }
+
+    #if os(macOS)
+        /// Native toolbar toggles own their glass, sizing and selected-state contrast.
+        private var macModeControls: some View {
+            Group {
+                Toggle(
+                    isOn: Binding(
+                        get: { player.shuffleEnabled },
+                        set: { player.setShuffle($0) }
+                    )
+                ) {
+                    Label("Shuffle", systemImage: "shuffle")
+                }
+                .accessibilityValue(player.shuffleEnabled ? "On" : "Off")
+                Toggle(
+                    isOn: Binding(
+                        get: { player.repeatMode != .off },
+                        set: { _ in
+                            let next: FoundationPlayer.RepeatMode =
+                                player.repeatMode == .off
+                                ? .all : player.repeatMode == .all ? .one : .off
+                            player.setRepeat(next)
+                        }
+                    )
+                ) {
+                    Label("Repeat", systemImage: player.repeatMode == .one ? "repeat.1" : "repeat")
+                }
+                .accessibilityValue(player.repeatMode.rawValue.capitalized)
+            }
+            .toggleStyle(.button)
+            .labelStyle(.iconOnly)
+            .controlSize(.regular)
+        }
+    #endif
 
     private var modeControls: some View {
         GlassEffectContainer(spacing: 8) {
