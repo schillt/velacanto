@@ -369,6 +369,7 @@ struct FoundationLibraryView: View {
                     FoundationPlaylistCreate(library: library)
                 case .credits(let item):
                     FoundationItemMetadataView(item: item, library: accountLibrary)
+                    .environmentObject(primaryGenres)
                 case .addSongs(let item):
                     FoundationPlaylistSongPicker(playlist: item, library: library)
                 case .reorderSongs(let item):
