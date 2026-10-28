@@ -71,13 +71,14 @@ struct FoundationPlayerView: View {
             GeometryReader { geometry in
                 VStack(spacing: 0) {
                     GeometryReader { artworkGeometry in
+                        let artworkHeight =
+                            artworkGeometry.size.width
+                            + max(0, artworkGeometry.size.height - artworkGeometry.size.width)
+                            * 0.75 + geometry.safeAreaInsets.top
                         ZStack(alignment: .topLeading) {
                             artworkView(
                                 size: artworkGeometry.size.width,
-                                height: artworkGeometry.size.width
-                                    + max(
-                                        0, artworkGeometry.size.height - artworkGeometry.size.width)
-                                    * 0.75 + geometry.safeAreaInsets.top
+                                height: artworkHeight
                             )
                             #if DEBUG && os(iOS) && targetEnvironment(simulator)
                                 .modifier(FoundationPlayerArtworkFixtureTarget())
@@ -86,22 +87,21 @@ struct FoundationPlayerView: View {
                                 .foundationPlayerArtworkRegistration(
                                     role: .expanded, identity: current?.sharedArtworkIdentity)
                             #endif
-                            .mask {
-                                LinearGradient(
-                                    stops: [
-                                        .init(color: .white, location: 0.84),
-                                        .init(color: .white.opacity(0.82), location: 0.90),
-                                        .init(color: .white.opacity(0.35), location: 0.96),
-                                        .init(color: .white.opacity(0.07), location: 0.99),
-                                        .init(color: .clear, location: 1),
-                                    ], startPoint: .top, endPoint: .bottom)
-                            }
+                            .mask(artworkFade)
                             .frame(width: artworkGeometry.size.width, alignment: .top)
                             .compositingGroup()
                             .offset(y: -geometry.safeAreaInsets.top)
                             .opacity(contentMode == .artwork ? 1 : 0)
                             .accessibilityHidden(lyricsPresentation != nil || showingQueue)
                             .allowsHitTesting(lyricsPresentation == nil && !showingQueue)
+                            #if os(iOS)
+                                FoundationPlayerQueueArtworkLayer(model: artworkPresentation)
+                                    .frame(width: artworkGeometry.size.width, height: artworkHeight)
+                                    .mask(artworkFade)
+                                    .offset(y: -geometry.safeAreaInsets.top)
+                                    .allowsHitTesting(false)
+                                    .accessibilityHidden(true)
+                            #endif
                             if let presentation = lyricsPresentation {
                                 let entry = presentation.entry
                                 FoundationLyricsView(
@@ -395,6 +395,17 @@ struct FoundationPlayerView: View {
         }
     #endif
 
+    private var artworkFade: LinearGradient {
+        LinearGradient(
+            stops: [
+                .init(color: .white, location: 0.84),
+                .init(color: .white.opacity(0.82), location: 0.90),
+                .init(color: .white.opacity(0.35), location: 0.96),
+                .init(color: .white.opacity(0.07), location: 0.99),
+                .init(color: .clear, location: 1),
+            ], startPoint: .top, endPoint: .bottom)
+    }
+
     @ViewBuilder private func artworkView(size: CGFloat, height: CGFloat) -> some View {
         if let album {
             FoundationCatalogArtwork(
@@ -611,6 +622,7 @@ private struct FoundationQueueView: View {
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     @State private var hasAnchoredOnOpen = false
+    @Environment(\.foundationReduceTransparency) private var reduceTransparency
     @State private var currentHeaderHeight: CGFloat = 0
     @State private var historyIsVisible = false
 
@@ -827,6 +839,9 @@ private struct FoundationQueueView: View {
                 Color.clear
             #else
                 Color(nsColor: .windowBackgroundColor)
+                    .overlay {
+                        if !reduceTransparency { Rectangle().fill(.regularMaterial) }
+                    }
             #endif
         }
     }

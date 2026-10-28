@@ -151,6 +151,7 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
         private var queueToken: UUID?
         private var queueImage: Artwork?
         private weak var queueContainer: UIView?
+        fileprivate weak var queueArtworkLayer: UIView?
         private var queueTarget: Role?
         private var queueGeometryScheduled = false
         private var queueRestingHero: (identity: String, frame: CGRect, bounds: CGRect)?
@@ -183,9 +184,9 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
                 let source = showing ? expanded : queueArtwork,
                 source.identity == image.identity, let view = source.view, let window = view.window
             else { return }
-            // The native SwiftUI cover has no custom UIKit host; both anchors still
-            // share their public window coordinate space.
-            let container: UIView = host?.view ?? window
+            // This explicit SwiftUI artwork plane shares the hero's fade mask and
+            // sits below queue content and transport, rather than above the window.
+            guard let container = queueArtworkLayer, container.window === window else { return }
             let frame =
                 priorIdentity == image.identity
                 ? priorFrame ?? view.convert(view.bounds, to: container)
@@ -195,7 +196,7 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
             }
             if showing, priorIdentity == nil || queueRestingHero?.identity != image.identity {
                 queueRestingHero = (
-                    image.identity, view.convert(view.bounds, to: container), container.bounds
+                    image.identity, view.convert(view.bounds, to: container), window.bounds
                 )
             }
             let snapshot = UIImageView(image: UIImage(cgImage: image.image))
@@ -274,7 +275,7 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
             let destination: CGRect
             if target == .expanded {
                 guard let resting = queueRestingHero, resting.identity == image.identity,
-                    resting.bounds == container.bounds
+                    resting.bounds == window.bounds
                 else {
                     cancelQueueTransition()
                     return
@@ -315,6 +316,12 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
                 snapshot?.removeFromSuperview()
             }
             animator.startAnimation()
+        }
+
+        fileprivate func retireQueueArtworkLayer(_ view: UIView) {
+            guard queueArtworkLayer === view else { return }
+            cancelQueueTransition()
+            queueArtworkLayer = nil
         }
 
         func cancelQueueTransition() {
@@ -495,11 +502,40 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
             queueArtwork = nil
             queueDisplayed = false
             queueRestingHero = nil
+            queueArtworkLayer = nil
             compactSurface = nil
             surfaceToken = nil
             surfaceIdentity = nil
             artwork = { nil }
             host = nil
+        }
+    }
+
+    /// A public, inert drawing plane composed under the player's existing fade.
+    struct FoundationPlayerQueueArtworkLayer: UIViewRepresentable {
+        let model: FoundationPlayerArtworkPresentationModel?
+
+        final class Coordinator {
+            weak var model: FoundationPlayerArtworkPresentationModel?
+        }
+
+        func makeCoordinator() -> Coordinator { Coordinator() }
+        func makeUIView(context: Context) -> UIView {
+            let view = UIView()
+            view.backgroundColor = .clear
+            view.isUserInteractionEnabled = false
+            view.accessibilityElementsHidden = true
+            return view
+        }
+        func updateUIView(_ view: UIView, context: Context) {
+            if context.coordinator.model !== model {
+                context.coordinator.model?.retireQueueArtworkLayer(view)
+            }
+            context.coordinator.model = model
+            model?.queueArtworkLayer = view
+        }
+        static func dismantleUIView(_ view: UIView, coordinator: Coordinator) {
+            coordinator.model?.retireQueueArtworkLayer(view)
         }
     }
 
