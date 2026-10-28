@@ -173,6 +173,8 @@ private struct FoundationOverviewSheet: View {
                 }
             }
         }
+        // Immersive detail controls may use a white tint; native sheet actions use the app accent.
+        .tint(.accentColor)
         .preferredColorScheme(browsingColorScheme ?? inheritedColorScheme)
         .presentationBackground(.background)
         .accessibilityAction(.escape, dismiss)
