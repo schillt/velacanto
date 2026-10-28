@@ -8,6 +8,112 @@ import XCTest
 final class FoundationHandoffControllerTests: XCTestCase {
     private let scope = String(repeating: "a", count: 64)
 
+    func testForegroundReassertsSameActivityAndHeaderWithoutChangingPlayback() throws {
+        var publications: [NSUserActivity] = []
+        let controller = FoundationHandoffController(publish: { publications.append($0) })
+        let player = FoundationPlayer(resolve: { _ in throw FoundationLibraryError.unavailable })
+        defer {
+            controller.invalidate()
+            player.stop()
+        }
+        let entry = FoundationQueueEntry(item: FoundationTestTones.items[0])
+        player.restoreSession(
+            .init(
+                entries: [entry], selectedEntryID: entry.id, shuffleEnabled: true, repeatMode: .one)
+        )
+        controller.configure(scope: scope, player: player, resolve: { $0 }, navigate: { _ in })
+        let activity = try XCTUnwrap(controller.activity)
+        let header = try activityHeader(controller)
+        let generation = player.continuationGeneration
+        controller.reassertCurrentActivityAfterForeground()
+        XCTAssertEqual(publications.count, 2)
+        XCTAssertTrue(publications.allSatisfy { $0 === activity })
+        XCTAssertEqual(try activityHeader(controller), header)
+        XCTAssertEqual(player.continuationGeneration, generation)
+        XCTAssertEqual(player.persistedQueue, [entry])
+        XCTAssertFalse(player.wantsPlayback)
+        XCTAssertTrue(player.shuffleEnabled)
+        XCTAssertEqual(player.repeatMode, .one)
+        activity.isEligibleForHandoff = false
+        controller.reassertCurrentActivityAfterForeground()
+        XCTAssertEqual(publications.count, 2)
+    }
+
+    func testForegroundWithoutEligibleActivityOrAfterRetirementDoesNotPublish() {
+        var publications = 0
+        let controller = FoundationHandoffController(publish: { _ in publications += 1 })
+        let player = FoundationPlayer(resolve: { _ in throw FoundationLibraryError.unavailable })
+        defer {
+            controller.invalidate()
+            player.stop()
+        }
+        controller.configure(scope: scope, player: player, resolve: { $0 }, navigate: { _ in })
+        controller.reassertCurrentActivityAfterForeground()
+        XCTAssertEqual(publications, 0)
+        controller.beginBrowse(
+            .init(id: "album", title: "Synthetic", subtitle: "", kind: .album, duration: nil),
+            owner: UUID())
+        XCTAssertEqual(publications, 1)
+        controller.invalidate()
+        controller.reassertCurrentActivityAfterForeground()
+        XCTAssertEqual(publications, 1)
+        XCTAssertNil(controller.activity)
+    }
+
+    func testForegroundDoesNotRepublishDuringIncomingPreparation() throws {
+        var publications = 0
+        let controller = FoundationHandoffController(
+            publish: { _ in publications += 1 }, requestStreams: { _, _ in })
+        let player = FoundationPlayer(resolve: { _ in throw FoundationLibraryError.unavailable })
+        defer {
+            controller.invalidate()
+            player.stop()
+        }
+        let entry = FoundationQueueEntry(item: FoundationTestTones.items[0])
+        player.restoreSession(
+            .init(
+                entries: [entry], selectedEntryID: entry.id, shuffleEnabled: false, repeatMode: .off
+            ))
+        controller.configure(scope: scope, player: player, resolve: { $0 }, navigate: { _ in })
+        let activity = try XCTUnwrap(controller.activity)
+        let offered = NSUserActivity(activityType: FoundationHandoffPayload.activityType)
+        offered.userInfo = [
+            FoundationHandoffPayload.userInfoKey:
+                try FoundationHandoffPayload.Header(scope: scope, kind: .playback).encoded()
+        ]
+        XCTAssertTrue(controller.receive(offered) { false })
+        controller.reassertCurrentActivityAfterForeground()
+        XCTAssertEqual(publications, 1)
+        XCTAssertTrue(controller.activity === activity)
+        XCTAssertEqual(player.persistedQueue, [entry])
+    }
+
+    func testForegroundPreservesPendingIncomingAndOutgoingNativeExchange() async throws {
+        var receiverPublications = 0
+        let fixture = try Fixture(
+            scope: scope, receiverPublish: { _ in receiverPublications += 1 })
+        defer { fixture.invalidate() }
+        try await offer(fixture)
+        let sourceActivity = try XCTUnwrap(fixture.source.activity)
+        let header = try activityHeader(fixture.source)
+        let pendingID = try XCTUnwrap(fixture.receiver.pending?.id)
+        let before = receiverPublications
+        var sourcePublications = 0
+        let observer = fixture.publications.sink { _ in sourcePublications += 1 }
+        defer { observer.cancel() }
+        fixture.source.reassertCurrentActivityAfterForeground()
+        fixture.receiver.reassertCurrentActivityAfterForeground()
+        XCTAssertEqual(sourcePublications, 0)
+        XCTAssertEqual(receiverPublications, before)
+        XCTAssertTrue(fixture.source.activity === sourceActivity)
+        XCTAssertEqual(try activityHeader(fixture.source), header)
+        XCTAssertEqual(fixture.receiver.pending?.id, pendingID)
+        fixture.receiver.acceptPending()
+        await restored(fixture)
+        XCTAssertEqual(fixture.receiverPlayer.persistedQueue.map(\.id), fixture.entries.map(\.id))
+        XCTAssertFalse(fixture.receiverPlayer.wantsPlayback)
+    }
+
     func testPausedFullQueueRequiresConfirmationAndDoesNotResolveAudio() async throws {
         let fixture = try Fixture(scope: scope)
         defer { fixture.invalidate() }
@@ -599,7 +705,8 @@ final class FoundationHandoffControllerTests: XCTestCase {
             scope: String, receivingScope: String? = nil, playing: Bool = false,
             failReceiverSeek: Bool = false, catalogItems: [FoundationItem]? = nil,
             resourceHold: ResourceHold? = nil, seekProbe: ReceiverSeekProbe? = nil,
-            activationHold: ResourceHold? = nil
+            activationHold: ResourceHold? = nil,
+            receiverPublish: @escaping @MainActor (NSUserActivity) -> Void = { _ in }
         ) throws {
             let publications = PassthroughSubject<FoundationHandoffPayload.Header, Never>()
             self.publications = publications
@@ -613,7 +720,7 @@ final class FoundationHandoffControllerTests: XCTestCase {
             let native = try FoundationHandoffStreamTests.pair()
             let sourceOwner = source
             receiver = FoundationHandoffController(
-                publish: { _ in },
+                publish: receiverPublish,
                 requestStreams: { activity, completion in
                     sourceOwner.userActivity(
                         activity, didReceive: native.0.input, outputStream: native.0.output)

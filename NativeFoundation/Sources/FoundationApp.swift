@@ -1035,6 +1035,7 @@ struct FoundationRootView: View {
         #endif
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {
+                model.handoff.reassertCurrentActivityAfterForeground()
                 model.playbackPreferences.refresh()
                 model.downloads?.reconcilePlaylists()
                 Task { await model.preparePrimaryGenresIfNeeded() }

@@ -140,6 +140,18 @@ final class FoundationHandoffController: NSObject, ObservableObject, NSUserActiv
         publishActivity()
     }
 
+    /// Reassert the retained advertisement at a real foreground boundary. This is lifetime
+    /// hardening, not a discovery guarantee; native exchange ownership and intent stay unchanged.
+    func reassertCurrentActivityAfterForeground() {
+        guard context != nil, let kind = advertisedKind, let activity,
+            header?.kind == kind, activity.isEligibleForHandoff,
+            !applying, incomingID == nil, incoming == nil, pending == nil,
+            preparationTask == nil, receivingTask == nil, acceptanceTask == nil,
+            outgoing == nil, sourceTransfer == nil
+        else { return }
+        publish(activity)
+    }
+
     func invalidate() {
         context = nil
         player = nil
