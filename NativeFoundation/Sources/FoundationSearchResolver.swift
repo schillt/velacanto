@@ -597,8 +597,12 @@ struct FoundationSearchResolver: Sendable {
     private var budget = FoundationCatalogBudget()
     private let scope: String
 
-    init(scope: String, seed: FoundationPlaylistContentPage) {
+    init(
+        scope: String, seed: FoundationPlaylistContentPage,
+        limits: FoundationCatalogBudget = .init()
+    ) {
         self.scope = scope
+        budget = limits
         items = seed.items
         cursor =
             seed.continuation
@@ -606,6 +610,20 @@ struct FoundationSearchResolver: Sendable {
                 .init(candidateOffset: $0, pending: [])
             }
         incomplete = seed.hasIncompleteCoverage
+        let page = FoundationPage(items: seed.items, nextStartIndex: nil)
+        guard seed.items.count <= FoundationPlaylistContentSearch.candidateLimit,
+            seed.items.allSatisfy({ $0.kind == .playlist }),
+            let cost = budget.cost(of: page), budget.canRetain(cost)
+        else {
+            items = []
+            cursor = nil
+            incomplete = true
+            error = .invalidResponse
+            return
+        }
+        budget.requestedPages += 1
+        budget.retainedItems += cost.items
+        budget.retainedBytes += cost.bytes
     }
 
     func cancel() {
@@ -621,6 +639,7 @@ struct FoundationSearchResolver: Sendable {
         }
         let identity = UUID()
         owner = identity
+        budget.requestedPages += 1
         loading = true
         error = nil
         defer { if owner == identity { loading = false } }
@@ -632,7 +651,6 @@ struct FoundationSearchResolver: Sendable {
             guard let cost = budget.cost(of: raw), budget.canRetain(cost) else {
                 throw FoundationLibraryError.invalidResponse
             }
-            budget.requestedPages += 1
             budget.retainedItems += cost.items
             budget.retainedBytes += cost.bytes
             var seen = Set(items.map(\.id))

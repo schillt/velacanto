@@ -464,6 +464,52 @@ final class FoundationPlaylistContentSearchTests: XCTestCase {
         }
     }
 
+    func testTypedProviderRejectsMalformedCursorBeforeTransport() async {
+        let requests = PlaylistContentRequests()
+        let library = Self.library(requests: requests)
+        for cursor in [
+            FoundationPlaylistContentCursor(candidateOffset: -1, pending: []),
+            FoundationPlaylistContentCursor(
+                candidateOffset: nil,
+                pending: [.init(playlist: Self.item("../bad", kind: .playlist), trackOffset: 0)]),
+            FoundationPlaylistContentCursor(
+                candidateOffset: nil,
+                pending: [.init(playlist: Self.item(Self.id(1), kind: .playlist), trackOffset: -1)]),
+            FoundationPlaylistContentCursor(
+                candidateOffset: nil,
+                pending: (0..<7).map {
+                    .init(playlist: Self.item(Self.id($0), kind: .playlist), trackOffset: 0)
+                }),
+        ] {
+            do {
+                _ = try await library.playlistsContainingMusic(
+                    context: .init(trackIDs: [Self.id(2)]), cursor: cursor)
+                XCTFail("Malformed cursor must fail before transport")
+            } catch { XCTAssertEqual(error as? FoundationLibraryError, .invalidResponse) }
+        }
+        let calls = await requests.values
+        XCTAssertTrue(calls.isEmpty)
+    }
+
+    @MainActor
+    func testLookupSeedCountsTowardExistingRetentionBudget() async {
+        let requests = PlaylistContentRequests()
+        let library = Self.library(requests: requests)
+        var limits = FoundationCatalogBudget()
+        limits.maximumItems = 1
+        let seedItem = Self.item(Self.id(1), kind: .playlist)
+        let model = FoundationPlaylistLookupModel(
+            scope: library.metadataScopeID,
+            seed: .init(
+                items: [seedItem], nextStartIndex: 6, hasIncompleteCoverage: true,
+                partialFailureCount: 0), limits: limits)
+        await model.load(context: .init(trackIDs: [Self.id(2)]), library: library)
+        XCTAssertEqual(model.items, [seedItem])
+        XCTAssertEqual(model.error, .invalidResponse)
+        let calls = await requests.values
+        XCTAssertTrue(calls.isEmpty, "Retained seed already exhausts the configured item budget")
+    }
+
     private static func id(_ suffix: Int) -> String { String(format: "%032x", suffix) }
 
     private static func query(_ request: URLRequest, _ name: String) -> String? {

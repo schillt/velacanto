@@ -1547,11 +1547,16 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
     func playlistsContainingMusic(
         context: FoundationMusicSearchContext, cursor: FoundationPlaylistContentCursor
     ) async throws -> FoundationPlaylistContentPage {
+        try Task.checkCancellation()
         try context.validate()
         guard context.identities.allSatisfy(Self.validID),
+            cursor.pending.count <= FoundationPlaylistContentSearch.candidateLimit,
+            cursor.candidateOffset.map({ $0 >= 0 }) ?? true,
             cursor.pending.allSatisfy({
-                Self.validID($0.playlist.id) && acceptsCatalogItem($0.playlist)
-            }), catalogAvailable
+                Self.validID($0.playlist.id) && $0.playlist.kind == .playlist && $0.trackOffset >= 0
+            })
+        else { throw FoundationLibraryError.invalidResponse }
+        guard catalogAvailable, cursor.pending.allSatisfy({ acceptsCatalogItem($0.playlist) })
         else { throw FoundationLibraryError.unavailable }
         let omitted =
             musicLibraryID != nil && (!context.artistIDs.isEmpty || !context.genreIDs.isEmpty)
