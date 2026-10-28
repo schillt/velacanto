@@ -152,11 +152,21 @@ struct FoundationMusicSearchContext: Sendable {
 }
 
 /// The cursor advances through inspected playlist candidates, not through matching results.
+struct FoundationPlaylistContentCursor: Sendable, Equatable {
+    struct Pending: Sendable, Equatable {
+        let playlist: FoundationItem
+        let trackOffset: Int
+    }
+    let candidateOffset: Int?
+    let pending: [Pending]
+}
+
 struct FoundationPlaylistContentPage: Sendable {
     let items: [FoundationItem]
     let nextStartIndex: Int?
     let hasIncompleteCoverage: Bool
     let partialFailureCount: Int
+    var continuation: FoundationPlaylistContentCursor? = nil
 }
 
 /// One bounded batch: six playlist candidates and at most their first 100 tracks each.
@@ -164,65 +174,85 @@ enum FoundationPlaylistContentSearch {
     static let candidateLimit = 6
     static let trackLimit = 100
 
-    static func resolve(
-        context: FoundationMusicSearchContext, startIndex: Int,
+    /// Each explicit continuation checks at most six track pages. Pending long
+    /// playlists finish before the next candidate batch; a match ends that playlist.
+    static func continueSearch(
+        context: FoundationMusicSearchContext, cursor: FoundationPlaylistContentCursor,
         playlists: @Sendable (Int, Int) async throws -> FoundationPage,
-        tracks: @Sendable (String) async throws -> FoundationPage
+        tracks: @Sendable (String, Int) async throws -> FoundationPage
     ) async throws -> FoundationPlaylistContentPage {
         try Task.checkCancellation()
         try context.validate()
-        guard startIndex >= 0 else { throw FoundationLibraryError.invalidResponse }
+        guard cursor.pending.count <= candidateLimit,
+            cursor.candidateOffset.map({ $0 >= 0 }) ?? true,
+            cursor.pending.allSatisfy({ $0.playlist.kind == .playlist && $0.trackOffset >= 0 })
+        else { throw FoundationLibraryError.invalidResponse }
         guard !context.isEmpty else {
             return .init(
-                items: [], nextStartIndex: nil, hasIncompleteCoverage: false,
-                partialFailureCount: 0)
+                items: [], nextStartIndex: nil, hasIncompleteCoverage: false, partialFailureCount: 0
+            )
         }
-        let candidates: FoundationPage
-        do {
-            candidates = try await playlists(startIndex, candidateLimit)
+        var pending = cursor.pending
+        var candidateOffset = cursor.candidateOffset
+        if pending.isEmpty, let offset = candidateOffset {
+            let page = try await playlists(offset, candidateLimit)
             try Task.checkCancellation()
-        } catch {
-            try Task.checkCancellation()
-            let category = FoundationLibraryError.category(error)
-            if category == .cancelled { throw CancellationError() }
-            throw category
+            guard page.items.count <= candidateLimit,
+                page.items.allSatisfy({ $0.kind == .playlist && !$0.id.isEmpty }),
+                page.nextStartIndex.map({ $0 > offset && !page.items.isEmpty }) ?? true
+            else { throw FoundationLibraryError.invalidResponse }
+            var seen = Set<String>()
+            pending = page.items.filter { seen.insert($0.id).inserted }.map {
+                .init(playlist: $0, trackOffset: 0)
+            }
+            candidateOffset = page.nextStartIndex
         }
-        guard candidates.items.count <= candidateLimit,
-            candidates.items.allSatisfy({ $0.kind == .playlist && !$0.id.isEmpty }),
-            candidates.nextStartIndex.map({ $0 > startIndex && !candidates.items.isEmpty }) ?? true
-        else { throw FoundationLibraryError.invalidResponse }
+        var remaining: [FoundationPlaylistContentCursor.Pending] = []
         var matches: [FoundationItem] = []
-        var inspected: Set<String> = []
-        var incomplete = candidates.nextStartIndex != nil
-        var failureCount = 0
-        for playlist in candidates.items where inspected.insert(playlist.id).inserted {
+        var failures = 0
+        for entry in pending {
             try Task.checkCancellation()
             do {
-                let contents = try await tracks(playlist.id)
+                let page = try await tracks(entry.playlist.id, entry.trackOffset)
                 try Task.checkCancellation()
-                guard contents.items.count <= trackLimit,
-                    contents.items.allSatisfy({ $0.kind == .track }),
-                    contents.nextStartIndex.map({ $0 > 0 && !contents.items.isEmpty }) ?? true
+                guard page.items.count <= trackLimit, page.items.allSatisfy({ $0.kind == .track }),
+                    page.nextStartIndex.map({ $0 > entry.trackOffset && !page.items.isEmpty })
+                        ?? true
                 else { throw FoundationLibraryError.invalidResponse }
-                incomplete = incomplete || contents.nextStartIndex != nil
-                if contents.items.contains(where: context.matches(track:)) {
-                    matches.append(playlist)
+                if page.items.contains(where: context.matches(track:)) {
+                    matches.append(entry.playlist)
+                } else if let next = page.nextStartIndex {
+                    remaining.append(.init(playlist: entry.playlist, trackOffset: next))
                 }
             } catch {
                 try Task.checkCancellation()
                 let category = FoundationLibraryError.category(error)
                 if category == .cancelled { throw CancellationError() }
-                // A missing optional playlist or transport failure is partial; authentication stays actionable.
                 guard category == .network || category == .unavailable else { throw category }
-                failureCount += 1
-                incomplete = true
+                failures += 1
+                remaining.append(entry)
             }
         }
         try Task.checkCancellation()
+        let next: FoundationPlaylistContentCursor? =
+            remaining.isEmpty && candidateOffset == nil
+            ? nil : .init(candidateOffset: candidateOffset, pending: remaining)
         return .init(
-            items: matches, nextStartIndex: candidates.nextStartIndex,
-            hasIncompleteCoverage: incomplete, partialFailureCount: failureCount)
+            items: matches, nextStartIndex: candidateOffset,
+            hasIncompleteCoverage: next != nil, partialFailureCount: failures, continuation: next)
     }
+
+    static func resolve(
+        context: FoundationMusicSearchContext, startIndex: Int,
+        playlists: @Sendable (Int, Int) async throws -> FoundationPage,
+        tracks: @Sendable (String) async throws -> FoundationPage
+    ) async throws -> FoundationPlaylistContentPage {
+        try await continueSearch(
+            context: context,
+            cursor: .init(candidateOffset: startIndex, pending: []),
+            playlists: playlists, tracks: { id, _ in try await tracks(id) })
+    }
+
 }
 
 struct FoundationSession: Codable, Sendable {
@@ -503,6 +533,9 @@ protocol FoundationLibrary: Sendable {
     func playlistTracks(playlistID: String, startIndex: Int) async throws -> FoundationPage
     func playlistsContainingMusic(context: FoundationMusicSearchContext, startIndex: Int)
         async throws -> FoundationPlaylistContentPage
+    func playlistsContainingMusic(
+        context: FoundationMusicSearchContext, cursor: FoundationPlaylistContentCursor
+    ) async throws -> FoundationPlaylistContentPage
     func favorites(startIndex: Int) async throws -> FoundationPage
     func favorites(kind: FoundationItem.Kind, startIndex: Int) async throws -> FoundationPage
     func genres(startIndex: Int) async throws -> FoundationPage
@@ -687,6 +720,14 @@ extension FoundationLibrary {
     func playlistsContainingMusic(context: FoundationMusicSearchContext, startIndex: Int)
         async throws -> FoundationPlaylistContentPage
     { throw FoundationLibraryError.unavailable }
+    func playlistsContainingMusic(
+        context: FoundationMusicSearchContext, cursor: FoundationPlaylistContentCursor
+    ) async throws -> FoundationPlaylistContentPage {
+        guard cursor.pending.isEmpty, let offset = cursor.candidateOffset else {
+            throw FoundationLibraryError.unavailable
+        }
+        return try await playlistsContainingMusic(context: context, startIndex: offset)
+    }
     func favorites(kind: FoundationItem.Kind, startIndex: Int) async throws -> FoundationPage {
         throw FoundationLibraryError.unavailable
     }
@@ -1498,17 +1539,44 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
         guard catalogAvailable else { throw FoundationLibraryError.unavailable }
         // Artist and genre identities may span libraries. A selected library uses only its
         // resolved track/album identities; omitted relationships remain explicitly incomplete.
-        let result = try await FoundationPlaylistContentSearch.resolve(
-            context: effectiveContext, startIndex: startIndex,
+        return try await contentSearch(
+            context: effectiveContext, cursor: .init(candidateOffset: startIndex, pending: []),
+            omitted: omitsSharedIdentities)
+    }
+
+    func playlistsContainingMusic(
+        context: FoundationMusicSearchContext, cursor: FoundationPlaylistContentCursor
+    ) async throws -> FoundationPlaylistContentPage {
+        try context.validate()
+        guard context.identities.allSatisfy(Self.validID),
+            cursor.pending.allSatisfy({
+                Self.validID($0.playlist.id) && acceptsCatalogItem($0.playlist)
+            }), catalogAvailable
+        else { throw FoundationLibraryError.unavailable }
+        let omitted =
+            musicLibraryID != nil && (!context.artistIDs.isEmpty || !context.genreIDs.isEmpty)
+        let effective =
+            musicLibraryID == nil
+            ? context
+            : FoundationMusicSearchContext(trackIDs: context.trackIDs, albumIDs: context.albumIDs)
+        return try await contentSearch(context: effective, cursor: cursor, omitted: omitted)
+    }
+
+    private func contentSearch(
+        context: FoundationMusicSearchContext, cursor: FoundationPlaylistContentCursor,
+        omitted: Bool
+    ) async throws -> FoundationPlaylistContentPage {
+        let result = try await FoundationPlaylistContentSearch.continueSearch(
+            context: context, cursor: cursor,
             playlists: { offset, limit in
                 try await page(kinds: [.playlist], parent: nil, startIndex: offset, limit: limit)
             },
-            tracks: { id in try await playlistTracks(playlistID: id, startIndex: 0) })
+            tracks: { id, offset in try await playlistTracks(playlistID: id, startIndex: offset) })
         try Task.checkCancellation()
         return .init(
             items: result.items, nextStartIndex: result.nextStartIndex,
-            hasIncompleteCoverage: result.hasIncompleteCoverage || omitsSharedIdentities,
-            partialFailureCount: result.partialFailureCount)
+            hasIncompleteCoverage: result.hasIncompleteCoverage || omitted,
+            partialFailureCount: result.partialFailureCount, continuation: result.continuation)
     }
 
     func playlistTracks(playlistID: String, startIndex: Int = 0) async throws -> FoundationPage {

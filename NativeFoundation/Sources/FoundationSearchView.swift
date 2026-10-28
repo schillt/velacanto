@@ -66,6 +66,12 @@ struct FoundationSearchView<Profile: View>: View {
                             initialPage: category.page, initialLocalOnly: category.localOnly,
                             showsContent: presented)
                     }
+                } else if let context = category.musicContext, let seed = category.contentPage {
+                    FoundationPlaylistLookupView(
+                        title: category.title, context: context, seed: seed,
+                        library: library, player: player, isActive: isActive
+                    )
+                    .id(category.title + library.metadataScopeID)
                 } else {
                     FoundationSearchCategory(
                         title: category.title, query: term, kind: category.kind,
@@ -209,6 +215,7 @@ private struct FoundationSearchCategorySelection {
     let localOnly: Bool
     var musicContext: FoundationMusicSearchContext? = nil
     var incompleteCoverage = false
+    var contentPage: FoundationPlaylistContentPage? = nil
 }
 
 private struct FoundationSearchOverview: View {
@@ -308,10 +315,18 @@ private struct FoundationSearchOverview: View {
                         }
                     }
                 }
-                if let playlistContents,
-                    !playlistContents.items.isEmpty || playlistContents.hasIncompleteCoverage
-                {
-                    playlistContentSection(playlistContents)
+                if let playlistContents {
+                    if !playlistContents.items.isEmpty {
+                        playlistContentSection(playlistContents)
+                    } else if playlistContents.hasIncompleteCoverage {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Button("Check playlists for matching music") {
+                                openPlaylistLookup(playlistContents)
+                            }.accessibilityIdentifier("search-playlist-lookup")
+                            Text("Not every playlist has been checked yet.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
                 }
                 if let error = playlistContentError {
                     Text(error.localizedDescription).foregroundStyle(.red)
@@ -498,17 +513,20 @@ private struct FoundationSearchOverview: View {
         }
     }
 
+    private func openPlaylistLookup(_ page: FoundationPlaylistContentPage) {
+        openCategory(
+            .init(
+                title: "Playlists with “" + query + "”", kind: .playlist,
+                page: .init(items: page.items, nextStartIndex: nil), localOnly: false,
+                musicContext: playlistMusicContext, incompleteCoverage: page.hasIncompleteCoverage,
+                contentPage: page))
+    }
+
     private func playlistContentSection(_ page: FoundationPlaylistContentPage) -> some View {
         let title = "Playlists with “" + query + "”"
         return VStack(alignment: .leading, spacing: 12) {
             Button {
-                openCategory(
-                    .init(
-                        title: title, kind: .playlist,
-                        page: .init(items: page.items, nextStartIndex: page.nextStartIndex),
-                        localOnly: false, musicContext: playlistMusicContext,
-                        incompleteCoverage: page.hasIncompleteCoverage
-                            || page.partialFailureCount > 0))
+                openPlaylistLookup(page)
             } label: {
                 HStack(spacing: 6) {
                     Text(title).font(.title2.bold())
@@ -685,5 +703,81 @@ private struct FoundationSearchCategory: View {
             downloads.localSearchItems(query: query, kind: kind)
             + current.filter { seedIdentities.contains($0.id) }
         results.installSnapshot(FoundationSearchResolver.ranked(matches, query: query))
+    }
+}
+
+private struct FoundationPlaylistLookupView: View {
+    @EnvironmentObject private var connectivity: FoundationConnectivity
+    let title: String
+    let context: FoundationMusicSearchContext
+    let library: any FoundationLibrary
+    @ObservedObject var player: FoundationPlayer
+    let isActive: Bool
+    @StateObject private var model: FoundationPlaylistLookupModel
+    @State private var request = 0
+    @State private var handledRequest = 0
+    @State private var visible = false
+    @State private var openedItem: FoundationItem?
+
+    init(
+        title: String, context: FoundationMusicSearchContext, seed: FoundationPlaylistContentPage,
+        library: any FoundationLibrary, player: FoundationPlayer, isActive: Bool
+    ) {
+        self.title = title
+        self.context = context
+        self.library = library
+        self.player = player
+        self.isActive = isActive
+        _model = StateObject(
+            wrappedValue: FoundationPlaylistLookupModel(scope: library.metadataScopeID, seed: seed))
+    }
+
+    var body: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 16) {
+                ForEach(model.items) { item in
+                    FoundationLibraryItemRow(
+                        item: item, library: library,
+                        isActive: isActive && visible, open: { openedItem = item },
+                        player: player, showsTrackArtwork: true, navigate: { openedItem = $0 })
+                }
+                if model.loading { FoundationLoadingPlaceholder() }
+                if let error = model.error {
+                    Text(error.localizedDescription).foregroundStyle(.secondary)
+                }
+                if model.cursor != nil {
+                    Text("More playlists or tracks remain to be checked.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Button(model.error == nil ? "Check more playlists" : "Retry playlist check") {
+                        request += 1
+                    }.disabled(model.loading || connectivity.localOnly || !isActive)
+                        .accessibilityIdentifier("search-playlist-check-more")
+                } else if model.incomplete {
+                    Text("Some music relationships could not be checked in this library.")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else if model.items.isEmpty {
+                    Text("No playlists contain the matching music.").foregroundStyle(.secondary)
+                }
+            }.padding().foundationBottomChromeEndPadding()
+        }
+        .foundationBottomChromeScrollClearance()
+        .foundationCatalogHeader(title)
+        .foundationCollectionDestination(
+            item: $openedItem, library: library, player: player, isActive: isActive
+        )
+        .onAppear { visible = true }
+        .onDisappear {
+            visible = false
+            model.cancel()
+        }
+        .onChange(of: connectivity.localOnly) { _, _ in model.cancel() }
+        .onChange(of: isActive) { _, active in if !active { model.cancel() } }
+        .task(id: "\(request)-\(isActive && visible)-\(connectivity.localOnly)") {
+            guard request > handledRequest, isActive, visible, !connectivity.localOnly else {
+                return
+            }
+            handledRequest = request
+            await model.load(context: context, library: library)
+        }
     }
 }

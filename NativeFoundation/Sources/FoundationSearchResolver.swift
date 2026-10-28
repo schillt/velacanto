@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 
 /// Resolves a bounded query snapshot. Callers own cancellation and source/query identity.
@@ -582,5 +583,73 @@ struct FoundationSearchResolver: Sendable {
     private static func unique(_ items: [FoundationItem]) -> [FoundationItem] {
         var seen: Set<String> = []
         return items.filter { seen.insert(key($0)).inserted }
+    }
+}
+
+/// Explicit lookup owner: empty matching pages may still advance the inspected cursor.
+@MainActor final class FoundationPlaylistLookupModel: ObservableObject {
+    @Published private(set) var items: [FoundationItem]
+    @Published private(set) var cursor: FoundationPlaylistContentCursor?
+    @Published private(set) var incomplete: Bool
+    @Published private(set) var error: FoundationLibraryError?
+    @Published private(set) var loading = false
+    private var owner = UUID()
+    private var budget = FoundationCatalogBudget()
+    private let scope: String
+
+    init(scope: String, seed: FoundationPlaylistContentPage) {
+        self.scope = scope
+        items = seed.items
+        cursor =
+            seed.continuation
+            ?? seed.nextStartIndex.map {
+                .init(candidateOffset: $0, pending: [])
+            }
+        incomplete = seed.hasIncompleteCoverage
+    }
+
+    func cancel() {
+        owner = UUID()
+        loading = false
+    }
+
+    func load(context: FoundationMusicSearchContext, library: any FoundationLibrary) async {
+        guard !loading, library.metadataScopeID == scope, let cursor else { return }
+        guard budget.canRequestPage else {
+            error = .invalidResponse
+            return
+        }
+        let identity = UUID()
+        owner = identity
+        loading = true
+        error = nil
+        defer { if owner == identity { loading = false } }
+        do {
+            let page = try await library.playlistsContainingMusic(context: context, cursor: cursor)
+            try Task.checkCancellation()
+            guard owner == identity, library.metadataScopeID == scope else { return }
+            let raw = FoundationPage(items: page.items, nextStartIndex: nil)
+            guard let cost = budget.cost(of: raw), budget.canRetain(cost) else {
+                throw FoundationLibraryError.invalidResponse
+            }
+            budget.requestedPages += 1
+            budget.retainedItems += cost.items
+            budget.retainedBytes += cost.bytes
+            var seen = Set(items.map(\.id))
+            items += page.items.filter { seen.insert($0.id).inserted }
+            self.cursor =
+                page.continuation
+                ?? page.nextStartIndex.map {
+                    .init(candidateOffset: $0, pending: [])
+                }
+            incomplete = page.hasIncompleteCoverage
+            if page.partialFailureCount > 0 { error = .network }
+        } catch {
+            guard owner == identity, library.metadataScopeID == scope, !Task.isCancelled else {
+                return
+            }
+            let category = FoundationLibraryError.category(error)
+            if category != .cancelled { self.error = category }
+        }
     }
 }

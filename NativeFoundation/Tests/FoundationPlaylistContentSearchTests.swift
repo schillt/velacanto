@@ -282,6 +282,188 @@ final class FoundationPlaylistContentSearchTests: XCTestCase {
         XCTAssertTrue(calls.isEmpty)
     }
 
+    func testTypedContinuationFindsMatchBeyondFirstHundredWithoutReadingNextCandidates()
+        async throws
+    {
+        let playlist = Self.item("long", kind: .playlist)
+        let calls = TypedPlaylistCalls()
+        let first = try await FoundationPlaylistContentSearch.continueSearch(
+            context: .init(trackIDs: ["selected"]),
+            cursor: .init(candidateOffset: 0, pending: []),
+            playlists: { offset, limit in
+                XCTAssertEqual(offset, 0)
+                XCTAssertEqual(limit, 6)
+                await calls.candidate()
+                return .init(items: [playlist], nextStartIndex: 6)
+            },
+            tracks: { id, offset in
+                await calls.track(offset)
+                XCTAssertEqual(id, "long")
+                XCTAssertEqual(offset, 0)
+                return .init(items: [Self.item("other", kind: .track)], nextStartIndex: 100)
+            })
+        XCTAssertTrue(first.items.isEmpty)
+        let cursor = try XCTUnwrap(first.continuation)
+        XCTAssertEqual(cursor.pending.first?.trackOffset, 100)
+        XCTAssertEqual(cursor.candidateOffset, 6)
+        let second = try await FoundationPlaylistContentSearch.continueSearch(
+            context: .init(trackIDs: ["selected"]), cursor: cursor,
+            playlists: { _, _ in
+                XCTFail("Pending page must precede candidate lookup")
+                return .init(items: [], nextStartIndex: nil)
+            },
+            tracks: { _, offset in
+                await calls.track(offset)
+                XCTAssertEqual(offset, 100)
+                return .init(items: [Self.item("selected", kind: .track)], nextStartIndex: 200)
+            })
+        XCTAssertEqual(second.items.map(\.id), ["long"])
+        XCTAssertTrue(second.continuation?.pending.isEmpty == true)
+        XCTAssertEqual(second.continuation?.candidateOffset, 6)
+        let recorded = await calls.offsets
+        XCTAssertEqual(recorded, [0, 100])
+        let candidateCount = await calls.candidates
+        XCTAssertEqual(candidateCount, 1)
+    }
+
+    func testTypedEmptyBatchesAdvanceThenCompleteWithoutAutomaticFollowing() async throws {
+        let calls = TypedPlaylistCalls()
+        for offset in [0, 6] {
+            let result = try await FoundationPlaylistContentSearch.continueSearch(
+                context: .init(trackIDs: ["selected"]),
+                cursor: .init(candidateOffset: offset, pending: []),
+                playlists: { actual, _ in
+                    await calls.candidate()
+                    XCTAssertEqual(actual, offset)
+                    return .init(
+                        items: [Self.item("playlist-\(offset)", kind: .playlist)],
+                        nextStartIndex: offset == 0 ? 6 : nil)
+                },
+                tracks: { _, _ in
+                    return .init(items: [Self.item("other", kind: .track)], nextStartIndex: nil)
+                })
+            XCTAssertTrue(result.items.isEmpty)
+            XCTAssertEqual(result.continuation?.candidateOffset, offset == 0 ? 6 : nil)
+            XCTAssertEqual(result.hasIncompleteCoverage, offset == 0)
+        }
+        let count = await calls.candidates
+        XCTAssertEqual(count, 2)
+    }
+
+    func testTypedRecoverableFailureRetainsExactTrackCursorForExplicitRetry() async throws {
+        let entry = FoundationPlaylistContentCursor.Pending(
+            playlist: Self.item("long", kind: .playlist), trackOffset: 200)
+        let result = try await FoundationPlaylistContentSearch.continueSearch(
+            context: .init(trackIDs: ["selected"]),
+            cursor: .init(candidateOffset: nil, pending: [entry]),
+            playlists: { _, _ in
+                XCTFail("No candidate read")
+                return .init(items: [], nextStartIndex: nil)
+            },
+            tracks: { _, offset in
+                XCTAssertEqual(offset, 200)
+                throw FoundationLibraryError.network
+            })
+        XCTAssertEqual(result.continuation?.pending, [entry])
+        XCTAssertEqual(result.partialFailureCount, 1)
+        XCTAssertTrue(result.hasIncompleteCoverage)
+    }
+
+    @MainActor
+    func testLookupOwnerDoesNotReadUntilExplicitLoadAndRejectsOtherAccount() async throws {
+        let requests = PlaylistContentRequests()
+        let library = Self.library(requests: requests)
+        let cursor = FoundationPlaylistContentCursor(candidateOffset: 0, pending: [])
+        let seed = FoundationPlaylistContentPage(
+            items: [], nextStartIndex: 0,
+            hasIncompleteCoverage: true, partialFailureCount: 0, continuation: cursor)
+        let model = FoundationPlaylistLookupModel(scope: library.metadataScopeID, seed: seed)
+        let initially = await requests.values
+        XCTAssertTrue(initially.isEmpty)
+        let other = FoundationJellyfinLibrary(
+            session: .init(
+                serverURL: URL(string: "https://other.invalid")!, accessToken: "synthetic",
+                userID: Self.id(9), deviceID: "synthetic"),
+            load: { _ in
+                XCTFail("Retired owner must not read another account")
+                throw FoundationLibraryError.unavailable
+            })
+        await model.load(context: .init(trackIDs: [Self.id(2)]), library: other)
+        XCTAssertTrue(model.items.isEmpty)
+        XCTAssertEqual(model.cursor, cursor)
+        await model.load(context: .init(trackIDs: [Self.id(2)]), library: library)
+        XCTAssertEqual(model.items.map(\.id), [Self.id(1)])
+        XCTAssertNil(model.cursor)
+        XCTAssertFalse(model.incomplete)
+        let final = await requests.values
+        XCTAssertEqual(final.count, 2)
+        await model.load(context: .init(trackIDs: [Self.id(2)]), library: library)
+        let afterComplete = await requests.values
+        XCTAssertEqual(afterComplete.count, 2)
+    }
+
+    @MainActor
+    func testLookupCancellationRejectsLateNoncooperativeResultAndKeepsSeed() async {
+        let gate = PlaylistContentGate()
+        let seedItem = Self.item("seed", kind: .playlist)
+        let library = FoundationJellyfinLibrary(
+            session: .init(
+                serverURL: URL(string: "https://example.invalid")!, accessToken: "synthetic",
+                userID: Self.id(9), deviceID: "synthetic"),
+            load: { request in
+                await gate.wait()
+                let data = Data("{\"Items\":[],\"StartIndex\":0,\"TotalRecordCount\":0}".utf8)
+                return (
+                    data,
+                    HTTPURLResponse(
+                        url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+                )
+            })
+        let cursor = FoundationPlaylistContentCursor(candidateOffset: 0, pending: [])
+        let model = FoundationPlaylistLookupModel(
+            scope: library.metadataScopeID,
+            seed: .init(
+                items: [seedItem], nextStartIndex: 0, hasIncompleteCoverage: true,
+                partialFailureCount: 0, continuation: cursor))
+        let task = Task {
+            await model.load(context: .init(trackIDs: [Self.id(2)]), library: library)
+        }
+        while !(await gate.started) { await Task.yield() }
+        model.cancel()
+        await gate.release()
+        await task.value
+        XCTAssertEqual(model.items, [seedItem])
+        XCTAssertEqual(model.cursor, cursor)
+        XCTAssertFalse(model.loading)
+    }
+
+    func testTypedContinuationRejectsNonadvancingTrackCursorAndPropagatesCancellation() async {
+        let pending = FoundationPlaylistContentCursor.Pending(
+            playlist: Self.item("long", kind: .playlist), trackOffset: 100)
+        for cancelled in [false, true] {
+            do {
+                _ = try await FoundationPlaylistContentSearch.continueSearch(
+                    context: .init(trackIDs: ["selected"]),
+                    cursor: .init(candidateOffset: nil, pending: [pending]),
+                    playlists: { _, _ in
+                        XCTFail("No listing while pending")
+                        return .init(items: [], nextStartIndex: nil)
+                    },
+                    tracks: { _, _ in
+                        if cancelled { throw FoundationLibraryError.cancelled }
+                        return .init(items: [Self.item("other", kind: .track)], nextStartIndex: 100)
+                    })
+                XCTFail("Invalid/cancelled response cannot publish")
+            } catch {
+                if cancelled {
+                    XCTAssertTrue(error is CancellationError)
+                } else {
+                    XCTAssertEqual(error as? FoundationLibraryError, .invalidResponse)
+                }
+            }
+        }
+    }
+
     private static func id(_ suffix: Int) -> String { String(format: "%032x", suffix) }
 
     private static func query(_ request: URLRequest, _ name: String) -> String? {
@@ -373,4 +555,11 @@ private actor PlaylistContentGate {
 private actor PlaylistContentRequests {
     var values: [URLRequest] = []
     func append(_ request: URLRequest) { values.append(request) }
+}
+
+private actor TypedPlaylistCalls {
+    var candidates = 0
+    var offsets: [Int] = []
+    func candidate() { candidates += 1 }
+    func track(_ offset: Int) { offsets.append(offset) }
 }
