@@ -1817,59 +1817,37 @@ final class FoundationDownloadsUITests: XCTestCase {
         }
     }
 
-    func testLimitedOfflineProductionShellKeepsSettingsAndExplicitRetry() {
+    func testOfflineModeSettingsFiltersDownloadsAndKeepsPlayerBannerFree() {
         continueAfterFailure = false
-        let app = launch(productionShell: true)
-        app.buttons["Queue fixture playlist"].tap()
-        app.buttons["Library"].firstMatch.tap()
-        let downloads = app.buttons.matching(
-            NSPredicate(format: "label BEGINSWITH %@", "Downloads")
-        ).firstMatch
-        tapVisible(downloads, in: app)
-        waitForSavedDownload(app)
-        capture("Downloads in Your Music production navigation", in: app)
-        app.switches["Simulate unavailable network"].switches.firstMatch.tap()
-        XCTAssertTrue(app.navigationBars["Downloads"].exists)
-        XCTAssertFalse(app.buttons["Retry Online"].exists)
+        let app = launch(productionShell: true, canonicalDownloadState: "full", longPlayback: true)
+        selectTab("Home", in: app)
+        tapNativeChrome(app.buttons["Profile and settings"], in: app)
+        XCTAssertTrue(app.navigationBars["Profile & Settings"].waitForExistence(timeout: 5))
+        let toggle = app.switches["settings-offline-mode"].firstMatch
+        reveal(toggle, in: app)
+        XCTAssertTrue(toggle.exists)
+        XCTAssertEqual(toggle.value as? String, "0")
+        toggle.switches.firstMatch.tap()
+        XCTAssertEqual(toggle.value as? String, "1")
+        tapNativeChrome(app.navigationBars["Profile & Settings"].buttons["Done"], in: app)
         XCTAssertTrue(
             app.descendants(matching: .any)["browsing-offline-status"].waitForExistence(timeout: 5))
-        capture("Offline preserves Downloads beneath the compact status strip", in: app)
-        XCUIDevice.shared.orientation = .landscapeLeft
-        addTeardownBlock { @MainActor in XCUIDevice.shared.orientation = .portrait }
+        XCTAssertFalse(app.buttons["offline-retry"].exists)
+        XCTAssertFalse(app.buttons["offline-status-retry"].exists)
+        selectTab("Library", in: app)
+        tapVisible(
+            app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Downloads"))
+                .firstMatch, in: app)
         XCTAssertTrue(app.navigationBars["Downloads"].waitForExistence(timeout: 5))
-        let rotatedStatus = app.descendants(matching: .any)["browsing-offline-status"]
-        XCTAssertTrue(rotatedStatus.exists)
-        XCTAssertLessThanOrEqual(
-            rotatedStatus.frame.maxY, app.navigationBars["Downloads"].frame.minY + 1)
-        capture("Offline Downloads landscape keeps navigation below the status strip", in: app)
-        XCUIDevice.shared.orientation = .portrait
-        XCTAssertTrue(app.navigationBars["Downloads"].waitForExistence(timeout: 5))
-        app.buttons["Search"].firstMatch.tap()
-        XCTAssertTrue(app.buttons["offline-retry"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts["Search"].firstMatch.exists)
-        XCTAssertTrue(app.staticTexts["Offline. Downloaded music is in Library."].exists)
-        XCTAssertTrue(app.buttons["Open Library"].exists)
-        let search = app.textFields["Search music"]
-        if search.exists { XCTAssertTrue(search.isEnabled) }
-        capture("Offline preserves Search and explains unavailable content", in: app)
-        app.buttons["Profile and settings"].tap()
-        XCTAssertTrue(app.navigationBars["Profile & Settings"].waitForExistence(timeout: 5))
-        capture("Offline Profile and Settings", in: app)
-        XCTAssertFalse(app.staticTexts["Streaming Quality"].exists)
-        XCTAssertFalse(app.staticTexts["Download Quality"].exists)
-        XCTAssertTrue(app.staticTexts["Playback & Downloads"].exists)
-        XCTAssertTrue(app.buttons["Playback Settings"].exists)
-        app.buttons["Downloaded Music"].tap()
-        XCTAssertTrue(app.navigationBars["Downloaded Music"].waitForExistence(timeout: 5))
-        app.navigationBars.buttons.firstMatch.tap()
-        XCTAssertTrue(app.navigationBars["Profile & Settings"].waitForExistence(timeout: 5))
-        app.buttons["Done"].tap()
-        XCTAssertTrue(app.buttons["offline-retry"].waitForExistence(timeout: 5))
-        app.buttons["offline-retry"].tap()
-        XCTAssertTrue(search.waitForExistence(timeout: 5))
-        XCTAssertTrue(search.isEnabled)
-        XCTAssertTrue(app.staticTexts["Search"].firstMatch.exists)
-        XCTAssertEqual(app.switches["Simulate unavailable network"].value as? String, "0")
+        capture("Offline Downloads overview", in: app)
+        tapVisible(app.buttons["downloads-category-track"], in: app)
+        XCTAssertTrue(app.navigationBars["Songs"].waitForExistence(timeout: 5))
+        let song = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Fixture Tone"))
+            .firstMatch
+        tapVisible(song, in: app)
+        openNowPlaying(app)
+        XCTAssertFalse(app.descendants(matching: .any)["browsing-offline-status"].isHittable)
+        capture("Now Playing excludes browsing offline banner", in: app)
     }
 
     func testOfflinePreservesAlbumHomeAndPlayerWithoutPlaybackBadges() {

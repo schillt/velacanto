@@ -101,6 +101,16 @@ final class FoundationLyricsModel: ObservableObject {
         state = .idle
     }
 
+    func suspendForOffline() {
+        guard isActive else { return }
+        generation += 1
+        loadTask?.cancel()
+        loadTask = nil
+        if case .loaded = state { return }
+        if case .missing = state { return }
+        state = .idle
+    }
+
     func prepareRetry() {
         guard isActive, case .failed = state else { return }
         state = .idle
@@ -123,40 +133,53 @@ struct FoundationLyricsView: View {
     // Sidebar glass follows appearance; artwork-backed presentations retain light text.
     var followsAppearance = false
     var availabilityChanged: (Bool) -> Void = { _ in }
+    @EnvironmentObject private var connectivity: FoundationConnectivity
     @State private var retry = 0
+
+    private var hasLoadedLyrics: Bool {
+        if case .loaded = model.state { return true }
+        return false
+    }
 
     var body: some View {
         Group {
-            switch model.state {
-            case .idle, .loading:
-                ProgressView("Loading lyrics…")
-            case .missing:
-                ContentUnavailableView("Lyrics unavailable", systemImage: "quote.bubble")
-            case .failed(let error):
-                VStack(spacing: 16) {
-                    ContentUnavailableView(
-                        "Couldn’t load lyrics", systemImage: "exclamationmark.bubble",
-                        description: Text(error.localizedDescription))
-                    Button("Retry") {
-                        model.prepareRetry()
-                        retry += 1
+            if connectivity.localOnly, !hasLoadedLyrics {
+                ContentUnavailableView(
+                    "Lyrics unavailable offline", systemImage: "quote.bubble",
+                    description: Text("Lyrics are not saved with downloaded music."))
+            } else {
+                switch model.state {
+                case .idle, .loading:
+                    ProgressView("Loading lyrics…")
+                case .missing:
+                    ContentUnavailableView("Lyrics unavailable", systemImage: "quote.bubble")
+                case .failed(let error):
+                    VStack(spacing: 16) {
+                        ContentUnavailableView(
+                            "Couldn’t load lyrics", systemImage: "exclamationmark.bubble",
+                            description: Text(error.localizedDescription))
+                        Button("Retry") {
+                            model.prepareRetry()
+                            retry += 1
+                        }
                     }
-                }
-            case .loaded(let lyrics):
-                if lyrics.hasTiming {
-                    FoundationTimedLyricsView(
-                        lyrics: lyrics, entryID: entryID, player: player, isActive: model.isActive,
-                        followsAppearance: followsAppearance)
-                } else {
-                    ScrollView {
-                        Text(lyrics.text)
-                            .font(.system(.title2, design: .default, weight: .semibold))
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .textSelection(.enabled)
-                            .padding(.vertical)
-                            .padding(.horizontal, 24)
+                case .loaded(let lyrics):
+                    if lyrics.hasTiming {
+                        FoundationTimedLyricsView(
+                            lyrics: lyrics, entryID: entryID, player: player,
+                            isActive: model.isActive,
+                            followsAppearance: followsAppearance)
+                    } else {
+                        ScrollView {
+                            Text(lyrics.text)
+                                .font(.system(.title2, design: .default, weight: .semibold))
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .textSelection(.enabled)
+                                .padding(.vertical)
+                                .padding(.horizontal, 24)
+                        }
+                        .mask { FoundationPlayerContentFade() }
                     }
-                    .mask { FoundationPlayerContentFade() }
                 }
             }
         }
@@ -165,7 +188,11 @@ struct FoundationLyricsView: View {
         .disabled(!model.isActive)
         .allowsHitTesting(model.isActive)
         .accessibilityHidden(!model.isActive)
-        .task(id: retry) {
+        .task(id: "\(retry)-\(connectivity.localOnly)") {
+            if connectivity.localOnly {
+                model.suspendForOffline()
+                return
+            }
             await model.load(item: item, library: library) { player.selectedEntryID == entryID }
         }
         .onChange(of: model.state, initial: true) { _, state in

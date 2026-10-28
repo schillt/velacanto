@@ -23,6 +23,7 @@ struct FoundationSettingsView: View {
     var pinSync: FoundationPinSync? = nil
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var preferences: FoundationPlaybackPreferences
+    @EnvironmentObject private var connectivity: FoundationConnectivity
     #if DEBUG
         @State private var diagnosticSnapshot: FoundationJournalSnapshot?
     #endif
@@ -69,7 +70,9 @@ struct FoundationSettingsView: View {
                         "Browse and play downloaded music without connecting to your music server.")
                 }
                 librarySection
-                if let pinSync { FoundationPinSyncSection(sync: pinSync) }
+                if let pinSync {
+                    FoundationPinSyncSection(sync: pinSync).disabled(connectivity.localOnly)
+                }
                 Section("Storage") {
                     NavigationLink {
                         FoundationDownloadManagementView()
@@ -196,6 +199,7 @@ struct FoundationSettingsView: View {
         Section("Library") {
             if let librarySelection {
                 FoundationMusicLibrarySettingsRow(selection: librarySelection)
+                    .disabled(connectivity.localOnly)
             } else {
                 Text("All music available to this Jellyfin account")
                 Text("Library selection is unavailable for this connection.")

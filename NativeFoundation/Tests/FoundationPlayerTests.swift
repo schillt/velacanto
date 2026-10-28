@@ -89,6 +89,70 @@ final class FoundationPlayerTests: XCTestCase {
         XCTAssertEqual(observed.map(\.1), observed.map(\.1).sorted())
     }
 
+    func testOfflineModeRetiresPendingNaturalSuccessorEvenWhenLocalItemIsRetained() async throws {
+        let resources = PlaybackResourceProbe()
+        let player = FoundationPlayer(
+            resolve: { _ in throw URLError(.unknown) },
+            resolveResource: { _ in try await resources.resolve() },
+            makeItem: { _ in AVPlayerItem(asset: AVMutableComposition()) },
+            activateSession: {}, deactivateSession: {}, startPlayback: { _ in })
+        player.setQueue([track, track], selectedIndex: 0)
+        let first = player.selectionTask
+        try await resources.waitForCalls(1)
+        await resources.succeed(0)
+        await first?.value
+        await player.playTask?.value
+        player.didReachEnd(try XCTUnwrap(player.nativePlayer.currentItem))
+        let successor = player.selectionTask
+        try await resources.waitForCalls(2)
+        let occurrence = player.selectedEntryID
+        player.enterOfflineMode()
+        await resources.succeed(1, url: URL(string: "https://example.invalid/audio")!)
+        await successor?.value
+        try await resources.waitForReleases(2)
+        XCTAssertNil(player.nativePlayer.currentItem)
+        XCTAssertEqual(player.selectedEntryID, occurrence)
+        XCTAssertNil(player.errorMessage)
+        XCTAssertEqual(player.state, .idle)
+        player.stop()
+    }
+
+    func testOfflineModePreservesInstalledLocalPlaybackAndReleasesRemoteWithoutError() async throws
+    {
+        for local in [true, false] {
+            let resources = PlaybackResourceProbe()
+            let player = FoundationPlayer(
+                resolve: { _ in throw URLError(.unknown) },
+                resolveResource: { _ in try await resources.resolve() },
+                makeItem: { _ in AVPlayerItem(asset: AVMutableComposition()) },
+                activateSession: {}, deactivateSession: {}, startPlayback: { _ in })
+            player.setQueue([track], selectedIndex: 0)
+            let selection = player.selectionTask
+            try await resources.waitForCalls(1)
+            if local {
+                await resources.succeed(0)
+            } else {
+                await resources.succeed(0, url: URL(string: "https://example.invalid/audio")!)
+            }
+            await selection?.value
+            await player.playTask?.value
+            let item = try XCTUnwrap(player.nativePlayer.currentItem)
+            let occurrence = player.selectedEntryID
+            player.enterOfflineMode()
+            if local {
+                XCTAssertTrue(player.nativePlayer.currentItem === item)
+            } else {
+                XCTAssertNil(player.nativePlayer.currentItem)
+                XCTAssertEqual(player.state, .idle)
+                try await resources.waitForReleases(1)
+            }
+            XCTAssertNil(player.errorMessage)
+            XCTAssertEqual(player.selectedEntryID, occurrence)
+            XCTAssertEqual(player.queue.count, 1)
+            player.stop()
+        }
+    }
+
     func testStreamingPolicyChangePreservesPendingAndInstalledLocalResource() async throws {
         let resources = PlaybackResourceProbe()
         let player = FoundationPlayer(

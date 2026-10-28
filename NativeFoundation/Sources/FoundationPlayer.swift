@@ -795,7 +795,7 @@ final class FoundationPlayer: ObservableObject {
     /// Keep the selected queue occurrence; the next explicit Play constructs a fresh asset.
     func enterOfflineMode() {
         // Also retire unresolved remote preparations, but leave an installed local lease playing.
-        guard installedResource?.url.isFileURL != true else { return }
+        guard installedResource?.url.isFileURL != true || selectionTask != nil else { return }
         discardSelection()
         state = .idle
     }

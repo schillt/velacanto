@@ -516,7 +516,7 @@ final class FoundationDownloads: ObservableObject {
         let containers = downloadedAlbums + downloadedArtists + downloadedPlaylists
         let candidates =
             downloadedSongs
-            + containers.filter { availability(for: $0) != .unavailable || $0.kind == .artist }
+            + containers.filter { availability(for: $0) != .unavailable }
         return candidates.filter {
             (kind == nil || kind == $0.kind) && seen.insert(collectionKey($0)).inserted
         }

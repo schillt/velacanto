@@ -277,6 +277,7 @@ final class FoundationDownloadsTests: XCTestCase {
         XCTAssertEqual(selection.index, 1)
         manager.removeTrack(ready)
         XCTAssertTrue(manager.itemsWithDownloadedMusic(in: cachedItems).isEmpty)
+        XCTAssertTrue(manager.localCatalogItems().isEmpty)
         // Presentation filtering never erases cached membership or repeated occurrences.
         XCTAssertEqual(
             manager.knownCollectionTracks(for: playlist).map(\.id), ["remote", "ready", "ready"])

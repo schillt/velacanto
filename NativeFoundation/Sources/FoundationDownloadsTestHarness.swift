@@ -73,7 +73,7 @@
             }
             .foundationDownloadRemovalPresentation()
             .environmentObject(fixture.primaryGenres)
-            .onChange(of: fixture.preferences.offlineMode) { _, enabled in
+            .onReceive(fixture.preferences.$offlineMode) { enabled in
                 fixture.connectivity.setOfflineMode(enabled)
                 if enabled { fixture.player.enterOfflineMode() }
                 fixture.downloads.updateConnectivity(

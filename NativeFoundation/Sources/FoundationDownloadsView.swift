@@ -27,7 +27,7 @@ struct FoundationDownloadsView: View {
                 LazyVGrid(
                     columns: [
                         GridItem(
-                            .adaptive(minimum: 260),
+                            .adaptive(minimum: 300),
                             spacing: 16)
                     ], alignment: .leading, spacing: 16
                 ) {
@@ -71,7 +71,7 @@ struct FoundationDownloadsView: View {
                 }
                 if let error = downloads.errorMessage { Text(error).foregroundStyle(.red) }
             }
-            .frame(maxWidth: 1000, alignment: .leading)
+            .frame(maxWidth: 900, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, horizontalInset).padding(.vertical, 20)
             .foundationBottomChromeEndPadding()

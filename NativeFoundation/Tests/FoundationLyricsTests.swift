@@ -17,6 +17,32 @@ final class FoundationLyricsTests: XCTestCase {
         serverURL: URL(string: "https://example.invalid/proxy/")!, accessToken: "synthetic",
         userID: "00000000000000000000000000000002", deviceID: "synthetic")
 
+    func testOfflineSuspensionRejectsLateLyricsAndRetainsAlreadyLoadedWords() async {
+        let probe = Probe()
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            await probe.wait()
+            return (
+                Data(#"{"Lyrics":[{"Text":"Available"}]}"#.utf8),
+                Self.response(request, status: 200)
+            )
+        }
+        let model = FoundationLyricsModel()
+        let task = Task { await model.load(item: item, library: library) { true } }
+        while !(await probe.waiting) { await Task.yield() }
+        model.suspendForOffline()
+        await probe.finish()
+        await task.value
+        XCTAssertEqual(model.state, .idle)
+        XCTAssertTrue(model.isActive)
+        let reload = Task { await model.load(item: item, library: library) { true } }
+        while !(await probe.waiting) { await Task.yield() }
+        await probe.finish()
+        await reload.value
+        XCTAssertEqual(model.state, .loaded(.init(text: "Available")))
+        model.suspendForOffline()
+        XCTAssertEqual(model.state, .loaded(.init(text: "Available")))
+    }
+
     func testProviderCancellationHasExplicitRetryAndNeverStaysIdleLoading() async {
         let probe = Probe()
         let library = FoundationJellyfinLibrary(session: session) { request in

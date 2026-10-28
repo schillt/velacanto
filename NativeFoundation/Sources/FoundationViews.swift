@@ -853,7 +853,7 @@ struct FoundationLibraryView: View {
                 macLibraryButton("Favorites", symbol: "star", route: .favorites)
                 ForEach(actions.pins) { item in
                     if !connectivity.localOnly
-                        || !downloads.itemsWithDownloadedMusic(in: [item]).isEmpty
+                        || pinHasDownloadedMusic(item)
                     {
                         macPinnedItemButton(item)
                     }
@@ -961,7 +961,7 @@ struct FoundationLibraryView: View {
                 }.buttonStyle(.plain).accessibilityHint("Open Favorites")
                 ForEach(Array(actions.pins.enumerated()), id: \.offset) { _, item in
                     if !connectivity.localOnly
-                        || !downloads.itemsWithDownloadedMusic(in: [item]).isEmpty
+                        || pinHasDownloadedMusic(item)
                     {
                         pinnedTile(item)
                     }
@@ -971,6 +971,15 @@ struct FoundationLibraryView: View {
                 Text(error).foregroundStyle(.red)
             }
         }
+    }
+
+    private func pinHasDownloadedMusic(_ item: FoundationItem) -> Bool {
+        if item.kind == .genre {
+            return primaryGenres.items(localOnly: true).contains {
+                $0.genreIdentity == item.genreIdentity
+            }
+        }
+        return !downloads.itemsWithDownloadedMusic(in: [item]).isEmpty
     }
 
     @ViewBuilder private var localLibraryButton: some View {
@@ -1540,7 +1549,7 @@ private struct FoundationFavoriteShelf: View {
                     )
                     .foregroundStyle(.secondary).padding(.horizontal, 16)
                 }
-                if let error = model.errorMessage {
+                if let error = model.errorMessage, !connectivity.localOnly {
                     VStack(alignment: .leading) {
                         Text(error).foregroundStyle(.secondary)
                         Button("Retry") {
