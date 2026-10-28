@@ -58,7 +58,7 @@ else:
     assert attributes["SupportedMediaCategories"] == ["INMediaCategoryMusic"]
     extension_binaries.append(extension / extension_info["CFBundleExecutable"])
 markers = (
-    b"player.siri", b"audioSession.activation.denied", b"queueMorph", b"queueCompleted", b"queuePhase",
+    b"player.siri", b"audioSession.activation.denied", b"queueMorph", b"queueCompleted", b"queuePhase", b"metadataCompleted",
     b"player.hls.copy", b"player.hls.playlist", b"player.hls.negotiation",
     b"player.hls.source", b"player.hls.selection", b"player.comparison.access",
     b"foundationDeliveryComparison", b"player.hls.cleanup", b"MP3 HLS",

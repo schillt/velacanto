@@ -76,6 +76,13 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
     @MainActor
     final class FoundationPlayerArtworkPresentationModel: ObservableObject {
         enum Role { case compact, expanded, queue }
+        enum MetadataField: CaseIterable { case title, detail }
+        private struct MetadataAnchor {
+            weak var view: UIView?
+            let token: UUID
+            let identity: String
+            let text: String
+        }
 
         struct Artwork {
             let identity: String
@@ -99,7 +106,8 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
         @Published private(set) var hiddenArtworkIdentity: String?
         #if DEBUG && targetEnvironment(simulator)
             @Published private(set) var transitionSummary =
-                "morph 0; fade 0; cancelled 0; completed 0; glass 0; intermediate 0; queueMorph 0; queueCompleted 0; queuePhase 0"
+                "morph 0; fade 0; cancelled 0; completed 0; glass 0; intermediate 0; queueMorph 0; queueCompleted 0; queuePhase 0; metadataCompleted 0"
+            private var metadataCompleted = 0
             private var queuePhase = 0
             private var queueMorphCount = 0
             private var queueCompletedCount = 0
@@ -112,7 +120,7 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
 
             private func publishTransitionSummary() {
                 transitionSummary =
-                    "morph \(morphCount); fade \(fadeCount); cancelled \(cancelledCount); completed \(completedCount); glass \(glassCount); intermediate \(intermediateCount); queueMorph \(queueMorphCount); queueCompleted \(queueCompletedCount); queuePhase \(queuePhase)"
+                    "morph \(morphCount); fade \(fadeCount); cancelled \(cancelledCount); completed \(completedCount); glass \(glassCount); intermediate \(intermediateCount); queueMorph \(queueMorphCount); queueCompleted \(queueCompletedCount); queuePhase \(queuePhase); metadataCompleted \(metadataCompleted)"
             }
 
             fileprivate func recordIntermediateSurface(
@@ -152,6 +160,12 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
         private var queueImage: Artwork?
         private weak var queueContainer: UIView?
         fileprivate weak var queueArtworkLayer: UIView?
+        fileprivate weak var queueMetadataLayer: UIView?
+        @Published private(set) var queueHiddenMetadataIdentity: String?
+        private var expandedMetadata: [MetadataField: MetadataAnchor] = [:]
+        private var queueMetadata: [MetadataField: MetadataAnchor] = [:]
+        private var restingMetadata: [MetadataField: CGRect] = [:]
+        private var metadataLabels: [MetadataField: UILabel] = [:]
         private var queueTarget: Role?
         private var queueGeometryScheduled = false
         private var queueRestingHero: (identity: String, frame: CGRect, bounds: CGRect)?
@@ -213,6 +227,7 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
             queueContainer = container
             queueToken = UUID()
             queueTarget = showing ? .queue : .expanded
+            prepareMetadata(showing: showing, identity: image.identity)
             queueHiddenArtworkIdentity = image.identity
             #if DEBUG && targetEnvironment(simulator)
                 queuePhase = 2
@@ -286,9 +301,16 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
             }
             let radius =
                 target == .queue ? queueArtwork.cornerRadius : max(24, expanded.cornerRadius)
+            let metadataTargets = metadataDestinations(target: target, identity: image.identity)
             let animator = UIViewPropertyAnimator(duration: 0.35, curve: .easeInOut) {
                 snapshot.frame = destination
                 snapshot.layer.cornerRadius = radius
+                for (label, rect, scale) in metadataTargets {
+                    label.bounds.size = CGSize(
+                        width: rect.width / scale, height: rect.height / scale)
+                    label.center = CGPoint(x: rect.midX, y: rect.midY)
+                    label.transform = CGAffineTransform(scaleX: scale, y: scale)
+                }
             }
             queueAnimator = animator
             #if DEBUG && targetEnvironment(simulator)
@@ -304,6 +326,9 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
                 #if DEBUG && targetEnvironment(simulator)
                     self.queuePhase = 8
                     self.queueCompletedCount += 1
+                    if metadataTargets.count == MetadataField.allCases.count {
+                        self.metadataCompleted += 1
+                    }
                     self.publishTransitionSummary()
                 #endif
                 self.queueAnimator = nil
@@ -313,18 +338,131 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
                 self.queueImage = nil
                 self.queueContainer = nil
                 self.queueHiddenArtworkIdentity = nil
+                self.clearMetadataLabels()
                 snapshot?.removeFromSuperview()
             }
             animator.startAnimation()
         }
 
-        fileprivate func retireQueueArtworkLayer(_ view: UIView) {
-            guard queueArtworkLayer === view else { return }
+        fileprivate func registerMetadata(
+            _ view: UIView, token: UUID, role: Role, field: MetadataField,
+            identity: String, text: String
+        ) {
+            let anchor = MetadataAnchor(view: view, token: token, identity: identity, text: text)
+            if role == .expanded { expandedMetadata[field] = anchor }
+            if role == .queue { queueMetadata[field] = anchor }
+        }
+
+        fileprivate func unregisterMetadata(token: UUID, role: Role, field: MetadataField) {
+            if role == .expanded, expandedMetadata[field]?.token == token {
+                expandedMetadata[field] = nil
+            }
+            if role == .queue, queueMetadata[field]?.token == token { queueMetadata[field] = nil }
+        }
+
+        private func metadataFont(role: Role, field: MetadataField, view: UIView) -> UIFont {
+            let style: UIFont.TextStyle =
+                field == .title
+                ? (role == .expanded ? .title2 : .headline)
+                : (role == .expanded ? .subheadline : .caption1)
+            let font = UIFont.preferredFont(
+                forTextStyle: style, compatibleWith: view.traitCollection)
+            if field == .title, role == .expanded,
+                let descriptor = font.fontDescriptor.withSymbolicTraits(.traitBold)
+            {
+                return UIFont(descriptor: descriptor, size: font.pointSize)
+            }
+            return font
+        }
+
+        private func prepareMetadata(showing: Bool, identity: String) {
+            guard let layer = queueMetadataLayer, let window = layer.window else { return }
+            let source = showing ? expandedMetadata : queueMetadata
+            guard
+                MetadataField.allCases.allSatisfy({ field in
+                    guard let anchor = source[field], anchor.identity == identity,
+                        let view = anchor.view, view.window === window
+                    else { return false }
+                    return view.bounds.width > 0 && view.bounds.height > 0
+                })
+            else { return }
+            if showing { restingMetadata.removeAll() }
+            for field in MetadataField.allCases {
+                guard let anchor = source[field], let view = anchor.view else { continue }
+                let rect = view.convert(view.bounds, to: layer)
+                if showing { restingMetadata[field] = rect }
+                let label = UILabel(frame: rect)
+                label.overrideUserInterfaceStyle = .dark
+                label.text = anchor.text
+                label.font = metadataFont(
+                    role: showing ? .expanded : .queue, field: field, view: view)
+                label.textColor = field == .title ? .label : .secondaryLabel
+                label.numberOfLines = 0
+                label.lineBreakMode = .byTruncatingTail
+                label.clipsToBounds = true
+                label.isUserInteractionEnabled = false
+                label.isAccessibilityElement = false
+                layer.addSubview(label)
+                metadataLabels[field] = label
+            }
+            queueHiddenMetadataIdentity = identity
+        }
+
+        private func metadataDestinations(target: Role, identity: String) -> [(
+            UILabel, CGRect, CGFloat
+        )] {
+            guard let layer = queueMetadataLayer, let window = layer.window,
+                metadataLabels.count == MetadataField.allCases.count
+            else {
+                clearMetadataLabels()
+                return []
+            }
+            var targets: [(UILabel, CGRect, CGFloat)] = []
+            for field in MetadataField.allCases {
+                guard let label = metadataLabels[field] else { continue }
+                let rect: CGRect
+                let font: UIFont
+                if target == .queue {
+                    guard let anchor = queueMetadata[field], anchor.identity == identity,
+                        let view = anchor.view, view.window === window
+                    else {
+                        clearMetadataLabels()
+                        return []
+                    }
+                    rect = view.convert(view.bounds, to: layer)
+                    font = metadataFont(role: .queue, field: field, view: view)
+                } else {
+                    guard let resting = restingMetadata[field] else {
+                        clearMetadataLabels()
+                        return []
+                    }
+                    rect = resting
+                    font = metadataFont(role: .expanded, field: field, view: layer)
+                }
+                guard rect.width > 0, rect.height > 0, layer.bounds.intersects(rect) else {
+                    clearMetadataLabels()
+                    return []
+                }
+                targets.append((label, rect, font.pointSize / label.font.pointSize))
+            }
+            return targets
+        }
+
+        private func clearMetadataLabels() {
+            for label in metadataLabels.values { label.removeFromSuperview() }
+            metadataLabels.removeAll()
+            queueHiddenMetadataIdentity = nil
+        }
+
+        fileprivate func retireQueueTransitionLayer(_ view: UIView) {
+            guard queueArtworkLayer === view || queueMetadataLayer === view else { return }
             cancelQueueTransition()
-            queueArtworkLayer = nil
+            if queueArtworkLayer === view { queueArtworkLayer = nil }
+            if queueMetadataLayer === view { queueMetadataLayer = nil }
         }
 
         func cancelQueueTransition() {
+            clearMetadataLabels()
             queueToken = nil
             queueTarget = nil
             queueGeometryScheduled = false
@@ -503,6 +641,10 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
             queueDisplayed = false
             queueRestingHero = nil
             queueArtworkLayer = nil
+            queueMetadataLayer = nil
+            expandedMetadata.removeAll()
+            queueMetadata.removeAll()
+            restingMetadata.removeAll()
             compactSurface = nil
             surfaceToken = nil
             surfaceIdentity = nil
@@ -512,8 +654,9 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
     }
 
     /// A public, inert drawing plane composed under the player's existing fade.
-    struct FoundationPlayerQueueArtworkLayer: UIViewRepresentable {
+    struct FoundationPlayerQueueTransitionLayer: UIViewRepresentable {
         let model: FoundationPlayerArtworkPresentationModel?
+        var isMetadata = false
 
         final class Coordinator {
             weak var model: FoundationPlayerArtworkPresentationModel?
@@ -529,13 +672,85 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
         }
         func updateUIView(_ view: UIView, context: Context) {
             if context.coordinator.model !== model {
-                context.coordinator.model?.retireQueueArtworkLayer(view)
+                context.coordinator.model?.retireQueueTransitionLayer(view)
             }
             context.coordinator.model = model
-            model?.queueArtworkLayer = view
+            if isMetadata {
+                model?.queueMetadataLayer = view
+            } else {
+                model?.queueArtworkLayer = view
+            }
         }
         static func dismantleUIView(_ view: UIView, coordinator: Coordinator) {
-            coordinator.model?.retireQueueArtworkLayer(view)
+            coordinator.model?.retireQueueTransitionLayer(view)
+        }
+    }
+
+    struct FoundationPlayerMetadataRegistration<Content: View>: View {
+        @ObservedObject var model: FoundationPlayerArtworkPresentationModel
+        let role: FoundationPlayerArtworkPresentationModel.Role
+        let field: FoundationPlayerArtworkPresentationModel.MetadataField
+        let identity: String
+        let text: String
+        let content: Content
+
+        var body: some View {
+            content.overlay {
+                FoundationPlayerMetadataAnchor(
+                    model: model, role: role, field: field, identity: identity, text: text
+                )
+                .allowsHitTesting(false).accessibilityHidden(true)
+            }
+            .opacity(model.queueHiddenMetadataIdentity == identity ? 0 : 1)
+        }
+    }
+
+    private struct FoundationPlayerMetadataAnchor: UIViewRepresentable {
+        let model: FoundationPlayerArtworkPresentationModel
+        let role: FoundationPlayerArtworkPresentationModel.Role
+        let field: FoundationPlayerArtworkPresentationModel.MetadataField
+        let identity: String
+        let text: String
+        final class Coordinator {
+            let token = UUID()
+            var unregister: (() -> Void)?
+        }
+        func makeCoordinator() -> Coordinator { Coordinator() }
+        func makeUIView(context: Context) -> UIView {
+            let view = UIView()
+            view.isUserInteractionEnabled = false
+            view.accessibilityElementsHidden = true
+            return view
+        }
+        func updateUIView(_ view: UIView, context: Context) {
+            context.coordinator.unregister?()
+            let token = context.coordinator.token
+            model.registerMetadata(
+                view, token: token, role: role, field: field,
+                identity: identity, text: text)
+            context.coordinator.unregister = { [weak model] in
+                model?.unregisterMetadata(token: token, role: role, field: field)
+            }
+        }
+        static func dismantleUIView(_ view: UIView, coordinator: Coordinator) {
+            coordinator.unregister?()
+        }
+    }
+
+    struct FoundationPlayerMetadataModifier: ViewModifier {
+        let role: FoundationPlayerArtworkPresentationModel.Role
+        let field: FoundationPlayerArtworkPresentationModel.MetadataField
+        let identity: String
+        let text: String
+        @Environment(\.foundationPlayerArtworkPresentation) private var model
+        @ViewBuilder func body(content: Content) -> some View {
+            if let model {
+                FoundationPlayerMetadataRegistration(
+                    model: model, role: role, field: field,
+                    identity: identity, text: text, content: content)
+            } else {
+                content
+            }
         }
     }
 

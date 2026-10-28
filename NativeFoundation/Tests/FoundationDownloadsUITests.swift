@@ -728,6 +728,7 @@ final class FoundationDownloadsUITests: XCTestCase {
             object: transition)
         XCTAssertEqual(XCTWaiter.wait(for: [zoomed], timeout: 5), .completed, transition.label)
         XCTAssertFalse(modal.buttons["More playback options"].exists)
+        XCTAssertTrue(transition.label.contains("metadataCompleted 1"), transition.label)
         let before = queueSnapshot(app)
         let upcoming = before["upcoming"] as? [String] ?? []
         XCTAssertEqual(upcoming.count, 14)
@@ -796,6 +797,7 @@ final class FoundationDownloadsUITests: XCTestCase {
             object: transition)
         XCTAssertEqual(XCTWaiter.wait(for: [expanded], timeout: 5), .completed, transition.label)
         XCTAssertEqual(identity.label, startingIdentity)
+        XCTAssertTrue(transition.label.contains("metadataCompleted 2"), transition.label)
         XCTAssertTrue(modal.buttons["More playback options"].exists)
         capture("Queue artwork expands back without replacing playback", in: app)
     }

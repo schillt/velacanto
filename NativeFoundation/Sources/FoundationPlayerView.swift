@@ -95,7 +95,7 @@ struct FoundationPlayerView: View {
                             .accessibilityHidden(lyricsPresentation != nil || showingQueue)
                             .allowsHitTesting(lyricsPresentation == nil && !showingQueue)
                             #if os(iOS)
-                                FoundationPlayerQueueArtworkLayer(model: artworkPresentation)
+                                FoundationPlayerQueueTransitionLayer(model: artworkPresentation)
                                     .frame(width: artworkGeometry.size.width, height: artworkHeight)
                                     .mask(artworkFade)
                                     .offset(y: -geometry.safeAreaInsets.top)
@@ -202,6 +202,14 @@ struct FoundationPlayerView: View {
                         .clipped()
                     }.ignoresSafeArea()
                 }
+                #if os(iOS)
+                    .overlay {
+                        FoundationPlayerQueueTransitionLayer(
+                            model: artworkPresentation, isMetadata: true
+                        )
+                        .allowsHitTesting(false).accessibilityHidden(true)
+                    }
+                #endif
                 .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: contentMode)
             }
             .onAppear { isVisible = true }
@@ -448,6 +456,13 @@ struct FoundationPlayerView: View {
                 Text(current?.title ?? "Nothing selected").font(.title2.bold())
                     .lineLimit(dynamicTypeSize.isAccessibilitySize ? 2 : 1)
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    #if os(iOS)
+                        .modifier(
+                            FoundationPlayerMetadataModifier(
+                                role: .expanded, field: .title,
+                                identity: current?.sharedArtworkIdentity ?? "",
+                                text: current?.title ?? "Nothing selected"))
+                    #endif
                 Menu {
                     Button("View Album", systemImage: "square.stack") {
                         if let album { sheetDestination = .related(album) }
@@ -493,12 +508,16 @@ struct FoundationPlayerView: View {
                 }
             }
             if let current {
-                Text(
-                    [current.subtitle, album?.title].compactMap { $0 }
-                        .filter { !$0.isEmpty }.joined(separator: " · ")
-                )
-                .font(.subheadline).foregroundStyle(.secondary)
-                .lineLimit(dynamicTypeSize.isAccessibilitySize ? 3 : 1)
+                Text(foundationQueueMetadataDetail(current))
+                    .font(.subheadline).foregroundStyle(.secondary)
+                    .lineLimit(dynamicTypeSize.isAccessibilitySize ? 3 : 1)
+                    #if os(iOS)
+                        .modifier(
+                            FoundationPlayerMetadataModifier(
+                                role: .expanded, field: .detail,
+                                identity: current.sharedArtworkIdentity,
+                                text: foundationQueueMetadataDetail(current)))
+                    #endif
                 if let error = actions.errorMessage(for: current) {
                     Text(error).font(.caption)
                 }
@@ -878,8 +897,22 @@ private struct FoundationQueueView: View {
                         Text("Now Playing").font(.caption).foregroundStyle(.secondary)
                     }
                     Text(entry.item.title).font(.headline).lineLimit(2)
-                    Text(entry.item.subtitle).font(.caption).foregroundStyle(.secondary)
-                        .lineLimit(1)
+                        #if os(iOS)
+                            .modifier(
+                                FoundationPlayerMetadataModifier(
+                                    role: .queue, field: .title,
+                                    identity: entry.item.sharedArtworkIdentity,
+                                    text: entry.item.title))
+                        #endif
+                    Text(foundationQueueMetadataDetail(entry.item))
+                        .font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                        #if os(iOS)
+                            .modifier(
+                                FoundationPlayerMetadataModifier(
+                                    role: .queue, field: .detail,
+                                    identity: entry.item.sharedArtworkIdentity,
+                                    text: foundationQueueMetadataDetail(entry.item)))
+                        #endif
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -906,36 +939,47 @@ private struct FoundationQueueView: View {
                 Button {
                     player.setShuffle(!player.shuffleEnabled)
                 } label: {
-                    modeIcon("shuffle", active: player.shuffleEnabled)
+                    modeIcon("shuffle")
                 }
+                .modifier(FoundationQueueModeControlStyle(active: player.shuffleEnabled))
                 .accessibilityLabel("Shuffle")
                 .accessibilityValue(player.shuffleEnabled ? "On" : "Off")
                 .accessibilityAddTraits(player.shuffleEnabled ? .isSelected : [])
-                Menu {
-                    ForEach(FoundationPlayer.RepeatMode.allCases, id: \.self) { mode in
-                        Button(mode.rawValue.capitalized) { player.setRepeat(mode) }
+                #if os(macOS)
+                    Button {
+                        let next: FoundationPlayer.RepeatMode =
+                            player.repeatMode == .off
+                            ? .all : player.repeatMode == .all ? .one : .off
+                        player.setRepeat(next)
+                    } label: {
+                        modeIcon(player.repeatMode == .one ? "repeat.1" : "repeat")
                     }
-                } label: {
-                    modeIcon(
-                        player.repeatMode == .one ? "repeat.1" : "repeat",
-                        active: player.repeatMode != .off)
-                }
-                .accessibilityLabel("Repeat")
-                .accessibilityValue(player.repeatMode.rawValue.capitalized)
-                .accessibilityAddTraits(player.repeatMode == .off ? [] : .isSelected)
+                    .modifier(FoundationQueueModeControlStyle(active: player.repeatMode != .off))
+                    .accessibilityLabel("Repeat")
+                    .accessibilityValue(player.repeatMode.rawValue.capitalized)
+                    .accessibilityAddTraits(player.repeatMode == .off ? [] : .isSelected)
+                #else
+                    Menu {
+                        ForEach(FoundationPlayer.RepeatMode.allCases, id: \.self) { mode in
+                            Button(mode.rawValue.capitalized) { player.setRepeat(mode) }
+                        }
+                    } label: {
+                        modeIcon(player.repeatMode == .one ? "repeat.1" : "repeat")
+                    }
+                    .modifier(FoundationQueueModeControlStyle(active: player.repeatMode != .off))
+                    .accessibilityLabel("Repeat")
+                    .accessibilityValue(player.repeatMode.rawValue.capitalized)
+                    .accessibilityAddTraits(player.repeatMode == .off ? [] : .isSelected)
+                #endif
             }
-            .buttonStyle(.plain)
         }
         .fixedSize()
     }
 
-    private func modeIcon(_ symbol: String, active: Bool) -> some View {
+    private func modeIcon(_ symbol: String) -> some View {
         Image(systemName: symbol)
             .font(.body.weight(.semibold))
-            .foregroundStyle(active ? Color.black : Color.primary.opacity(0.85))
-            .frame(width: 44, height: 44)
-            .background(active ? Color.white.opacity(0.92) : .clear, in: Circle())
-            .glassEffect(.regular.interactive(), in: .circle)
+            .frame(width: 32, height: 32)
     }
 
     private func queueHeading(_ title: String) -> some View {
@@ -1048,6 +1092,22 @@ private struct FoundationQueueView: View {
             })
     }
 
+}
+
+private func foundationQueueMetadataDetail(_ item: FoundationItem) -> String {
+    [item.subtitle, item.relatedAlbum?.title].compactMap { $0 }
+        .filter { !$0.isEmpty }.joined(separator: " · ")
+}
+
+private struct FoundationQueueModeControlStyle: ViewModifier {
+    let active: Bool
+    @ViewBuilder func body(content: Content) -> some View {
+        if active {
+            content.buttonStyle(.glassProminent).buttonBorderShape(.circle).tint(.accentColor)
+        } else {
+            content.buttonStyle(.glass).buttonBorderShape(.circle)
+        }
+    }
 }
 
 private struct FoundationQueueFixtureIdentifier: ViewModifier {
@@ -1336,7 +1396,6 @@ extension EnvironmentValues {
                         relatedItem = $0
                     }
                     .id(queuePresentation)
-                    .ignoresSafeArea(.container, edges: .top)
                 } else if connectivity.localOnly {
                     ContentUnavailableView(
                         "Lyrics unavailable offline", systemImage: "quote.bubble")
@@ -1350,6 +1409,7 @@ extension EnvironmentValues {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .ignoresSafeArea(.container, edges: mode == .queue ? .top : [])
             // The native inspector owns its adaptive sidebar material. A second
             // edge-to-edge glass surface adds refraction highlights around the panel.
             .background {
