@@ -3,6 +3,46 @@ import XCTest
 
 @MainActor
 final class FoundationDownloadsUITests: XCTestCase {
+    func testMissingLyricsShowsUnavailableControlAfterClosingPane() {
+        continueAfterFailure = false
+        let app = launch(
+            productionShell: true, canonicalDownloadState: "full",
+            longPlayback: true, lyricsPresentation: true, missingLyrics: true)
+        selectTab("Library", in: app)
+        openCanonicalCollection("album", fromDownloads: false, in: app)
+        tapVisible(app.buttons["Play"], in: app)
+        openNowPlaying(app)
+        app.buttons["Show lyrics"].tap()
+        XCTAssertTrue(app.staticTexts["Lyrics unavailable"].waitForExistence(timeout: 5))
+        app.buttons["Show artwork"].tap()
+        let unavailable = app.buttons["Lyrics unavailable"]
+        XCTAssertTrue(unavailable.waitForExistence(timeout: 5))
+        XCTAssertFalse(unavailable.isEnabled)
+        capture("Confirmed missing lyrics has dimmed slashed control", in: app)
+    }
+
+    func testLyricsFollowTrackChangesWithoutClosingPane() {
+        continueAfterFailure = false
+        let app = launch(
+            productionShell: true, canonicalDownloadState: "full",
+            longPlayback: true, queuePresentation: true, lyricsPresentation: true)
+        selectTab("Library", in: app)
+        openCanonicalCollection("album", fromDownloads: false, in: app)
+        tapVisible(app.buttons["Play"], in: app)
+        openNowPlaying(app)
+        app.buttons["Show lyrics"].tap()
+        XCTAssertTrue(app.buttons["Fixture lyric tone"].waitForExistence(timeout: 5))
+        let modal = app.descendants(matching: .any)["foundation-now-playing"]
+        modal.buttons["Next"].tap()
+        XCTAssertTrue(
+            app.buttons["Fixture lyric missing-tone"].waitForExistence(timeout: 5),
+            "A new occurrence must load its own lyrics while the pane stays open")
+        modal.buttons["Next"].tap()
+        XCTAssertTrue(app.buttons["Fixture lyric tone"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["Fixture lyric missing-tone"].exists)
+        capture("Lyrics follow consecutive track changes", in: app)
+    }
+
     func testNewTracksLoadsDateAddedAscendingSongsAndStartsPlayback() {
         continueAfterFailure = false
         let app = launch(
@@ -378,12 +418,15 @@ final class FoundationDownloadsUITests: XCTestCase {
         primaryGenres: Bool = false, heldPrimaryGenreMetadata: Bool = false,
         primaryGenreScopedQuery: Bool = false,
         sharedChromeEvidence: Bool = false, remoteListening: Bool = false,
-        queueArtworkTransition: Bool = false
+        queueArtworkTransition: Bool = false, lyricsPresentation: Bool = false,
+        missingLyrics: Bool = false
     )
         -> XCUIApplication
     {
         let app = XCUIApplication(bundleIdentifier: "com.chameleonenterprise.velacanto.uitesting")
         app.launchArguments = ["-foundationDownloadsUITesting", "-foundationTesting"]
+        if lyricsPresentation { app.launchArguments.append("-fixtureLyricsPresentation") }
+        if missingLyrics { app.launchArguments.append("-fixtureMissingLyrics") }
         if sharedChromeEvidence { app.launchArguments.append("-fixtureSharedChromeEvidence") }
         if remoteListening { app.launchArguments.append("-fixtureRemoteListening") }
         if primaryGenres { app.launchArguments.append("-fixturePrimaryGenres") }

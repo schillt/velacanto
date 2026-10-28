@@ -98,6 +98,7 @@ struct FoundationLibraryView: View {
         @State private var bottomChromeGeometry = FoundationBottomChromeGeometry()
     #endif
     @State private var displayedEntryID: UUID?
+    @State private var missingLyricsEntryID: UUID?
     @State private var displayedState: FoundationPlayer.State = .idle
     @EnvironmentObject private var currentArtwork: FoundationCurrentArtwork
     @EnvironmentObject private var downloads: FoundationDownloads
@@ -241,7 +242,10 @@ struct FoundationLibraryView: View {
         }
         .onPreferenceChange(FoundationOfflineSurfacePreferenceKey.self) { offlineSurface = $0 }
         .onReceive(player.$queue.removeDuplicates()) { displayedQueue = $0 }
-        .onReceive(player.$selectedEntryID.removeDuplicates()) { displayedEntryID = $0 }
+        .onReceive(player.$selectedEntryID.removeDuplicates()) { selection in
+            if displayedEntryID != selection { missingLyricsEntryID = nil }
+            displayedEntryID = selection
+        }
         .onReceive(player.$state.removeDuplicates()) { displayedState = $0 }
         #if DEBUG
             .onChange(of: showingPlayer) { _, shown in
@@ -456,7 +460,11 @@ struct FoundationLibraryView: View {
             .inspector(isPresented: $showingPlayer) {
                 FoundationMacPlaybackPanel(
                     player: player, library: accountLibrary, mode: macPanel,
-                    queuePresentation: macQueuePresentation, isPresented: showingPlayer
+                    queuePresentation: macQueuePresentation, isPresented: showingPlayer,
+                    lyricsAvailabilityChanged: { entryID, available in
+                        guard entryID == player.selectedEntryID else { return }
+                        missingLyricsEntryID = available ? nil : entryID
+                    }
                 )
                 .environment(\.foundationMacTransportBottomInset, 0)
                 .environment(\.foundationMacUsesShellToolbar, false)
@@ -1206,11 +1214,18 @@ struct FoundationLibraryView: View {
     }
 
     #if os(macOS)
+        private var lyricsUnavailable: Bool {
+            displayedQueue.first(where: { $0.id == displayedEntryID })?.item.hasLyrics == false
+                || (displayedEntryID != nil && missingLyricsEntryID == displayedEntryID)
+        }
+
         private var macTransport: some View {
             let item = displayedQueue.first { $0.id == displayedEntryID }?.item
             return FoundationMacTransport(
                 player: player, item: item, state: displayedState,
-                lyricsEnabled: item != nil && !connectivity.localOnly,
+                lyricsEnabled: item != nil && !connectivity.localOnly
+                    && (!lyricsUnavailable || (showingPlayer && macPanel == .lyrics)),
+                lyricsUnavailable: lyricsUnavailable,
                 lyricsSelected: showingPlayer && macPanel == .lyrics,
                 queueSelected: showingPlayer && macPanel == .queue,
                 toggleLyrics: { toggleMacPanel(.lyrics) },
@@ -1244,7 +1259,8 @@ struct FoundationLibraryView: View {
                 previous: { player.previous() }, next: { player.next() },
                 queue: { toggleMacPanel(.queue) }, lyrics: { toggleMacPanel(.lyrics) },
                 hasSelection: displayedEntryID != nil, canAdvance: player.canAdvance,
-                canShowLyrics: displayedEntryID != nil && !connectivity.localOnly)
+                canShowLyrics: displayedEntryID != nil && !connectivity.localOnly
+                    && (!lyricsUnavailable || (showingPlayer && macPanel == .lyrics)))
         }
     #endif
 
@@ -1340,13 +1356,18 @@ struct FoundationLibraryView: View {
                 Button {
                     toggleMacPanel(.lyrics)
                 } label: {
-                    Image(systemName: "quote.bubble").frame(width: 28, height: 32)
+                    FoundationLyricsIcon(unavailable: lyricsUnavailable).frame(
+                        width: 28, height: 32)
                 }
-                .buttonStyle(.plain).disabled(displayedEntryID == nil || connectivity.localOnly)
+                .buttonStyle(.plain).disabled(
+                    displayedEntryID == nil || connectivity.localOnly
+                        || (lyricsUnavailable && !(showingPlayer && macPanel == .lyrics))
+                )
                 .foregroundStyle(
                     showingPlayer && macPanel == .lyrics ? Color.accentColor : Color.primary
                 )
-                .help("Lyrics (⇧⌘L)").accessibilityLabel("Show lyrics")
+                .help("Lyrics (⇧⌘L)")
+                .accessibilityLabel(lyricsUnavailable ? "Lyrics unavailable" : "Show lyrics")
                 .accessibilityAddTraits(showingPlayer && macPanel == .lyrics ? .isSelected : [])
                 Button {
                     toggleMacPanel(.queue)

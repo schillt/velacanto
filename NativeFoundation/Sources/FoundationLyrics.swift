@@ -66,6 +66,10 @@ final class FoundationLyricsModel: ObservableObject {
         isCurrent: @MainActor () -> Bool
     ) async {
         guard isActive, state == .idle, isCurrent(), !Task.isCancelled else { return }
+        if item.hasLyrics == false {
+            state = .missing
+            return
+        }
         generation += 1
         let request = generation
         state = .loading
@@ -83,7 +87,8 @@ final class FoundationLyricsModel: ObservableObject {
         } catch {
             guard isActive, request == generation, isCurrent(), !Task.isCancelled else { return }
             let failure = FoundationLibraryError.category(error)
-            state = failure == .cancelled ? .idle : .failed(failure)
+            // A still-visible provider cancellation needs an explicit recovery action.
+            state = .failed(failure)
         }
     }
 
@@ -117,6 +122,7 @@ struct FoundationLyricsView: View {
     @ObservedObject var model: FoundationLyricsModel
     // Sidebar glass follows appearance; artwork-backed presentations retain light text.
     var followsAppearance = false
+    var availabilityChanged: (Bool) -> Void = { _ in }
     @State private var retry = 0
 
     var body: some View {
@@ -161,6 +167,14 @@ struct FoundationLyricsView: View {
         .accessibilityHidden(!model.isActive)
         .task(id: retry) {
             await model.load(item: item, library: library) { player.selectedEntryID == entryID }
+        }
+        .onChange(of: model.state, initial: true) { _, state in
+            guard model.isActive, player.selectedEntryID == entryID else { return }
+            switch state {
+            case .loaded: availabilityChanged(true)
+            case .missing: availabilityChanged(false)
+            default: break
+            }
         }
         .onChange(of: player.selectedEntryID) { _, selection in
             guard selection != entryID else { return }
@@ -291,5 +305,20 @@ struct FoundationPlayerContentFade: View {
             LinearGradient(colors: [.white, .clear], startPoint: .top, endPoint: .bottom)
                 .frame(height: Self.edgeHeight)
         }
+    }
+}
+
+/// Keep the familiar lyrics mark; a slash distinguishes confirmed absence from loading/errors.
+struct FoundationLyricsIcon: View {
+    var unavailable: Bool = false
+    var body: some View {
+        Image(systemName: "quote.bubble")
+            .overlay {
+                if unavailable {
+                    Image(systemName: "line.diagonal").fontWeight(.bold).scaleEffect(1.25)
+                }
+            }
+            .opacity(unavailable ? 0.4 : 1)
+            .accessibilityHidden(true)
     }
 }

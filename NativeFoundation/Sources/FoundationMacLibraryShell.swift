@@ -462,6 +462,7 @@ import SwiftUI
         let item: FoundationItem?
         let state: FoundationPlayer.State
         let lyricsEnabled: Bool
+        let lyricsUnavailable: Bool
         let lyricsSelected: Bool
         let queueSelected: Bool
         let toggleLyrics: () -> Void
@@ -517,6 +518,7 @@ import SwiftUI
                 .frame(maxWidth: .infinity, minHeight: FoundationMacLayout.transportContentHeight)
                 FoundationMacTransportTools(
                     player: player, lyricsEnabled: lyricsEnabled,
+                    lyricsUnavailable: lyricsUnavailable,
                     lyricsSelected: lyricsSelected, queueSelected: queueSelected,
                     toggleLyrics: toggleLyrics, toggleQueue: toggleQueue
                 ).frame(width: 184)
@@ -575,6 +577,7 @@ import SwiftUI
     private struct FoundationMacTransportTools: View {
         @ObservedObject var player: FoundationPlayer
         let lyricsEnabled: Bool
+        let lyricsUnavailable: Bool
         let lyricsSelected: Bool
         let queueSelected: Bool
         let toggleLyrics: () -> Void
@@ -586,12 +589,15 @@ import SwiftUI
         var body: some View {
             HStack(spacing: 8) {
                 Button(action: toggleLyrics) {
-                    Image(systemName: "quote.bubble").frame(width: 40, height: 44)
-                        .contentShape(Rectangle())
+                    FoundationLyricsIcon(unavailable: lyricsUnavailable).frame(
+                        width: 40, height: 44
+                    )
+                    .contentShape(Rectangle())
                 }
                 .disabled(!lyricsEnabled)
                 .foregroundStyle(lyricsSelected ? Color.accentColor : Color.primary)
-                .help("Lyrics (⇧⌘L)").accessibilityLabel("Show lyrics")
+                .help("Lyrics (⇧⌘L)")
+                .accessibilityLabel(lyricsUnavailable ? "Lyrics unavailable" : "Show lyrics")
                 .accessibilityAddTraits(lyricsSelected ? .isSelected : [])
                 Button(action: toggleQueue) {
                     Image(systemName: "list.bullet").frame(width: 40, height: 44)

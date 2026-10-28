@@ -23,6 +23,7 @@ struct FoundationPlayerView: View {
     @State private var scrubEntryID: UUID?
     @State private var showingQueue = false
     @State private var lyricsPresentation: FoundationLyricsPresentation?
+    @State private var missingLyricsEntryID: UUID?
     @State private var showsDelayedLoading = false
     @State private var sheetDestination: PlayerSheetDestination?
 
@@ -47,6 +48,11 @@ struct FoundationPlayerView: View {
 
     private var current: FoundationItem? {
         player.queue.first { $0.id == player.selectedEntryID }?.item
+    }
+
+    private var lyricsUnavailable: Bool {
+        current?.hasLyrics == false
+            || (player.selectedEntryID != nil && missingLyricsEntryID == player.selectedEntryID)
     }
 
     // The first transition frame uses the same already-decoded cover as the bar.
@@ -106,7 +112,11 @@ struct FoundationPlayerView: View {
                                 let entry = presentation.entry
                                 FoundationLyricsView(
                                     item: entry.item, entryID: entry.id, library: library,
-                                    player: player, model: presentation.model
+                                    player: player, model: presentation.model,
+                                    availabilityChanged: { available in
+                                        guard player.selectedEntryID == entry.id else { return }
+                                        missingLyricsEntryID = available ? nil : entry.id
+                                    }
                                 )
                                 .id(presentation.id)
                                 .frame(
@@ -148,13 +158,18 @@ struct FoundationPlayerView: View {
                             Button {
                                 toggleLyrics()
                             } label: {
-                                Image(systemName: "quote.bubble")
+                                FoundationLyricsIcon(unavailable: lyricsUnavailable)
                                     .font(.title2)
                                     .frame(width: 44, height: 44)
                             }
-                            .disabled(current == nil || connectivity.localOnly)
+                            .disabled(
+                                current == nil || connectivity.localOnly
+                                    || (lyricsUnavailable && lyricsPresentation == nil)
+                            )
                             .accessibilityLabel(
-                                lyricsPresentation == nil ? "Show lyrics" : "Show artwork"
+                                lyricsPresentation == nil
+                                    ? (lyricsUnavailable ? "Lyrics unavailable" : "Show lyrics")
+                                    : "Show artwork"
                             )
                             .accessibilityAddTraits(lyricsPresentation == nil ? [] : .isSelected)
                             Spacer()
@@ -352,8 +367,14 @@ struct FoundationPlayerView: View {
             #endif
             scrubbing = false
             scrubEntryID = nil
+            let keepLyricsOpen = lyricsPresentation != nil && !connectivity.localOnly
             lyricsPresentation?.model.cancel()
-            lyricsPresentation = nil
+            missingLyricsEntryID = nil
+            lyricsPresentation =
+                keepLyricsOpen
+                ? player.queue.first(where: { $0.id == player.selectedEntryID })
+                    .map { FoundationLyricsPresentation(entry: $0) }
+                : nil
         }
     }
 
@@ -805,9 +826,17 @@ private struct FoundationQueueView: View {
                         }
                         .toolbar {
                             if isPresented {
-                                ToolbarItemGroup(placement: .primaryAction) {
-                                    macModeControls
+                                ToolbarItem(placement: .principal) {
+                                    GlassEffectContainer(spacing: 8) {
+                                        HStack(spacing: 12) {
+                                            macModeControls(
+                                                labelWidth: max(44, (geometry.size.width - 92) / 2))
+                                        }
+                                    }
+                                    .frame(width: max(0, geometry.size.width - 32), height: 36)
+                                    .padding(.vertical, 8)
                                 }
+                                .sharedBackgroundVisibility(.hidden)
                             }
                         }
                         .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
@@ -967,7 +996,7 @@ private struct FoundationQueueView: View {
 
     #if os(macOS)
         /// Native toolbar toggles own their glass, sizing and selected-state contrast.
-        private var macModeControls: some View {
+        private func macModeControls(labelWidth: CGFloat) -> some View {
             Group {
                 Toggle(
                     isOn: Binding(
@@ -975,8 +1004,9 @@ private struct FoundationQueueView: View {
                         set: { player.setShuffle($0) }
                     )
                 ) {
-                    Label("Shuffle", systemImage: "shuffle")
+                    Image(systemName: "shuffle").frame(width: labelWidth, height: 22)
                 }
+                .accessibilityLabel("Shuffle")
                 .accessibilityValue(player.shuffleEnabled ? "On" : "Off")
                 Toggle(
                     isOn: Binding(
@@ -989,11 +1019,15 @@ private struct FoundationQueueView: View {
                         }
                     )
                 ) {
-                    Label("Repeat", systemImage: player.repeatMode == .one ? "repeat.1" : "repeat")
+                    Image(systemName: player.repeatMode == .one ? "repeat.1" : "repeat")
+                        .frame(width: labelWidth, height: 22)
                 }
+                .accessibilityLabel("Repeat")
                 .accessibilityValue(player.repeatMode.rawValue.capitalized)
             }
             .toggleStyle(.button)
+            .buttonStyle(.glass)
+            .buttonBorderShape(.capsule)
             .labelStyle(.iconOnly)
             .controlSize(.regular)
         }
@@ -1434,6 +1468,7 @@ extension EnvironmentValues {
         let mode: Mode
         let queuePresentation: Int
         let isPresented: Bool
+        var lyricsAvailabilityChanged: (UUID, Bool) -> Void = { _, _ in }
         @Environment(\.foundationReduceTransparency) private var reduceTransparency
         @EnvironmentObject private var connectivity: FoundationConnectivity
         @State private var lyrics: FoundationLyricsPresentation?
@@ -1456,7 +1491,12 @@ extension EnvironmentValues {
                     FoundationLyricsView(
                         item: lyrics.entry.item, entryID: lyrics.entry.id,
                         library: library, player: player, model: lyrics.model,
-                        followsAppearance: true)
+                        followsAppearance: true,
+                        availabilityChanged: { available in
+                            lyricsAvailabilityChanged(lyrics.entry.id, available)
+                        }
+                    )
+                    .id(lyrics.id)
                 } else {
                     ContentUnavailableView("Select a track for lyrics", systemImage: "quote.bubble")
                 }
@@ -1469,11 +1509,11 @@ extension EnvironmentValues {
             }
             .task(
                 id:
-                    "\(mode.rawValue)-\(player.selectedEntryID?.uuidString ?? "none")-\(connectivity.localOnly)"
+                    "\(isPresented)-\(mode.rawValue)-\(player.selectedEntryID?.uuidString ?? "none")-\(connectivity.localOnly)"
             ) {
                 lyrics?.model.cancel()
                 lyrics = nil
-                if mode == .lyrics, !connectivity.localOnly,
+                if isPresented, mode == .lyrics, !connectivity.localOnly,
                     let entry = player.queue.first(where: { $0.id == player.selectedEntryID })
                 {
                     lyrics = FoundationLyricsPresentation(entry: entry)

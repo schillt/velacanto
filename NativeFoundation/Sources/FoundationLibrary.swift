@@ -27,6 +27,8 @@ struct FoundationItem: Identifiable, Equatable, Codable, Sendable {
     var sortName: String? = nil
     /// Membership identity for editing this occurrence, separate from the song identity.
     var playlistEntryID: String? = nil
+    /// Provider-reported availability; nil means unknown, never absent.
+    var hasLyrics: Bool? = nil
     var trackNumber: Int? = nil
     var discNumber: Int? = nil
     /// Nil preserves legacy account-owned Jellyfin snapshots. New local items are explicit.
@@ -2671,6 +2673,7 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
                 genreMetadataIsComplete: entry.genreItems.map { $0.count == genres.count },
                 playCount: max(0, entry.userData?.playCount ?? 0), sortName: entry.sortName,
                 playlistEntryID: entry.playlistItemID,
+                hasLyrics: kind == .track ? entry.hasLyrics : nil,
                 trackNumber: entry.indexNumber, discNumber: entry.parentIndexNumber)
         }
     }

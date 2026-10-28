@@ -817,6 +817,17 @@
             ]
         }
 
+        func lyrics(for item: FoundationItem) async throws -> FoundationLyrics? {
+            guard ProcessInfo.processInfo.arguments.contains("-fixtureLyricsPresentation") else {
+                return nil
+            }
+            if ProcessInfo.processInfo.arguments.contains("-fixtureMissingLyrics") { return nil }
+            return .init(lines: [
+                .init(id: 0, text: "Fixture lyric " + item.id, start: 0),
+                .init(id: 1, text: "Fixture next line " + item.id, start: 5),
+            ])
+        }
+
         private var alphabetCapabilityReleased = false
         func releaseAlphabetCapability() { alphabetCapabilityReleased = true }
         private let alphabetCatalog = ProcessInfo.processInfo.arguments.contains(

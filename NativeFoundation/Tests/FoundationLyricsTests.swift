@@ -3,6 +3,11 @@ import XCTest
 
 @testable import VelacantoFoundation
 
+#if os(macOS)
+    import AppKit
+    import SwiftUI
+#endif
+
 @MainActor
 final class FoundationLyricsTests: XCTestCase {
     private let item = FoundationItem(
@@ -11,6 +16,114 @@ final class FoundationLyricsTests: XCTestCase {
     private let session = FoundationSession(
         serverURL: URL(string: "https://example.invalid/proxy/")!, accessToken: "synthetic",
         userID: "00000000000000000000000000000002", deviceID: "synthetic")
+
+    func testProviderCancellationHasExplicitRetryAndNeverStaysIdleLoading() async {
+        let probe = Probe()
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            if await probe.increment() == 1 { throw CancellationError() }
+            return (
+                Data(#"{"Lyrics":[{"Text":"Recovered"}]}"#.utf8),
+                Self.response(request, status: 200)
+            )
+        }
+        let model = FoundationLyricsModel()
+        await model.load(item: item, library: library) { true }
+        XCTAssertEqual(model.state, .failed(.cancelled))
+        await model.load(item: item, library: library) { true }
+        let initialCount = await probe.count
+        XCTAssertEqual(initialCount, 1, "No automatic retry")
+        model.prepareRetry()
+        await model.load(item: item, library: library) { true }
+        XCTAssertEqual(model.state, .loaded(.init(text: "Recovered")))
+    }
+
+    func testKnownMissingMetadataSkipsRequestWhileUnknownStillLoads() async {
+        let probe = Probe()
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            _ = await probe.increment()
+            return (Data(#"{"Lyrics":[]}"#.utf8), Self.response(request, status: 200))
+        }
+        var knownMissing = item
+        knownMissing.hasLyrics = false
+        let missing = FoundationLyricsModel()
+        await missing.load(item: knownMissing, library: library) { true }
+        XCTAssertEqual(missing.state, .missing)
+        let before = await probe.count
+        XCTAssertEqual(before, 0)
+        let unknown = FoundationLyricsModel()
+        await unknown.load(item: item, library: library) { true }
+        XCTAssertEqual(unknown.state, .missing)
+        let after = await probe.count
+        XCTAssertEqual(after, 1)
+    }
+
+    func testCatalogPreservesTrueFalseAndUnknownLyricsMetadata() async throws {
+        for flag in [true, false, nil] as [Bool?] {
+            let library = FoundationJellyfinLibrary(session: session) { request in
+                var track: [String: Any] = [
+                    "Id": "00000000000000000000000000000001", "Name": "Synthetic", "Type": "Audio",
+                ]
+                if let flag { track["HasLyrics"] = flag }
+                let data = try JSONSerialization.data(withJSONObject: [
+                    "Items": [track], "TotalRecordCount": 1, "StartIndex": 0,
+                ])
+                return (data, Self.response(request, status: 200))
+            }
+            let page = try await library.songs(startIndex: 0)
+            XCTAssertEqual(page.items.first?.hasLyrics, flag)
+        }
+    }
+
+    #if os(macOS)
+        func testMountedMacLyricsLoadsNewTrackWithoutClosingInspector() async {
+            let first = FoundationQueueEntry(item: item)
+            let other = FoundationItem(
+                id: "00000000000000000000000000000003", title: "Second", subtitle: "", kind: .track,
+                duration: 30)
+            let second = FoundationQueueEntry(item: other)
+            let initial = expectation(description: "First lyrics loaded")
+            let changed = expectation(description: "Second lyrics loaded in mounted inspector")
+            let library = FoundationJellyfinLibrary(session: session) { request in
+                if request.url!.path.contains(other.id) {
+                    changed.fulfill()
+                } else {
+                    initial.fulfill()
+                }
+                return (
+                    Data(#"{"Lyrics":[{"Text":"Synthetic line"}]}"#.utf8),
+                    Self.response(request, status: 200)
+                )
+            }
+            let player = FoundationPlayer(
+                resolve: { _ in throw FoundationLibraryError.unavailable }, activateSession: {},
+                deactivateSession: {})
+            func select(_ id: UUID) {
+                player.restoreSession(
+                    .init(
+                        entries: [first, second], selectedEntryID: id, shuffleEnabled: false,
+                        repeatMode: .off))
+            }
+            select(first.id)
+            let connectivity = FoundationConnectivity(monitorConnectivity: false, retry: {})
+            let panel = FoundationMacPlaybackPanel(
+                player: player, library: library, mode: .lyrics, queuePresentation: 0,
+                isPresented: true
+            ).environmentObject(connectivity)
+            let window = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 340, height: 600), styleMask: [.titled],
+                backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            window.contentView = NSHostingView(rootView: panel)
+            window.orderFront(nil)
+            defer {
+                window.close()
+                player.stop()
+            }
+            await fulfillment(of: [initial], timeout: 5)
+            select(second.id)
+            await fulfillment(of: [changed], timeout: 5)
+        }
+    #endif
 
     func testGeneratedRequestAndTimedUntimedBlankMapping() async throws {
         for body in [
