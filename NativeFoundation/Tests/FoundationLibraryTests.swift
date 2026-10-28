@@ -201,6 +201,53 @@ final class FoundationLibraryTests: XCTestCase {
         XCTAssertNil(retired, "Retired accounts cannot rehydrate their old metadata")
     }
 
+    func testOverviewPreservesSuppliedParagraphsAndDoesNotInventPlainTextBreaks() async throws {
+        for supplied in [
+            "  Opening paragraph.\n\nSecond paragraph.\nA supplied line break.  ",
+            "One sentence. Another sentence. A provider-supplied single paragraph.",
+        ] {
+            let expected = supplied.trimmingCharacters(in: .whitespacesAndNewlines)
+            for kind in [FoundationItem.Kind.album, .artist] {
+                let recorder = Recorder()
+                let requestedID = itemID
+                let gate = FoundationAlphabetTestGate()
+                let library = FoundationJellyfinLibrary(session: session) { request in
+                    await recorder.append(request)
+                    if kind == .artist { await gate.suspend() }
+                    return (
+                        try JSONSerialization.data(withJSONObject: [
+                            "Id": requestedID,
+                            "Type": kind == .artist ? "MusicArtist" : "MusicAlbum",
+                            "Name": "Synthetic",
+                            "Overview": supplied,
+                        ]),
+                        Self.response(request)
+                    )
+                }
+                let item = FoundationItem(
+                    id: itemID, title: "Synthetic", subtitle: "", kind: kind, duration: nil)
+                if kind == .artist {
+                    async let overview = library.overview(for: item)
+                    async let details = library.itemDetails(for: item)
+                    await gate.entered()
+                    await gate.release()
+                    let (text, _) = try await (overview, details)
+                    XCTAssertEqual(text, expected)
+                    let cached = await library.cachedArtistDetails(for: item)
+                    XCTAssertEqual(cached?.overview, expected)
+                    let repeated = try await library.overview(for: item)
+                    XCTAssertEqual(repeated, expected)
+                } else {
+                    let text = try await library.overview(for: item)
+                    XCTAssertEqual(text, expected)
+                }
+                let requests = await recorder.requests
+                XCTAssertEqual(
+                    requests.count, 1, "Formatting must not add or bypass artist metadata reads")
+            }
+        }
+    }
+
     func testArtistDetailsAndOverviewShareOneReadAndExplicitInvalidationRefreshes() async throws {
         let recorder = Recorder()
         let gate = FoundationAlphabetTestGate()
