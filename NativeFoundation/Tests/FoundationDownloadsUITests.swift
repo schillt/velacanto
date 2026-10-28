@@ -1305,7 +1305,7 @@ final class FoundationDownloadsUITests: XCTestCase {
         if app.buttons["search-dismiss-keyboard"].exists {
             app.buttons["search-dismiss-keyboard"].tap()
         }
-        tapVisible(app.buttons["primary-genres-build"], in: app)
+        XCTAssertFalse(app.buttons["primary-genres-build"].exists)
         XCTAssertTrue(app.buttons["Fixture Genre"].waitForExistence(timeout: 5))
         counts("Genre 1")
         capture("Search genre Primary shares its identity independently of New", in: app)
@@ -3547,7 +3547,40 @@ final class FoundationDownloadsUITests: XCTestCase {
         XCTAssertTrue(
             genre.waitForExistence(timeout: 10),
             "First-launch genres must not require the Build button")
-        capture("Automatic genre preparation publishes the normal library view", in: app)
+        XCTAssertFalse(app.buttons["Rebuild Genres"].exists)
+        XCTAssertFalse(app.buttons["Cancel indexing"].exists)
+        XCTAssertFalse(
+            app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "Indexed "))
+                .firstMatch.exists)
+        selectTab("Search", in: app)
+        if app.buttons["search-dismiss-keyboard"].exists {
+            app.buttons["search-dismiss-keyboard"].tap()
+        }
+        XCTAssertTrue(app.buttons["Fixture Genre"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["Rebuild Genres"].exists)
+        XCTAssertFalse(app.buttons["Cancel indexing"].exists)
+        XCTAssertFalse(
+            app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "Indexed "))
+                .firstMatch.exists)
+        capture("Automatic genres browse without maintenance in Search and Library", in: app)
+        openGenreLibrarySettings(in: app)
+        XCTAssertTrue(app.buttons["settings-rebuild-genres"].waitForExistence(timeout: 5))
+        capture("Genre maintenance remains in Library Settings", in: app)
+        closeGenreLibrarySettings(in: app)
+    }
+
+    private func openGenreLibrarySettings(in app: XCUIApplication) {
+        selectTab("Home", in: app)
+        tapNativeChrome(app.buttons["Profile and settings"], in: app)
+        XCTAssertTrue(app.navigationBars["Profile & Settings"].waitForExistence(timeout: 5))
+        tapVisibleCenter(app.buttons["Library Settings"], in: app)
+        XCTAssertTrue(app.navigationBars["Library Settings"].waitForExistence(timeout: 5))
+    }
+
+    private func closeGenreLibrarySettings(in app: XCUIApplication) {
+        tapNativeChrome(app.navigationBars["Library Settings"].buttons.firstMatch, in: app)
+        XCTAssertTrue(app.navigationBars["Profile & Settings"].waitForExistence(timeout: 5))
+        tapNativeChrome(app.navigationBars["Profile & Settings"].buttons["Done"], in: app)
     }
 
     func testExplicitPrimaryGenreBuildCancelLateResponseAndSharedSearchLibrarySnapshot() {
@@ -3559,7 +3592,7 @@ final class FoundationDownloadsUITests: XCTestCase {
         if app.buttons["search-dismiss-keyboard"].exists {
             app.buttons["search-dismiss-keyboard"].tap()
         }
-        XCTAssertTrue(app.buttons["primary-genres-build"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["primary-genres-build"].exists)
         XCTAssertFalse(app.buttons["Fixture Genre"].exists)
 
         func reads(_ expected: String, release: Bool = false) {
@@ -3574,18 +3607,32 @@ final class FoundationDownloadsUITests: XCTestCase {
         }
 
         reads("metadata 0 returned 0")
-        app.buttons["primary-genres-build"].tap()
-        XCTAssertTrue(app.buttons["primary-genres-cancel"].waitForExistence(timeout: 5))
+        openGenreLibrarySettings(in: app)
+        tapNativeChrome(app.buttons["settings-rebuild-genres"], in: app)
+        XCTAssertTrue(app.buttons["settings-cancel-genres"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["0 songs checked"].exists)
+        closeGenreLibrarySettings(in: app)
         reads("metadata 1 returned 0")
-        app.buttons["primary-genres-cancel"].tap()
-        XCTAssertTrue(app.buttons["primary-genres-build"].waitForExistence(timeout: 5))
+        openGenreLibrarySettings(in: app)
+        tapNativeChrome(app.buttons["settings-cancel-genres"], in: app)
+        XCTAssertTrue(app.buttons["settings-rebuild-genres"].isEnabled)
+        closeGenreLibrarySettings(in: app)
+        selectTab("Search", in: app)
         XCTAssertFalse(app.buttons["Fixture Rare Genre"].exists)
+        XCTAssertFalse(app.buttons["primary-genres-cancel"].exists)
 
+        openGenreLibrarySettings(in: app)
+        tapNativeChrome(app.buttons["settings-rebuild-genres"], in: app)
+        let completed = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "enabled == true"),
+            object: app.buttons["settings-rebuild-genres"])
+        XCTAssertEqual(XCTWaiter.wait(for: [completed], timeout: 5), .completed)
+        closeGenreLibrarySettings(in: app)
         selectTab("Library", in: app)
         tapVisible(app.buttons["library-category-genres"], in: app)
         XCTAssertTrue(
             app.descendants(matching: .any)["library-index-genre"].waitForExistence(timeout: 5))
-        app.buttons["primary-genres-build"].tap()
+        XCTAssertFalse(app.buttons["primary-genres-build"].exists)
         let libraryGenre = app.buttons.matching(
             NSPredicate(
                 format: "label == %@ OR label BEGINSWITH %@",
@@ -3612,19 +3659,19 @@ final class FoundationDownloadsUITests: XCTestCase {
         XCTAssertTrue(app.buttons["Fixture Other Genre"].exists)
         XCTAssertFalse(app.buttons["Fixture Rare Genre"].exists)
         reads("metadata 2 returned 2")
-        capture("Explicit primary genre census shared by native Library and Search", in: app)
+        capture("Settings-only genre maintenance shares one Search and Library snapshot", in: app)
     }
 
     func testPrimaryGenreSeededQueryClearsAndColdDownloadedDestinationUsesCanonicalSongs() {
         continueAfterFailure = false
         let app = launch(
             productionShell: true, canonicalDownloadState: "full", compactFixtureControls: true,
-            primaryGenres: true, primaryGenreScopedQuery: true)
+            primaryGenres: true, primaryGenreScopedQuery: true, automaticGenres: true)
         selectTab("Search", in: app)
         if app.buttons["search-dismiss-keyboard"].exists {
             app.buttons["search-dismiss-keyboard"].tap()
         }
-        tapVisible(app.buttons["primary-genres-build"], in: app)
+        XCTAssertFalse(app.buttons["primary-genres-build"].exists)
         XCTAssertTrue(app.buttons["Fixture Genre"].waitForExistence(timeout: 5))
         let search = app.textFields["Search music"]
         tapNativeChrome(search, in: app)
@@ -3676,7 +3723,7 @@ final class FoundationDownloadsUITests: XCTestCase {
                 "Fixture Genre", "View Fixture Genre")
         ).firstMatch
         XCTAssertTrue(restored.waitForExistence(timeout: 5))
-        XCTAssertEqual(app.buttons["primary-genres-build"].label, "Rebuild Genres")
+        XCTAssertFalse(app.buttons["primary-genres-build"].exists)
         openAlphabetFixtureControls(app)
         app.buttons["Read primary genre counts"].tap()
         let noScan = XCTNSPredicateExpectation(
@@ -3697,43 +3744,35 @@ final class FoundationDownloadsUITests: XCTestCase {
         capture("Cold downloaded primary genre resolves songs without a prior album page", in: app)
     }
 
-    func testHomeGenresRequireExplicitBuildAndOpenCanonicalSongMembership() {
+    func testHomeAutomaticallyPreparedGenresOpenCanonicalSongMembership() {
         continueAfterFailure = false
         let app = launch(
             productionShell: true, canonicalDownloadState: "full", compactFixtureControls: true,
-            primaryGenres: true)
-        openAlphabetFixtureControls(app)
-        app.buttons["Read primary genre counts"].tap()
-        let noScan = XCTNSPredicateExpectation(
-            predicate: NSPredicate(format: "label == %@", "metadata 0 returned 0"),
-            object: app.staticTexts["fixture-primary-genre-counts"])
-        XCTAssertEqual(XCTWaiter.wait(for: [noScan], timeout: 5), .completed)
-        closeAlphabetFixtureControls(app)
+            primaryGenres: true, automaticGenres: true)
         selectTab("Home", in: app)
-        tapVisible(app.buttons["home-build-primary-genres"], in: app)
-        tapVisible(app.buttons["primary-genres-build"], in: app)
-        XCTAssertTrue(app.buttons["Fixture Genre"].waitForExistence(timeout: 5))
-        tapNativeChrome(app.navigationBars["Genres"].buttons.firstMatch, in: app)
-        tapVisible(app.buttons["home-shelf-Fixture Genre"], in: app)
+        let shelf = app.buttons["home-shelf-Fixture Genre"]
+        XCTAssertTrue(shelf.waitForExistence(timeout: 10))
+        XCTAssertFalse(app.buttons["primary-genres-build"].exists)
+        tapVisible(shelf, in: app)
         XCTAssertTrue(
             app.descendants(matching: .any)["primary-genre-songs"].waitForExistence(timeout: 5))
         XCTAssertTrue(
             app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Primary Song 2"))
                 .firstMatch.exists, "Home genre routes must preserve song-only canonical membership"
         )
-        capture("Home explicit genre index opens canonical songs", in: app)
+        capture("Home automatic genres open canonical songs", in: app)
     }
 
     func testNewAndPinnedGenresUseCanonicalSongDestinationsWithoutAlbumGenreQueries() {
         continueAfterFailure = false
         let app = launch(
             productionShell: true, canonicalDownloadState: "full", compactFixtureControls: true,
-            primaryGenres: true)
+            primaryGenres: true, automaticGenres: true)
         selectTab("Search", in: app)
         if app.buttons["search-dismiss-keyboard"].exists {
             app.buttons["search-dismiss-keyboard"].tap()
         }
-        tapVisible(app.buttons["primary-genres-build"], in: app)
+        XCTAssertFalse(app.buttons["primary-genres-build"].exists)
         XCTAssertTrue(app.buttons["Fixture Genre"].waitForExistence(timeout: 5))
         selectTab("New", in: app)
         tapVisible(app.buttons["Fixture Genre"], in: app)
