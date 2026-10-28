@@ -3091,6 +3091,7 @@ private struct FoundationScreenHeader<Profile: View, Search: View>: ViewModifier
             VStack(spacing: 0) {
                 HStack {
                     Text(title).font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
+                        .accessibilityIdentifier("browsing-screen-title-" + title)
                     Spacer()
                     profile
                 }.padding(.horizontal, 16).frame(height: 56)

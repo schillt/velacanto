@@ -1949,8 +1949,10 @@ final class FoundationDownloadsUITests: XCTestCase {
 
         for name in ["Home", "Library"] {
             selectTab(name, in: app)
-            let title = app.staticTexts[name].firstMatch
+            let title = app.staticTexts["browsing-screen-title-" + name]
             assertOfflineBannerBelow(title, in: app)
+            capture(
+                "\(name) offline strip below the visible custom title before scrolling", in: app)
             scrollContent(in: app)
             let hiddenTogether = XCTNSPredicateExpectation(
                 predicate: NSPredicate { _, _ in
