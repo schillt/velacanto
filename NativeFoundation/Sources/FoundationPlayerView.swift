@@ -622,9 +622,12 @@ private struct FoundationQueueView: View {
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     @State private var hasAnchoredOnOpen = false
-    @Environment(\.foundationReduceTransparency) private var reduceTransparency
     @State private var currentHeaderHeight: CGFloat = 0
     @State private var historyIsVisible = false
+    #if os(macOS)
+        @State private var currentHeaderBottom: CGFloat = 0
+        @State private var historyHeaderBottom: CGFloat = 0
+    #endif
 
     private enum ScrollTarget: Hashable {
         case current
@@ -695,8 +698,19 @@ private struct FoundationQueueView: View {
                                 alignment: .leading, spacing: 8, pinnedViews: [.sectionHeaders]
                             ) {
                                 if !player.history.isEmpty {
-                                    historyHeader
-                                    ForEach(player.history) { row($0) }
+                                    Section {
+                                        VStack(alignment: .leading, spacing: 8) {
+                                            ForEach(player.history) { row($0) }
+                                        }
+                                        .mask { rowsBelowHeader(historyHeaderBottom) }
+                                    } header: {
+                                        historyHeader
+                                            .onGeometryChange(for: CGFloat.self) {
+                                                $0.frame(in: .named("queue-scroll")).maxY
+                                            } action: {
+                                                historyHeaderBottom = $0
+                                            }
+                                    }
                                 }
                                 Section {
                                     VStack(alignment: .leading, spacing: 8) {
@@ -741,21 +755,19 @@ private struct FoundationQueueView: View {
                                         }
                                         .reorderable()
                                     }
+                                    .mask { rowsBelowHeader(currentHeaderBottom) }
                                     .frame(
                                         minHeight: max(
                                             0, geometry.size.height - currentHeaderHeight),
                                         alignment: .top)
                                 } header: {
                                     currentHeader
-                                        .onGeometryChange(for: CGFloat.self) {
-                                            $0.size.height
-                                        } action: {
-                                            currentHeaderHeight = $0
-                                        }
-                                        .onGeometryChange(for: Bool.self) {
-                                            $0.frame(in: .named("queue-scroll")).minY > 2
-                                        } action: {
-                                            historyIsVisible = $0
+                                        .onGeometryChange(for: CGRect.self) {
+                                            $0.frame(in: .named("queue-scroll"))
+                                        } action: { frame in
+                                            currentHeaderHeight = frame.height
+                                            currentHeaderBottom = frame.maxY
+                                            historyIsVisible = frame.minY > 2
                                         }
                                         .id(ScrollTarget.current)
                                 }
@@ -834,17 +846,20 @@ private struct FoundationQueueView: View {
         .padding(.top, 8)
         .padding(.bottom, 4)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background {
-            #if os(iOS)
-                Color.clear
-            #else
-                Color(nsColor: .windowBackgroundColor)
-                    .overlay {
-                        if !reduceTransparency { Rectangle().fill(.regularMaterial) }
-                    }
-            #endif
-        }
+        .background(Color.clear)
     }
+
+    #if os(macOS)
+        /// Native inspector material remains visible; scrolling rows cannot paint over headings.
+        private func rowsBelowHeader(_ headerBottom: CGFloat) -> some View {
+            GeometryReader { geometry in
+                let hiddenHeight = min(
+                    geometry.size.height,
+                    max(0, headerBottom - geometry.frame(in: .named("queue-scroll")).minY))
+                Rectangle().padding(.top, hiddenHeight)
+            }
+        }
+    #endif
 
     private func currentTrack(_ entry: FoundationQueueEntry) -> some View {
         Button {
@@ -917,7 +932,7 @@ private struct FoundationQueueView: View {
     private func modeIcon(_ symbol: String, active: Bool) -> some View {
         Image(systemName: symbol)
             .font(.body.weight(.semibold))
-            .foregroundStyle(active ? Color.black : Color.white.opacity(0.85))
+            .foregroundStyle(active ? Color.black : Color.primary.opacity(0.85))
             .frame(width: 44, height: 44)
             .background(active ? Color.white.opacity(0.92) : .clear, in: Circle())
             .glassEffect(.regular.interactive(), in: .circle)
@@ -1321,6 +1336,7 @@ extension EnvironmentValues {
                         relatedItem = $0
                     }
                     .id(queuePresentation)
+                    .ignoresSafeArea(.container, edges: .top)
                 } else if connectivity.localOnly {
                     ContentUnavailableView(
                         "Lyrics unavailable offline", systemImage: "quote.bubble")
@@ -1339,7 +1355,7 @@ extension EnvironmentValues {
             .background {
                 if reduceTransparency { Rectangle().fill(.background) }
             }
-            // Keep readable content below the native inspector toolbar title.
+            // Queue extends into its empty inspector toolbar area; Lyrics keeps its title.
             .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
             .task(
                 id:

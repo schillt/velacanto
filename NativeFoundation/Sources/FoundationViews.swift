@@ -460,10 +460,9 @@ struct FoundationLibraryView: View {
                 )
                 .environment(\.foundationMacTransportBottomInset, 0)
                 .environment(\.foundationMacUsesShellToolbar, false)
-                // A meaningful, noninteractive title owns the inspector's native
-                // toolbar section; Now Playing toggles still control presentation.
+                // Queue begins with the current track; only Lyrics needs a toolbar title.
                 .toolbar {
-                    if showingPlayer {
+                    if showingPlayer, macPanel == .lyrics {
                         ToolbarItem(placement: .principal) {
                             Text(macPanel.rawValue)
                                 .font(.headline)
