@@ -81,6 +81,10 @@ final class FoundationPresentationTests: XCTestCase {
                     contentRect: NSRect(x: 0, y: 0, width: 800, height: 700),
                     styleMask: [.titled], backing: .buffered, defer: false)
                 window.isReleasedWhenClosed = false
+                // Native sheet chrome can inherit its presenter's NSAppearance independently of
+                // SwiftUI's colorScheme environment. Exercise the opposite native appearance.
+                let parentAppearance: NSAppearance.Name = scheme == .light ? .darkAqua : .aqua
+                window.appearance = NSAppearance(named: parentAppearance)
                 let beganSheet = expectation(
                     for: NSPredicate { _, _ in
                         MainActor.assumeIsolated {
@@ -99,19 +103,27 @@ final class FoundationPresentationTests: XCTestCase {
                 let content = try XCTUnwrap(sheet.contentView)
                 content.layoutSubtreeIfNeeded()
                 content.displayIfNeeded()
+                let requestedAppearance: NSAppearance.Name = scheme == .light ? .aqua : .darkAqua
+                XCTAssertEqual(
+                    sheet.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]),
+                    requestedAppearance)
+                XCTAssertEqual(
+                    window.appearance?.name, parentAppearance, "The presenter is unchanged")
                 let bitmap = try XCTUnwrap(
                     content.bitmapImageRepForCachingDisplay(in: content.bounds))
                 content.cacheDisplay(in: content.bounds, to: bitmap)
                 let image = NSImage(size: content.bounds.size)
                 image.addRepresentation(bitmap)
                 let attachment = XCTAttachment(image: image)
-                attachment.name = "Native Mac overview \(scheme) from dark white-text presenter"
+                attachment.name =
+                    "Native Mac overview \(scheme) from opposite native window appearance"
                 attachment.lifetime = .keepAlways
                 add(attachment)
                 // Include the native frame as well: the reading view alone can omit the sheet's
                 // title and confirmation chrome. Review this capture in both appearances.
                 let frameView = content.superview ?? content
                 frameView.layoutSubtreeIfNeeded()
+                frameView.displayIfNeeded()
                 let frameBitmap = try XCTUnwrap(
                     frameView.bitmapImageRepForCachingDisplay(in: frameView.bounds))
                 frameView.cacheDisplay(in: frameView.bounds, to: frameBitmap)
@@ -122,6 +134,19 @@ final class FoundationPresentationTests: XCTestCase {
                     "Native Mac overview \(scheme) full sheet frame and confirmation chrome"
                 chrome.lifetime = .keepAlways
                 add(chrome)
+                let footerColor = try XCTUnwrap(
+                    frameBitmap.colorAt(
+                        x: frameBitmap.pixelsWide / 8,
+                        y: frameBitmap.pixelsHigh - frameBitmap.pixelsHigh / 25
+                    )?.usingColorSpace(.sRGB))
+                let footerLuma =
+                    0.2126 * footerColor.redComponent
+                    + 0.7152 * footerColor.greenComponent + 0.0722 * footerColor.blueComponent
+                if scheme == .light {
+                    XCTAssertGreaterThan(footerLuma, 0.7, "Native Done footer must follow Light")
+                } else {
+                    XCTAssertLessThan(footerLuma, 0.3, "Native Done footer must follow Dark")
+                }
 
                 // Sample only the reading interior, excluding native chrome, edges and scrollbar.
                 // White-on-white inherited text cannot satisfy this contrast check.

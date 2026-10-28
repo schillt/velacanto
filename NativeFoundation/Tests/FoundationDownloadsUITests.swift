@@ -561,6 +561,7 @@ final class FoundationDownloadsUITests: XCTestCase {
 
     func testAlbumOverviewSheetUsesLightWindowAppearance() {
         continueAfterFailure = false
+        XCUIDevice.shared.orientation = .portrait
         let app = launch(
             productionShell: true, canonicalDownloadState: "none", colorScheme: "light",
             compactFixtureControls: true, overview: true)
@@ -578,12 +579,16 @@ final class FoundationDownloadsUITests: XCTestCase {
         ).firstMatch
         XCTAssertTrue(body.waitForExistence(timeout: 5))
         XCTAssertTrue(body.label.contains("overview paragraph 8."))
-        capture("Album overview uses system light appearance at medium size", in: app)
+        let mediumTitleY = navigation.frame.minY
+        XCTAssertGreaterThan(mediumTitleY, app.frame.height * 0.25)
+        XCTAssertFalse(navigation.buttons["Done"].exists)
+        capture("Album overview native glass at medium detent with system light colors", in: app)
         navigation.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
             .press(
                 forDuration: 0.1,
                 thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.1)))
-        capture("Album overview uses system light appearance when expanded", in: app)
+        XCTAssertLessThan(navigation.frame.minY, mediumTitleY - app.frame.height * 0.15)
+        capture("Album overview native sheet expanded with system light colors", in: app)
         XCTAssertFalse(navigation.buttons["Done"].exists)
         for _ in 0..<2 where navigation.exists {
             navigation.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
