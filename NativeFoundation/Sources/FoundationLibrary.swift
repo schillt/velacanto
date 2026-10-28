@@ -195,8 +195,16 @@ enum FoundationPlaylistContentSearch {
         var pending = cursor.pending
         var candidateOffset = cursor.candidateOffset
         if pending.isEmpty, let offset = candidateOffset {
-            let page = try await playlists(offset, candidateLimit)
-            try Task.checkCancellation()
+            let page: FoundationPage
+            do {
+                page = try await playlists(offset, candidateLimit)
+                try Task.checkCancellation()
+            } catch {
+                try Task.checkCancellation()
+                let category = FoundationLibraryError.category(error)
+                if category == .cancelled { throw CancellationError() }
+                throw category
+            }
             guard page.items.count <= candidateLimit,
                 page.items.allSatisfy({ $0.kind == .playlist && !$0.id.isEmpty }),
                 page.nextStartIndex.map({ $0 > offset && !page.items.isEmpty }) ?? true
