@@ -534,6 +534,44 @@ final class FoundationDownloadsUITests: XCTestCase {
         return app
     }
 
+    func testAlbumOverviewSheetUsesLightWindowAppearance() {
+        continueAfterFailure = false
+        let app = launch(
+            productionShell: true, canonicalDownloadState: "none", colorScheme: "light",
+            compactFixtureControls: true, overview: true)
+        selectTab("Library", in: app)
+        openCanonicalCollection("album", fromDownloads: false, in: app, useVerifiedCenter: true)
+        let more = app.buttons.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "Overview: Synthetic album")
+        ).firstMatch
+        XCTAssertTrue(more.waitForExistence(timeout: 5))
+        tapVisibleCenter(more, in: app)
+        let navigation = app.navigationBars["About Fixture Album"]
+        XCTAssertTrue(navigation.waitForExistence(timeout: 5))
+        let body = app.staticTexts.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "Synthetic album overview")
+        ).firstMatch
+        XCTAssertTrue(body.waitForExistence(timeout: 5))
+        XCTAssertTrue(body.label.contains("overview paragraph 8."))
+        capture("Album overview uses system light appearance at medium size", in: app)
+        navigation.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+            .press(
+                forDuration: 0.1,
+                thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.1)))
+        capture("Album overview uses system light appearance when expanded", in: app)
+        tapNativeChrome(navigation.buttons["Done"], in: app)
+        XCTAssertFalse(navigation.exists)
+        let counts = app.buttons["Read catalog counts"]
+        counts.tap()
+        XCTAssertEqual(
+            XCTWaiter.wait(
+                for: [
+                    XCTNSPredicateExpectation(
+                        predicate: NSPredicate(format: "value == %@", "overview-album 1"),
+                        object: counts)
+                ], timeout: 5), .completed)
+    }
+
     func testLoadedAlbumAndArtistOverviewSheetsInLightAppearance() {
         checkLoadedOverviewSheets(colorScheme: "light")
     }

@@ -176,6 +176,7 @@ private struct FoundationOverviewSheet: View {
         // Immersive detail controls may use a white tint; native sheet actions use the app accent.
         .tint(.accentColor)
         .preferredColorScheme(browsingColorScheme ?? inheritedColorScheme)
+        .environment(\.colorScheme, browsingColorScheme ?? inheritedColorScheme)
         .presentationBackground(.background)
         .accessibilityAction(.escape, dismiss)
         #if os(iOS)
