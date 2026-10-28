@@ -248,6 +248,41 @@ final class FoundationDownloadsTests: XCTestCase {
         manager.invalidate()
     }
 
+    func testOfflinePresentationHidesCachedContainersWithoutPlayableMusic() async throws {
+        var ready = item("ready")
+        ready.album = .init(id: "album", title: "Synthetic album")
+        ready.artist = .init(id: "artist", title: "Synthetic artist")
+        let remote = item("remote")
+        let album = item("album", kind: .album)
+        let playlist = item("playlist", kind: .playlist)
+        let emptyPlaylist = item("empty", kind: .playlist)
+        let artist = item("artist", kind: .artist)
+        let cachedItems = [remote, playlist, ready, ready, album, emptyPlaylist, artist]
+        let manager = FoundationDownloads(
+            scope: "fixture", library: DownloadsLibrary(tracks: [ready, remote]),
+            root: try root(), transfer: transfer, monitorConnectivity: false)
+        manager.rememberCollection(album, tracks: [remote, ready], complete: true)
+        manager.rememberCollection(playlist, tracks: [remote, ready, ready], complete: true)
+        manager.rememberCollection(emptyPlaylist, tracks: [remote], complete: true)
+        manager.updateConnectivity(isAllowed: true)
+        manager.download(ready)
+        try await waitUntil { manager.isReady(ready) }
+        XCTAssertEqual(
+            manager.itemsWithDownloadedMusic(in: cachedItems).map(\.id),
+            ["playlist", "ready", "ready", "album", "artist"])
+        let selection = try XCTUnwrap(
+            FoundationTrackQueueSelection(
+                in: manager.itemsWithDownloadedMusic(in: [remote, ready, ready]), selecting: 1))
+        XCTAssertEqual(selection.items.map(\.id), ["ready", "ready"])
+        XCTAssertEqual(selection.index, 1)
+        manager.removeTrack(ready)
+        XCTAssertTrue(manager.itemsWithDownloadedMusic(in: cachedItems).isEmpty)
+        // Presentation filtering never erases cached membership or repeated occurrences.
+        XCTAssertEqual(
+            manager.knownCollectionTracks(for: playlist).map(\.id), ["remote", "ready", "ready"])
+        _ = await manager.clearAccount()
+    }
+
     func testTrackDownloadDiscoversRelatedCollectionsAcrossColdOfflineRelaunch() async throws {
         var first = item("first")
         first.album = .init(id: "album", title: "Synthetic album")

@@ -28,7 +28,7 @@ struct FoundationNewView<Profile: View>: View {
                 trackSection
                 albumSection
                 genreSection
-                if let error = actions.pinErrorMessage {
+                if let error = actions.pinErrorMessage, !connectivity.localOnly {
                     Text(error).foregroundStyle(.red)
                 }
             }.padding()
@@ -66,32 +66,42 @@ struct FoundationNewView<Profile: View>: View {
             item: $openedItem, library: library, player: player, isActive: isActive)
     }
 
+    private var displayedTracks: [FoundationItem] {
+        connectivity.localOnly ? downloads.itemsWithDownloadedMusic(in: tracks.items) : tracks.items
+    }
+
+    private var displayedAlbums: [FoundationItem] {
+        connectivity.localOnly ? downloads.itemsWithDownloadedMusic(in: albums.items) : albums.items
+    }
+
     private var trackSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            sectionHeader("New Tracks", model: tracks) {
-                try await library.recentTracks(startIndex: $0)
-            }
-            ForEach(
-                Array(tracks.items.prefix(6).enumerated()).filter {
-                    !connectivity.localOnly || downloads.isReady($0.element)
-                }, id: \.offset
-            ) { index, item in
-                FoundationLibraryItemRow(
-                    item: item, library: library, isActive: isActive && isVisible,
-                    open: {},
-                    play: {
-                        guard
-                            let selection = tracks.trackQueue(
-                                selecting: index,
-                                isAvailable: { !connectivity.localOnly || downloads.isReady($0) })
-                        else { return }
-                        player.setQueue(selection.items, selectedIndex: selection.index)
-                    }, player: player, showsTrackArtwork: true)
-                if index < min(5, tracks.items.count - 1) { Divider() }
-            }
-            sectionState(tracks) {
-                tracks.request(tracks.retryRequest)
-                trackRevision += 1
+            if !connectivity.localOnly || !displayedTracks.isEmpty {
+                sectionHeader("New Tracks", model: tracks) {
+                    try await library.recentTracks(startIndex: $0)
+                }
+                ForEach(
+                    Array(displayedTracks.prefix(6).enumerated()), id: \.offset
+                ) { index, item in
+                    FoundationLibraryItemRow(
+                        item: item, library: library, isActive: isActive && isVisible,
+                        open: {},
+                        play: {
+                            guard
+                                let selection = FoundationTrackQueueSelection(
+                                    in: displayedTracks, selecting: index,
+                                    isAvailable: {
+                                        !connectivity.localOnly || downloads.isReady($0)
+                                    })
+                            else { return }
+                            player.setQueue(selection.items, selectedIndex: selection.index)
+                        }, player: player, showsTrackArtwork: true)
+                    if index < min(5, displayedTracks.count - 1) { Divider() }
+                }
+                sectionState(tracks) {
+                    tracks.request(tracks.retryRequest)
+                    trackRevision += 1
+                }
             }
         }
         .task(
@@ -116,28 +126,30 @@ struct FoundationNewView<Profile: View>: View {
 
     private var albumSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            sectionHeader("Recently Added", model: albums) {
-                try await library.recentAlbums(startIndex: $0)
-            }
-            if !albums.items.isEmpty {
-                ScrollView(.horizontal) {
-                    LazyHStack(alignment: .top, spacing: 16) {
-                        ForEach(Array(albums.items.prefix(5).enumerated()), id: \.offset) {
-                            _, item in
-                            FoundationAlbumShelfCard(
-                                item: item, library: library, player: player,
-                                isActive: isActive && isVisible, open: { openedItem = item },
-                                navigate: { openedItem = $0 })
-                        }
-                    }.scrollTargetLayout()
+            if !connectivity.localOnly || !displayedAlbums.isEmpty {
+                sectionHeader("Recently Added", model: albums) {
+                    try await library.recentAlbums(startIndex: $0)
                 }
-                .scrollTargetBehavior(.viewAligned)
-                .scrollIndicators(.hidden)
-                .foundationMacShelfUnderlap()
-            }
-            sectionState(albums) {
-                albums.request(albums.retryRequest)
-                albumRevision += 1
+                if !displayedAlbums.isEmpty {
+                    ScrollView(.horizontal) {
+                        LazyHStack(alignment: .top, spacing: 16) {
+                            ForEach(Array(displayedAlbums.prefix(5).enumerated()), id: \.offset) {
+                                _, item in
+                                FoundationAlbumShelfCard(
+                                    item: item, library: library, player: player,
+                                    isActive: isActive && isVisible, open: { openedItem = item },
+                                    navigate: { openedItem = $0 })
+                            }
+                        }.scrollTargetLayout()
+                    }
+                    .scrollTargetBehavior(.viewAligned)
+                    .scrollIndicators(.hidden)
+                    .foundationMacShelfUnderlap()
+                }
+                sectionState(albums) {
+                    albums.request(albums.retryRequest)
+                    albumRevision += 1
+                }
             }
         }
         .task(
@@ -187,12 +199,15 @@ struct FoundationNewView<Profile: View>: View {
                 .scrollIndicators(.hidden)
                 .foundationMacShelfUnderlap()
             }
-        } else if primaryGenres.completedRecord(libraryScope: library.primaryGenreIndexScope) == nil
+        } else if !connectivity.localOnly,
+            primaryGenres.completedRecord(libraryScope: library.primaryGenreIndexScope) == nil
         {
             Text("Build primary genres in Library to browse new music by genre.")
                 .font(.subheadline).foregroundStyle(.secondary)
         }
-        if let record = primaryGenres.completedRecord(libraryScope: library.primaryGenreIndexScope),
+        if !connectivity.localOnly,
+            let record = primaryGenres.completedRecord(
+                libraryScope: library.primaryGenreIndexScope),
             tracks.items.contains(where: {
                 $0.kind == .track
                     && ($0.catalogSource == nil || $0.catalogSource == record.snapshot.scope.source)
@@ -209,7 +224,9 @@ struct FoundationNewView<Profile: View>: View {
         loader: @escaping (Int) async throws -> FoundationPage
     ) -> some View {
         HStack(spacing: 6) {
-            if model.items.count > (model === tracks ? 6 : 5) || model.nextStartIndex != nil {
+            if !connectivity.localOnly,
+                model.items.count > (model === tracks ? 6 : 5) || model.nextStartIndex != nil
+            {
                 NavigationLink {
                     FoundationCatalogView(
                         title: title, model: model, library: library, player: player,
@@ -239,7 +256,7 @@ struct FoundationNewView<Profile: View>: View {
         if model.isLoading, model.items.isEmpty, !connectivity.localOnly {
             FoundationLoadingPlaceholder(layout: model === albums ? .albumShelf : .rows)
         }
-        if let error = model.errorMessage, !model.hasConnectionIssue {
+        if let error = model.errorMessage, !model.hasConnectionIssue, !connectivity.localOnly {
             Text(error).foregroundStyle(.red)
             Button("Retry") {
                 guard !connectivity.localOnly else { return }
@@ -256,6 +273,7 @@ struct FoundationNewView<Profile: View>: View {
 
 /// A retained, bounded album ranking independent of New and Home.
 struct FoundationLibraryMostPlayedAlbums: View {
+    @EnvironmentObject private var downloads: FoundationDownloads
     @EnvironmentObject private var connectivity: FoundationConnectivity
     @ObservedObject var model: FoundationBrowseModel
     let library: any FoundationLibrary
@@ -265,38 +283,48 @@ struct FoundationLibraryMostPlayedAlbums: View {
     @State private var revision = 0
     @State private var openedItem: FoundationItem?
 
+    private var displayedItems: [FoundationItem] {
+        connectivity.localOnly ? downloads.itemsWithDownloadedMusic(in: model.items) : model.items
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Most Played Albums").font(.title2.bold())
-            Text("From your 100 most-played tracks").font(.subheadline).foregroundStyle(.secondary)
-            LazyVGrid(
-                columns: [GridItem(.adaptive(minimum: 144, maximum: 180), spacing: 16)],
-                alignment: .leading, spacing: 20
-            ) {
-                ForEach(Array(model.items.prefix(12).enumerated()), id: \.offset) { _, item in
-                    FoundationAlbumShelfCard(
-                        item: item, library: library, player: player,
-                        isActive: isActive && isVisible, open: { openedItem = item },
-                        navigate: { openedItem = $0 })
+            if !connectivity.localOnly || !displayedItems.isEmpty {
+                Text("Most Played Albums").font(.title2.bold())
+                Text("From your 100 most-played tracks").font(.subheadline).foregroundStyle(
+                    .secondary)
+                LazyVGrid(
+                    columns: [GridItem(.adaptive(minimum: 144, maximum: 180), spacing: 16)],
+                    alignment: .leading, spacing: 20
+                ) {
+                    ForEach(Array(displayedItems.prefix(12).enumerated()), id: \.offset) {
+                        _, item in
+                        FoundationAlbumShelfCard(
+                            item: item, library: library, player: player,
+                            isActive: isActive && isVisible, open: { openedItem = item },
+                            navigate: { openedItem = $0 })
+                    }
                 }
-            }
-            if connectivity.hasConnectionIssue || model.hasConnectionIssue {
-                FoundationOfflineNotice()
-            }
-            if model.isLoading, model.items.isEmpty, !connectivity.localOnly {
-                FoundationLoadingPlaceholder(layout: .albumGrid)
-            }
-            if let error = model.errorMessage, !model.hasConnectionIssue {
-                Text(error).foregroundStyle(.red)
-                Button("Retry") {
-                    guard !connectivity.localOnly else { return }
-                    model.request(model.retryRequest)
-                    revision += 1
-                }.disabled(connectivity.localOnly)
-            } else if !connectivity.localOnly, !model.hasConnectionIssue, model.loaded,
-                model.items.isEmpty
-            {
-                Text("No album listening history yet.").foregroundStyle(.secondary)
+                if connectivity.hasConnectionIssue || model.hasConnectionIssue {
+                    FoundationOfflineNotice()
+                }
+                if model.isLoading, model.items.isEmpty, !connectivity.localOnly {
+                    FoundationLoadingPlaceholder(layout: .albumGrid)
+                }
+                if let error = model.errorMessage, !model.hasConnectionIssue,
+                    !connectivity.localOnly
+                {
+                    Text(error).foregroundStyle(.red)
+                    Button("Retry") {
+                        guard !connectivity.localOnly else { return }
+                        model.request(model.retryRequest)
+                        revision += 1
+                    }.disabled(connectivity.localOnly)
+                } else if !connectivity.localOnly, !model.hasConnectionIssue, model.loaded,
+                    model.items.isEmpty
+                {
+                    Text("No album listening history yet.").foregroundStyle(.secondary)
+                }
             }
         }
         .onAppear { isVisible = true }

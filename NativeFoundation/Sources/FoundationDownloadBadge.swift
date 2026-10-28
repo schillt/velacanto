@@ -139,20 +139,30 @@ struct FoundationOfflineSurfacePreferenceKey: PreferenceKey {
     }
 }
 
-/// Connection recovery stays visible alongside usable saved content.
+extension FoundationDownloads {
+    /// Filter presentation only; cached metadata and saved download intent stay intact.
+    /// Availability includes partial collections and preserves repeated track occurrences.
+    func itemsWithDownloadedMusic(in items: [FoundationItem]) -> [FoundationItem] {
+        items.filter { availability(for: $0) != .unavailable }
+    }
+}
+
+/// Expected offline browsing uses the title banner; recovery is for online failures.
 struct FoundationOfflineNotice: View {
     @EnvironmentObject private var connectivity: FoundationConnectivity
     @Environment(\.foundationOpenLibrary) private var openLibrary
 
     var body: some View {
+        if !connectivity.localOnly { recoveryNotice }
+    }
+
+    private var recoveryNotice: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Label(connectivity.localOnly ? "Offline" : "No Connection", systemImage: "wifi.slash")
+            Label("No Connection", systemImage: "wifi.exclamationmark")
                 .font(.subheadline.weight(.semibold))
             Text(
                 connectivity.statusMessage
-                    ?? (connectivity.localOnly
-                        ? "Offline. Downloaded music is in Library."
-                        : "The server could not be reached. Saved music remains available.")
+                    ?? "The server could not be reached. Saved music remains available."
             )
             .font(.subheadline).foregroundStyle(.primary)
             .fixedSize(horizontal: false, vertical: true)

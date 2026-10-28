@@ -255,7 +255,9 @@ struct FoundationHomeView<Profile: View>: View {
                 openedItem: $openedItem
             ) { try await library.recentAlbums(startIndex: $0) }
             genreShelves
-            if let error = actions.pinErrorMessage { Text(error).foregroundStyle(.red) }
+            if let error = actions.pinErrorMessage, !connectivity.localOnly {
+                Text(error).foregroundStyle(.red)
+            }
         }.padding()
     }
 
@@ -278,7 +280,7 @@ struct FoundationHomeView<Profile: View>: View {
                     Text(error).foregroundStyle(.secondary)
                 }
             }
-        } else {
+        } else if !connectivity.localOnly {
             VStack(alignment: .leading, spacing: 12) {
                 Text("Primary Genres").font(.title2.bold())
                 Text("Build primary genres to browse music by its common song tags.")
@@ -745,7 +747,8 @@ private struct FoundationHomeShelf: View {
     }
 
     private var displayedItems: [FoundationItem] {
-        isFavorites ? actions.favoriteItems(in: model.items) : model.items
+        let items = isFavorites ? actions.favoriteItems(in: model.items) : model.items
+        return connectivity.localOnly ? downloads.itemsWithDownloadedMusic(in: items) : items
     }
 
     private var favoritesActivation: Bool {
@@ -754,105 +757,119 @@ private struct FoundationHomeShelf: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 6) {
-                if isFavorites || !displayedItems.isEmpty || model.nextStartIndex != nil {
-                    NavigationLink {
-                        if isFavorites {
-                            FoundationFavoritesView(
-                                library: library, player: player, isActive: isActive)
-                        } else {
-                            FoundationCatalogView(
-                                title: title, model: model, library: library, player: player,
-                                isActive: isActive, showsTrackArtwork: showsTracks, loader: loader)
+            if !connectivity.localOnly || !displayedItems.isEmpty {
+                HStack(spacing: 6) {
+                    if !connectivity.localOnly,
+                        isFavorites || !displayedItems.isEmpty || model.nextStartIndex != nil
+                    {
+                        NavigationLink {
+                            if isFavorites {
+                                FoundationFavoritesView(
+                                    library: library, player: player, isActive: isActive)
+                            } else {
+                                FoundationCatalogView(
+                                    title: title, model: model, library: library, player: player,
+                                    isActive: isActive, showsTrackArtwork: showsTracks,
+                                    loader: loader)
+                            }
+                        } label: {
+                            HStack(spacing: 6) {
+                                Text(title).font(.title2.bold())
+                                Image(systemName: "chevron.right")
+                                    .font(.subheadline.weight(.semibold)).foregroundStyle(
+                                        .secondary)
+                            }.frame(minHeight: 44)
                         }
-                    } label: {
-                        HStack(spacing: 6) {
-                            Text(title).font(.title2.bold())
-                            Image(systemName: "chevron.right")
-                                .font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
-                        }.frame(minHeight: 44)
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("See all " + title.lowercased())
+                        .accessibilityAddTraits(.isHeader)
+                        .accessibilityIdentifier(
+                            isFavorites ? "home-favorites" : "home-shelf-" + title)
+                    } else {
+                        Text(title).font(.title2.bold()).accessibilityAddTraits(.isHeader)
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("See all " + title.lowercased())
-                    .accessibilityAddTraits(.isHeader)
-                    .accessibilityIdentifier(isFavorites ? "home-favorites" : "home-shelf-" + title)
-                } else {
-                    Text(title).font(.title2.bold()).accessibilityAddTraits(.isHeader)
+                    Spacer(minLength: 0)
                 }
-                Spacer(minLength: 0)
-            }
-            if showsTracks {
-                if usesVerticalRecentRows {
-                    VStack(spacing: 12) {
-                        recentRows
-                    }
-                } else {
-                    ScrollView(.horizontal) {
-                        LazyHGrid(rows: [GridItem(.fixed(64)), GridItem(.fixed(64))], spacing: 16) {
+                if showsTracks {
+                    if usesVerticalRecentRows {
+                        VStack(spacing: 12) {
                             recentRows
                         }
-                        .frame(height: 136)
-                        .scrollTargetLayout()
+                    } else {
+                        ScrollView(.horizontal) {
+                            LazyHGrid(
+                                rows: [GridItem(.fixed(64)), GridItem(.fixed(64))], spacing: 16
+                            ) {
+                                recentRows
+                            }
+                            .frame(height: 136)
+                            .scrollTargetLayout()
+                        }
+                        .scrollTargetBehavior(.viewAligned)
+                        .scrollIndicators(.hidden)
+                        .foundationMacShelfUnderlap()
+                        .accessibilityLabel("Recently Played carousel")
+                    }
+                } else if !displayedItems.isEmpty {
+                    ScrollView(.horizontal) {
+                        LazyHStack(alignment: .top, spacing: 16) {
+                            ForEach(
+                                Array(displayedItems.prefix(previewLimit).enumerated()),
+                                id: \.offset
+                            ) {
+                                _, item in
+                                if isFavorites {
+                                    FoundationCollectionCard(
+                                        item: item, library: library, player: player,
+                                        isActive: isActive && isVisible,
+                                        open: { openedItem = item },
+                                        navigate: { openedItem = $0 }
+                                    )
+                                    .frame(width: dynamicTypeSize.isAccessibilitySize ? 240 : 160)
+                                } else {
+                                    FoundationAlbumShelfCard(
+                                        item: item, library: library, player: player,
+                                        isActive: isActive && isVisible,
+                                        open: { openedItem = item },
+                                        navigate: { openedItem = $0 })
+                                }
+                            }
+                        }.scrollTargetLayout()
                     }
                     .scrollTargetBehavior(.viewAligned)
                     .scrollIndicators(.hidden)
-                    .foundationMacShelfUnderlap()
-                    .accessibilityLabel("Recently Played carousel")
+                    .modifier(FoundationHomeShelfBoundary(contained: isFavorites))
+                    #if DEBUG && os(iOS) && targetEnvironment(simulator)
+                        .modifier(FoundationRemoteListeningShelfUIProbe(isFavorites: isFavorites))
+                    #endif
                 }
-            } else if !displayedItems.isEmpty {
-                ScrollView(.horizontal) {
-                    LazyHStack(alignment: .top, spacing: 16) {
-                        ForEach(
-                            Array(displayedItems.prefix(previewLimit).enumerated()), id: \.offset
-                        ) {
-                            _, item in
-                            if isFavorites {
-                                FoundationCollectionCard(
-                                    item: item, library: library, player: player,
-                                    isActive: isActive && isVisible, open: { openedItem = item },
-                                    navigate: { openedItem = $0 }
-                                )
-                                .frame(width: dynamicTypeSize.isAccessibilitySize ? 240 : 160)
-                            } else {
-                                FoundationAlbumShelfCard(
-                                    item: item, library: library, player: player,
-                                    isActive: isActive && isVisible, open: { openedItem = item },
-                                    navigate: { openedItem = $0 })
-                            }
-                        }
-                    }.scrollTargetLayout()
+                if model.hasConnectionIssue, !connectivity.hasConnectionIssue {
+                    FoundationOfflineNotice()
                 }
-                .scrollTargetBehavior(.viewAligned)
-                .scrollIndicators(.hidden)
-                .modifier(FoundationHomeShelfBoundary(contained: isFavorites))
-                #if DEBUG && os(iOS) && targetEnvironment(simulator)
-                    .modifier(FoundationRemoteListeningShelfUIProbe(isFavorites: isFavorites))
-                #endif
-            }
-            if model.hasConnectionIssue, !connectivity.hasConnectionIssue {
-                FoundationOfflineNotice()
-            }
-            if isActive, displayedItems.isEmpty, !connectivity.localOnly,
-                !model.hasConnectionIssue, model.errorMessage == nil,
-                model.isLoading || !model.loaded
-            {
-                FoundationLoadingPlaceholder(layout: showsTracks ? .rows : .albumShelf)
-            }
-            if let error = model.errorMessage, !model.hasConnectionIssue {
-                Text(error).foregroundStyle(.red)
-                Button("Retry") {
-                    guard !connectivity.localOnly else { return }
-                    model.request(model.retryRequest)
-                    retryRevision += 1
-                }.disabled(connectivity.localOnly)
-            } else if !connectivity.localOnly, !model.hasConnectionIssue, model.loaded,
-                displayedItems.isEmpty
-            {
-                Text(
-                    model.nextStartIndex == nil
-                        ? "No items yet."
-                        : "No matches in this page. Open the full list to load more."
-                ).foregroundStyle(.secondary)
+                if isActive, displayedItems.isEmpty, !connectivity.localOnly,
+                    !model.hasConnectionIssue, model.errorMessage == nil,
+                    model.isLoading || !model.loaded
+                {
+                    FoundationLoadingPlaceholder(layout: showsTracks ? .rows : .albumShelf)
+                }
+                if let error = model.errorMessage, !model.hasConnectionIssue,
+                    !connectivity.localOnly
+                {
+                    Text(error).foregroundStyle(.red)
+                    Button("Retry") {
+                        guard !connectivity.localOnly else { return }
+                        model.request(model.retryRequest)
+                        retryRevision += 1
+                    }.disabled(connectivity.localOnly)
+                } else if !connectivity.localOnly, !model.hasConnectionIssue, model.loaded,
+                    displayedItems.isEmpty
+                {
+                    Text(
+                        model.nextStartIndex == nil
+                            ? "No items yet."
+                            : "No matches in this page. Open the full list to load more."
+                    ).foregroundStyle(.secondary)
+                }
             }
         }
         .onAppear {
@@ -947,7 +964,7 @@ private struct FoundationHomeShelf: View {
                     .foundationEllipsisMenuIndicator()
                     .accessibilityLabel("Actions for " + item.title)
                 }
-                if let error = actions.errorMessage(for: item) {
+                if let error = actions.errorMessage(for: item), !connectivity.localOnly {
                     Text(error).font(.caption).foregroundStyle(.red)
                 }
             }
@@ -958,8 +975,9 @@ private struct FoundationHomeShelf: View {
 
     private func playRecent(_ index: Int) {
         guard
-            let selection = model.trackQueue(
-                selecting: index, isAvailable: { !connectivity.localOnly || downloads.isReady($0) })
+            let selection = FoundationTrackQueueSelection(
+                in: displayedItems, selecting: index,
+                isAvailable: { !connectivity.localOnly || downloads.isReady($0) })
         else { return }
         player.setQueue(selection.items, selectedIndex: selection.index)
     }

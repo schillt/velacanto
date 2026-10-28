@@ -156,6 +156,7 @@ struct FoundationOverviewSection: View {
 /// Reuses catalog ownership and cards; each optional shelf fails independently.
 struct FoundationRelatedSection<Card: View>: View {
     @Environment(\.foundationReduceMotion) private var reduceMotion
+    @EnvironmentObject private var downloads: FoundationDownloads
     @EnvironmentObject private var actions: FoundationLibraryActions
     @EnvironmentObject private var connectivity: FoundationConnectivity
     let title: String
@@ -167,22 +168,29 @@ struct FoundationRelatedSection<Card: View>: View {
     @StateObject private var model = FoundationBrowseModel()
     @State private var revision = 0
 
+    private var displayedItems: [FoundationItem] {
+        connectivity.localOnly ? downloads.itemsWithDownloadedMusic(in: model.items) : model.items
+    }
+
+    private var showsError: Bool { !connectivity.localOnly && model.errorMessage != nil }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            if showsInitialPlaceholder || !model.items.isEmpty || model.errorMessage != nil {
+            if showsInitialPlaceholder || !displayedItems.isEmpty || showsError {
                 Text(title).font(.title2.bold()).padding(.horizontal)
             }
-            if !model.items.isEmpty {
+            if !displayedItems.isEmpty {
                 ScrollView(.horizontal) {
                     LazyHStack(alignment: .top, spacing: 16) {
                         let rows = twoRows ? 2 : 1
-                        ForEach(0..<((model.items.count + rows - 1) / rows), id: \.self) { column in
+                        ForEach(0..<((displayedItems.count + rows - 1) / rows), id: \.self) {
+                            column in
                             VStack(alignment: .leading, spacing: 20) {
                                 ForEach(
-                                    column * rows..<min(column * rows + rows, model.items.count),
+                                    column * rows..<min(column * rows + rows, displayedItems.count),
                                     id: \.self
                                 ) { index in
-                                    card(model.items[index]).frame(width: 150)
+                                    card(displayedItems[index]).frame(width: 150)
                                 }
                             }
                         }
@@ -194,21 +202,17 @@ struct FoundationRelatedSection<Card: View>: View {
             if model.hasConnectionIssue {
                 FoundationOfflineNotice().padding(.horizontal)
             }
-            if let error = model.errorMessage, !model.hasConnectionIssue {
-                if connectivity.localOnly {
-                    if model.items.isEmpty { FoundationOfflineNotice().padding(.horizontal) }
-                } else {
-                    Text(error).font(.caption).foregroundStyle(.secondary).padding(.horizontal)
-                    Button("Retry") { request(model.retryRequest) }.padding(.horizontal)
-                }
+            if let error = model.errorMessage, !model.hasConnectionIssue, !connectivity.localOnly {
+                Text(error).font(.caption).foregroundStyle(.secondary).padding(.horizontal)
+                Button("Retry") { request(model.retryRequest) }.padding(.horizontal)
             }
-            if model.items.isEmpty, showsInitialPlaceholder {
+            if displayedItems.isEmpty, showsInitialPlaceholder {
                 VStack(spacing: 20) {
                     FoundationLoadingPlaceholder(layout: .albumShelf)
                     if twoRows { FoundationLoadingPlaceholder(layout: .albumShelf) }
                 }.padding(.horizontal)
             }
-            if model.nextStartIndex != nil {
+            if model.nextStartIndex != nil, !connectivity.localOnly {
                 Button("Load more") { request(.more) }.disabled(
                     model.isLoading || connectivity.localOnly
                 ).padding(
@@ -217,9 +221,9 @@ struct FoundationRelatedSection<Card: View>: View {
         }
         .padding(
             .vertical,
-            showsInitialPlaceholder || !model.items.isEmpty || model.errorMessage != nil ? 12 : 0
+            showsInitialPlaceholder || !displayedItems.isEmpty || showsError ? 12 : 0
         )
-        .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: model.items.isEmpty)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: displayedItems.isEmpty)
         .onChange(of: connectivity.successfulRetryRevision) { _, _ in
             model.request(.refresh)
             revision += 1
@@ -258,26 +262,33 @@ struct FoundationArtistSuggestedSongs: View {
         refreshInterval: 30 * 60, usesCachedFreshness: true)
     @State private var revision = 0
 
+    private var displayedItems: [FoundationItem] {
+        connectivity.localOnly ? downloads.itemsWithDownloadedMusic(in: model.items) : model.items
+    }
+
+    private var showsError: Bool { !connectivity.localOnly && model.errorMessage != nil }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            if showsInitialPlaceholder || !model.items.isEmpty || model.errorMessage != nil {
+            if showsInitialPlaceholder || !displayedItems.isEmpty || showsError {
                 Text("Suggested Songs").font(.title2.bold()).padding(.horizontal)
             }
-            if !model.items.isEmpty {
+            if !displayedItems.isEmpty {
                 ScrollView(.horizontal) {
                     LazyHStack(alignment: .top, spacing: 20) {
-                        ForEach(0..<((model.items.count + 1) / 2), id: \.self) { column in
+                        ForEach(0..<((displayedItems.count + 1) / 2), id: \.self) { column in
                             VStack(alignment: .leading, spacing: 16) {
                                 ForEach(
-                                    column * 2..<min(column * 2 + 2, model.items.count), id: \.self
+                                    column * 2..<min(column * 2 + 2, displayedItems.count),
+                                    id: \.self
                                 ) { index in
                                     FoundationLibraryItemRow(
-                                        item: model.items[index], library: library,
+                                        item: displayedItems[index], library: library,
                                         isActive: isActive,
                                         open: {}, play: { play(index) }, player: player,
                                         showsTrackArtwork: true, navigate: navigate,
                                         currentPageKind: .artist,
-                                        subtitleOverride: model.items[index].album?.title ?? "")
+                                        subtitleOverride: displayedItems[index].album?.title ?? "")
                                 }
                             }.frame(width: 300)
                         }
@@ -289,7 +300,7 @@ struct FoundationArtistSuggestedSongs: View {
             if model.hasConnectionIssue {
                 FoundationOfflineNotice().padding(.horizontal)
             }
-            if let error = model.errorMessage, !model.hasConnectionIssue {
+            if let error = model.errorMessage, !model.hasConnectionIssue, !connectivity.localOnly {
                 Text(error).font(.caption).foregroundStyle(.secondary).padding(.horizontal)
                 Button("Retry") {
                     guard !connectivity.localOnly else { return }
@@ -297,15 +308,15 @@ struct FoundationArtistSuggestedSongs: View {
                     revision += 1
                 }.disabled(connectivity.localOnly).padding(.horizontal)
             }
-            if model.items.isEmpty, showsInitialPlaceholder {
+            if displayedItems.isEmpty, showsInitialPlaceholder {
                 FoundationLoadingPlaceholder(rowCount: 2, rowArtworkSize: 52).padding(.horizontal)
             }
         }
         .padding(
             .vertical,
-            showsInitialPlaceholder || !model.items.isEmpty || model.errorMessage != nil ? 12 : 0
+            showsInitialPlaceholder || !displayedItems.isEmpty || showsError ? 12 : 0
         )
-        .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: model.items.isEmpty)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: displayedItems.isEmpty)
         .onChange(of: connectivity.successfulRetryRevision) { _, _ in
             model.request(.refresh)
             revision += 1
@@ -332,8 +343,9 @@ struct FoundationArtistSuggestedSongs: View {
 
     private func play(_ index: Int) {
         guard
-            let selection = model.trackQueue(
-                selecting: index, isAvailable: { !connectivity.localOnly || downloads.isReady($0) })
+            let selection = FoundationTrackQueueSelection(
+                in: displayedItems, selecting: index,
+                isAvailable: { !connectivity.localOnly || downloads.isReady($0) })
         else { return }
         player.setQueue(selection.items, selectedIndex: selection.index)
     }
