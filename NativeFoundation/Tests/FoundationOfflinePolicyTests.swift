@@ -7,6 +7,59 @@ import XCTest
 
 @MainActor
 final class FoundationOfflinePolicyTests: XCTestCase {
+    func testOfflineModePersistsWithoutChangingCellularPolicies() throws {
+        let name = "FoundationOfflineModeTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
+        defer { defaults.removePersistentDomain(forName: name) }
+        let preferences = FoundationPlaybackPreferences(defaults: defaults)
+        XCTAssertFalse(preferences.offlineMode)
+        preferences.setOfflineMode(true)
+        let restored = FoundationPlaybackPreferences(defaults: defaults)
+        XCTAssertTrue(restored.offlineMode)
+        XCTAssertTrue(restored.allowsCellularStreaming)
+        XCTAssertFalse(restored.allowsCellularDownloads)
+        defaults.set(false, forKey: FoundationPlaybackPreferences.offlineModeKey)
+        restored.refresh()
+        XCTAssertFalse(restored.offlineMode)
+    }
+
+    func testManualOfflineModeBlocksRetryAndSurvivesPathRecovery() async {
+        let connectivity = FoundationConnectivity(offlineMode: true, monitorConnectivity: false) {
+            XCTFail("Manual Offline Mode must not contact the server")
+        }
+        connectivity.update(status: .available, wifiOrWired: true, cellular: false)
+        XCTAssertEqual(connectivity.status, .available)
+        XCTAssertTrue(connectivity.localOnly)
+        XCTAssertFalse(connectivity.isConnected)
+        XCTAssertFalse(connectivity.hasConnectionIssue)
+        await connectivity.retryOnline()
+        XCTAssertEqual(connectivity.successfulRetryRevision, 0)
+        connectivity.setOfflineMode(false)
+        XCTAssertFalse(connectivity.localOnly)
+        XCTAssertTrue(connectivity.isConnected)
+    }
+
+    func testManualOfflineModeRejectsLateOnlineRetryPublication() async {
+        let started = expectation(description: "retry began")
+        let (release, continuation) = AsyncStream<Void>.makeStream()
+        let connectivity = FoundationConnectivity(monitorConnectivity: false) {
+            started.fulfill()
+            for await _ in release { break }
+        }
+        connectivity.update(status: .available, wifiOrWired: true, cellular: false)
+        let retry = Task { await connectivity.retryOnline() }
+        await fulfillment(of: [started], timeout: 2)
+        connectivity.setOfflineMode(true)
+        continuation.yield(())
+        continuation.finish()
+        await retry.value
+        XCTAssertTrue(connectivity.localOnly)
+        XCTAssertFalse(connectivity.isConnected)
+        XCTAssertEqual(connectivity.successfulRetryRevision, 0)
+        connectivity.setOfflineMode(false)
+        XCTAssertTrue(connectivity.isConnected)
+    }
+
     func testScalarPreferencesPreserveDefaultsAndIndependentExternalChanges() throws {
         let name = "FoundationPolicyTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: name))

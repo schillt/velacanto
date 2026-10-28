@@ -12,6 +12,26 @@ final class FoundationCatalogPageCacheTests: XCTestCase {
         FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     }
 
+    func testLastContentRefreshUsesSuccessfulAccountScopedRecords() async {
+        let directory = root()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let instant = Date(timeIntervalSince1970: 1_700_000_000)
+        let cache = FoundationCatalogPageCache(
+            scope: "refresh/account-a", root: directory, now: { instant })
+        let other = FoundationCatalogPageCache(
+            scope: "refresh/account-b", root: directory, now: { instant })
+        let empty = await cache.latestSavedAt()
+        XCTAssertNil(empty)
+        await cache.write(FoundationPage(items: [album], nextStartIndex: nil), key: "home")
+        let refreshed = await cache.latestSavedAt()
+        XCTAssertEqual(refreshed, instant)
+        let isolated = await other.latestSavedAt()
+        XCTAssertNil(isolated)
+        _ = await cache.invalidate()
+        let retired = await cache.latestSavedAt()
+        XCTAssertNil(retired)
+    }
+
     func testStorageMetricsCountOnlyCurrentAccountPageFilesAndBecomeUnavailableAfterRetirement()
         async throws
     {

@@ -72,6 +72,37 @@ actor FoundationCatalogPageCache {
         directory.appendingPathComponent(FoundationArtworkCache.digest(key) + ".page")
     }
 
+    /// Account-scoped successful content refresh time, never the time a snapshot was restored.
+    /// Inspect only the bounded retained page records; this performs no server requests.
+    func latestSavedAt() async -> Date? {
+        await registration.value
+        guard live, !Task.isCancelled, (try? prepare()) != nil else { return nil }
+        trim()
+        let urls =
+            (try? FileManager.default.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]))
+            ?? []
+        var latest: Date?
+        let instant = now()
+        for url in urls.filter({ $0.pathExtension == "page" }).prefix(max(0, limits.pages)) {
+            guard
+                let values = try? url.resourceValues(forKeys: [
+                    .isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey,
+                ]),
+                values.isRegularFile == true, values.isSymbolicLink != true,
+                let size = values.fileSize, size <= max(0, limits.entryBytes),
+                let data = try? Data(contentsOf: url),
+                let record = try? PropertyListDecoder().decode(Record.self, from: data),
+                record.page.items.count <= max(0, limits.itemsPerPage),
+                record.savedAt <= instant,
+                instant.timeIntervalSince(record.savedAt) < limits.retention
+            else { continue }
+            latest = max(latest ?? record.savedAt, record.savedAt)
+        }
+        return latest
+    }
+
     func read(_ key: String) async -> Record? {
         await registration.value
         guard live, !Task.isCancelled, (try? prepare()) != nil else { return nil }

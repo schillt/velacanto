@@ -143,6 +143,8 @@ import SwiftUI
         private let librarySidebar: () -> LibrarySidebar
         private let profile: () -> Profile
         private let activateSearch: () -> Void
+        private let catalogPageCache: FoundationCatalogPageCache?
+        @EnvironmentObject private var connectivity: FoundationConnectivity
         private let destination: (FoundationItem) -> Destination
 
         init(
@@ -150,7 +152,7 @@ import SwiftUI
             searchQuery: Binding<String>, searchActivation: Int, libraryNavigationID: String,
             navigationRevision: Int, navigation: FoundationMacNavigation,
             playbackInset: Binding<CGFloat>,
-            showsMiniPlayer: Bool,
+            showsMiniPlayer: Bool, catalogPageCache: FoundationCatalogPageCache? = nil,
             @ViewBuilder content: @escaping (FoundationDestination) -> Content,
             @ViewBuilder miniPlayer: @escaping () -> MiniPlayer,
             @ViewBuilder librarySidebar: @escaping () -> LibrarySidebar,
@@ -166,6 +168,7 @@ import SwiftUI
             self.navigation = navigation
             _playbackInset = playbackInset
             self.showsMiniPlayer = showsMiniPlayer
+            self.catalogPageCache = catalogPageCache
             self.content = content
             self.miniPlayer = miniPlayer
             self.librarySidebar = librarySidebar
@@ -267,6 +270,9 @@ import SwiftUI
                                 .modifier(FoundationMacScrollChrome())
                                 .environment(\.foundationMacHeaderOwnerID, route.headerOwnerID)
                         }
+                }
+                .safeAreaInset(edge: .top, spacing: 0) {
+                    if connectivity.localOnly { FoundationOfflineStatus(cache: catalogPageCache) }
                 }
                 .scrollClipDisabled()
                 .scrollEdgeEffectStyle(.soft, for: .top)

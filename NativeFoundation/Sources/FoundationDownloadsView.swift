@@ -145,44 +145,32 @@ private struct FoundationDownloadFilteredCatalog: View {
     }
 }
 
-/// A status strip occupies layout space above browsing, never covers native navigation.
+/// Quiet browsing-only status. It is mounted by navigation, outside player presentations.
 struct FoundationOfflineStatus: View {
-    @EnvironmentObject private var connectivity: FoundationConnectivity
-    @Environment(\.colorScheme) private var colorScheme
-    var surfaceColor: Color? = nil
+    let cache: FoundationCatalogPageCache?
+    @State private var lastRefresh: Date?
 
     var body: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 8) {
-                statusLabel
-                recoveryAction
-            }
-            VStack(spacing: 6) {
-                statusLabel
-                recoveryAction
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Label("Offline Mode", systemImage: "icloud.slash")
+                .fontWeight(.medium)
+            Spacer(minLength: 0)
+            if let lastRefresh {
+                Text(
+                    "Last refreshed \(lastRefresh.formatted(date: .abbreviated, time: .shortened))")
+            } else {
+                Text("Content refresh unavailable")
             }
         }
-        .font(.caption).foregroundStyle(.primary)
-        .buttonStyle(.borderless)
-        .frame(maxWidth: .infinity).padding(.horizontal, 16).padding(.vertical, 6)
-        .background(surfaceColor ?? .clear)
-        // Detail artwork sampling already bounds luminance for white text.
-        .environment(\.colorScheme, surfaceColor == nil ? colorScheme : .dark)
-        .accessibilityElement(children: .contain)
+        .font(.caption).foregroundStyle(.secondary)
+        .padding(.horizontal, 16).padding(.vertical, 8)
+        .background(.bar)
+        .accessibilityElement(children: .combine)
         .accessibilityIdentifier("browsing-offline-status")
-    }
-
-    private var statusLabel: some View {
-        Label("Browsing offline", systemImage: "wifi.slash")
-            .fixedSize(horizontal: false, vertical: true)
-    }
-
-    private var recoveryAction: some View {
-        HStack(spacing: 6) {
-            Button("Retry") { Task { await connectivity.retryOnline() } }
-                .disabled(connectivity.isRetrying)
-                .accessibilityIdentifier("offline-status-retry")
-            if connectivity.isRetrying { ProgressView().controlSize(.mini) }
+        .task(id: cache?.scope) {
+            let date = await cache?.latestSavedAt()
+            guard !Task.isCancelled else { return }
+            lastRefresh = date
         }
     }
 }

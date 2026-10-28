@@ -793,6 +793,13 @@ final class FoundationPlayer: ObservableObject {
 
     /// A newly selected policy must not leave an old remote asset fetching on cellular.
     /// Keep the selected queue occurrence; the next explicit Play constructs a fresh asset.
+    func enterOfflineMode() {
+        // Also retire unresolved remote preparations, but leave an installed local lease playing.
+        guard installedResource?.url.isFileURL != true else { return }
+        discardSelection()
+        state = .idle
+    }
+
     func invalidateRemoteItemForPolicyChange() {
         guard installedResource?.url.isFileURL == false else { return }
         discardSelection()

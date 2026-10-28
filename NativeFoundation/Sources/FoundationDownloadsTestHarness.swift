@@ -73,6 +73,13 @@
             }
             .foundationDownloadRemovalPresentation()
             .environmentObject(fixture.primaryGenres)
+            .onChange(of: fixture.preferences.offlineMode) { _, enabled in
+                fixture.connectivity.setOfflineMode(enabled)
+                if enabled { fixture.player.enterOfflineMode() }
+                fixture.downloads.updateConnectivity(
+                    isConnected: fixture.connectivity.isConnected,
+                    usesWiFi: fixture.connectivity.usesWiFiOrWired)
+            }
             .onChange(of: fixture.connectivity.localOnly) { _, localOnly in
                 if localOnly { fixture.primaryGenres.cancel() }
             }
@@ -619,6 +626,7 @@
                 return try await library.artwork(for: item)
             }
             let connectivity = self.connectivity
+            connectivity.setOfflineMode(preferences.offlineMode)
             actions.configureTrackAvailability { [weak connectivity, weak downloads] item in
                 connectivity?.localOnly != true || downloads?.isReady(item) == true
             }

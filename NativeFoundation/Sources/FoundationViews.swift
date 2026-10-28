@@ -230,7 +230,6 @@ struct FoundationLibraryView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if connectivity.localOnly { FoundationOfflineStatus(surfaceColor: offlineSurface) }
             if library.catalogScopeID.hasSuffix(".unavailable"), !connectivity.localOnly {
                 Text(
                     "Music library unavailable. Choose a library in Settings or retry the connection."
@@ -438,7 +437,7 @@ struct FoundationLibraryView: View {
                 navigationRevision: macNavigationRevision,
                 navigation: macNavigation,
                 playbackInset: $macTransportInset,
-                showsMiniPlayer: true
+                showsMiniPlayer: true, catalogPageCache: library.catalogPageCache
             ) { destination in
                 browsingContent(destination)
             } miniPlayer: {
@@ -543,6 +542,11 @@ struct FoundationLibraryView: View {
                     Tab(value: destination, role: destination == .search ? .search : nil) {
                         NavigationStack {
                             browsingContent(destination)
+                        }
+                        .safeAreaInset(edge: .top, spacing: 0) {
+                            if connectivity.localOnly {
+                                FoundationOfflineStatus(cache: library.catalogPageCache)
+                            }
                         }
                         .id(library.catalogScopeID + String(destination.rawValue))
                     } label: {
@@ -765,7 +769,9 @@ struct FoundationLibraryView: View {
                 macLibraryButton(
                     "All Playlists", symbol: "music.note.square.stack", route: .playlists)
                 ForEach(
-                    connectivity.localOnly ? downloads.downloadedPlaylists : playlists.items
+                    connectivity.localOnly
+                        ? downloads.itemsWithDownloadedMusic(in: downloads.downloadedPlaylists)
+                        : playlists.items
                 ) { item in
                     macLibraryButton(
                         item.title, symbol: "music.note.list", route: .playlist(item)
@@ -846,8 +852,8 @@ struct FoundationLibraryView: View {
             DisclosureGroup(isExpanded: $macPinsExpanded) {
                 macLibraryButton("Favorites", symbol: "star", route: .favorites)
                 ForEach(actions.pins) { item in
-                    if item.kind == .genre || !connectivity.localOnly
-                        || !downloads.browseTracks(for: item).isEmpty
+                    if !connectivity.localOnly
+                        || !downloads.itemsWithDownloadedMusic(in: [item]).isEmpty
                     {
                         macPinnedItemButton(item)
                     }
@@ -954,8 +960,8 @@ struct FoundationLibraryView: View {
                     .aspectRatio(1, contentMode: .fit)
                 }.buttonStyle(.plain).accessibilityHint("Open Favorites")
                 ForEach(Array(actions.pins.enumerated()), id: \.offset) { _, item in
-                    if item.kind == .genre || !connectivity.localOnly
-                        || !downloads.browseTracks(for: item).isEmpty
+                    if !connectivity.localOnly
+                        || !downloads.itemsWithDownloadedMusic(in: [item]).isEmpty
                     {
                         pinnedTile(item)
                     }
@@ -1787,7 +1793,7 @@ struct FoundationCatalogView: View {
             }
             model.configureFavoriteObservations(actions, knownFavorites: isFavorites)
             if connectivity.localOnly, let localItems {
-                model.installSnapshot(localItems())
+                model.installSnapshot(downloads.itemsWithDownloadedMusic(in: localItems()))
                 return
             }
             if !connectivity.localOnly, localItems != nil, model.isRetainedSnapshot,
@@ -1871,7 +1877,7 @@ struct FoundationCatalogView: View {
                     : model.nextStartIndex == nil
                         ? "No items found." : "No matches in this page. Load more to continue.")
         }
-        if let error = model.errorMessage, !model.hasConnectionIssue {
+        if let error = model.errorMessage, !model.hasConnectionIssue, !connectivity.localOnly {
             Text(error).foregroundStyle(.red)
             Button("Retry") { reload(model.retryRequest) }.disabled(connectivity.localOnly)
         }
@@ -2406,7 +2412,9 @@ struct FoundationTrackList: View {
             ]) {
                 guard isActive, !Task.isCancelled else { return }
                 if connectivity.localOnly {
-                    if let localItems { tracks.installSnapshot(localItems()) }
+                    if let localItems {
+                        tracks.installSnapshot(downloads.itemsWithDownloadedMusic(in: localItems()))
+                    }
                     return
                 }
                 if localItems != nil, tracks.isRetainedSnapshot { tracks.request(.refresh) }
@@ -2569,12 +2577,13 @@ struct FoundationTrackList: View {
             if !connectivity.localOnly, tracks.loaded, tracks.items.isEmpty {
                 Text("No tracks found.")
             }
-            if let error = tracks.errorMessage, !tracks.hasConnectionIssue {
+            if let error = tracks.errorMessage, !tracks.hasConnectionIssue, !connectivity.localOnly
+            {
                 Text(error).foregroundStyle(.red)
                 Button("Retry") { reload(tracks.retryRequest) }.disabled(connectivity.localOnly)
             }
             if !connectivity.localOnly, tracks.isLoading { FoundationLoadingPlaceholder() }
-            if tracks.nextStartIndex != nil {
+            if tracks.nextStartIndex != nil, !connectivity.localOnly {
                 Button("Load more tracks") { reload(.more) }.disabled(
                     tracks.isLoading || connectivity.localOnly)
             }

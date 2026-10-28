@@ -684,7 +684,7 @@ final class FoundationAppModel: ObservableObject {
             })
         self.downloads = downloads
         configurePrimaryGenres(browseLibrary ?? library)
-        let connectivity = FoundationConnectivity {
+        let connectivity = FoundationConnectivity(offlineMode: playbackPreferences.offlineMode) {
             _ = try await library.songs(startIndex: 0)
         }
         self.connectivity = connectivity
@@ -720,6 +720,12 @@ final class FoundationAppModel: ObservableObject {
                     isConnected: connectivity.isConnected,
                     usesWiFi: connectivity.usesWiFiOrWired)
             }
+        }.store(in: &policySubscriptions)
+        preferences.$offlineMode.removeDuplicates().dropFirst().sink {
+            [weak self, weak connectivity] enabled in
+            guard let self, let connectivity, self.connectivity === connectivity else { return }
+            connectivity.setOfflineMode(enabled)
+            if enabled { self.player?.enterOfflineMode() }
         }.store(in: &policySubscriptions)
         preferences.$allowsCellularDownloads.dropFirst().sink { [weak downloads] value in
             Task { @MainActor in downloads?.setAllowsCellular(value) }

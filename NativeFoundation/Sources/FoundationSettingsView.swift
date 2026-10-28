@@ -52,6 +52,22 @@ struct FoundationSettingsView: View {
                 #if os(macOS)
                     accountSections
                 #endif
+                Section {
+                    Toggle(
+                        isOn: Binding(
+                            get: { preferences.offlineMode },
+                            set: { preferences.setOfflineMode($0) }
+                        )
+                    ) {
+                        Label("Offline Mode", systemImage: "icloud.slash")
+                    }
+                    .accessibilityIdentifier("settings-offline-mode")
+                } header: {
+                    Text("Connection")
+                } footer: {
+                    Text(
+                        "Browse and play downloaded music without connecting to your music server.")
+                }
                 librarySection
                 if let pinSync { FoundationPinSyncSection(sync: pinSync) }
                 Section("Storage") {
