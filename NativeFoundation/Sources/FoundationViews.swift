@@ -1425,7 +1425,7 @@ struct FoundationFavoritesView: View {
 
     var body: some View {
         ScrollView {
-            LazyVStack(alignment: .leading, spacing: 28) {
+            LazyVStack(alignment: .leading, spacing: 0) {
                 ForEach([FoundationItem.Kind.playlist, .album, .track, .artist], id: \.self) {
                     kind in
                     FoundationFavoriteShelf(
@@ -1474,13 +1474,18 @@ private struct FoundationFavoriteShelf: View {
     }
     private var hasMore: Bool { model.nextStartIndex != nil || displayedItems.count > 6 }
 
+    private var showsShelf: Bool {
+        !displayedItems.isEmpty
+            || (!connectivity.localOnly && (model.isLoading || model.errorMessage != nil))
+    }
+
     private var favoritesActivation: Bool {
         isActive && isVisible && scenePhase == .active && !connectivity.localOnly
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            if !connectivity.localOnly || !displayedItems.isEmpty {
+            if showsShelf {
                 if !connectivity.localOnly {
                     NavigationLink {
                         FoundationCatalogView(
@@ -1544,13 +1549,6 @@ private struct FoundationFavoriteShelf: View {
                 } else if model.isLoading {
                     FoundationLoadingPlaceholder(layout: kind == .track ? .rows : .albumGrid)
                         .padding(.horizontal, 16)
-                } else if model.loaded {
-                    Text(
-                        model.nextStartIndex == nil
-                            ? "No favorite " + title.lowercased() + " yet."
-                            : "No favorites in this page. Open the full list to load more."
-                    )
-                    .foregroundStyle(.secondary).padding(.horizontal, 16)
                 }
                 if let error = model.errorMessage, !connectivity.localOnly {
                     VStack(alignment: .leading) {
@@ -1563,7 +1561,10 @@ private struct FoundationFavoriteShelf: View {
                 }
             }
         }
+        // Hidden shelves occupy no inter-section spacing but retain their refresh owner.
+        .padding(.bottom, showsShelf ? 28 : 0)
         .accessibilityIdentifier("favorites-section-" + kind.rawValue)
+        .accessibilityHidden(!showsShelf)
         .foundationCollectionDestination(
             item: $openedItem, library: library, player: player, isActive: isActive
         )
