@@ -2672,8 +2672,8 @@ final class FoundationDownloadsUITests: XCTestCase {
         let catalog = app.descendants(matching: .any)["favorites-catalog"].firstMatch
         XCTAssertTrue(catalog.waitForExistence(timeout: 5))
         // Fail a blank initial destination promptly instead of cycling through scroll discovery.
-        let initialShelf = catalog.descendants(matching: .button).matching(
-            NSPredicate(format: "identifier BEGINSWITH %@", "favorites-see-all-")
+        let initialShelf = catalog.buttons.matching(
+            NSPredicate(format: "label == %@", "Playlists")
         ).firstMatch
         guard initialShelf.waitForExistence(timeout: 10) else {
             capture("Favorites missing initial loading shell", in: app)
