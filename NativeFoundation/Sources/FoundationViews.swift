@@ -142,10 +142,11 @@ struct FoundationLibraryView: View {
         @State private var macLibraryExpanded = true
         @State private var macPinsExpanded = true
         @State private var macPlaylistsExpanded = true
-        @State private var macPlaylistSheet: MacPlaylistSheet?
+        @State private var macLibrarySheet: MacLibrarySheet?
 
-        private enum MacPlaylistSheet: Identifiable {
+        private enum MacLibrarySheet: Identifiable {
             case create
+            case credits(FoundationItem)
             case addSongs(FoundationItem)
             case reorderSongs(FoundationItem)
             case manage(FoundationItem)
@@ -154,6 +155,7 @@ struct FoundationLibraryView: View {
             var id: String {
                 switch self {
                 case .create: "create"
+                case .credits(let item): "credits-" + item.id
                 case .addSongs(let item): "add-" + item.id
                 case .reorderSongs(let item): "reorder-" + item.id
                 case .manage(let item): "manage-" + item.id
@@ -268,7 +270,7 @@ struct FoundationLibraryView: View {
             if localOnly {
                 playlistSource = nil
                 #if os(macOS)
-                    macPlaylistSheet = nil
+                    macLibrarySheet = nil
                 #endif
                 actions.cancelQueueAddition()
             }
@@ -361,10 +363,12 @@ struct FoundationLibraryView: View {
             .focusedSceneValue(\.foundationMacActions, macActions)
             // A confirmed title update is metadata, not a new browsing destination.
             .onChange(of: macLibraryRoute.identity) { _, _ in actions.cancelQueueAddition() }
-            .sheet(item: $macPlaylistSheet) { destination in
+            .sheet(item: $macLibrarySheet) { destination in
                 switch destination {
                 case .create:
                     FoundationPlaylistCreate(library: library)
+                case .credits(let item):
+                    FoundationItemMetadataView(item: item, library: accountLibrary)
                 case .addSongs(let item):
                     FoundationPlaylistSongPicker(playlist: item, library: library)
                 case .reorderSongs(let item):
@@ -388,7 +392,7 @@ struct FoundationLibraryView: View {
     private func resetCatalogScope() {
         #if os(macOS)
             macLibraryRoute = .overview
-            macPlaylistSheet = nil
+            macLibrarySheet = nil
             macNavigation.returnToRoot()
         #endif
         openedItem = nil
@@ -767,16 +771,16 @@ struct FoundationLibraryView: View {
                     )
                     .contextMenu {
                         Button("Add Songs", systemImage: "plus") {
-                            macPlaylistSheet = .addSongs(item)
+                            macLibrarySheet = .addSongs(item)
                         }.disabled(connectivity.localOnly || !library.supportsPlaylistManagement)
                         Button("Reorder Songs", systemImage: "arrow.up.arrow.down") {
-                            macPlaylistSheet = .reorderSongs(item)
+                            macLibrarySheet = .reorderSongs(item)
                         }.disabled(connectivity.localOnly || !library.supportsPlaylistReordering)
                         Button("Manage Playlist", systemImage: "checklist") {
-                            macPlaylistSheet = .manage(item)
+                            macLibrarySheet = .manage(item)
                         }.disabled(connectivity.localOnly || !library.supportsPlaylistManagement)
                         Button("Playlist Details", systemImage: "pencil") {
-                            macPlaylistSheet = .details(item)
+                            macLibrarySheet = .details(item)
                         }.disabled(connectivity.localOnly || !library.supportsPlaylistManagement)
                     }
                 }
@@ -786,7 +790,7 @@ struct FoundationLibraryView: View {
                     Text("Playlists")
                     Spacer()
                     Button("Create Playlist", systemImage: "plus") {
-                        macPlaylistSheet = .create
+                        macLibrarySheet = .create
                     }
                     .labelStyle(.iconOnly)
                     .buttonStyle(.borderless)
@@ -1231,6 +1235,7 @@ struct FoundationLibraryView: View {
                 toggleLyrics: { toggleMacPanel(.lyrics) },
                 toggleQueue: { toggleMacPanel(.queue) },
                 navigate: { openMacLibrary(.item($0)) },
+                showCredits: { macLibrarySheet = .credits($0) },
                 artwork: {
                     if let item {
                         FoundationCatalogArtwork(

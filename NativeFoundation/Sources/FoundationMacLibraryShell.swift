@@ -468,6 +468,7 @@ import SwiftUI
         let toggleLyrics: () -> Void
         let toggleQueue: () -> Void
         let navigate: (FoundationItem) -> Void
+        let showCredits: (FoundationItem) -> Void
         @ViewBuilder let artwork: () -> Artwork
 
         var body: some View {
@@ -507,7 +508,7 @@ import SwiftUI
                     if let item {
                         FoundationMacPlaybackTimeline(
                             player: player, item: item, state: state, navigate: navigate,
-                            artwork: artwork
+                            showCredits: showCredits, artwork: artwork
                         )
                     } else {
                         Image(nsImage: NSApplication.shared.applicationIconImage)
@@ -532,10 +533,15 @@ import SwiftUI
     @MainActor private final class FoundationMacTrackMenu: NSObject {
         let item: FoundationItem
         let navigate: (FoundationItem) -> Void
+        let showCredits: (FoundationItem) -> Void
 
-        init(item: FoundationItem, navigate: @escaping (FoundationItem) -> Void) {
+        init(
+            item: FoundationItem, navigate: @escaping (FoundationItem) -> Void,
+            showCredits: @escaping (FoundationItem) -> Void
+        ) {
             self.item = item
             self.navigate = navigate
+            self.showCredits = showCredits
         }
 
         func show() {
@@ -560,10 +566,21 @@ import SwiftUI
                 entry.image = NSImage(systemSymbolName: "music.mic", accessibilityDescription: nil)
                 menu.addItem(entry)
             }
+            if item.kind == .track {
+                if !menu.items.isEmpty { menu.addItem(.separator()) }
+                let credits = NSMenuItem(
+                    title: "Song Credits", action: #selector(openCredits), keyEquivalent: "")
+                credits.target = self
+                credits.image = NSImage(
+                    systemSymbolName: "person.text.rectangle", accessibilityDescription: nil)
+                menu.addItem(credits)
+            }
             menu.popUp(
                 positioning: nil,
                 at: view.convert(window.mouseLocationOutsideOfEventStream, from: nil), in: view)
         }
+
+        @objc private func openCredits() { showCredits(item) }
 
         @objc private func openAlbum() {
             if let album = item.relatedAlbum { navigate(album) }
@@ -684,6 +701,7 @@ import SwiftUI
         let item: FoundationItem
         let state: FoundationPlayer.State
         let navigate: (FoundationItem) -> Void
+        let showCredits: (FoundationItem) -> Void
         @ViewBuilder let artwork: () -> Artwork
         @Environment(\.foundationReduceMotion) private var reduceMotion
         @State private var scrubbing = false
@@ -713,8 +731,9 @@ import SwiftUI
                         height: FoundationMacLayout.transportContentHeight, alignment: .top
                     )
                     .contentShape(Rectangle())
-                    .disabled(!canNavigate)
-                    .accessibilityLabel("View album or artist")
+                    .disabled(!canShowTrackMenu)
+                    .accessibilityLabel("Track options")
+                    .help("View album, artist or song credits")
                     .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: showsDetails)
                     Text(time(currentPosition))
                         .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
@@ -731,8 +750,9 @@ import SwiftUI
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .contentShape(Rectangle())
                     }
-                    .buttonStyle(.plain).disabled(!canNavigate)
-                    .accessibilityLabel("View album or artist")
+                    .buttonStyle(.plain).disabled(!canShowTrackMenu)
+                    .accessibilityLabel("Track options")
+                    .help("View album, artist or song credits")
                     timeline
                 }
             }
@@ -784,10 +804,13 @@ import SwiftUI
             .onChange(of: focused) { _, focused in keyboardFocused = focused && !hovering }
         }
 
-        private var canNavigate: Bool { item.relatedAlbum != nil || item.relatedArtist != nil }
+        private var canShowTrackMenu: Bool {
+            item.kind == .track || item.relatedAlbum != nil || item.relatedArtist != nil
+        }
 
         private func showTrackMenu() {
-            let menu = FoundationMacTrackMenu(item: item, navigate: navigate)
+            let menu = FoundationMacTrackMenu(
+                item: item, navigate: navigate, showCredits: showCredits)
             withExtendedLifetime(menu) { menu.show() }
         }
 
