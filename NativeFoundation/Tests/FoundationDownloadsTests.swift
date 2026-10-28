@@ -248,6 +248,34 @@ final class FoundationDownloadsTests: XCTestCase {
         manager.invalidate()
     }
 
+    func testMetadataPreparationDoesNotCreateAdditionalOwnedPlaylistReconciliation() async throws {
+        let ready = item("ready")
+        let playlist = item("owned", kind: .playlist)
+        let library = DownloadsLibrary(tracks: [ready], preparesOfflinePlaylists: true)
+        await library.setOfflinePlaylistFixture(
+            candidates: [playlist], memberships: [playlist.id: [ready]])
+        let manager = FoundationDownloads(
+            scope: "fixture", library: library, root: try root(), transfer: transfer,
+            monitorConnectivity: false)
+        manager.updateConnectivity(isAllowed: true)
+        manager.download(playlist)
+        try await waitUntil {
+            manager.offlinePlaylistPreparationMessage
+                == "Playlist availability saved for offline browsing."
+        }
+        let ownedOffsets = await library.playlistOffsets
+        XCTAssertEqual(
+            ownedOffsets, [0],
+            "Ready files may trigger optional metadata only, not an owned playlist refresh")
+        let optionalOffsets = await library.offlinePlaylistOffsets
+        XCTAssertTrue(
+            optionalOffsets.isEmpty, "The already-owned playlist needs no duplicate optional read")
+        let requestedTracks = await library.downloadSourceIDs
+        XCTAssertEqual(requestedTracks, [ready.id])
+        XCTAssertTrue(manager.isReady(ready))
+        _ = await manager.clearAccount()
+    }
+
     func testNeverOpenedPlaylistsArePreparedAcrossPagesAndSurviveColdOfflineRelaunch() async throws
     {
         let directory = try root()

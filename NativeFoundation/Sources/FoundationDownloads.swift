@@ -98,6 +98,7 @@ final class FoundationDownloads: ObservableObject {
     private var resetting = false
     private var syncTask: Task<Void, Never>?
     private var syncPending = false
+    private var offlinePreparationPending = false
     private var transferRevision: UInt = 0
     private var activeOwner: String?
     private var monitor: NWPathMonitor?
@@ -218,7 +219,9 @@ final class FoundationDownloads: ObservableObject {
                 self.inventoryTask = nil
                 self.scheduleArtwork()
                 self.schedule()
-                if self.syncPending { self.reconcilePlaylists() }
+                if self.syncPending || self.offlinePreparationPending {
+                    self.startSynchronization()
+                }
             } catch {
                 guard let self, self.isLive, self.generation == epoch else { return }
                 self.inventoryTask = nil
@@ -853,7 +856,11 @@ final class FoundationDownloads: ObservableObject {
             self.worker = nil
             self.activeOwner = nil
             self.refreshStates()
-            if self.verifiedReadyRevision != readyRevision { self.reconcilePlaylists() }
+            if self.verifiedReadyRevision != readyRevision {
+                self.requestOfflinePlaylistPreparation()
+            } else if self.offlinePreparationPending {
+                self.startSynchronization()
+            }
             if self.owners.contains(where: { $0.state == .queued }) { self.schedule() }
         }
     }
@@ -1422,12 +1429,28 @@ final class FoundationDownloads: ObservableObject {
     func reconcilePlaylists() {
         guard isLive, storageUsable else { return }
         syncPending = true
-        guard allowed, !isLoading, syncTask == nil else { return }
+        offlinePreparationPending =
+            offlinePreparationPending || library.supportsOfflinePlaylistPreparation
+        startSynchronization()
+    }
+
+    /// A completed download requests optional availability metadata, never a second owned refresh.
+    private func requestOfflinePlaylistPreparation() {
+        guard isLive, storageUsable, library.supportsOfflinePlaylistPreparation else { return }
+        offlinePreparationPending = true
+        startSynchronization()
+    }
+
+    private func startSynchronization() {
+        guard isLive, storageUsable, allowed, !isLoading, syncTask == nil,
+            syncPending || offlinePreparationPending,
+            syncPending || worker == nil
+        else { return }
         syncTask = Task { [weak self] in
             guard let self else { return }
             await self.runReconciliation()
             self.syncTask = nil
-            if self.syncPending, self.allowed, self.isLive { self.reconcilePlaylists() }
+            if self.syncPending || self.offlinePreparationPending { self.startSynchronization() }
         }
     }
 
@@ -1441,46 +1464,57 @@ final class FoundationDownloads: ObservableObject {
 
     private func runReconciliation() async {
         let epoch = generation
-        while syncPending, isLive, allowed, !Task.isCancelled {
+        while syncPending || offlinePreparationPending, isLive, allowed, !Task.isCancelled {
+            let reconcileOwned = syncPending
             syncPending = false
-            let snapshots = owners.filter { $0.item.kind == .playlist && expanded.contains($0.id) }
-            for owner in snapshots {
-                do {
-                    let entries = try await FoundationPlaylistSnapshot.load(
-                        id: owner.item.id, library: library)
-                    let permission = try await library.playlistPermissions(id: owner.item.id)
-                    try Task.checkCancellation()
-                    guard isLive, epoch == generation,
-                        let index = owners.firstIndex(where: { $0.id == owner.id }),
-                        owners[index].reconciliationIdentity == owner.reconciliationIdentity
-                    else { continue }
-                    let previous = owners[index]
-                    var item = owner.item
-                    // FoundationItem title is immutable; retain neutral catalog metadata.
-                    item = FoundationItem(
-                        id: item.id, title: permission.name, subtitle: item.subtitle,
-                        kind: .playlist, duration: item.duration,
-                        primaryImageTag: item.primaryImageTag)
-                    owners[index].item = item
-                    owners[index].tracks = entries.map(\.item)
-                    do { try save() } catch {
-                        owners[index] = previous
-                        throw error
+            if reconcileOwned {
+                let snapshots = owners.filter {
+                    $0.item.kind == .playlist && expanded.contains($0.id)
+                }
+                for owner in snapshots {
+                    do {
+                        let entries = try await FoundationPlaylistSnapshot.load(
+                            id: owner.item.id, library: library)
+                        let permission = try await library.playlistPermissions(id: owner.item.id)
+                        try Task.checkCancellation()
+                        guard isLive, epoch == generation,
+                            let index = owners.firstIndex(where: { $0.id == owner.id }),
+                            owners[index].reconciliationIdentity == owner.reconciliationIdentity
+                        else { continue }
+                        let previous = owners[index]
+                        var item = owner.item
+                        // FoundationItem title is immutable; retain neutral catalog metadata.
+                        item = FoundationItem(
+                            id: item.id, title: permission.name, subtitle: item.subtitle,
+                            kind: .playlist, duration: item.duration,
+                            primaryImageTag: item.primaryImageTag)
+                        owners[index].item = item
+                        owners[index].tracks = entries.map(\.item)
+                        do { try save() } catch {
+                            owners[index] = previous
+                            throw error
+                        }
+                        rememberCollection(item, tracks: entries.map(\.item), complete: true)
+                        installCollectionSnapshot(
+                            item, tracks: entries.map(\.item), refreshed: true)
+                        if activeOwner == owner.id { worker?.cancel() }
+                        collectUnusedFiles()
+                        scheduleArtwork()
+                        refreshStates()
+                        schedule()
+                    } catch {
+                        if Task.isCancelled || !isLive || epoch != generation { return }
+                        errorMessage =
+                            "A downloaded playlist could not refresh. Its last saved tracks remain available."
                     }
-                    rememberCollection(item, tracks: entries.map(\.item), complete: true)
-                    installCollectionSnapshot(item, tracks: entries.map(\.item), refreshed: true)
-                    if activeOwner == owner.id { worker?.cancel() }
-                    collectUnusedFiles()
-                    scheduleArtwork()
-                    refreshStates()
-                    schedule()
-                } catch {
-                    if Task.isCancelled || !isLive || epoch != generation { return }
-                    errorMessage =
-                        "A downloaded playlist could not refresh. Its last saved tracks remain available."
                 }
             }
-            if worker == nil { await prepareOfflinePlaylists(epoch: epoch) }
+            if offlinePreparationPending {
+                // Download completion resumes deferred optional work; do not spin while it owns files.
+                guard worker == nil else { return }
+                offlinePreparationPending = false
+                await prepareOfflinePlaylists(epoch: epoch)
+            }
         }
     }
 
@@ -1675,6 +1709,7 @@ final class FoundationDownloads: ObservableObject {
         storageUsable = false
         generation &+= 1
         syncPending = false
+        offlinePreparationPending = false
         inventoryTask?.cancel()
         artworkTask?.cancel()
         worker?.cancel()
