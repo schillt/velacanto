@@ -1546,7 +1546,12 @@ final class FoundationDownloads: ObservableObject {
                         continue
                     }
                     let previous = rememberedCollection(playlist)
-                    let model = collectionModels[collectionKey(playlist)]
+                    let key = collectionKey(playlist)
+                    let model = collectionModels[key]
+                    let modelItems = model?.rawItems
+                    let modelLoaded = model?.loaded
+                    let modelCursor = model?.nextStartIndex
+                    let modelRetained = model?.isRetainedSnapshot
                     if model?.isLoading == true {
                         incomplete = true
                         continue
@@ -1594,8 +1599,14 @@ final class FoundationDownloads: ObservableObject {
                         incomplete = true
                     }
                     try checkPreparation(epoch)
-                    // A page explicitly opened/refreshed while this request waited wins publication.
-                    guard rememberedCollection(playlist) == previous, model?.isLoading != true
+                    // A page opened, replaced or independently loaded while this request waited wins.
+                    let currentModel = collectionModels[key]
+                    guard rememberedCollection(playlist) == previous,
+                        currentModel === model, currentModel?.rawItems == modelItems,
+                        currentModel?.loaded == modelLoaded,
+                        currentModel?.nextStartIndex == modelCursor,
+                        currentModel?.isRetainedSnapshot == modelRetained,
+                        currentModel?.isLoading != true
                     else {
                         incomplete = true
                         continue
@@ -1604,8 +1615,9 @@ final class FoundationDownloads: ObservableObject {
                     if hasReady { expectedPlaylists.insert(playlist.id) }
                     if complete, hasReady || previous != nil {
                         rememberCollection(playlist, tracks: tracks, complete: true)
-                        // Do not replace an independently loaded live canonical page.
-                        installCollectionSnapshot(playlist, tracks: tracks)
+                        // The unchanged older canonical page must see the fresh complete membership.
+                        // Otherwise availability would still prefer its stale rows over the saved record.
+                        installCollectionSnapshot(playlist, tracks: tracks, refreshed: true)
                     } else if !complete, previous == nil, hasReady {
                         rememberCollection(playlist, tracks: tracks, complete: false)
                     }

@@ -355,6 +355,87 @@ final class FoundationDownloadsTests: XCTestCase {
         }
     }
 
+    func testPreparationRefreshesUnchangedLoadedCanonicalMembershipBeforeOfflineFiltering()
+        async throws
+    {
+        let ready = item("ready")
+        let remote = item("remote")
+        let target = item("playlist", kind: .playlist)
+        let gate = DownloadGate()
+        let directory = try root()
+        let library = DownloadsLibrary(tracks: [], preparesOfflinePlaylists: true)
+        await library.setOfflinePlaylistFixture(
+            candidates: [target], memberships: [target.id: [ready, ready]])
+        await library.setOfflinePlaylistGate(gate)
+        let manager = FoundationDownloads(
+            scope: "fixture", library: library, root: directory, transfer: transfer,
+            monitorConnectivity: false)
+        let canonical = manager.collectionModel(for: target)
+        await canonical.load(.refresh) { _ in .init(items: [remote], nextStartIndex: nil) }
+        XCTAssertTrue(canonical.loaded)
+        XCTAssertFalse(canonical.isRetainedSnapshot)
+        manager.updateConnectivity(isAllowed: true)
+        manager.download(ready)
+        try await waitUntilAsync { await gate.started }
+        await gate.resume()
+        await manager.waitForCurrentReconciliationForTesting()
+        XCTAssertEqual(canonical.rawItems.map(\.id), [ready.id, ready.id])
+        XCTAssertEqual(manager.availability(for: target), .ready)
+        XCTAssertEqual(
+            manager.itemsWithDownloadedMusic(in: manager.downloadedPlaylists).map(\.id), [target.id]
+        )
+        manager.updateConnectivity(isAllowed: false)
+        XCTAssertEqual(manager.browseTracks(for: target).map(\.id), [ready.id, ready.id])
+        manager.invalidate()
+        let restored = FoundationDownloads(
+            scope: "fixture", library: library, root: directory, transfer: transfer,
+            monitorConnectivity: false)
+        try await waitUntil { !restored.isLoading }
+        XCTAssertEqual(restored.browseTracks(for: target).map(\.id), [ready.id, ready.id])
+        _ = await restored.clearAccount()
+    }
+
+    func testNewOrIndependentlyChangedCanonicalPageWinsPendingPreparation() async throws {
+        for existedBeforeRequest in [false, true] {
+            let ready = item("ready")
+            let remote = item("remote")
+            let target = item("playlist", kind: .playlist)
+            let gate = DownloadGate()
+            let directory = try root()
+            let library = DownloadsLibrary(tracks: [], preparesOfflinePlaylists: true)
+            await library.setOfflinePlaylistFixture(
+                candidates: [target], memberships: [target.id: []])
+            await library.setOfflinePlaylistGate(gate)
+            let manager = FoundationDownloads(
+                scope: "fixture", library: library, root: directory, transfer: transfer,
+                monitorConnectivity: false)
+            if existedBeforeRequest {
+                let old = manager.collectionModel(for: target)
+                await old.load(.refresh) { _ in .init(items: [remote], nextStartIndex: nil) }
+            }
+            manager.updateConnectivity(isAllowed: true)
+            manager.download(ready)
+            try await waitUntilAsync { await gate.started }
+            let current = manager.collectionModel(for: target)
+            await current.load(.refresh) { _ in .init(items: [ready, ready], nextStartIndex: nil) }
+            await gate.resume()
+            await manager.waitForCurrentReconciliationForTesting()
+            XCTAssertEqual(current.rawItems.map(\.id), [ready.id, ready.id])
+            XCTAssertEqual(
+                manager.knownCollectionTracks(for: target).map(\.id), [ready.id, ready.id])
+            XCTAssertEqual(
+                manager.offlinePlaylistPreparationMessage,
+                "Some playlist availability is not saved yet. Refresh online to try again.")
+            let stored = try FoundationDownloadStorage.load(
+                directory: FoundationDownloadStorage.directory(scope: "fixture", root: directory))
+            XCTAssertTrue(
+                stored.collections?.isEmpty ?? true,
+                "An older preparation must not persist over a newly opened or independently changed page"
+            )
+            _ = await manager.clearAccount()
+        }
+    }
+
     func testExplicitNewerMembershipWinsOverPendingAutomaticPreparation() async throws {
         let ready = item("ready")
         let target = item("playlist", kind: .playlist)
