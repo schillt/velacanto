@@ -805,19 +805,6 @@ private struct FoundationQueueView: View {
                         }
                         .toolbar {
                             if isPresented {
-                                ToolbarItem(placement: .principal) {
-                                    if let current = player.queue.first(where: {
-                                        $0.id == player.selectedEntryID
-                                    }) {
-                                        currentTrack(current)
-                                            .frame(
-                                                width: max(0, geometry.size.width - 112), height: 36
-                                            )
-                                            .padding(.vertical, 8)
-                                            .accessibilityElement(children: .contain)
-                                    }
-                                }
-                                .sharedBackgroundVisibility(.hidden)
                                 ToolbarItemGroup(placement: .primaryAction) {
                                     macModeControls
                                 }
