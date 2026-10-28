@@ -217,18 +217,6 @@ struct FoundationNewView<Profile: View>: View {
             )
             .font(.subheadline).foregroundStyle(.secondary)
         }
-        if !connectivity.localOnly,
-            let record = primaryGenres.completedRecord(
-                libraryScope: library.primaryGenreIndexScope),
-            tracks.items.contains(where: {
-                $0.kind == .track
-                    && ($0.catalogSource == nil || $0.catalogSource == record.snapshot.scope.source)
-                    && record.snapshot.primaryBySongID[$0.id] == nil
-            })
-        {
-            Text("Rebuild Genres in Library Settings to include the latest song tags.")
-                .font(.subheadline).foregroundStyle(.secondary)
-        }
     }
 
     private func sectionHeader(
