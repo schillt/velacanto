@@ -454,6 +454,7 @@ protocol FoundationLibrary: Sendable {
     func downloadSource(for item: FoundationItem) async throws -> FoundationDownloadSource
     func downloadPreparation(for item: FoundationItem, quality: FoundationDownloadQuality)
         async throws -> FoundationDownloadPreparation
+    var supportsOfflinePlaylistPreparation: Bool { get }
     var supportsPlaylistManagement: Bool { get }
     var supportsRepeatedPlaylistTracks: Bool { get }
     var supportsPlaylistReordering: Bool { get }
@@ -522,6 +523,7 @@ protocol FoundationLibrary: Sendable {
 }
 
 extension FoundationLibrary {
+    var supportsOfflinePlaylistPreparation: Bool { false }
     var listeningActivityScope: String { "" }
     func remoteListeningActivity() async throws -> [FoundationRemoteListeningActivity] { [] }
     func playbackResource(for item: FoundationItem) async throws -> FoundationPlaybackResource {
@@ -875,6 +877,7 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
         }
     }
 
+    var supportsOfflinePlaylistPreparation: Bool { true }
     var supportsPlaylistManagement: Bool { true }
     var supportsPlaylistReordering: Bool { true }
 

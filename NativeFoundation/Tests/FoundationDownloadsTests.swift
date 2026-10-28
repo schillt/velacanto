@@ -248,6 +248,156 @@ final class FoundationDownloadsTests: XCTestCase {
         manager.invalidate()
     }
 
+    func testNeverOpenedPlaylistsArePreparedAcrossPagesAndSurviveColdOfflineRelaunch() async throws
+    {
+        let directory = try root()
+        let ready = item("ready")
+        let target = item("playlist-7", kind: .playlist)
+        let remote = (0..<110).map { item("remote-\($0)") }
+        let contents = remote + [ready, ready]
+        let library = DownloadsLibrary(tracks: [], preparesOfflinePlaylists: true)
+        let candidates = (0..<7).map { item("playlist-\($0 + 1)", kind: .playlist) }
+        await library.setOfflinePlaylistFixture(
+            candidates: candidates, memberships: [target.id: contents], pageSize: 2)
+        let manager = FoundationDownloads(
+            scope: "fixture", library: library, root: directory, transfer: transfer,
+            monitorConnectivity: false)
+        manager.updateConnectivity(isAllowed: true)
+        manager.download(ready)
+        try await waitUntil {
+            manager.offlinePlaylistPreparationMessage
+                == "Playlist availability saved for offline browsing."
+        }
+        XCTAssertEqual(manager.downloadedPlaylists.map(\.id), [target.id])
+        XCTAssertEqual(manager.knownCollectionTracks(for: target).map(\.id), contents.map(\.id))
+        XCTAssertEqual(manager.browseTracks(for: target).map(\.id), ["ready", "ready"])
+        XCTAssertEqual(manager.owners.map { $0.item.kind }, [.track])
+        let offsets = await library.offlinePlaylistOffsets
+        XCTAssertEqual(offsets[target.id], [0, 100])
+        let candidateOffsets = await library.offlineCandidateOffsets
+        XCTAssertEqual(candidateOffsets, [0, 2, 4, 6])
+        let sourceIDs = await library.downloadSourceIDs
+        XCTAssertEqual(
+            sourceIDs, [ready.id], "Metadata preparation must not download playlist songs")
+        manager.invalidate()
+        let restored = FoundationDownloads(
+            scope: "fixture", library: library, root: directory, transfer: transfer,
+            monitorConnectivity: false)
+        try await waitUntil { !restored.isLoading }
+        XCTAssertEqual(restored.downloadedPlaylists.map(\.id), [target.id])
+        XCTAssertEqual(restored.browseTracks(for: target).map(\.id), ["ready", "ready"])
+        let offlineCandidateOffsets = await library.offlineCandidateOffsets
+        XCTAssertEqual(
+            offlineCandidateOffsets, candidateOffsets,
+            "Cold offline launch must not prepare remotely")
+        restored.removeTrack(ready)
+        XCTAssertTrue(restored.itemsWithDownloadedMusic(in: restored.downloadedPlaylists).isEmpty)
+        XCTAssertEqual(restored.knownCollectionTracks(for: target).map(\.id), contents.map(\.id))
+        _ = await restored.clearAccount()
+    }
+
+    func testFailedAutomaticPlaylistPreparationPreservesKnownMembership() async throws {
+        let ready = item("ready")
+        let target = item("playlist", kind: .playlist)
+        let library = DownloadsLibrary(tracks: [], preparesOfflinePlaylists: true)
+        await library.setOfflinePlaylistFixture(
+            candidates: [target], memberships: [target.id: [ready, ready]])
+        let manager = FoundationDownloads(
+            scope: "fixture", library: library, root: try root(), transfer: transfer,
+            monitorConnectivity: false)
+        manager.updateConnectivity(isAllowed: true)
+        manager.download(ready)
+        try await waitUntil {
+            manager.offlinePlaylistPreparationMessage
+                == "Playlist availability saved for offline browsing."
+        }
+        await library.setFailure(true)
+        manager.reconcilePlaylists()
+        await manager.waitForCurrentReconciliationForTesting()
+        XCTAssertEqual(manager.browseTracks(for: target).map(\.id), [ready.id, ready.id])
+        XCTAssertEqual(
+            manager.offlinePlaylistPreparationMessage,
+            "Some playlist availability is not saved yet. Refresh online to try again.")
+        XCTAssertNil(
+            manager.errorMessage, "Optional metadata failure must not fail a ready download")
+        XCTAssertTrue(manager.isReady(ready))
+        _ = await manager.clearAccount()
+    }
+
+    func testOfflineOrRetiredPreparationRejectsLateMembershipResponse() async throws {
+        for retire in [false, true] {
+            let ready = item("ready")
+            let target = item("playlist", kind: .playlist)
+            let gate = DownloadGate()
+            let library = DownloadsLibrary(tracks: [], preparesOfflinePlaylists: true)
+            await library.setOfflinePlaylistFixture(
+                candidates: [target], memberships: [target.id: [ready]])
+            await library.setOfflinePlaylistGate(gate)
+            let directory = try root()
+            let manager = FoundationDownloads(
+                scope: "fixture", library: library, root: directory, transfer: transfer,
+                monitorConnectivity: false)
+            manager.updateConnectivity(isAllowed: true)
+            manager.download(ready)
+            try await waitUntilAsync { await gate.started }
+            XCTAssertTrue(manager.isReady(ready), "Optional preparation must not delay ready files")
+            if retire { manager.invalidate() } else { manager.updateConnectivity(isAllowed: false) }
+            await gate.resume()
+            await manager.waitForCurrentReconciliationForTesting()
+            XCTAssertTrue(manager.downloadedPlaylists.isEmpty)
+            XCTAssertTrue(manager.knownCollectionTracks(for: target).isEmpty)
+            let stored = try FoundationDownloadStorage.load(
+                directory: FoundationDownloadStorage.directory(scope: "fixture", root: directory))
+            XCTAssertTrue(
+                stored.collections?.isEmpty ?? true,
+                "A retired response must not write membership to disk")
+            _ = await manager.clearAccount()
+        }
+    }
+
+    func testExplicitNewerMembershipWinsOverPendingAutomaticPreparation() async throws {
+        let ready = item("ready")
+        let target = item("playlist", kind: .playlist)
+        let gate = DownloadGate()
+        let library = DownloadsLibrary(tracks: [], preparesOfflinePlaylists: true)
+        await library.setOfflinePlaylistFixture(candidates: [target], memberships: [target.id: []])
+        await library.setOfflinePlaylistGate(gate)
+        let manager = FoundationDownloads(
+            scope: "fixture", library: library, root: try root(), transfer: transfer,
+            monitorConnectivity: false)
+        manager.updateConnectivity(isAllowed: true)
+        manager.download(ready)
+        try await waitUntilAsync { await gate.started }
+        manager.rememberCollection(target, tracks: [ready, ready], complete: true)
+        await gate.resume()
+        await manager.waitForCurrentReconciliationForTesting()
+        XCTAssertEqual(manager.knownCollectionTracks(for: target).map(\.id), [ready.id, ready.id])
+        XCTAssertEqual(manager.downloadedPlaylists.map(\.id), [target.id])
+        _ = await manager.clearAccount()
+    }
+
+    func testAutomaticPlaylistPreparationReportsCandidateBudgetWithoutFalseCompletion() async throws
+    {
+        let ready = item("ready")
+        let candidates = (0..<129).map { item("playlist-\($0)", kind: .playlist) }
+        let library = DownloadsLibrary(tracks: [], preparesOfflinePlaylists: true)
+        await library.setOfflinePlaylistFixture(candidates: candidates, memberships: [:])
+        let manager = FoundationDownloads(
+            scope: "fixture", library: library, root: try root(), transfer: transfer,
+            monitorConnectivity: false)
+        manager.updateConnectivity(isAllowed: true)
+        manager.download(ready)
+        try await waitUntil {
+            manager.offlinePlaylistPreparationMessage
+                == "Offline preparation reached its limit. Some playlists may not appear offline."
+        }
+        let offsets = await library.offlinePlaylistOffsets
+        XCTAssertEqual(offsets.count, 128)
+        XCTAssertNil(offsets[candidates.last!.id])
+        XCTAssertTrue(manager.isReady(ready))
+        _ = await manager.clearAccount()
+    }
+
     func testOfflinePresentationHidesCachedContainersWithoutPlayableMusic() async throws {
         var ready = item("ready")
         ready.album = .init(id: "album", title: "Synthetic album")
@@ -2186,6 +2336,40 @@ final class FoundationDownloadsTests: XCTestCase {
 }
 
 private actor DownloadsLibrary: FoundationLibrary {
+    nonisolated let supportsOfflinePlaylistPreparation: Bool
+    private var offlineCandidates: [FoundationItem] = []
+    private var offlineMemberships: [String: [FoundationItem]] = [:]
+    private var offlineCandidatePageSize = 50
+    private var offlinePlaylistGate: DownloadGate?
+    private(set) var offlineCandidateOffsets: [Int] = []
+    private(set) var offlinePlaylistOffsets: [String: [Int]] = [:]
+    func setOfflinePlaylistGate(_ gate: DownloadGate) { offlinePlaylistGate = gate }
+    func setOfflinePlaylistFixture(
+        candidates: [FoundationItem], memberships: [String: [FoundationItem]], pageSize: Int = 50
+    ) {
+        offlineCandidates = candidates
+        offlineMemberships = memberships
+        offlineCandidatePageSize = pageSize
+    }
+    func playlists(startIndex: Int) async throws -> FoundationPage {
+        offlineCandidateOffsets.append(startIndex)
+        let end = min(offlineCandidates.count, startIndex + offlineCandidatePageSize)
+        return .init(
+            items: Array(offlineCandidates[startIndex..<end]),
+            nextStartIndex: end < offlineCandidates.count ? end : nil)
+    }
+    func playlistTracks(playlistID: String, startIndex: Int) async throws -> FoundationPage {
+        offlinePlaylistOffsets[playlistID, default: []].append(startIndex)
+        if let gate = offlinePlaylistGate {
+            offlinePlaylistGate = nil
+            await gate.wait()
+        }
+        if fails { throw FoundationLibraryError.unavailable }
+        let tracks = offlineMemberships[playlistID] ?? []
+        let end = min(tracks.count, startIndex + 100)
+        return .init(
+            items: Array(tracks[startIndex..<end]), nextStartIndex: end < tracks.count ? end : nil)
+    }
     private var conversionGate: DownloadGate?
     private(set) var requestedQualities: [FoundationDownloadQuality] = []
     func setConversionGate(_ gate: DownloadGate) { conversionGate = gate }
@@ -2239,7 +2423,10 @@ private actor DownloadsLibrary: FoundationLibrary {
         if artworkFails { throw FoundationLibraryError.unavailable }
         return artwork
     }
-    init(tracks: [FoundationItem]) { self.tracks = tracks }
+    init(tracks: [FoundationItem], preparesOfflinePlaylists: Bool = false) {
+        self.tracks = tracks
+        self.supportsOfflinePlaylistPreparation = preparesOfflinePlaylists
+    }
     func setFailure(_ value: Bool) { fails = value }
     func setTracks(_ value: [FoundationItem]) { tracks = value }
     func albums(startIndex: Int) async throws -> FoundationPage {

@@ -68,6 +68,8 @@ final class FoundationDownloads: ObservableObject {
     @Published private(set) var artworkRevision: UInt = 0
     @Published private(set) var catalogRevision: UInt = 0
     @Published private(set) var verifiedReadyRevision: UInt = 0
+    @Published private(set) var isPreparingOfflinePlaylists = false
+    @Published private(set) var offlinePlaylistPreparationMessage: String?
     private let library: any FoundationLibrary
     private let projectTracks: @MainActor ([FoundationItem], String?) -> [FoundationItem]
     private let observeTracks: @MainActor ([FoundationItem], String?) -> Void
@@ -261,6 +263,11 @@ final class FoundationDownloads: ObservableObject {
         self.connected = connected
         self.wifi = wifi
         if !allowed {
+            if isPreparingOfflinePlaylists {
+                offlinePlaylistPreparationMessage =
+                    "Connect to finish saving playlist availability."
+                isPreparingOfflinePlaylists = false
+            }
             worker?.cancel()
             artworkTask?.cancel()
             syncTask?.cancel()
@@ -836,13 +843,17 @@ final class FoundationDownloads: ObservableObject {
     }
 
     private func schedule() {
-        guard isLive, storageUsable, !isLoading, allowed, worker == nil else { return }
+        guard isLive, storageUsable, !isLoading, allowed, worker == nil,
+            owners.contains(where: { $0.state == .queued && !paused.contains($0.id) })
+        else { return }
+        let readyRevision = verifiedReadyRevision
         worker = Task { [weak self] in
             guard let self else { return }
             await self.run()
             self.worker = nil
             self.activeOwner = nil
             self.refreshStates()
+            if self.verifiedReadyRevision != readyRevision { self.reconcilePlaylists() }
             if self.owners.contains(where: { $0.state == .queued }) { self.schedule() }
         }
     }
@@ -1469,6 +1480,164 @@ final class FoundationDownloads: ObservableObject {
                         "A downloaded playlist could not refresh. Its last saved tracks remain available."
                 }
             }
+            if worker == nil { await prepareOfflinePlaylists(epoch: epoch) }
+        }
+    }
+
+    /// Explicitly reported metadata preparation, sharing reconciliation's lifetime and admission.
+    /// At most128 playlists,10,000 track occurrences and256 requests per online boundary.
+    /// A completed download remains ready immediately; optional browsing metadata never owns files.
+    private func prepareOfflinePlaylists(epoch: UInt) async {
+        guard !downloadedSongs.isEmpty else {
+            offlinePlaylistPreparationMessage = nil
+            return
+        }
+        guard library.supportsOfflinePlaylistPreparation else {
+            offlinePlaylistPreparationMessage =
+                "This music source does not support saving playlist availability automatically."
+            return
+        }
+        guard isLive, allowed, !Task.isCancelled, generation == epoch else { return }
+        isPreparingOfflinePlaylists = true
+        offlinePlaylistPreparationMessage = "Saving playlist availability for offline browsing…"
+        defer { isPreparingOfflinePlaylists = false }
+        var candidates = 0
+        var occurrences = 0
+        var requests = 0
+        var cursor: Int? = 0
+        var seenPlaylists: Set<String> = []
+        var expectedPlaylists: Set<String> = []
+        var incomplete = false
+        var limitReached = false
+        do {
+            while let offset = cursor {
+                try checkPreparation(epoch)
+                guard candidates < 128, occurrences < 10_000, requests < 256 else {
+                    incomplete = true
+                    limitReached = true
+                    break
+                }
+                requests += 1
+                let page = try await library.playlists(startIndex: offset)
+                try checkPreparation(epoch)
+                guard page.items.count <= 50,
+                    page.items.allSatisfy({
+                        $0.kind == .playlist && !$0.id.isEmpty && $0.id.utf8.count <= 256
+                    }),
+                    page.nextStartIndex.map({ $0 > offset && !page.items.isEmpty }) ?? true
+                else { throw FoundationLibraryError.invalidResponse }
+                cursor = page.nextStartIndex
+                for playlist in page.items {
+                    try checkPreparation(epoch)
+                    guard candidates < 128, occurrences < 10_000, requests < 256 else {
+                        incomplete = true
+                        limitReached = true
+                        break
+                    }
+                    guard seenPlaylists.insert(playlist.id).inserted else {
+                        throw FoundationLibraryError.invalidResponse
+                    }
+                    candidates += 1
+                    // Owned playlists were fully reconciled immediately above using their own guard.
+                    if owners.contains(where: {
+                        $0.item.kind == .playlist && $0.item.id == playlist.id
+                            && expanded.contains($0.id)
+                    }) {
+                        continue
+                    }
+                    let previous = rememberedCollection(playlist)
+                    let model = collectionModels[collectionKey(playlist)]
+                    if model?.isLoading == true {
+                        incomplete = true
+                        continue
+                    }
+                    var tracks: [FoundationItem] = []
+                    var trackCursor: Int? = 0
+                    var complete = false
+                    do {
+                        while let trackOffset = trackCursor {
+                            try checkPreparation(epoch)
+                            guard occurrences < 10_000, requests < 256 else {
+                                incomplete = true
+                                limitReached = true
+                                break
+                            }
+                            requests += 1
+                            let contents = try await library.playlistTracks(
+                                playlistID: playlist.id, startIndex: trackOffset)
+                            try checkPreparation(epoch)
+                            guard contents.items.count <= 100,
+                                contents.items.allSatisfy({
+                                    $0.kind == .track && !$0.id.isEmpty && $0.id.utf8.count <= 256
+                                }),
+                                contents.nextStartIndex.map({
+                                    $0 > trackOffset && !contents.items.isEmpty
+                                }) ?? true
+                            else { throw FoundationLibraryError.invalidResponse }
+                            let admitted = Array(contents.items.prefix(10_000 - occurrences))
+                            occurrences += admitted.count
+                            tracks += admitted
+                            trackCursor = contents.nextStartIndex
+                            guard admitted.count == contents.items.count else {
+                                incomplete = true
+                                limitReached = true
+                                break
+                            }
+                            complete = trackCursor == nil
+                        }
+                    } catch {
+                        try checkPreparation(epoch)
+                        let category = FoundationLibraryError.category(error)
+                        guard category == .network || category == .unavailable else {
+                            throw category
+                        }
+                        incomplete = true
+                    }
+                    try checkPreparation(epoch)
+                    // A page explicitly opened/refreshed while this request waited wins publication.
+                    guard rememberedCollection(playlist) == previous, model?.isLoading != true
+                    else {
+                        incomplete = true
+                        continue
+                    }
+                    let hasReady = tracks.contains(where: isReady)
+                    if hasReady { expectedPlaylists.insert(playlist.id) }
+                    if complete, hasReady || previous != nil {
+                        rememberCollection(playlist, tracks: tracks, complete: true)
+                        // Do not replace an independently loaded live canonical page.
+                        installCollectionSnapshot(playlist, tracks: tracks)
+                    } else if !complete, previous == nil, hasReady {
+                        rememberCollection(playlist, tracks: tracks, complete: false)
+                    }
+                    if !complete { incomplete = true }
+                    offlinePlaylistPreparationMessage =
+                        "Saving playlist availability: \(candidates) checked…"
+                }
+                if incomplete, candidates >= 128 || occurrences >= 10_000 || requests >= 256 {
+                    break
+                }
+            }
+            try checkPreparation(epoch)
+            // Retention budgets can evict old metadata; never label that coverage complete.
+            let retained = Set(downloadedPlaylists.map(\.id))
+            incomplete = incomplete || !expectedPlaylists.isSubset(of: retained)
+            offlinePlaylistPreparationMessage =
+                limitReached
+                ? "Offline preparation reached its limit. Some playlists may not appear offline."
+                : incomplete
+                    ? "Some playlist availability is not saved yet. Refresh online to try again."
+                    : "Playlist availability saved for offline browsing."
+        } catch {
+            guard isLive, allowed, !Task.isCancelled, generation == epoch else { return }
+            offlinePlaylistPreparationMessage =
+                "Playlist availability could not finish saving. Previously saved playlists remain available."
+        }
+    }
+
+    private func checkPreparation(_ epoch: UInt) throws {
+        try Task.checkCancellation()
+        guard isLive, storageUsable, allowed, generation == epoch else {
+            throw CancellationError()
         }
     }
 
