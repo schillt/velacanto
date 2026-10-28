@@ -3074,10 +3074,7 @@ private struct FoundationScreenHeader<Profile: View, Search: View>: ViewModifier
             if #available(iOS 26.0, *) {
                 content
                     .safeAreaBar(edge: .top, spacing: 0) {
-                        VStack(spacing: 0) {
-                            visibleHeader(headerContent.background { searchReadabilityBackground })
-                            FoundationOfflineBrowsingBanner()
-                        }
+                        visibleHeader(headerContent.background { searchReadabilityBackground })
                     }
                     .scrollEdgeEffectStyle(.soft, for: .top)
                     .scrollEdgeEffectHidden(!showsHeader || isAtTop, for: .top)
@@ -3085,10 +3082,7 @@ private struct FoundationScreenHeader<Profile: View, Search: View>: ViewModifier
                 content
                     .contentMargins(.top, 56 + searchHeight, for: .scrollContent)
                     .overlay(alignment: .top) {
-                        VStack(spacing: 0) {
-                            visibleHeader(headerContent.background { legacyBackground })
-                            FoundationOfflineBrowsingBanner()
-                        }
+                        visibleHeader(headerContent.background { legacyBackground })
                     }
             }
         }
@@ -3101,6 +3095,8 @@ private struct FoundationScreenHeader<Profile: View, Search: View>: ViewModifier
                     profile
                 }.padding(.horizontal, 16).frame(height: 56)
                 search.frame(height: searchHeight)
+                // The browsing status belongs to the same scroll-driven header surface.
+                FoundationOfflineBrowsingBanner(drawsBackground: false)
             }
         }
 

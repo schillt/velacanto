@@ -199,11 +199,12 @@ extension EnvironmentValues {
 
 /// Render at the title owner, never above the enclosing NavigationStack's toolbar.
 struct FoundationOfflineBrowsingBanner: View {
+    var drawsBackground = true
     @Environment(\.foundationOfflineBannerContext) private var context
 
     var body: some View {
         if let context, context.isOffline {
-            FoundationOfflineStatus(cache: context.cache)
+            FoundationOfflineStatus(cache: context.cache, drawsBackground: drawsBackground)
         }
     }
 }
@@ -230,11 +231,12 @@ extension View {
 /// Quiet browsing-only status. It is mounted below the title, outside player presentations.
 struct FoundationOfflineStatus: View {
     let cache: FoundationCatalogPageCache?
+    var drawsBackground = true
     @State private var lastRefresh: Date?
 
     var body: some View {
         statusContent
-            .background(.bar)
+            .background(drawsBackground ? AnyShapeStyle(.bar) : AnyShapeStyle(Color.clear))
             .accessibilityElement(children: .combine)
             .accessibilityIdentifier("browsing-offline-status")
             #if DEBUG && os(iOS) && targetEnvironment(simulator)
