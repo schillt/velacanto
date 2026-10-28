@@ -584,7 +584,13 @@ final class FoundationDownloadsUITests: XCTestCase {
                 forDuration: 0.1,
                 thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.1)))
         capture("Album overview uses system light appearance when expanded", in: app)
-        tapNativeChrome(navigation.buttons["Done"], in: app)
+        XCTAssertFalse(navigation.buttons["Done"].exists)
+        for _ in 0..<2 where navigation.exists {
+            navigation.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+                .press(
+                    forDuration: 0.1,
+                    thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.98)))
+        }
         XCTAssertFalse(navigation.exists)
         let counts = app.buttons["Read catalog counts"]
         counts.tap()
