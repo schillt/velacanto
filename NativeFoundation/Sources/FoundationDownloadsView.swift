@@ -203,6 +203,9 @@ struct FoundationOfflineStatus: View {
             .background(.bar)
             .accessibilityElement(children: .combine)
             .accessibilityIdentifier("browsing-offline-status")
+            #if DEBUG && os(iOS) && targetEnvironment(simulator)
+                .modifier(FoundationOfflineBannerGeometry())
+            #endif
             .task(id: cache?.scope) {
                 let date = await cache?.latestSavedAt()
                 guard !Task.isCancelled else { return }
@@ -248,3 +251,26 @@ struct FoundationOfflineStatus: View {
         #endif
     }
 }
+
+#if DEBUG && os(iOS) && targetEnvironment(simulator)
+    /// The native AX wrapper can report a zero frame for safe-area accessory content.
+    /// Only the isolated UI fixture exposes the rendered global bounds for geometry assertions.
+    private struct FoundationOfflineBannerGeometry: ViewModifier {
+        @State private var frame = CGRect.zero
+
+        @ViewBuilder func body(content: Content) -> some View {
+            if FoundationDownloadsTestHarness.enabled {
+                content
+                    .onGeometryChange(for: CGRect.self) { geometry in
+                        geometry.frame(in: .global)
+                    } action: {
+                        frame = $0
+                    }
+                    .accessibilityValue(
+                        "frame=\(frame.minX),\(frame.minY),\(frame.width),\(frame.height)")
+            } else {
+                content
+            }
+        }
+    }
+#endif

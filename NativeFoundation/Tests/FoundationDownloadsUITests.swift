@@ -1869,12 +1869,32 @@ final class FoundationDownloadsUITests: XCTestCase {
             visible.count, 1, "Exactly one browsing banner is visible", file: file, line: line)
         guard let banner = visible.first else { return }
         XCTAssertTrue(title.exists, file: file, line: line)
+        let measured = XCTNSPredicateExpectation(
+            predicate: NSPredicate { [weak self] object, _ in
+                guard let element = object as? XCUIElement,
+                    let frame = self?.offlineBannerFrame(element)
+                else { return false }
+                return frame.width > 0 && frame.height > 0
+            }, object: banner)
+        XCTAssertEqual(
+            XCTWaiter.wait(for: [measured], timeout: 5), .completed, file: file, line: line)
+        guard let frame = offlineBannerFrame(banner) else {
+            XCTFail("Rendered banner geometry is required", file: file, line: line)
+            return
+        }
         XCTAssertGreaterThanOrEqual(
-            banner.frame.minY, title.frame.maxY - 1,
+            frame.minY, title.frame.maxY - 1,
             "Offline banner must start below the title bar", file: file, line: line)
         XCTAssertLessThanOrEqual(
-            banner.frame.height, 32,
+            frame.height, 32,
             "The default-size iPhone banner remains a slim strip", file: file, line: line)
+    }
+
+    private func offlineBannerFrame(_ banner: XCUIElement) -> CGRect? {
+        guard let value = banner.value as? String, value.hasPrefix("frame=") else { return nil }
+        let numbers = value.dropFirst(6).split(separator: ",").compactMap { Double($0) }
+        guard numbers.count == 4 else { return nil }
+        return CGRect(x: numbers[0], y: numbers[1], width: numbers[2], height: numbers[3])
     }
 
     func testOfflinePreservesAlbumHomeAndPlayerWithoutPlaybackBadges() {
