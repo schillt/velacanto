@@ -4,9 +4,20 @@ import SwiftUI
     import UIKit
 #endif
 
+/// Capture the window's semantic appearance before immersive artwork changes detail colors.
+private struct FoundationBrowsingColorSchemeKey: EnvironmentKey {
+    static let defaultValue: ColorScheme? = nil
+}
+
+extension EnvironmentValues {
+    var foundationBrowsingColorScheme: ColorScheme? {
+        get { self[FoundationBrowsingColorSchemeKey.self] }
+        set { self[FoundationBrowsingColorSchemeKey.self] = newValue }
+    }
+}
+
 /// Optional item text owns one visible-page read; presenting it adds no work.
 struct FoundationOverviewSection: View {
-    @Environment(\.colorScheme) private var colorScheme
     @Environment(\.foundationReduceMotion) private var reduceMotion
     @EnvironmentObject private var connectivity: FoundationConnectivity
     let item: FoundationItem
@@ -78,40 +89,9 @@ struct FoundationOverviewSection: View {
                 .accessibilityHint("Opens the complete overview")
                 .transition(.opacity)
                 .sheet(isPresented: $showingOverview) {
-                    NavigationStack {
-                        ScrollView {
-                            Text(overview)
-                                .lineSpacing(item.kind == .artist ? 4 : 0)
-                                #if os(macOS)
-                                    .font(overviewFont)
-                                #endif
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .textSelection(.enabled).padding()
-                        }
-                        .navigationTitle("About " + item.title)
-                        .foundationOfflineBrowsingBanner()
-                        #if os(iOS)
-                            .navigationBarTitleDisplayMode(.inline)
-                            .toolbarBackground(.hidden, for: .navigationBar)
-                        #else
-                            .toolbar {
-                                ToolbarItem(placement: .confirmationAction) {
-                                    Button("Done") { showingOverview = false }
-                                }
-                            }
-                        #endif
+                    FoundationOverviewSheet(item: item, overview: overview) {
+                        showingOverview = false
                     }
-                    // Match native sheet chrome to the semantic colors inherited from its detail.
-                    .preferredColorScheme(colorScheme)
-                    #if os(iOS)
-                        .presentationDetents([.medium, .large])
-                        .presentationDragIndicator(.hidden)
-                        .foundationIdleGrabber(showsOverlay: true)
-                        .accessibilityAction(.escape) { showingOverview = false }
-                    #else
-                        .frame(minWidth: 360, idealWidth: 480, minHeight: 320, idealHeight: 520)
-                        .background(.regularMaterial)
-                    #endif
                 }
             }
             if failed, !connectivity.localOnly {
@@ -151,6 +131,57 @@ struct FoundationOverviewSection: View {
                 if !Task.isCancelled { failed = true }
             }
         }
+    }
+}
+
+/// A text reading surface follows the window, rather than the presenting artwork's tint.
+private struct FoundationOverviewSheet: View {
+    let item: FoundationItem
+    let overview: String
+    let dismiss: () -> Void
+    @Environment(\.foundationBrowsingColorScheme) private var browsingColorScheme
+    @Environment(\.colorScheme) private var inheritedColorScheme
+    #if os(macOS)
+        @ScaledMetric(relativeTo: .body) private var textSize = 15.0
+    #endif
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                Text(overview)
+                    #if os(macOS)
+                        .font(.system(size: textSize))
+                    #else
+                        .font(.body)
+                    #endif
+                    .lineSpacing(5)
+                    .foregroundStyle(.primary)
+                    .frame(maxWidth: 600, alignment: .leading)
+                    .textSelection(.enabled)
+                    .padding(.horizontal, 24).padding(.vertical, 24)
+                    .frame(maxWidth: .infinity, alignment: .center)
+            }
+            .background(.background)
+            .navigationTitle("About " + item.title)
+            .foundationOfflineBrowsingBanner()
+            #if os(iOS)
+                .navigationBarTitleDisplayMode(.inline)
+            #endif
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done", action: dismiss)
+                }
+            }
+        }
+        .preferredColorScheme(browsingColorScheme ?? inheritedColorScheme)
+        .presentationBackground(.background)
+        .accessibilityAction(.escape, dismiss)
+        #if os(iOS)
+            .presentationDetents([.medium, .large])
+            .presentationDragIndicator(.visible)
+        #else
+            .frame(minWidth: 400, idealWidth: 600, minHeight: 360, idealHeight: 600)
+        #endif
     }
 }
 

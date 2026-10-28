@@ -100,6 +100,7 @@ struct FoundationLibraryView: View {
     @State private var displayedEntryID: UUID?
     @State private var missingLyricsEntryID: UUID?
     @State private var displayedState: FoundationPlayer.State = .idle
+    @Environment(\.colorScheme) private var browsingColorScheme
     @EnvironmentObject private var currentArtwork: FoundationCurrentArtwork
     @EnvironmentObject private var downloads: FoundationDownloads
     @EnvironmentObject private var connectivity: FoundationConnectivity
@@ -340,6 +341,7 @@ struct FoundationLibraryView: View {
             }
         #endif
         .environment(\.foundationOpenLibrary, libraryPresentation)
+        .environment(\.foundationBrowsingColorScheme, browsingColorScheme)
         #if os(iOS)
             .environment(
                 \.foundationOfflineBannerContext,
