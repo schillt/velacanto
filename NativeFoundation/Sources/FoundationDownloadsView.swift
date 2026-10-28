@@ -24,6 +24,7 @@ struct FoundationDownloadsView: View {
                         .font(.subheadline).foregroundStyle(.secondary)
                 }
                 if downloads.isLoading { ProgressView("Verifying downloaded files…") }
+                FoundationOfflinePlaylistPreparationStatus()
                 LazyVGrid(
                     columns: [
                         GridItem(
@@ -142,6 +143,26 @@ private struct FoundationDownloadFilteredCatalog: View {
         FoundationLibraryIndexView(
             kind: kind, model: results, library: library, player: player,
             isActive: isActive, downloadedOnly: true)
+    }
+}
+
+/// Optional membership preparation reports its actual state without owning downloaded files.
+struct FoundationOfflinePlaylistPreparationStatus: View {
+    @EnvironmentObject private var downloads: FoundationDownloads
+
+    var body: some View {
+        if let message = downloads.offlinePlaylistPreparationMessage {
+            HStack(alignment: .center, spacing: 8) {
+                if downloads.isPreparingOfflinePlaylists {
+                    ProgressView().controlSize(.mini)
+                }
+                Text(message).fixedSize(horizontal: false, vertical: true)
+            }
+            .font(.caption).foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("offline-playlist-preparation-status")
+        }
     }
 }
 

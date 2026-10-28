@@ -66,8 +66,12 @@ struct FoundationSettingsView: View {
                 } header: {
                     Text("Connection")
                 } footer: {
-                    Text(
-                        "Browse and play downloaded music without connecting to your music server.")
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(
+                            "Browse and play downloaded music without connecting to your music server."
+                        )
+                        FoundationOfflinePlaylistPreparationStatus()
+                    }
                 }
                 librarySection
                 if let pinSync {
