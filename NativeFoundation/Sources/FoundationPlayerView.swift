@@ -1409,13 +1409,12 @@ extension EnvironmentValues {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .ignoresSafeArea(.container, edges: mode == .queue ? .top : [])
             // The native inspector owns its adaptive sidebar material. A second
             // edge-to-edge glass surface adds refraction highlights around the panel.
             .background {
                 if reduceTransparency { Rectangle().fill(.background) }
             }
-            // Queue extends into its empty inspector toolbar area; Lyrics keeps its title.
+            // The window toolbar stays native; Queue starts at the interactive panel edge.
             .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
             .task(
                 id:
