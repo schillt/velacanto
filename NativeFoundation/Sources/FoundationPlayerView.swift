@@ -804,12 +804,15 @@ private struct FoundationQueueView: View {
                             .padding(.bottom, 12)
                         }
                         .toolbar {
-                            ToolbarItem(placement: .principal) {
-                                currentRow
-                                    .frame(width: max(0, geometry.size.width - 32))
-                                    .padding(.vertical, 8)
+                            if isPresented {
+                                ToolbarItem(placement: .principal) {
+                                    currentRow
+                                        .frame(width: max(0, geometry.size.width - 32), height: 44)
+                                        .padding(.vertical, 4)
+                                        .accessibilityElement(children: .contain)
+                                }
+                                .sharedBackgroundVisibility(.hidden)
                             }
-                            .sharedBackgroundVisibility(.hidden)
                         }
                         .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
                         .scrollContentBackground(.hidden)
@@ -895,23 +898,41 @@ private struct FoundationQueueView: View {
         }
     #endif
 
+    private var currentArtworkSize: CGFloat {
+        #if os(macOS)
+            44
+        #else
+            64
+        #endif
+    }
+
+    private var currentTextLineLimit: Int {
+        #if os(macOS)
+            1
+        #else
+            2
+        #endif
+    }
+
     private func currentTrack(_ entry: FoundationQueueEntry) -> some View {
         Button {
             guard isPresented else { return }
             player.select(entry.id)
         } label: {
             HStack(spacing: 12) {
-                queueArtwork(entry, size: 64, isCurrent: true)
+                queueArtwork(entry, size: currentArtworkSize, isCurrent: true)
                     #if os(iOS)
                         .foundationPlayerArtworkRegistration(
                             role: .queue, identity: entry.item.sharedArtworkIdentity,
                             cornerRadius: 6)
                     #endif
                 VStack(alignment: .leading, spacing: 3) {
-                    if historyIsVisible {
-                        Text("Now Playing").font(.caption).foregroundStyle(.secondary)
-                    }
-                    Text(entry.item.title).font(.headline).lineLimit(2)
+                    #if os(iOS)
+                        if historyIsVisible {
+                            Text("Now Playing").font(.caption).foregroundStyle(.secondary)
+                        }
+                    #endif
+                    Text(entry.item.title).font(.headline).lineLimit(currentTextLineLimit)
                         #if os(iOS)
                             .modifier(
                                 FoundationPlayerMetadataModifier(
@@ -920,7 +941,7 @@ private struct FoundationQueueView: View {
                                     text: entry.item.title))
                         #endif
                     Text(foundationQueueMetadataDetail(entry.item))
-                        .font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                        .font(.caption).foregroundStyle(.secondary).lineLimit(currentTextLineLimit)
                         #if os(iOS)
                             .modifier(
                                 FoundationPlayerMetadataModifier(
@@ -1382,6 +1403,7 @@ extension EnvironmentValues {
         let library: any FoundationLibrary
         let mode: Mode
         let queuePresentation: Int
+        let isPresented: Bool
         @Environment(\.foundationReduceTransparency) private var reduceTransparency
         @EnvironmentObject private var connectivity: FoundationConnectivity
         @State private var lyrics: FoundationLyricsPresentation?
@@ -1392,7 +1414,7 @@ extension EnvironmentValues {
                 if mode == .queue {
                     // Inspectors can retain content after closing; reset only on a queue opening.
                     FoundationQueueView(
-                        player: player, library: library, isPresented: .constant(true)
+                        player: player, library: library, isPresented: .constant(isPresented)
                     ) {
                         relatedItem = $0
                     }

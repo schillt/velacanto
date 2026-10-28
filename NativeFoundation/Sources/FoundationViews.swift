@@ -456,7 +456,7 @@ struct FoundationLibraryView: View {
             .inspector(isPresented: $showingPlayer) {
                 FoundationMacPlaybackPanel(
                     player: player, library: accountLibrary, mode: macPanel,
-                    queuePresentation: macQueuePresentation
+                    queuePresentation: macQueuePresentation, isPresented: showingPlayer
                 )
                 .environment(\.foundationMacTransportBottomInset, 0)
                 .environment(\.foundationMacUsesShellToolbar, false)
