@@ -2634,9 +2634,10 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
         guard acceptsCatalogItem(item) else { throw FoundationLibraryError.unavailable }
         try Task.checkCancellation()
         let tag = item.primaryImageTag.flatMap { $0.isEmpty ? nil : $0 }
-        // Artist and album references may omit image tags. Jellyfin accepts
-        // an untagged Primary request; missing version metadata is not missing artwork.
-        guard item.kind != .track, tag != nil || item.kind == .artist || item.kind == .album
+        // Canonical genre descriptors and artist/album references may omit image tags.
+        // Jellyfin accepts an untagged Primary request; unknown revision is not missing artwork.
+        guard item.kind != .track,
+            tag != nil || item.kind == .artist || item.kind == .album || item.kind == .genre
         else { return nil }
         guard Self.validID(item.id) else { throw FoundationLibraryError.invalidResponse }
         let pixels = min(2048, max(1, size))

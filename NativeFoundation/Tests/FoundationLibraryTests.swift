@@ -2341,8 +2341,10 @@ final class FoundationLibraryTests: XCTestCase {
         }
     }
 
-    func testArtistAndAlbumReferencesWithoutImageTagsMakeOneBoundedImageRequestEach() async throws {
-        for kind in [FoundationItem.Kind.artist, .album] {
+    func testArtistAlbumAndCanonicalGenreWithoutImageTagsMakeOneBoundedImageRequestEach()
+        async throws
+    {
+        for kind in [FoundationItem.Kind.artist, .album, .genre] {
             let recorder = Recorder()
             let library = FoundationJellyfinLibrary(session: session) { request in
                 await recorder.append(request)

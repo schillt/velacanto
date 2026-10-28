@@ -309,6 +309,7 @@ private struct FoundationGenreSettingsSection: View {
                 .foregroundStyle(.secondary)
             }
             if let error = genres.errorMessage { Text(error).foregroundStyle(.secondary) }
+            if let error = genres.offlineErrorMessage { Text(error).foregroundStyle(.secondary) }
         }
     }
 }

@@ -111,39 +111,25 @@ struct FoundationPrimaryGenresView: View {
     }
 
     @ViewBuilder private var status: some View {
-        if genres.isBuilding {
-            VStack(alignment: .leading, spacing: 8) {
-                ProgressView(
-                    "Indexing song tags…", value: Double(genres.processedSongs),
-                    total: Double(max(1, genres.totalSongs ?? 1)))
-                Text("\(genres.processedSongs) songs read").font(.caption).foregroundStyle(
-                    .secondary)
-                Button("Cancel indexing") { genres.cancel() }
-                    .accessibilityIdentifier("primary-genres-cancel")
+        if genres.record == nil {
+            if connectivity.localOnly {
+                Text("Connect to load genres.").foregroundStyle(.secondary)
+            } else if genres.errorMessage != nil {
+                Text("Genres aren’t available right now. You can try again in Library Settings.")
+                    .foregroundStyle(.secondary)
+            } else if !genres.isSupported {
+                Text("Genres aren’t available for this library.").foregroundStyle(.secondary)
+            } else {
+                ProgressView("Loading genres…")
             }
-        } else if genres.isSupported {
-            Button("Rebuild Genres") {
-                genres.start()
-            }.disabled(connectivity.localOnly)
-                .accessibilityIdentifier("primary-genres-build")
-        }
-        if let record = genres.record {
+        } else if items.isEmpty {
             Text(
-                "Indexed \(record.snapshot.completedAt.formatted(date: .abbreviated, time: .shortened)). Rebuild Genres in Library Settings after changing song tags on your server."
-            )
-            .font(.caption).foregroundStyle(.secondary)
-            if items.isEmpty { Text("No primary genres found.").foregroundStyle(.secondary) }
-        } else {
-            Text(
-                connectivity.localOnly
-                    ? "Genres will be prepared when you are online."
-                    : "Genres are prepared automatically. You can rebuild them in Library Settings."
+                !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    ? "No genres match your search."
+                    : (connectivity.localOnly
+                        ? "No downloaded music in these genres." : "No genres found.")
             )
             .foregroundStyle(.secondary)
-        }
-        if let error = genres.errorMessage { Text(error).foregroundStyle(.red) }
-        if connectivity.localOnly, let error = genres.offlineErrorMessage {
-            Text(error).foregroundStyle(.secondary)
         }
     }
 

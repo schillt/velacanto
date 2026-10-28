@@ -19,9 +19,9 @@ struct FoundationPrimaryGenreDestination: View {
             ).id(record.snapshot.censusID)
         } else {
             ContentUnavailableView(
-                "Primary genre index unavailable", systemImage: "music.note.list",
+                "Genre unavailable", systemImage: "music.note.list",
                 description: Text(
-                    "Return to Genres and select it again, or build or refresh the index for this music library."
+                    "Return to Genres and select it again."
                 ))
         }
     }
@@ -59,10 +59,7 @@ private struct FoundationPrimaryGenreSongs: View {
     var body: some View {
         FoundationCatalogView(
             title: genre.title, model: songs, library: library, player: player,
-            isActive: isActive, showsTrackArtwork: true,
-            coverageMessage:
-                "Rebuild Genres in Library Settings if songs have changed on your server.",
-            localItems: { readySongs }
+            isActive: isActive, showsTrackArtwork: true, localItems: { readySongs }
         ) { offset in
             try await record.songPage(genreID: genre.id, startIndex: offset, library: library)
         }
