@@ -65,6 +65,10 @@
             }
             .task {
                 await fixture.primaryGenres.restoreBoundCache()
+                if ProcessInfo.processInfo.arguments.contains("-fixtureAutomaticGenres") {
+                    await fixture.primaryGenres.prepareAutomaticallyIfNeeded(
+                        allowsNetwork: fixture.connectivity.isConnected)
+                }
                 await fixture.prepareCanonicalCollections()
                 await fixture.prepareMembershipCollections()
                 if !fixture.connectivity.localOnly {
@@ -80,8 +84,31 @@
                     isConnected: fixture.connectivity.isConnected,
                     usesWiFi: fixture.connectivity.usesWiFiOrWired)
             }
-            .onChange(of: fixture.connectivity.localOnly) { _, localOnly in
-                if localOnly { fixture.primaryGenres.cancel() }
+            .onReceive(fixture.connectivity.$localOnly) { _ in
+                Task { @MainActor in
+                    let automatic = ProcessInfo.processInfo.arguments.contains(
+                        "-fixtureAutomaticGenres")
+                    if fixture.connectivity.localOnly {
+                        if automatic {
+                            fixture.primaryGenres.suspendForOffline()
+                        } else {
+                            fixture.primaryGenres.cancel()
+                        }
+                    }
+                    if automatic {
+                        await fixture.primaryGenres.prepareAutomaticallyIfNeeded(
+                            allowsNetwork: fixture.connectivity.isConnected)
+                    }
+                }
+            }
+            .onChange(of: fixture.catalogLibrary.catalogScopeID) { _, _ in
+                guard ProcessInfo.processInfo.arguments.contains("-fixtureAutomaticGenres") else {
+                    return
+                }
+                Task {
+                    await fixture.primaryGenres.prepareAutomaticallyIfNeeded(
+                        allowsNetwork: fixture.connectivity.isConnected)
+                }
             }
             .environmentObject(fixture.downloads)
             .environmentObject(fixture.preferences)

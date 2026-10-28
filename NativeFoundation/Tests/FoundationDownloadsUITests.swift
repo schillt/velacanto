@@ -441,7 +441,8 @@ final class FoundationDownloadsUITests: XCTestCase {
         primaryGenreScopedQuery: Bool = false,
         sharedChromeEvidence: Bool = false, remoteListening: Bool = false,
         queueArtworkTransition: Bool = false, lyricsPresentation: Bool = false,
-        missingLyrics: Bool = false, remoteFavoriteRefresh: Bool = false
+        missingLyrics: Bool = false, remoteFavoriteRefresh: Bool = false,
+        automaticGenres: Bool = false
     )
         -> XCUIApplication
     {
@@ -453,6 +454,7 @@ final class FoundationDownloadsUITests: XCTestCase {
         if sharedChromeEvidence { app.launchArguments.append("-fixtureSharedChromeEvidence") }
         if remoteListening { app.launchArguments.append("-fixtureRemoteListening") }
         if primaryGenres { app.launchArguments.append("-fixturePrimaryGenres") }
+        if automaticGenres { app.launchArguments.append("-fixtureAutomaticGenres") }
         if heldPrimaryGenreMetadata {
             app.launchArguments.append("-fixtureHoldPrimaryGenreMetadata")
         }
@@ -3457,6 +3459,23 @@ final class FoundationDownloadsUITests: XCTestCase {
         capture("Bounded typed catalog requests after page end", in: app)
     }
 
+    func testGenresPrepareAutomaticallyWithoutManualBuild() {
+        continueAfterFailure = false
+        let app = launch(
+            productionShell: true, compactFixtureControls: true,
+            primaryGenres: true, automaticGenres: true)
+        selectTab("Library", in: app)
+        tapVisibleCenter(app.buttons["library-category-genres"], in: app)
+        XCTAssertTrue(app.navigationBars["Genres"].waitForExistence(timeout: 5))
+        let genre = app.buttons.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "Fixture Genre")
+        ).firstMatch
+        XCTAssertTrue(
+            genre.waitForExistence(timeout: 10),
+            "First-launch genres must not require the Build button")
+        capture("Automatic genre preparation publishes the normal library view", in: app)
+    }
+
     func testExplicitPrimaryGenreBuildCancelLateResponseAndSharedSearchLibrarySnapshot() {
         continueAfterFailure = false
         let app = launch(
@@ -3583,7 +3602,7 @@ final class FoundationDownloadsUITests: XCTestCase {
                 "Fixture Genre", "View Fixture Genre")
         ).firstMatch
         XCTAssertTrue(restored.waitForExistence(timeout: 5))
-        XCTAssertEqual(app.buttons["primary-genres-build"].label, "Refresh primary genres")
+        XCTAssertEqual(app.buttons["primary-genres-build"].label, "Rebuild Genres")
         openAlphabetFixtureControls(app)
         app.buttons["Read primary genre counts"].tap()
         let noScan = XCTNSPredicateExpectation(
