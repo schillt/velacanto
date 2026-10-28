@@ -1448,7 +1448,10 @@ private struct FoundationFavoriteShelf: View {
     @State private var revision = 0
     @State private var needsRefresh = false
     @State private var openedItem: FoundationItem?
-    private var displayedItems: [FoundationItem] { actions.favoriteItems(in: model.items) }
+    private var displayedItems: [FoundationItem] {
+        let items = actions.favoriteItems(in: model.items)
+        return connectivity.localOnly ? downloads.itemsWithDownloadedMusic(in: items) : items
+    }
     private var title: String {
         switch kind {
         case .album: "Albums"
@@ -1465,80 +1468,87 @@ private struct FoundationFavoriteShelf: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            NavigationLink {
-                FoundationCatalogView(
-                    title: "Favorite " + title, model: model, library: library, player: player,
-                    isActive: isActive, isFavorites: true, showsTrackArtwork: true
-                ) { try await library.favorites(kind: kind, startIndex: $0) }
-            } label: {
-                HStack {
-                    Text(title).font(.title2.bold())
-                    if hasMore {
-                        Image(systemName: "chevron.right").font(.subheadline.weight(.semibold))
-                    }
-                }.foregroundStyle(.primary)
-            }
-            .buttonStyle(.plain)
-            .disabled(!hasMore)
-            .accessibilityIdentifier("favorites-see-all-" + kind.rawValue)
-            .padding(.horizontal, 16)
-            if !displayedItems.isEmpty {
-                ScrollView(.horizontal) {
-                    if kind == .track {
-                        LazyHGrid(
-                            rows: Array(repeating: GridItem(.fixed(songRowHeight)), count: 3),
-                            spacing: 16
-                        ) {
-                            ForEach(
-                                Array(model.items.enumerated()).filter {
-                                    actions.favoriteState(
-                                        for: $0.element, initial: $0.element.isFavorite) != false
-                                }.prefix(6), id: \.offset
-                            ) {
-                                index, item in
-                                FoundationLibraryItemRow(
-                                    item: item, library: library, isActive: isActive && isVisible,
-                                    open: { openedItem = item }, play: { play(index) },
-                                    player: player,
-                                    showsTrackArtwork: true, navigate: { openedItem = $0 }
-                                )
-                                .lineLimit(1).frame(
-                                    width: dynamicTypeSize.isAccessibilitySize ? 360 : 300)
+            if !connectivity.localOnly || !displayedItems.isEmpty {
+                if !connectivity.localOnly {
+                    NavigationLink {
+                        FoundationCatalogView(
+                            title: "Favorite " + title, model: model, library: library,
+                            player: player,
+                            isActive: isActive, isFavorites: true, showsTrackArtwork: true
+                        ) { try await library.favorites(kind: kind, startIndex: $0) }
+                    } label: {
+                        HStack {
+                            Text(title).font(.title2.bold())
+                            if hasMore {
+                                Image(systemName: "chevron.right").font(
+                                    .subheadline.weight(.semibold))
                             }
-                        }.padding(.horizontal, 16)
-                    } else {
-                        LazyHStack(alignment: .top, spacing: 18) {
-                            ForEach(displayedItems.prefix(6)) { item in
-                                FoundationCollectionCard(
-                                    item: item, library: library, player: player,
-                                    isActive: isActive && isVisible, open: { openedItem = item },
-                                    navigate: { openedItem = $0 }
-                                )
-                                .frame(width: dynamicTypeSize.isAccessibilitySize ? 240 : 160)
-                            }
-                        }.padding(.horizontal, 16)
+                        }.foregroundStyle(.primary)
                     }
-                }.scrollIndicators(.hidden)
-                    .foundationMacContainedShelf()
-            } else if model.isLoading {
-                FoundationLoadingPlaceholder(layout: kind == .track ? .rows : .albumGrid)
+                    .buttonStyle(.plain)
+                    .disabled(!hasMore)
+                    .accessibilityIdentifier("favorites-see-all-" + kind.rawValue)
                     .padding(.horizontal, 16)
-            } else if model.loaded {
-                Text(
-                    model.nextStartIndex == nil
-                        ? "No favorite " + title.lowercased() + " yet."
-                        : "No favorites in this page. Open the full list to load more."
-                )
-                .foregroundStyle(.secondary).padding(.horizontal, 16)
-            }
-            if let error = model.errorMessage {
-                VStack(alignment: .leading) {
-                    Text(error).foregroundStyle(.secondary)
-                    Button("Retry") {
-                        model.request(model.retryRequest)
-                        revision += 1
-                    }.disabled(connectivity.localOnly)
-                }.padding(.horizontal, 16)
+                } else {
+                    Text(title).font(.title2.bold()).padding(.horizontal, 16)
+                }
+                if !displayedItems.isEmpty {
+                    ScrollView(.horizontal) {
+                        if kind == .track {
+                            LazyHGrid(
+                                rows: Array(repeating: GridItem(.fixed(songRowHeight)), count: 3),
+                                spacing: 16
+                            ) {
+                                ForEach(
+                                    Array(displayedItems.enumerated()).prefix(6), id: \.offset
+                                ) {
+                                    index, item in
+                                    FoundationLibraryItemRow(
+                                        item: item, library: library,
+                                        isActive: isActive && isVisible,
+                                        open: { openedItem = item }, play: { play(index) },
+                                        player: player,
+                                        showsTrackArtwork: true, navigate: { openedItem = $0 }
+                                    )
+                                    .lineLimit(1).frame(
+                                        width: dynamicTypeSize.isAccessibilitySize ? 360 : 300)
+                                }
+                            }.padding(.horizontal, 16)
+                        } else {
+                            LazyHStack(alignment: .top, spacing: 18) {
+                                ForEach(displayedItems.prefix(6)) { item in
+                                    FoundationCollectionCard(
+                                        item: item, library: library, player: player,
+                                        isActive: isActive && isVisible,
+                                        open: { openedItem = item },
+                                        navigate: { openedItem = $0 }
+                                    )
+                                    .frame(width: dynamicTypeSize.isAccessibilitySize ? 240 : 160)
+                                }
+                            }.padding(.horizontal, 16)
+                        }
+                    }.scrollIndicators(.hidden)
+                        .foundationMacContainedShelf()
+                } else if model.isLoading {
+                    FoundationLoadingPlaceholder(layout: kind == .track ? .rows : .albumGrid)
+                        .padding(.horizontal, 16)
+                } else if model.loaded {
+                    Text(
+                        model.nextStartIndex == nil
+                            ? "No favorite " + title.lowercased() + " yet."
+                            : "No favorites in this page. Open the full list to load more."
+                    )
+                    .foregroundStyle(.secondary).padding(.horizontal, 16)
+                }
+                if let error = model.errorMessage {
+                    VStack(alignment: .leading) {
+                        Text(error).foregroundStyle(.secondary)
+                        Button("Retry") {
+                            model.request(model.retryRequest)
+                            revision += 1
+                        }.disabled(connectivity.localOnly)
+                    }.padding(.horizontal, 16)
+                }
             }
         }
         .accessibilityIdentifier("favorites-section-" + kind.rawValue)
@@ -1589,7 +1599,7 @@ private struct FoundationFavoriteShelf: View {
     private func play(_ index: Int) {
         guard
             let selection = actions.favoriteTrackQueue(
-                in: model.items, selecting: index,
+                in: displayedItems, selecting: index,
                 isAvailable: { !connectivity.localOnly || downloads.isReady($0) })
         else { return }
         player.setQueue(selection.items, selectedIndex: selection.index)
@@ -1838,7 +1848,8 @@ struct FoundationCatalogView: View {
     }
 
     private var displayedItems: [FoundationItem] {
-        isFavorites ? actions.favoriteItems(in: model.items) : model.items
+        let items = isFavorites ? actions.favoriteItems(in: model.items) : model.items
+        return connectivity.localOnly ? downloads.itemsWithDownloadedMusic(in: items) : items
     }
 
     private var showsCollectionGrid: Bool {
@@ -1856,10 +1867,7 @@ struct FoundationCatalogView: View {
     }
 
     private var hasVisibleItems: Bool {
-        if !connectivity.localOnly { return !displayedItems.isEmpty }
-        return displayedItems.contains {
-            $0.kind == .track || !downloads.browseTracks(for: $0).isEmpty
-        }
+        !displayedItems.isEmpty
     }
 
     @ViewBuilder private var pageState: some View {
@@ -1887,7 +1895,7 @@ struct FoundationCatalogView: View {
         {
             FoundationLoadingPlaceholder(layout: showsCollectionGrid ? .albumGrid : .rows)
         }
-        if model.nextStartIndex != nil {
+        if model.nextStartIndex != nil, !connectivity.localOnly {
             Button("Load more") { reload(.more) }.disabled(
                 model.isLoading || connectivity.localOnly)
         }
@@ -1902,11 +1910,7 @@ struct FoundationCatalogView: View {
 
     private var resultRows: some View {
         ForEach(
-            Array(model.items.enumerated()).filter {
-                !isFavorites
-                    || actions.favoriteState(for: $0.element, initial: $0.element.isFavorite)
-                        != false
-            }, id: \.offset
+            Array(displayedItems.enumerated()), id: \.offset
         ) { index, item in
             resultRow(item, at: index)
         }
@@ -1931,8 +1935,9 @@ struct FoundationCatalogView: View {
         guard
             let selection = isFavorites
                 ? actions.favoriteTrackQueue(
-                    in: model.items, selecting: index, isAvailable: isAvailable)
-                : model.trackQueue(selecting: index, isAvailable: isAvailable)
+                    in: displayedItems, selecting: index, isAvailable: isAvailable)
+                : FoundationTrackQueueSelection(
+                    in: displayedItems, selecting: index, isAvailable: isAvailable)
         else { return }
         player.setQueue(selection.items, selectedIndex: selection.index)
     }
@@ -2397,7 +2402,9 @@ struct FoundationTrackList: View {
                 if offline, playlistRemoval.isPending { playlistRemoval.cancel() }
             }
             .onChange(of: connectivity.localOnly ? localItems?() : nil) { _, items in
-                if let items { tracks.installSnapshot(items) }
+                if let items {
+                    tracks.installSnapshot(downloads.itemsWithDownloadedMusic(in: items))
+                }
             }
             .onChange(of: connectivity.successfulRetryRevision) { _, _ in
                 guard isActive, isVisible else { return }
