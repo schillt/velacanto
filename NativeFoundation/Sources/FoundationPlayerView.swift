@@ -939,53 +939,33 @@ private struct FoundationQueueView: View {
                 Button {
                     player.setShuffle(!player.shuffleEnabled)
                 } label: {
-                    modeIcon("shuffle", active: player.shuffleEnabled)
+                    modeIcon("shuffle")
                 }
                 .modifier(FoundationQueueModeControlStyle(active: player.shuffleEnabled))
                 .accessibilityLabel("Shuffle")
                 .accessibilityValue(player.shuffleEnabled ? "On" : "Off")
                 .accessibilityAddTraits(player.shuffleEnabled ? .isSelected : [])
-                #if os(macOS)
-                    Button {
-                        let next: FoundationPlayer.RepeatMode =
-                            player.repeatMode == .off
-                            ? .all : player.repeatMode == .all ? .one : .off
-                        player.setRepeat(next)
-                    } label: {
-                        modeIcon(
-                            player.repeatMode == .one ? "repeat.1" : "repeat",
-                            active: player.repeatMode != .off)
-                    }
-                    .modifier(FoundationQueueModeControlStyle(active: player.repeatMode != .off))
-                    .accessibilityLabel("Repeat")
-                    .accessibilityValue(player.repeatMode.rawValue.capitalized)
-                    .accessibilityAddTraits(player.repeatMode == .off ? [] : .isSelected)
-                #else
-                    Menu {
-                        ForEach(FoundationPlayer.RepeatMode.allCases, id: \.self) { mode in
-                            Button(mode.rawValue.capitalized) { player.setRepeat(mode) }
-                        }
-                    } label: {
-                        modeIcon(
-                            player.repeatMode == .one ? "repeat.1" : "repeat",
-                            active: player.repeatMode != .off)
-                    }
-                    .modifier(FoundationQueueModeControlStyle(active: player.repeatMode != .off))
-                    .accessibilityLabel("Repeat")
-                    .accessibilityValue(player.repeatMode.rawValue.capitalized)
-                    .accessibilityAddTraits(player.repeatMode == .off ? [] : .isSelected)
-                #endif
+                Button {
+                    let next: FoundationPlayer.RepeatMode =
+                        player.repeatMode == .off ? .all : player.repeatMode == .all ? .one : .off
+                    player.setRepeat(next)
+                } label: {
+                    modeIcon(player.repeatMode == .one ? "repeat.1" : "repeat")
+                }
+                .modifier(FoundationQueueModeControlStyle(active: player.repeatMode != .off))
+                .accessibilityLabel("Repeat")
+                .accessibilityValue(player.repeatMode.rawValue.capitalized)
+                .accessibilityAddTraits(player.repeatMode == .off ? [] : .isSelected)
+
             }
         }
         .fixedSize()
     }
 
-    private func modeIcon(_ symbol: String, active: Bool) -> some View {
+    private func modeIcon(_ symbol: String) -> some View {
         Image(systemName: symbol)
             .font(.body.weight(.semibold))
-            .foregroundStyle(active ? Color.white : Color.primary)
             .frame(width: 32, height: 32)
-            .background(active ? Color.accentColor : .clear, in: Circle())
     }
 
     private func queueHeading(_ title: String) -> some View {
@@ -1109,9 +1089,9 @@ private struct FoundationQueueModeControlStyle: ViewModifier {
     let active: Bool
     @ViewBuilder func body(content: Content) -> some View {
         if active {
-            content.buttonStyle(.glassProminent).buttonBorderShape(.circle).tint(.accentColor)
+            content.buttonStyle(.glassProminent).buttonBorderShape(.circle).tint(.blue)
         } else {
-            content.buttonStyle(.glass).buttonBorderShape(.circle)
+            content.buttonStyle(.glass).buttonBorderShape(.circle).tint(.primary)
         }
     }
 }
@@ -1420,8 +1400,6 @@ extension EnvironmentValues {
             .background {
                 if reduceTransparency { Rectangle().fill(.background) }
             }
-            // The window toolbar stays native; Queue starts at the interactive panel edge.
-            .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
             .task(
                 id:
                     "\(mode.rawValue)-\(player.selectedEntryID?.uuidString ?? "none")-\(connectivity.localOnly)"

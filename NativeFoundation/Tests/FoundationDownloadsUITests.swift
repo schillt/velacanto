@@ -802,6 +802,39 @@ final class FoundationDownloadsUITests: XCTestCase {
         capture("Queue artwork expands back without replacing playback", in: app)
     }
 
+    func testQueueModeControlsCycleRepeatAndKeepPlayback() {
+        continueAfterFailure = false
+        let app = launch(
+            productionShell: true, canonicalDownloadState: "full",
+            longPlayback: true, queuePresentation: true)
+        selectTab("Library", in: app)
+        openCanonicalCollection("album", fromDownloads: false, in: app)
+        tapVisible(app.buttons["collection-track-0"], in: app)
+        openNowPlaying(app)
+        let modal = app.descendants(matching: .any)["foundation-now-playing"]
+        let identity = app.staticTexts["fixture-player-playback-identity"]
+        let original = identity.label
+        app.buttons["Show queue"].tap()
+        let repeatControl = modal.buttons["Repeat"]
+        XCTAssertTrue(repeatControl.waitForExistence(timeout: 5))
+        XCTAssertEqual(repeatControl.value as? String, "Off")
+        for mode in ["All", "One", "Off"] {
+            repeatControl.tap()
+            let changed = XCTNSPredicateExpectation(
+                predicate: NSPredicate(format: "value == %@", mode), object: repeatControl)
+            XCTAssertEqual(XCTWaiter.wait(for: [changed], timeout: 3), .completed)
+            capture("Queue repeat click cycle " + mode, in: app)
+            XCTAssertEqual(identity.label, original)
+        }
+        let shuffle = modal.buttons["Shuffle"]
+        shuffle.tap()
+        XCTAssertEqual(shuffle.value as? String, "On")
+        capture("Queue selected Shuffle has contrasting symbol", in: app)
+        shuffle.tap()
+        XCTAssertEqual(shuffle.value as? String, "Off")
+        XCTAssertEqual(identity.label, original)
+    }
+
     func testQueueHistoryContextMenuOffersReplayAndSharedTrackActions() {
         continueAfterFailure = false
         let app = launch(

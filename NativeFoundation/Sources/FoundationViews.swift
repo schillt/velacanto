@@ -460,18 +460,10 @@ struct FoundationLibraryView: View {
                 )
                 .environment(\.foundationMacTransportBottomInset, 0)
                 .environment(\.foundationMacUsesShellToolbar, false)
-                // Queue begins with the current track; only Lyrics needs a toolbar title.
-                .toolbar {
-                    if showingPlayer, macPanel == .lyrics {
-                        ToolbarItem(placement: .principal) {
-                            Text(macPanel.rawValue)
-                                .font(.headline)
-                                .accessibilityAddTraits(.isHeader)
-                                .accessibilityIdentifier("mac-playback-inspector-title")
-                        }
-                        .sharedBackgroundVisibility(.hidden)
-                    }
-                }
+                .modifier(
+                    FoundationMacPlaybackToolbar(
+                        showsLyricsTitle: showingPlayer && macPanel == .lyrics)
+                )
                 .inspectorColumnWidth(
                     min: FoundationMacLayout.minimumInspectorWidth,
                     ideal: min(340, macMaximumInspectorWidth), max: macMaximumInspectorWidth)
@@ -4217,6 +4209,26 @@ private struct FoundationMiniPlayerLabel: View {
                 #if DEBUG
                     .modifier(FoundationHomeReboundAccessoryProbe(placement: placement))
                 #endif
+        }
+    }
+#endif
+
+#if os(macOS)
+    /// Omit Queue's toolbar scope entirely so its root owns the top interactive region.
+    private struct FoundationMacPlaybackToolbar: ViewModifier {
+        let showsLyricsTitle: Bool
+        @ViewBuilder func body(content: Content) -> some View {
+            if showsLyricsTitle {
+                content.toolbar {
+                    ToolbarItem(placement: .principal) {
+                        Text("Lyrics").font(.headline).accessibilityAddTraits(.isHeader)
+                            .accessibilityIdentifier("mac-playback-inspector-title")
+                    }.sharedBackgroundVisibility(.hidden)
+                }
+                .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
+            } else {
+                content.ignoresSafeArea(.container, edges: .top)
+            }
         }
     }
 #endif
