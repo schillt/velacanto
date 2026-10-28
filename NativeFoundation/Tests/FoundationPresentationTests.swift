@@ -100,6 +100,20 @@ final class FoundationPresentationTests: XCTestCase {
                 attachment.name = "Native Mac overview \(scheme) from dark white-text presenter"
                 attachment.lifetime = .keepAlways
                 add(attachment)
+                // Include the native frame as well: the reading view alone can omit the sheet's
+                // title and confirmation chrome. Review this capture in both appearances.
+                let frameView = content.superview ?? content
+                frameView.layoutSubtreeIfNeeded()
+                let frameBitmap = try XCTUnwrap(
+                    frameView.bitmapImageRepForCachingDisplay(in: frameView.bounds))
+                frameView.cacheDisplay(in: frameView.bounds, to: frameBitmap)
+                let frameImage = NSImage(size: frameView.bounds.size)
+                frameImage.addRepresentation(frameBitmap)
+                let chrome = XCTAttachment(image: frameImage)
+                chrome.name =
+                    "Native Mac overview \(scheme) full sheet frame and confirmation chrome"
+                chrome.lifetime = .keepAlways
+                add(chrome)
 
                 // Sample only the reading interior, excluding native chrome, edges and scrollbar.
                 // White-on-white inherited text cannot satisfy this contrast check.
