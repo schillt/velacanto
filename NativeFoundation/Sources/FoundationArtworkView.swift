@@ -34,6 +34,8 @@ struct FoundationCatalogArtwork: View {
     @State private var imageRevision = UUID()
     @State private var installedPixels = 0
     @State private var installedIdentity: String?
+    @State private var installedRetainedArtworkIdentity: String?
+    @State private var installedRetainedArtworkPixels = 0
     #if DEBUG
         @Environment(\.foundationTraceOrigin) private var traceOrigin
     #endif
@@ -88,13 +90,22 @@ struct FoundationCatalogArtwork: View {
             loadGeneration = generation
             isLoadingUpgrade = installedPixels < targetPixels
             defer { if loadGeneration == generation { isLoadingUpgrade = false } }
-            if let data = await downloads.retainedArtwork(for: item) {
+            let retainedIdentity = downloads.retainedArtworkIdentity(for: item)
+            if let retainedIdentity,
+                installedRetainedArtworkIdentity != retainedIdentity
+                    || installedRetainedArtworkPixels < targetPixels,
+                let data = await downloads.retainedArtwork(for: item)
+            {
                 let pixels = targetPixels
                 let result = await Task.detached(priority: .utility) {
                     FoundationCurrentArtwork.decode(data, maximumPixels: pixels)
                 }.value
                 guard !Task.isCancelled else { return }
-                if let result { installImage(result.image) }
+                if let result {
+                    installImage(result.image)
+                    installedRetainedArtworkIdentity = retainedIdentity
+                    installedRetainedArtworkPixels = pixels
+                }
             }
             #if DEBUG
                 await FoundationTrace.withPage(origin: traceOrigin, page: .artwork) {
@@ -147,6 +158,8 @@ struct FoundationCatalogArtwork: View {
         installImage(nil)
         installedIdentity = identity
         installedCurrentRevision = nil
+        installedRetainedArtworkIdentity = nil
+        installedRetainedArtworkPixels = 0
     }
 
     private var isCurrentArtwork: Bool {
@@ -183,7 +196,11 @@ struct FoundationCatalogArtwork: View {
             }
         }
         let decodedIdentity = cgImage.map { ObjectIdentifier($0) }
-        if decodedIdentity != nil, decodedIdentity != installedDecodedIdentity {
+        // A recreated lazy card can receive the shared decoded cache hit on its first task.
+        // Install that first cover immediately; only replacements of a usable cover crossfade.
+        if decodedIdentity != nil, installedDecodedIdentity != nil,
+            decodedIdentity != installedDecodedIdentity
+        {
             imageRevision = UUID()
         }
         installedDecodedIdentity = decodedIdentity
