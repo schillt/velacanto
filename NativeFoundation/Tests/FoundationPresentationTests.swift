@@ -81,9 +81,9 @@ final class FoundationPresentationTests: XCTestCase {
                     contentRect: NSRect(x: 0, y: 0, width: 800, height: 700),
                     styleMask: [.titled], backing: .buffered, defer: false)
                 window.isReleasedWhenClosed = false
-                // Native sheet chrome can inherit its presenter's NSAppearance independently of
-                // SwiftUI's colorScheme environment. Exercise the opposite native appearance.
-                let parentAppearance: NSAppearance.Name = scheme == .light ? .darkAqua : .aqua
+                // Match the actual immersive host's native and preferred dark appearance while
+                // requesting each semantic browsing scheme for the reading sheet.
+                let parentAppearance: NSAppearance.Name = .darkAqua
                 window.appearance = NSAppearance(named: parentAppearance)
                 let beganSheet = expectation(
                     for: NSPredicate { _, _ in
@@ -105,10 +105,6 @@ final class FoundationPresentationTests: XCTestCase {
                 content.displayIfNeeded()
                 XCTAssertEqual(
                     window.appearance?.name, parentAppearance, "The presenter is unchanged")
-                XCTAssertTrue(
-                    containsAccessibilityIdentifier("overview-reading-footer", in: content),
-                    "The reading surface owns its semantic footer")
-                XCTAssertTrue(containsAccessibilityIdentifier("overview-done", in: content))
                 let bitmap = try XCTUnwrap(
                     content.bitmapImageRepForCachingDisplay(in: content.bounds))
                 content.cacheDisplay(in: content.bounds, to: bitmap)
@@ -116,7 +112,7 @@ final class FoundationPresentationTests: XCTestCase {
                 image.addRepresentation(bitmap)
                 let attachment = XCTAttachment(image: image)
                 attachment.name =
-                    "Native Mac overview \(scheme) from opposite native window appearance"
+                    "Native Mac overview \(scheme) from preferred dark native window appearance"
                 attachment.lifetime = .keepAlways
                 add(attachment)
                 // Include the native frame as well: the reading view alone can omit the sheet's
@@ -173,28 +169,19 @@ final class FoundationPresentationTests: XCTestCase {
                     foregroundPixels, 100, "Overview words must contrast with the sheet")
                 XCTAssertGreaterThan(
                     backgroundPixels, 1000, "The reading surface must follow \(scheme)")
-                window.endSheet(sheet)
-            }
-        }
-
-        private func containsAccessibilityIdentifier(
-            _ identifier: String, in element: NSObject, depth: Int = 0
-        ) -> Bool {
-            guard depth < 24 else { return false }
-            // In-process public NSAccessibility getters also cover SwiftUI's virtual elements.
-            let identifierSelector = NSSelectorFromString("accessibilityIdentifier")
-            if element.responds(to: identifierSelector),
-                element.perform(identifierSelector)?.takeUnretainedValue() as? String == identifier
-            {
-                return true
-            }
-            let childrenSelector = NSSelectorFromString("accessibilityChildren")
-            guard element.responds(to: childrenSelector),
-                let children = element.perform(childrenSelector)?.takeUnretainedValue()
-                    as? [NSObject]
-            else { return false }
-            return children.contains {
-                containsAccessibilityIdentifier(identifier, in: $0, depth: depth + 1)
+                let dismissed = expectation(
+                    for: NSPredicate { _, _ in
+                        MainActor.assumeIsolated { window.attachedSheet == nil }
+                    }, evaluatedWith: window)
+                let returnKey = try XCTUnwrap(
+                    NSEvent.keyEvent(
+                        with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+                        windowNumber: sheet.windowNumber, context: nil, characters: "\r",
+                        charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36))
+                XCTAssertTrue(
+                    sheet.performKeyEquivalent(with: returnKey),
+                    "Return must invoke the reading footer's default Done action")
+                await fulfillment(of: [dismissed], timeout: 5)
             }
         }
 
