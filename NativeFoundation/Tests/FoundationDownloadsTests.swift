@@ -1,8 +1,15 @@
 import Foundation
 import ImageIO
+import SwiftUI
 import XCTest
 
 @testable import VelacantoFoundation
+
+#if os(macOS)
+    import AppKit
+#else
+    import UIKit
+#endif
 
 @MainActor
 final class FoundationDownloadsTests: XCTestCase {
@@ -1505,6 +1512,77 @@ final class FoundationDownloadsTests: XCTestCase {
         _ = await manager.clearAccount()
     }
 
+    func testArtworkVisibilityReentryKeepsEquivalentRetainedCoverWithoutAnotherDecodePublication()
+        async throws
+    {
+        var track = artworkTrack("track")
+        track.album = .init(
+            id: "11111111111111111111111111111111", title: "Synthetic album",
+            primaryImageTag: "first")
+        let data = try artworkData()
+        let downloadLibrary = DownloadsLibrary(tracks: [track])
+        await downloadLibrary.setArtwork(data)
+        let directory = try root()
+        let manager = FoundationDownloads(
+            scope: "fixture", library: downloadLibrary, root: directory, transfer: transfer,
+            monitorConnectivity: false)
+        defer { manager.invalidate() }
+        manager.updateConnectivity(isAllowed: true)
+        manager.download(track)
+        try await waitUntil(timeout: .seconds(15)) {
+            manager.artworkBytes > 0 && manager.owners.allSatisfy { $0.state == .ready }
+        }
+        XCTAssertNotNil(manager.retainedArtworkIdentity(for: track))
+        let cache = FoundationArtworkCache(scope: "hosted", root: directory)
+        addTeardownBlock { _ = await cache.invalidate(removeDisk: true) }
+        let cached = try await cache.result(
+            for: track, pixels: 160, allowsNetwork: true, load: { _, _ in data })
+        let expected = Image(decorative: try XCTUnwrap(cached).image, scale: 1)
+        let library = FoundationJellyfinLibrary(
+            session: .init(
+                serverURL: URL(string: "https://example.invalid")!, accessToken: "synthetic",
+                userID: "user", deviceID: "device"),
+            load: { _ in
+                XCTFail("Visibility reentry must reuse the warm cache, never issue another GET")
+                throw FoundationLibraryError.unavailable
+            }, artworkCache: cache)
+        let connectivity = FoundationConnectivity(monitorConnectivity: false, retry: {})
+        let state = HostedArtworkVisibilityState()
+        let content = HostedArtworkVisibilityView(state: state, item: track, library: library)
+            .environmentObject(manager).environmentObject(connectivity)
+            .environment(\.displayScale, 1)
+        #if os(macOS)
+            let window = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 200, height: 200),
+                styleMask: [.titled], backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            window.contentView = NSHostingView(rootView: content)
+            window.orderFront(nil)
+            defer { window.close() }
+        #else
+            let scene = try XCTUnwrap(
+                UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+            let window = UIWindow(windowScene: scene)
+            window.rootViewController = UIHostingController(rootView: content)
+            window.makeKeyAndVisible()
+            defer { window.isHidden = true }
+        #endif
+        try await waitUntil { state.image == expected && state.publications >= 3 }
+        let initial = state.publications
+        for reentry in 1...2 {
+            state.active = false
+            try await waitUntil { state.inactiveRenders == reentry }
+            state.active = true
+            try await waitUntil {
+                state.publications > initial + reentry - 1 && state.image == expected
+            }
+            XCTAssertEqual(
+                state.publications, initial + reentry,
+                "Only the equivalent catalog result republishes; the retained cover must not decode and crossfade again"
+            )
+        }
+    }
+
     func testArtworkSharesBoundedRenditionPersistsOfflineAndDeletesAfterFinalReference()
         async throws
     {
@@ -2599,4 +2677,34 @@ private actor DownloadProgressReporter {
         self.callback = callback
     }
     func report(_ bytes: Int64, _ total: Int64?) { callback?(bytes, total) }
+}
+
+@MainActor
+private final class HostedArtworkVisibilityState: ObservableObject {
+    @Published var active = true
+    var image: Image?
+    var publications = 0
+    var inactiveRenders = 0
+}
+
+@MainActor
+private struct HostedArtworkVisibilityView: View {
+    @ObservedObject var state: HostedArtworkVisibilityState
+    let item: FoundationItem
+    let library: any FoundationLibrary
+
+    var body: some View {
+        FoundationCatalogArtwork(
+            item: item, library: library, isActive: state.active, size: 144,
+            loadedImage: Binding(
+                get: { state.image },
+                set: {
+                    state.image = $0
+                    state.publications += 1
+                })
+        )
+        .onChange(of: state.active) { _, active in
+            if !active { state.inactiveRenders += 1 }
+        }
+    }
 }
