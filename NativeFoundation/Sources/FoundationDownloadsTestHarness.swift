@@ -842,7 +842,9 @@
         }
         func endRemotePlayback() { remotePlaybackEnded = true }
         func remoteListeningActivity() async throws -> [FoundationRemoteListeningActivity] {
-            guard !listeningActivityScope.isEmpty, !remotePlaybackEnded else { return [] }
+            guard !listeningActivityScope.isEmpty else { return [] }
+            catalogRequests["remote-listening", default: 0] += 1
+            guard !remotePlaybackEnded else { return [] }
             let item = FoundationItem(
                 id: "remote-fixture-track-\(remoteTrackGeneration)",
                 title: "Remote Fixture Track \(remoteTrackGeneration)",

@@ -5796,6 +5796,58 @@ final class FoundationDownloadsUITests: XCTestCase {
         add(image)
     }
 
+    /// A positive read count distinguishes an actual Home refresh from a scroll-only gesture.
+    /// This intentionally has no playback setup; the existing audio-isolation case stays separate.
+    func testRemoteContinueListeningHomePullRefreshReadsUpdatedActivity() throws {
+        continueAfterFailure = false
+        let app = launch(
+            productionShell: true, compactFixtureControls: true, remoteListening: true)
+        selectTab("Home", in: app)
+        let media = app.buttons["Continue listening instructions"]
+        XCTAssertTrue(media.waitForExistence(timeout: 5))
+        XCTAssertTrue((media.value as? String ?? "").contains("Remote Fixture Track 0"))
+        openAlphabetFixtureControls(app)
+        tapNativeChrome(app.buttons["Next remote fixture track"], in: app)
+        let advanced = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label == %@", "Remote generation 1"),
+            object: app.staticTexts["fixture-remote-generation"])
+        XCTAssertEqual(XCTWaiter.wait(for: [advanced], timeout: 5), .completed)
+        closeAlphabetFixtureControls(app)
+        let read = app.buttons["Read catalog counts"]
+        func remoteReads() -> Int {
+            let value = read.value as? String ?? ""
+            let entry = value.split(separator: ",").map {
+                $0.trimmingCharacters(in: .whitespaces)
+            }.first { $0.hasPrefix("remote-listening ") }
+            return entry.flatMap { Int($0.dropFirst("remote-listening ".count)) } ?? -1
+        }
+        _ = readAlphabetCounts(app, containing: "remote-listening ")
+        let before = remoteReads()
+        XCTAssertGreaterThan(before, 0)
+        let home = chromeScroll(app, "home")
+        XCTAssertTrue(home.exists && home.isHittable)
+        let heading = app.staticTexts["continue-listening-heading"]
+        XCTAssertTrue(heading.exists && heading.isHittable)
+        capture("Home top immediately before the single refresh gesture", in: app)
+        home.swipeDown()
+        // Poll only the existing read-only diagnostic control. Never resend the
+        // gesture, mutate the remote actor, or invoke refresh through fixture code.
+        for _ in 0..<3 {
+            tapNativeChrome(read, in: app)
+            if remoteReads() > before { break }
+        }
+        let after = remoteReads()
+        let attachment = XCTAttachment(
+            string: "remote reads before \(before), after \(after); "
+                + "card \(media.value as? String ?? "")")
+        attachment.name = "Home refresh actual read and rendered card"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        capture("Home after the single refresh gesture and bounded counter reads", in: app)
+        XCTAssertGreaterThan(after, before, "The Home gesture must actually read remote activity")
+        XCTAssertTrue((media.value as? String ?? "").contains("Remote Fixture Track 1"))
+    }
+
     func testRemoteContinueListeningMetadataGuideAndPlaybackIsolation() throws {
         continueAfterFailure = false
         let app = launch(
