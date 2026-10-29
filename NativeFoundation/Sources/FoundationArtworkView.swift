@@ -1,5 +1,24 @@
 import SwiftUI
 
+#if DEBUG
+    /// Hosted regression tests observe actual task completion, never image identities or payloads.
+    struct FoundationArtworkTaskObservation: Sendable {
+        let phase: UUID
+        let finished: @MainActor @Sendable (UUID, Bool) -> Void
+    }
+
+    private struct FoundationArtworkTaskObservationKey: EnvironmentKey {
+        static let defaultValue: FoundationArtworkTaskObservation? = nil
+    }
+
+    extension EnvironmentValues {
+        var foundationArtworkTaskObservation: FoundationArtworkTaskObservation? {
+            get { self[FoundationArtworkTaskObservationKey.self] }
+            set { self[FoundationArtworkTaskObservationKey.self] = newValue }
+        }
+    }
+#endif
+
 /// View publication is owned locally; catalog bytes and decoding share the account cache.
 struct FoundationCatalogArtwork: View {
     enum Source {
@@ -38,6 +57,7 @@ struct FoundationCatalogArtwork: View {
     @State private var installedRetainedArtworkPixels = 0
     #if DEBUG
         @Environment(\.foundationTraceOrigin) private var traceOrigin
+        @Environment(\.foundationArtworkTaskObservation) private var taskObservation
     #endif
 
     private var artworkCornerRadius: CGFloat {
@@ -45,6 +65,11 @@ struct FoundationCatalogArtwork: View {
     }
 
     var body: some View {
+        #if DEBUG
+            // Capture the immutable render epoch before the asynchronous task can be replaced.
+            let observation = taskObservation
+            let observedActive = isActive
+        #endif
         ZStack {
             RoundedRectangle(cornerRadius: artworkCornerRadius).fill(
                 .quaternary)
@@ -78,6 +103,11 @@ struct FoundationCatalogArtwork: View {
             }
         }
         .task(id: artworkTaskIdentity) {
+            #if DEBUG
+                defer {
+                    if let observation { observation.finished(observation.phase, observedActive) }
+                }
+            #endif
             guard isActive, !Task.isCancelled else { return }
             prepareArtworkIdentity()
             if case .current(let result) = source, let result {
