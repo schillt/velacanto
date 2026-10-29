@@ -81,7 +81,6 @@ struct FoundationCatalogArtwork: View {
             ZStack {
                 if let displayImage {
                     displayImage.resizable().scaledToFill()
-                        .blur(radius: isLoadingUpgrade && !isCurrentArtwork ? min(4, size / 40) : 0)
                         .scaleEffect(item.kind == .genre ? 2 : 1, anchor: .topLeading)
                         .id(imageRevision)
                         .transition(.opacity)

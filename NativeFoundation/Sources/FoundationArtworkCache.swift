@@ -60,7 +60,11 @@ actor FoundationArtworkCache {
         let task: Task<Void, Never>
         var waiters: [UUID: CheckedContinuation<FoundationCurrentArtwork.Result?, Error>]
     }
-    private var previews: [Key: PreviewJob] = [:]
+    private struct PreviewKey: Hashable, Sendable {
+        let artwork: Key
+        let allowsSmaller: Bool
+    }
+    private var previews: [PreviewKey: PreviewJob] = [:]
     private var live = true
     private var active = 0
 
@@ -149,7 +153,8 @@ actor FoundationArtworkCache {
     }
 
     /// Local preview may use a smaller rendition while the caller owns a bounded upgrade.
-    func cachedResult(for item: FoundationItem, pixels: Int) async throws
+    func cachedResult(for item: FoundationItem, pixels: Int, allowsSmaller: Bool = true)
+        async throws
         -> FoundationCurrentArtwork.Result?
     {
         try Task.checkCancellation()
@@ -157,28 +162,30 @@ actor FoundationArtworkCache {
         let key = await resolvedArtwork(item.catalogArtworkItem, pixels: pixels).key
         try Task.checkCancellation()
         guard live else { throw CancellationError() }
-        if let result = memory.result(for: key, allowsSmaller: true, now: now()) {
+        if let result = memory.result(for: key, allowsSmaller: allowsSmaller, now: now()) {
             return result
         }
-        for candidate in Self.renditionCandidates(key, allowsSmaller: true) {
+        for candidate in Self.renditionCandidates(key, allowsSmaller: allowsSmaller) {
             if let pending = pendingImages[candidate], pending.expiry > now() {
                 return pending.image
             }
         }
-        guard previews[key] != nil || previews.count < max(1, limits.pendingKeys) else {
+        let previewKey = PreviewKey(artwork: key, allowsSmaller: allowsSmaller)
+        guard previews[previewKey] != nil || previews.count < max(1, limits.pendingKeys) else {
             return nil
         }
         let waiter = UUID()
         let result = try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
-                if var job = previews[key] {
+                if var job = previews[previewKey] {
                     job.waiters[waiter] = continuation
-                    previews[key] = job
+                    previews[previewKey] = job
                 } else {
                     let id = UUID()
                     let disk = disk
+                    let needsCompact = needsCompactPreview(for: key)
                     let task = Task.detached(priority: .utility) { [weak self] in
-                        let record = await disk.read(key, allowsSmaller: true)
+                        let record = await disk.read(key, allowsSmaller: allowsSmaller)
                         let decoded =
                             Task.isCancelled
                             ? nil
@@ -186,27 +193,30 @@ actor FoundationArtworkCache {
                                 FoundationCurrentArtwork.decode(
                                     $0.data, maximumPixels: $0.key.pixels)
                             }
-                        await self?.finishPreview(key: key, id: id, record: record, result: decoded)
+                        let compact = needsCompact ? Self.compactPreview(decoded) : nil
+                        await self?.finishPreview(
+                            key: previewKey, id: id, record: record, result: decoded,
+                            compact: compact)
                     }
-                    previews[key] = PreviewJob(
+                    previews[previewKey] = PreviewJob(
                         id: id, task: task, waiters: [waiter: continuation])
                 }
             }
         } onCancel: {
-            Task { await self.cancelPreview(key: key, waiter: waiter) }
+            Task { await self.cancelPreview(key: previewKey, waiter: waiter) }
         }
         try Task.checkCancellation()
         return result
     }
 
     private func finishPreview(
-        key: Key, id: UUID, record: FoundationArtworkDisk.CachedRecord?,
-        result: FoundationCurrentArtwork.Result?
+        key: PreviewKey, id: UUID, record: FoundationArtworkDisk.CachedRecord?,
+        result: FoundationCurrentArtwork.Result?, compact: FoundationCurrentArtwork.Result?
     ) {
         guard let job = previews[key], job.id == id else { return }
         previews.removeValue(forKey: key)
         if live, let record, let result {
-            remember(result, key: record.key, expiry: record.record.expiry)
+            remember(compact, full: result, key: record.key, expiry: record.record.expiry)
         }
         for waiter in job.waiters.values {
             if live {
@@ -217,7 +227,7 @@ actor FoundationArtworkCache {
         }
     }
 
-    private func cancelPreview(key: Key, waiter: UUID) {
+    private func cancelPreview(key: PreviewKey, waiter: UUID) {
         guard var job = previews[key], let continuation = job.waiters.removeValue(forKey: waiter)
         else { return }
         continuation.resume(throwing: CancellationError())
@@ -256,6 +266,9 @@ actor FoundationArtworkCache {
         let id = UUID()
         // Offline readers never join a pending remote fetch. A disk read remains local.
         if !allowsNetwork {
+            if let full = try await cachedResult(for: item, pixels: pixels, allowsSmaller: false) {
+                return full
+            }
             return try await cachedResult(for: item, pixels: pixels)
         }
         failures = failures.filter { $0.value > now }
@@ -323,6 +336,7 @@ actor FoundationArtworkCache {
             if playback { protectedWorkers.insert(jobID) }
             let disk = disk
             let now = now
+            let needsCompact = !playback && needsCompactPreview(for: key)
             active += 1
             #if DEBUG
                 let timing = FoundationLoadTiming(.artwork)
@@ -382,9 +396,16 @@ actor FoundationArtworkCache {
                 } catch {
                     outcome = .failure(error)
                 }
+                let compact: FoundationCurrentArtwork.Result?
+                if needsCompact, !Task.isCancelled, case .success(let value) = outcome {
+                    compact = Self.compactPreview(value?.0)
+                } else {
+                    compact = nil
+                }
                 let didPublish =
                     await self?.publish(
-                        key: key, jobID: jobID, outcome: outcome, persists: write != nil) ?? false
+                        key: key, jobID: jobID, outcome: outcome, compact: compact,
+                        persists: write != nil) ?? false
                 #if DEBUG
                     if didPublish { timing.record(.published) }
                 #endif
@@ -411,12 +432,12 @@ actor FoundationArtworkCache {
 
     private func publish(
         key: Key, jobID: UUID, outcome: Result<(FoundationCurrentArtwork.Result, Date)?, Error>,
-        persists: Bool
+        compact: FoundationCurrentArtwork.Result?, persists: Bool
     ) -> Bool {
         guard let job = jobs[key], job.id == jobID else { return false }
         jobs.removeValue(forKey: key)
         if live, case .success(let value) = outcome, let (result, expiry) = value {
-            remember(result, key: key, expiry: expiry)
+            remember(compact, full: result, key: key, expiry: expiry)
         }
         if live {
             switch outcome {
@@ -480,8 +501,34 @@ actor FoundationArtworkCache {
         }
     }
 
-    private func remember(_ result: FoundationCurrentArtwork.Result, key: Key, expiry: Date) {
-        memory.remember(result, key: key, expiry: expiry)
+    private func needsCompactPreview(for key: Key) -> Bool {
+        key.pixels > 160
+            && !memory.containsExact(Key(identity: key.identity, pixels: 160), now: now())
+    }
+
+    /// Called only by existing detached decode workers, never by synchronous presentation.
+    private nonisolated static func compactPreview(_ result: FoundationCurrentArtwork.Result?)
+        -> FoundationCurrentArtwork.Result?
+    {
+        guard let result else { return nil }
+        if max(result.image.width, result.image.height) <= 160 { return result }
+        return FoundationCurrentArtwork.decode(result.data, maximumPixels: 160)
+    }
+
+    private func remember(
+        _ compact: FoundationCurrentArtwork.Result?, full result: FoundationCurrentArtwork.Result,
+        key: Key, expiry: Date
+    ) {
+        let previewKey = Key(identity: key.identity, pixels: 160)
+        let instant = now()
+        if key.pixels > 160, let compact,
+            !memory.containsExact(previewKey, now: instant)
+        {
+            memory.remember(compact, key: previewKey, expiry: expiry, now: instant)
+        }
+        // Admit the requested full cover last. A visible full result must not be immediately
+        // evicted by its own preview, even when compact entries fill the entire budget.
+        memory.remember(result, key: key, expiry: expiry, now: instant)
     }
 
     /// Pure memory-only presentation lookup. It neither changes LRU order nor starts work.
@@ -561,6 +608,10 @@ actor FoundationArtworkCache {
             }
         }
 
+        func containsExact(_ key: Key, now: Date) -> Bool {
+            withLock { live && entries[key].map { $0.expiry > now } == true }
+        }
+
         func result(for key: Key, allowsSmaller: Bool, now: Date)
             -> FoundationCurrentArtwork.Result?
         {
@@ -601,7 +652,9 @@ actor FoundationArtworkCache {
             }
         }
 
-        func remember(_ result: FoundationCurrentArtwork.Result, key: Key, expiry: Date) {
+        func remember(
+            _ result: FoundationCurrentArtwork.Result, key: Key, expiry: Date, now: Date
+        ) {
             let state: (entries: [Key: Entry], access: UInt)? = withLock {
                 guard live else { return nil }
                 clock &+= 1
@@ -613,13 +666,21 @@ actor FoundationArtworkCache {
             // Only the owning actor mutates this store, and this method never suspends.
             // Plan eviction off-lock so a first-frame peek never waits for a large LRU scan.
             // The temporary dictionary shares decoded objects; it is not another image cache.
-            var next = state.entries
+            var next = state.entries.filter { $0.value.expiry > now }
             next[key] = entry
             var total = next.values.reduce(0) { $0 + $1.cost }
             if total > max(0, limits.memoryBytes) {
-                for (key, value) in next.sorted(by: { $0.value.access < $1.value.access }) {
+                // One store and one budget: older upgrades go before compact covers, LRU
+                // within each class. Protect this admission so full requests cannot starve.
+                let candidates = next.filter { $0.key != key }.sorted {
+                    let leftUpgrade = $0.key.pixels > 160
+                    let rightUpgrade = $1.key.pixels > 160
+                    if leftUpgrade != rightUpgrade { return leftUpgrade }
+                    return $0.value.access < $1.value.access
+                }
+                for (candidate, value) in candidates {
                     guard total > max(0, limits.memoryBytes) else { break }
-                    next.removeValue(forKey: key)
+                    next.removeValue(forKey: candidate)
                     total -= value.cost
                 }
             }
