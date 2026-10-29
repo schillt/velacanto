@@ -399,9 +399,12 @@ final class FoundationHandoffController: NSObject, ObservableObject, NSUserActiv
                     snapshot, position: fresh.position, wasPlaying: true,
                     finalPosition: { [weak self, weak transfer] in
                         guard let self, let transfer, self.remoteIsCurrent(transfer),
-                            transfer.allowsNetworking(), let expected = transfer.offer
+                            let expected = transfer.offer
                         else { throw FoundationHandoffError.changed }
                         do {
+                            guard transfer.allowsNetworking() else {
+                                throw FoundationHandoffError.unavailable
+                            }
                             // One fresh read at native readiness, before the one initial seek.
                             let latest = try await transfer.library.refreshRemoteContinuation(
                                 expected)
