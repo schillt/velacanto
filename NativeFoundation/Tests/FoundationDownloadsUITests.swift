@@ -3776,6 +3776,9 @@ final class FoundationDownloadsUITests: XCTestCase {
                 capture("Home \(title) populated preview pass \(pass)", in: app)
             }
             if pass == 0 {
+                if !app.tabBars.buttons["Library"].exists {
+                    tapNativeChrome(app.tabBars.buttons["Home"], in: app)
+                }
                 selectTab("Library", in: app)
                 selectTab("Home", in: app)
             }
