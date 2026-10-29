@@ -374,21 +374,25 @@ struct FoundationLibraryView: View {
             // A confirmed title update is metadata, not a new browsing destination.
             .onChange(of: macLibraryRoute.identity) { _, _ in actions.cancelQueueAddition() }
             .sheet(item: $macLibrarySheet) { destination in
-                switch destination {
-                case .create:
-                    FoundationPlaylistCreate(library: library)
-                case .credits(let item):
-                    FoundationItemMetadataView(item: item, library: accountLibrary)
-                    .environmentObject(primaryGenres)
-                case .addSongs(let item):
-                    FoundationPlaylistSongPicker(playlist: item, library: library)
-                case .reorderSongs(let item):
-                    FoundationPlaylistReorderSheet(playlist: item, library: library)
-                case .manage(let item):
-                    macPlaylistEditor(item, showsDetails: false)
-                case .details(let item):
-                    macPlaylistEditor(item, showsDetails: true)
+                Group {
+                    switch destination {
+                    case .create:
+                        FoundationPlaylistCreate(library: library)
+                    case .credits(let item):
+                        FoundationItemMetadataView(item: item, library: accountLibrary)
+                        .environmentObject(primaryGenres)
+                    case .addSongs(let item):
+                        FoundationPlaylistSongPicker(playlist: item, library: library)
+                    case .reorderSongs(let item):
+                        FoundationPlaylistReorderSheet(playlist: item, library: library)
+                    case .manage(let item):
+                        macPlaylistEditor(item, showsDetails: false)
+                    case .details(let item):
+                        macPlaylistEditor(item, showsDetails: true)
+                    }
                 }
+                // This sheet is outside the earlier root-content injection.
+                .environmentObject(playlistChanges)
             }
         #endif
 
