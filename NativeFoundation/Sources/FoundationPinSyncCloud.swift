@@ -17,6 +17,10 @@ actor FoundationPinSyncCloud {
         container = CKContainer(identifier: containerIdentifier)
     }
 
+    func accountAvailable() async throws -> Bool {
+        try await container.accountStatus() == .available
+    }
+
     func exchange(
         scope: String, local: FoundationPinSyncState?, initial: [FoundationPinSyncState.Identity],
         device: UUID, expectedAccount: String?, erase: Bool = false

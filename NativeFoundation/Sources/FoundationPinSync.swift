@@ -31,10 +31,13 @@ final class FoundationPinSync: ObservableObject {
         // Optional preserves decoding of journals written before this recovery marker existed.
         var needsRecovery: Bool? = nil
         var recoveryBaseline: [FoundationPinSyncState.Identity]? = nil
+        // Local per-library presentation history; never part of the cloud payload.
+        var promptHandled: Bool? = nil
     }
     @Published private(set) var enabled = false
     @Published private(set) var isSyncing = false
     @Published private(set) var message: String
+    @Published private(set) var offersOptIn = false
     let available: Bool
     private let scope: String
     private let defaults: UserDefaults
@@ -46,6 +49,11 @@ final class FoundationPinSync: ObservableObject {
     typealias Apply =
         @MainActor ([FoundationPinSyncState.Identity], @escaping IsCurrent) async throws -> Void
     private let exchangeCloud: Exchange?
+    typealias AccountAvailable = @Sendable () async throws -> Bool
+    private let accountAvailable: AccountAvailable?
+    private var checkedPrompt = false
+    private var promptAccountStable = true
+    @Published private var promptOwner: UUID?
     private var journal: Journal
     private(set) var task: Task<Void, Never>?
     private var generation = UUID()
@@ -60,6 +68,7 @@ final class FoundationPinSync: ObservableObject {
     init(
         scope: String, containerIdentifier: String?, defaults: UserDefaults = .standard,
         exchange: Exchange? = nil,
+        accountAvailable: AccountAvailable? = nil,
         currentPins: @escaping () -> [FoundationPinSyncState.Identity],
         apply: @escaping Apply
     ) {
@@ -71,8 +80,10 @@ final class FoundationPinSync: ObservableObject {
         available = containerIdentifier != nil || exchange != nil
         if let exchange {
             exchangeCloud = exchange
+            self.accountAvailable = accountAvailable
         } else if let containerIdentifier {
             let cloud = FoundationPinSyncCloud(containerIdentifier: containerIdentifier)
+            self.accountAvailable = accountAvailable ?? { try await cloud.accountAvailable() }
             exchangeCloud = { scope, local, initial, device, account, erase in
                 try await cloud.exchange(
                     scope: scope, local: local, initial: initial, device: device,
@@ -80,6 +91,7 @@ final class FoundationPinSync: ObservableObject {
             }
         } else {
             exchangeCloud = nil
+            self.accountAvailable = accountAvailable
         }
         message =
             !available
@@ -122,7 +134,8 @@ final class FoundationPinSync: ObservableObject {
         let token = generation
         return Task { @MainActor [weak self] in
             guard let self, self.active, self.generation == token, !Task.isCancelled else { return }
-            self.setEnabled(false)
+            self.promptAccountStable = false
+            self.setEnabled(false, recordsDecision: false)
             if self.journal.needsRecovery != true {
                 self.journal.state = nil
                 self.journal.account = nil
@@ -144,7 +157,49 @@ final class FoundationPinSync: ObservableObject {
         }
     }
 
-    func setEnabled(_ value: Bool) {
+    private var canOfferOptIn: Bool {
+        active && promptAccountStable && available && !enabled && journal.enabled == false
+            && journal.account == nil && journal.needsRecovery != true
+            && journal.promptHandled != true
+    }
+
+    /// One status check on foreground appearance; no pin or user-record read before consent.
+    func prepareOptInPrompt() async {
+        guard canOfferOptIn, !checkedPrompt, let accountAvailable else { return }
+        checkedPrompt = true
+        let token = generation
+        let ready = (try? await accountAvailable()) == true
+        guard canOfferOptIn, generation == token else { return }
+        // A disappearing root may cancel its status callback. The next explicit
+        // appearance can check again; no task or timer retries in the background.
+        guard !Task.isCancelled else {
+            checkedPrompt = false
+            return
+        }
+        offersOptIn = ready
+    }
+
+    /// Presentation ownership is memory-only. Only an explicit choice records a decision.
+    func claimOptInPrompt(owner: UUID) -> Bool {
+        guard canOfferOptIn, offersOptIn, promptOwner == nil else { return false }
+        promptOwner = owner
+        return true
+    }
+
+    func ownsOptInPrompt(_ owner: UUID) -> Bool {
+        canOfferOptIn && offersOptIn && promptOwner == owner
+    }
+
+    func releaseOptInPrompt(owner: UUID) {
+        if promptOwner == owner { promptOwner = nil }
+    }
+
+    func respondToOptInPrompt(owner: UUID, enable: Bool) {
+        guard ownsOptInPrompt(owner) else { return }
+        setEnabled(enable)
+    }
+
+    func setEnabled(_ value: Bool, recordsDecision: Bool = true) {
         guard active, !value || available else { return }
         if value, journal.needsRecovery == true {
             message =
@@ -152,6 +207,9 @@ final class FoundationPinSync: ObservableObject {
             return
         }
         generation = UUID()
+        if recordsDecision { journal.promptHandled = true }
+        offersOptIn = false
+        promptOwner = nil
         task?.cancel()
         task = nil
         isSyncing = false
@@ -199,7 +257,7 @@ final class FoundationPinSync: ObservableObject {
             } catch {
                 journal.needsRecovery = true
                 if journal.recoveryBaseline == nil { journal.recoveryBaseline = localProjection }
-                setEnabled(false)
+                setEnabled(false, recordsDecision: false)
                 message =
                     "Local pins saved, but sync changes could not be recorded. Sync stays paused to protect unsynced pins, including after relaunch."
                 return
@@ -282,6 +340,8 @@ final class FoundationPinSync: ObservableObject {
 
     func invalidate() {
         active = false
+        offersOptIn = false
+        promptOwner = nil
         generation = UUID()
         task?.cancel()
         task = nil

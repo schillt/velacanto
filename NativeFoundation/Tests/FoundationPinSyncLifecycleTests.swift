@@ -31,6 +31,187 @@ final class FoundationPinSyncLifecycleTests: XCTestCase {
         UserDefaults(suiteName: "PinSyncTests." + UUID().uuidString)!
     }
 
+    private func promptSync(
+        store: UserDefaults, sourceScope: String? = nil,
+        accountAvailable: @escaping FoundationPinSync.AccountAvailable = { true }
+    ) -> FoundationPinSync {
+        FoundationPinSync(
+            scope: sourceScope ?? scope, containerIdentifier: nil, defaults: store,
+            exchange: { _, _, _, _, _, _ in
+                throw CancellationError()
+            }, accountAvailable: accountAvailable,
+            currentPins: { [] }, apply: { _, _ in XCTFail("Prompt applied pins") })
+    }
+
+    func testFirstOptInOfferIsLocalUntilExplicitEnable() async throws {
+        let store = defaults()
+        let sync = promptSync(store: store)
+        let owner = UUID()
+        await sync.prepareOptInPrompt()
+        XCTAssertTrue(sync.offersOptIn)
+        XCTAssertFalse(sync.enabled)
+        XCTAssertNil(sync.task)
+        XCTAssertNil(store.data(forKey: FoundationPinSync.storagePrefix + scope))
+        XCTAssertTrue(sync.claimOptInPrompt(owner: owner))
+        XCTAssertFalse(sync.claimOptInPrompt(owner: UUID()))
+        XCTAssertNil(store.data(forKey: FoundationPinSync.storagePrefix + scope))
+        sync.respondToOptInPrompt(owner: owner, enable: true)
+        XCTAssertTrue(sync.enabled)
+        XCTAssertFalse(sync.offersOptIn)
+        let journal = try JSONDecoder().decode(
+            FoundationPinSync.Journal.self,
+            from: XCTUnwrap(store.data(forKey: FoundationPinSync.storagePrefix + scope)))
+        XCTAssertEqual(journal.promptHandled, true)
+        // The explicit Enable choice authorizes the existing exchange path.
+        sync.invalidate()
+    }
+
+    func testNotNowSurvivesRelaunchAndRemainsScopedToThisLibrary() async {
+        let store = defaults()
+        let sync = promptSync(store: store)
+        let owner = UUID()
+        await sync.prepareOptInPrompt()
+        XCTAssertTrue(sync.claimOptInPrompt(owner: owner))
+        sync.respondToOptInPrompt(owner: owner, enable: false)
+        XCTAssertFalse(sync.enabled)
+        XCTAssertNil(sync.task)
+        sync.invalidate()
+        let returning = promptSync(store: store)
+        await returning.prepareOptInPrompt()
+        XCTAssertFalse(returning.offersOptIn)
+        returning.invalidate()
+        let other = promptSync(store: store, sourceScope: String(repeating: "b", count: 64))
+        await other.prepareOptInPrompt()
+        XCTAssertTrue(other.offersOptIn)
+        other.invalidate()
+    }
+
+    func testLeavingUnansweredOfferReleasesWindowClaimWithoutSavingDecision() async {
+        let store = defaults()
+        let sync = promptSync(store: store)
+        let first = UUID()
+        let second = UUID()
+        await sync.prepareOptInPrompt()
+        XCTAssertTrue(sync.claimOptInPrompt(owner: first))
+        sync.releaseOptInPrompt(owner: second)
+        XCTAssertTrue(sync.ownsOptInPrompt(first))
+        sync.releaseOptInPrompt(owner: first)
+        XCTAssertFalse(sync.ownsOptInPrompt(first))
+        XCTAssertTrue(sync.claimOptInPrompt(owner: second))
+        sync.invalidate()
+        let returning = promptSync(store: store)
+        await returning.prepareOptInPrompt()
+        XCTAssertTrue(returning.offersOptIn)
+        returning.invalidate()
+    }
+
+    func testPriorConsentOffAndRecoveryJournalNeverOfferOptIn() async throws {
+        for journal in [
+            FoundationPinSync.Journal(device: UUID(), enabled: true),
+            FoundationPinSync.Journal(account: "synthetic", device: UUID(), enabled: false),
+            FoundationPinSync.Journal(device: UUID(), enabled: false, needsRecovery: true),
+            FoundationPinSync.Journal(device: UUID(), enabled: false, promptHandled: true),
+        ] {
+            let store = defaults()
+            store.set(
+                try JSONEncoder().encode(journal), forKey: FoundationPinSync.storagePrefix + scope)
+            let sync = promptSync(
+                store: store,
+                accountAvailable: {
+                    XCTFail("Prior consent/recovery must not probe iCloud")
+                    return true
+                })
+            await sync.prepareOptInPrompt()
+            XCTAssertFalse(sync.offersOptIn)
+            sync.invalidate()
+        }
+    }
+
+    func testUnavailableCloudIsCheckedOnlyOnceWithoutPinExchange() async {
+        let gate = Gate()
+        let sync = promptSync(
+            store: defaults(),
+            accountAvailable: {
+                await gate.hold()
+                return false
+            })
+        let check = Task { await sync.prepareOptInPrompt() }
+        await gate.waitForStart()
+        await sync.prepareOptInPrompt()
+        await gate.release()
+        await check.value
+        await sync.prepareOptInPrompt()
+        let calls = await gate.calls
+        XCTAssertEqual(calls, 1)
+        XCTAssertFalse(sync.offersOptIn)
+        XCTAssertNil(sync.task)
+        sync.invalidate()
+    }
+
+    func testRetirementAndAccountChangeRejectHeldStatusAndOldPromptActions() async {
+        for retire in [false, true] {
+            let store = defaults()
+            let gate = Gate()
+            let sync = promptSync(
+                store: store,
+                accountAvailable: {
+                    await gate.hold()
+                    return true
+                })
+            let check = Task { await sync.prepareOptInPrompt() }
+            await gate.waitForStart()
+            if retire { sync.invalidate() } else { await sync.accountChanged().value }
+            await gate.release()
+            await check.value
+            XCTAssertFalse(sync.offersOptIn)
+            XCTAssertFalse(sync.claimOptInPrompt(owner: UUID()))
+            sync.respondToOptInPrompt(owner: UUID(), enable: true)
+            XCTAssertFalse(sync.enabled)
+            XCTAssertNil(sync.task)
+            sync.invalidate()
+        }
+    }
+
+    func testSettingsOffIsARecordedDecisionAndOldVisibleOfferCannotEnableAfterAccountChange() async
+    {
+        let store = defaults()
+        let settings = promptSync(store: store)
+        settings.setEnabled(false)
+        settings.invalidate()
+        let returning = promptSync(
+            store: store,
+            accountAvailable: {
+                XCTFail("An explicit Settings decision must not probe iCloud")
+                return true
+            })
+        await returning.prepareOptInPrompt()
+        XCTAssertFalse(returning.offersOptIn)
+        returning.invalidate()
+
+        let current = promptSync(store: defaults())
+        let owner = UUID()
+        await current.prepareOptInPrompt()
+        XCTAssertTrue(current.claimOptInPrompt(owner: owner))
+        await current.accountChanged().value
+        current.respondToOptInPrompt(owner: owner, enable: true)
+        XCTAssertFalse(current.enabled)
+        XCTAssertFalse(current.ownsOptInPrompt(owner))
+        current.invalidate()
+    }
+
+    func testUnconfiguredBuildNeverChecksPromptAccountStatus() async {
+        let sync = FoundationPinSync(
+            scope: scope, containerIdentifier: nil, defaults: defaults(),
+            accountAvailable: {
+                XCTFail("Unconfigured build probed iCloud")
+                return true
+            },
+            currentPins: { [] }, apply: { _, _ in XCTFail("Unconfigured sync applied") })
+        await sync.prepareOptInPrompt()
+        XCTAssertFalse(sync.offersOptIn)
+        sync.invalidate()
+    }
+
     func testUnavailableBuildDefaultsOffAndCannotEnable() {
         let sync = FoundationPinSync(
             scope: scope, containerIdentifier: nil, defaults: defaults(),
