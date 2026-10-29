@@ -2660,7 +2660,7 @@ final class FoundationDownloadsUITests: XCTestCase {
         )
         XCTAssertEqual(XCTWaiter.wait(for: [started], timeout: 5), .completed)
         let progress = app.descendants(matching: .any)["search-playlists-progress"].firstMatch
-        reveal(progress, in: app)
+        revealPlaylistSearchElement(progress, in: app)
         XCTAssertGreaterThan(progress.frame.height, 0)
         XCTAssertFalse(app.buttons["search-playlist-check-more"].exists)
         capture(
@@ -2668,7 +2668,8 @@ final class FoundationDownloadsUITests: XCTestCase {
         tapNativeChrome(app.buttons["Release playlist search batch"], in: app)
         let seeAll = app.buttons["See all Playlists with “Opalite”"]
         XCTAssertTrue(seeAll.waitForExistence(timeout: 5))
-        tapVisible(seeAll, in: app)
+        revealPlaylistSearchElement(seeAll, in: app, requiresTap: true)
+        seeAll.tap()
         XCTAssertTrue(app.navigationBars["Playlists with “Opalite”"].waitForExistence(timeout: 5))
         XCTAssertTrue(progress.waitForExistence(timeout: 5))
         tapNativeChrome(counts, in: app)
@@ -2678,7 +2679,8 @@ final class FoundationDownloadsUITests: XCTestCase {
         let dayDrive = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Day Drive"))
             .firstMatch
         XCTAssertTrue(dayDrive.waitForExistence(timeout: 5))
-        reveal(dayDrive, in: app)
+        revealPlaylistSearchElement(
+            dayDrive, in: app, scrollID: "foundation-playlist-lookup-scroll", requiresTap: true)
         let finished = XCTNSPredicateExpectation(
             predicate: NSPredicate(format: "exists == false"), object: progress)
         XCTAssertEqual(XCTWaiter.wait(for: [finished], timeout: 5), .completed)
@@ -2701,10 +2703,18 @@ final class FoundationDownloadsUITests: XCTestCase {
         field.tap()
         field.typeText("Opalite")
         tapNativeChrome(app.buttons["Dismiss search keyboard"], in: app)
-        let progress = app.descendants(matching: .any)["search-playlists-progress"].firstMatch
-        reveal(progress, in: app)
-        selectTab("Home", in: app)
         let counts = app.buttons["Read catalog counts"]
+        for _ in 0..<5 {
+            tapNativeChrome(counts, in: app)
+            if (counts.value as? String ?? "").contains("playlist-search 1") { break }
+        }
+        let started = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "value CONTAINS %@", "playlist-search 1"), object: counts
+        )
+        XCTAssertEqual(XCTWaiter.wait(for: [started], timeout: 5), .completed)
+        let progress = app.descendants(matching: .any)["search-playlists-progress"].firstMatch
+        XCTAssertTrue(progress.waitForExistence(timeout: 5))
+        selectTab("Home", in: app)
         tapNativeChrome(counts, in: app)
         let cancelled = XCTNSPredicateExpectation(
             predicate: NSPredicate(format: "value CONTAINS %@", "playlist-search-cancelled 1"),
@@ -2714,6 +2724,79 @@ final class FoundationDownloadsUITests: XCTestCase {
         tapNativeChrome(app.buttons["Release playlist search batch"], in: app)
         XCTAssertFalse(progress.exists)
         capture("Leaving Search cancels its held playlist batch", in: app)
+    }
+
+    /// Progress is not a tappable control. Reveal it in its actual result scroll,
+    /// without asking decorative indicators or hidden profile chrome for a tap point.
+    private func revealPlaylistSearchElement(
+        _ element: XCUIElement, in app: XCUIApplication,
+        scrollID: String = "foundation-search-results-scroll", requiresTap: Bool = false
+    ) {
+        let scroll = app.scrollViews[scrollID]
+        XCTAssertTrue(scroll.waitForExistence(timeout: 5))
+        for attempt in 0...3 {
+            let viewport = playlistSearchViewport(scroll, in: app)
+            let frame = element.exists ? element.frame : .zero
+            if frame.width.isFinite, frame.height.isFinite,
+                frame.minX.isFinite, frame.minY.isFinite, frame.width > 0, frame.height > 0,
+                !frame.intersection(viewport).isEmpty,
+                !requiresTap
+                    || (viewport.contains(CGPoint(x: frame.midX, y: frame.midY))
+                        && element.isHittable)
+            {
+                return
+            }
+            guard attempt < 3 else { break }
+            let upward = frame.height <= 0 || frame.midY >= viewport.midY
+            let origin = app.coordinate(withNormalizedOffset: .zero)
+            let start = origin.withOffset(
+                CGVector(
+                    dx: viewport.midX - app.frame.minX,
+                    dy: viewport.minY + viewport.height * (upward ? 0.85 : 0.15) - app.frame.minY))
+            let end = origin.withOffset(
+                CGVector(
+                    dx: viewport.midX - app.frame.minX,
+                    dy: viewport.minY + viewport.height * (upward ? 0.15 : 0.85) - app.frame.minY))
+            start.press(
+                forDuration: 0.05, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0)
+        }
+        capture("Search target not visible after three bounded result-scroll drags", in: app)
+        XCTFail("Search target must intersect the actual results viewport")
+    }
+
+    private func playlistSearchViewport(_ scroll: XCUIElement, in app: XCUIApplication) -> CGRect {
+        let original = scroll.frame.intersection(app.frame)
+        XCTAssertFalse(original.isEmpty || original.isNull)
+        var top = original.minY
+        var bottom = original.maxY
+        for bar in app.navigationBars.allElementsBoundByIndex {
+            let frame = bar.frame
+            if frame.intersects(original), frame.minY < original.midY {
+                top = max(top, frame.maxY)
+            }
+        }
+        let search = app.textFields["Search music"]
+        if search.exists {
+            let frame = search.frame
+            if frame.intersects(original), frame.minY < original.midY {
+                top = max(top, frame.maxY + 8)
+            }
+        }
+        if app.tabBars.firstMatch.exists {
+            let frame = app.tabBars.firstMatch.frame
+            if frame.intersects(original), frame.minY > original.midY {
+                bottom = min(bottom, frame.minY)
+            }
+        }
+        let viewport = CGRect(
+            x: original.minX + 8, y: top + 8,
+            width: max(0, original.width - 16), height: max(0, bottom - top - 16))
+        XCTAssertTrue(
+            viewport.minX.isFinite && viewport.minY.isFinite
+                && viewport.width.isFinite && viewport.height.isFinite)
+        XCTAssertGreaterThan(viewport.width, 44)
+        XCTAssertGreaterThan(viewport.height, 44)
+        return viewport
     }
 
     func testSearchLiquidGlassReducedEffectsLargeTextKeepsQueryAndFocus() {

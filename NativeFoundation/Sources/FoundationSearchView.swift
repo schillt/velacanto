@@ -355,6 +355,7 @@ private struct FoundationSearchOverview: View {
             }.padding(.horizontal).padding(.bottom)
                 .foundationBottomChromeEndPadding()
         }
+        .accessibilityIdentifier("foundation-search-results-scroll")
         .foundationBottomChromeScrollClearance()
         #if os(iOS)
             .refreshable { requestVisibleRefresh() }
@@ -707,6 +708,7 @@ private struct FoundationPlaylistLookupView: View {
                 contents
             } else {
                 ScrollView { contents.padding().foundationBottomChromeEndPadding() }
+                    .accessibilityIdentifier("foundation-playlist-lookup-scroll")
                     .foundationBottomChromeScrollClearance()
                     .foundationCatalogHeader(title)
             }
