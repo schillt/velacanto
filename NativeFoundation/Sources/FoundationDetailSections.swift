@@ -199,6 +199,7 @@ struct FoundationOverviewSheet: View {
         #if os(iOS)
             .presentationDetents([.medium, .large])
             .presentationDragIndicator(.visible)
+            .presentationContentInteraction(.resizes)
         #else
             .presentationBackground(.background)
             .frame(minWidth: 400, idealWidth: 600, minHeight: 360, idealHeight: 600)

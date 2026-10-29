@@ -615,6 +615,10 @@ final class FoundationDownloadsUITests: XCTestCase {
         checkLoadedOverviewSheets(colorScheme: "light")
     }
 
+    func testAlbumAndArtistOverviewContentDragExpandsBeforeScrolling() {
+        checkLoadedOverviewSheets(colorScheme: "light", verifyContentInteraction: true)
+    }
+
     func testLoadedAlbumAndArtistOverviewSheetsInDarkAppearance() {
         checkLoadedOverviewSheets(colorScheme: "dark")
     }
@@ -626,7 +630,7 @@ final class FoundationDownloadsUITests: XCTestCase {
 
     private func checkLoadedOverviewSheets(
         colorScheme: String, largeText: Bool = false,
-        reducedAccessibilityEffects: Bool = false
+        reducedAccessibilityEffects: Bool = false, verifyContentInteraction: Bool = false
     ) {
         continueAfterFailure = false
         let appearance = colorScheme + (largeText ? " accessibility text" : "")
@@ -654,7 +658,7 @@ final class FoundationDownloadsUITests: XCTestCase {
             XCTAssertTrue(more.waitForExistence(timeout: 5))
             let title = "About Fixture " + (kind == "album" ? "Album" : "Artist")
             let navigation = app.navigationBars[title]
-            for reopening in 0..<2 {
+            for reopening in 0..<(verifyContentInteraction ? 1 : 2) {
                 tapVisibleCenter(more, in: app)
                 XCTAssertTrue(navigation.waitForExistence(timeout: 5))
                 XCTAssertFalse(
@@ -669,13 +673,32 @@ final class FoundationDownloadsUITests: XCTestCase {
                 XCTAssertTrue(body.label.contains("overview paragraph 8."))
                 capture("Overview \(kind) \(appearance) medium reopen \(reopening)", in: app)
                 if reopening == 0 {
-                    navigation.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
-                        .press(
-                            forDuration: 0.1,
-                            thenDragTo: app.coordinate(
-                                withNormalizedOffset: CGVector(dx: 0.5, dy: 0.1)))
+                    let mediumTitleY = navigation.frame.minY
+                    if verifyContentInteraction {
+                        // Start on the reading content, leaving the native grabber untouched.
+                        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.82))
+                            .press(
+                                forDuration: 0.1,
+                                thenDragTo: app.coordinate(
+                                    withNormalizedOffset: CGVector(dx: 0.5, dy: 0.14)))
+                        XCTAssertLessThan(
+                            navigation.frame.minY, mediumTitleY - app.frame.height * 0.15,
+                            "Dragging medium content must expand the sheet before scrolling")
+                    } else {
+                        navigation.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+                            .press(
+                                forDuration: 0.1,
+                                thenDragTo: app.coordinate(
+                                    withNormalizedOffset: CGVector(dx: 0.5, dy: 0.1)))
+                    }
                     capture("Overview \(kind) \(appearance) expanded", in: app)
+                    let expandedTextY = body.frame.minY
                     body.swipeUp()
+                    if verifyContentInteraction {
+                        XCTAssertLessThan(
+                            body.frame.minY, expandedTextY - 24,
+                            "Expanded reading content remains scrollable")
+                    }
                     capture("Overview \(kind) \(appearance) scrolled", in: app)
                 }
                 for _ in 0..<2 where navigation.exists {
@@ -4305,6 +4328,33 @@ final class FoundationDownloadsUITests: XCTestCase {
 
     func testNowPlayingPartialOfflineAlbumAndArtistPreserveKnownTracksAndPlayback() {
         verifyNowPlayingCanonicalRoutes(state: "partial", offlineOnly: true)
+    }
+
+    func testRelatedAlbumAndArtistContentDragExpandsMediumSheet() {
+        continueAfterFailure = false
+        let app = launch(
+            productionShell: true, canonicalDownloadState: "full", longPlayback: true,
+            compactFixtureControls: true)
+        selectTab("Library", in: app)
+        openCanonicalCollection("album", fromDownloads: false, in: app)
+        tapVisible(app.buttons["collection-track-0"], in: app)
+        openNowPlaying(app)
+        for kind in ["Album", "Artist"] {
+            tapNativeChrome(app.buttons["More playback options"], in: app)
+            tapVisible(app.buttons["View " + kind], in: app)
+            assertRelatedDetent("medium", in: app)
+            capture("Related \(kind) content at medium detent", in: app)
+            let sheet = relatedSheet(app)
+            let start = app.coordinate(withNormalizedOffset: .zero).withOffset(
+                CGVector(dx: sheet.frame.midX, dy: sheet.frame.minY + sheet.frame.height * 0.75))
+            start.press(
+                forDuration: 0.1,
+                thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.14)))
+            assertRelatedDetent("large", in: app)
+            capture("Related \(kind) body drag expands before content scrolling", in: app)
+            closeRelatedSheet(app)
+        }
+        XCTAssertTrue(app.buttons["Pause"].waitForExistence(timeout: 5))
     }
 
     func testRelatedSheetRefinedControlsRemainUsable() {
