@@ -586,13 +586,15 @@ struct FoundationSearchResolver: Sendable {
     }
 }
 
-/// Explicit lookup owner: empty matching pages may still advance the inspected cursor.
+/// Visible query-owned lookup: empty matching pages may still advance the inspected cursor.
 @MainActor final class FoundationPlaylistLookupModel: ObservableObject {
     @Published private(set) var items: [FoundationItem]
     @Published private(set) var cursor: FoundationPlaylistContentCursor?
     @Published private(set) var incomplete: Bool
     @Published private(set) var error: FoundationLibraryError?
     @Published private(set) var loading = false
+    @Published private(set) var searching = false
+    private var searchOwner = UUID()
     private var owner = UUID()
     private var budget = FoundationCatalogBudget()
     private let scope: String
@@ -624,11 +626,34 @@ struct FoundationSearchResolver: Sendable {
         budget.requestedPages += 1
         budget.retainedItems += cost.items
         budget.retainedBytes += cost.bytes
+        if seed.partialFailureCount > 0 { error = .network }
+    }
+
+    /// The caller owns visibility/query lifetime. Each step uses the unchanged
+    /// bounded provider batch and ordinary admission; errors never auto-retry.
+    func searchWhileVisible(context: FoundationMusicSearchContext, library: any FoundationLibrary)
+        async
+    {
+        guard !searching, !loading, error == nil, library.metadataScopeID == scope else { return }
+        let identity = UUID()
+        searchOwner = identity
+        searching = true
+        defer { if searchOwner == identity { searching = false } }
+        while let previous = cursor, searchOwner == identity, !Task.isCancelled, error == nil {
+            await load(context: context, library: library)
+            guard searchOwner == identity, !Task.isCancelled, error == nil else { return }
+            if cursor == previous {
+                error = .invalidResponse
+                return
+            }
+        }
     }
 
     func cancel() {
         owner = UUID()
+        searchOwner = UUID()
         loading = false
+        searching = false
     }
 
     func load(context: FoundationMusicSearchContext, library: any FoundationLibrary) async {

@@ -66,9 +66,9 @@ struct FoundationSearchView<Profile: View>: View {
                             initialPage: category.page, initialLocalOnly: category.localOnly,
                             showsContent: presented)
                     }
-                } else if let context = category.musicContext, let seed = category.contentPage {
+                } else if let context = category.musicContext, let model = category.contentModel {
                     FoundationPlaylistLookupView(
-                        title: category.title, context: context, seed: seed,
+                        title: category.title, context: context, model: model,
                         library: library, player: player, isActive: isActive
                     )
                     .id(category.title + library.metadataScopeID)
@@ -215,7 +215,7 @@ private struct FoundationSearchCategorySelection {
     let localOnly: Bool
     var musicContext: FoundationMusicSearchContext? = nil
     var incompleteCoverage = false
-    var contentPage: FoundationPlaylistContentPage? = nil
+    var contentModel: FoundationPlaylistLookupModel? = nil
 }
 
 private struct FoundationSearchOverview: View {
@@ -238,7 +238,7 @@ private struct FoundationSearchOverview: View {
     @State private var rawDirect: [FoundationSearchResolver.DirectSection] = []
     @State private var rawRelated: [FoundationSearchResolver.RelatedSection] = []
     @State private var rawDiscovery: [FoundationItem] = []
-    @State private var playlistContents: FoundationPlaylistContentPage?
+    @State private var playlistLookup: FoundationPlaylistLookupModel?
     @State private var playlistMusicContext = FoundationMusicSearchContext()
     @State private var playlistContentError: FoundationLibraryError?
     @State private var isResolving = false
@@ -315,18 +315,14 @@ private struct FoundationSearchOverview: View {
                         }
                     }
                 }
-                if let playlistContents {
-                    if !playlistContents.items.isEmpty {
-                        playlistContentSection(playlistContents)
-                    } else if playlistContents.hasIncompleteCoverage {
-                        VStack(alignment: .leading, spacing: 6) {
-                            Button("Check playlists for matching music") {
-                                openPlaylistLookup(playlistContents)
-                            }.accessibilityIdentifier("search-playlist-lookup")
-                            Text("Not every playlist has been checked yet.")
-                                .font(.caption).foregroundStyle(.secondary)
-                        }
-                    }
+                if let playlistLookup {
+                    FoundationPlaylistLookupView(
+                        title: "Playlists with “" + query + "”", context: playlistMusicContext,
+                        model: playlistLookup, library: library, player: player,
+                        isActive: isActive && isVisible, inline: true,
+                        openAll: { openPlaylistLookup(playlistLookup) }
+                    )
+                    .id(ObjectIdentifier(playlistLookup))
                 }
                 if let error = playlistContentError {
                     Text(error.localizedDescription).foregroundStyle(.red)
@@ -461,7 +457,10 @@ private struct FoundationSearchOverview: View {
             rawDirect = result.direct
             rawRelated = result.related
             rawDiscovery = result.discovery
-            playlistContents = result.playlistContents
+            playlistLookup?.cancel()
+            playlistLookup = result.playlistContents.map {
+                FoundationPlaylistLookupModel(scope: library.metadataScopeID, seed: $0)
+            }
             playlistMusicContext = result.musicContext
             playlistContentError = result.playlistContentError
             hasPartialFailure = result.failures.contains {
@@ -513,37 +512,12 @@ private struct FoundationSearchOverview: View {
         }
     }
 
-    private func openPlaylistLookup(_ page: FoundationPlaylistContentPage) {
+    private func openPlaylistLookup(_ model: FoundationPlaylistLookupModel) {
         openCategory(
             .init(
                 title: "Playlists with “" + query + "”", kind: .playlist,
-                page: .init(items: page.items, nextStartIndex: nil), localOnly: false,
-                musicContext: playlistMusicContext, incompleteCoverage: page.hasIncompleteCoverage,
-                contentPage: page))
-    }
-
-    private func playlistContentSection(_ page: FoundationPlaylistContentPage) -> some View {
-        let title = "Playlists with “" + query + "”"
-        return VStack(alignment: .leading, spacing: 12) {
-            Button {
-                openPlaylistLookup(page)
-            } label: {
-                HStack(spacing: 6) {
-                    Text(title).font(.title2.bold())
-                    Image(systemName: "chevron.right").font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                }.frame(minHeight: 44)
-            }.buttonStyle(.plain).accessibilityLabel("See all " + title)
-            resultRows(page.items)
-            if page.hasIncompleteCoverage {
-                Text("More playlists or tracks may contain matching music.")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-            if page.partialFailureCount > 0 {
-                Text("Some playlists could not be checked.")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-        }
+                page: .init(items: [], nextStartIndex: nil), localOnly: false,
+                musicContext: playlistMusicContext, contentModel: model))
     }
 
     @ViewBuilder
@@ -711,67 +685,29 @@ private struct FoundationPlaylistLookupView: View {
     @EnvironmentObject private var downloads: FoundationDownloads
     let title: String
     let context: FoundationMusicSearchContext
+    @ObservedObject var model: FoundationPlaylistLookupModel
     let library: any FoundationLibrary
     @ObservedObject var player: FoundationPlayer
     let isActive: Bool
-    @StateObject private var model: FoundationPlaylistLookupModel
-    @State private var request = 0
-    @State private var handledRequest = 0
+    var inline = false
+    var openAll: (() -> Void)? = nil
     @State private var visible = false
     @State private var openedItem: FoundationItem?
 
     private var displayedItems: [FoundationItem] {
-        connectivity.localOnly
-            ? downloads.itemsWithDownloadedMusic(in: model.items) : model.items
-    }
-
-    init(
-        title: String, context: FoundationMusicSearchContext, seed: FoundationPlaylistContentPage,
-        library: any FoundationLibrary, player: FoundationPlayer, isActive: Bool
-    ) {
-        self.title = title
-        self.context = context
-        self.library = library
-        self.player = player
-        self.isActive = isActive
-        _model = StateObject(
-            wrappedValue: FoundationPlaylistLookupModel(scope: library.metadataScopeID, seed: seed))
+        connectivity.localOnly ? downloads.itemsWithDownloadedMusic(in: model.items) : model.items
     }
 
     var body: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 16) {
-                ForEach(displayedItems) { item in
-                    FoundationLibraryItemRow(
-                        item: item, library: library,
-                        isActive: isActive && visible, open: { openedItem = item },
-                        player: player, showsTrackArtwork: true, navigate: { openedItem = $0 })
-                }
-                if model.loading, !connectivity.localOnly { FoundationLoadingPlaceholder() }
-                if let error = model.error, !connectivity.localOnly {
-                    Text(error.localizedDescription).foregroundStyle(.secondary)
-                }
-                if connectivity.localOnly {
-                    if displayedItems.isEmpty {
-                        Text("No downloaded music in these playlists.").foregroundStyle(.secondary)
-                    }
-                } else if model.cursor != nil {
-                    Text("More playlists or tracks remain to be checked.")
-                        .font(.caption).foregroundStyle(.secondary)
-                    Button(model.error == nil ? "Check more playlists" : "Retry playlist check") {
-                        request += 1
-                    }.disabled(model.loading || connectivity.localOnly || !isActive)
-                        .accessibilityIdentifier("search-playlist-check-more")
-                } else if model.incomplete {
-                    Text("Some music relationships could not be checked in this library.")
-                        .font(.caption).foregroundStyle(.secondary)
-                } else if model.items.isEmpty {
-                    Text("No playlists contain the matching music.").foregroundStyle(.secondary)
-                }
-            }.padding().foundationBottomChromeEndPadding()
+        Group {
+            if inline {
+                contents
+            } else {
+                ScrollView { contents.padding().foundationBottomChromeEndPadding() }
+                    .foundationBottomChromeScrollClearance()
+                    .foundationCatalogHeader(title)
+            }
         }
-        .foundationBottomChromeScrollClearance()
-        .foundationCatalogHeader(title)
         .foundationCollectionDestination(
             item: $openedItem, library: library, player: player, isActive: isActive
         )
@@ -782,12 +718,50 @@ private struct FoundationPlaylistLookupView: View {
         }
         .onChange(of: connectivity.localOnly) { _, _ in model.cancel() }
         .onChange(of: isActive) { _, active in if !active { model.cancel() } }
-        .task(id: "\(request)-\(isActive && visible)-\(connectivity.localOnly)") {
-            guard request > handledRequest, isActive, visible, !connectivity.localOnly else {
-                return
-            }
-            handledRequest = request
-            await model.load(context: context, library: library)
+        .task(id: "\(isActive && visible)-\(connectivity.localOnly)") {
+            guard isActive, visible, !connectivity.localOnly else { return }
+            await model.searchWhileVisible(context: context, library: library)
         }
     }
+
+    private var contents: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if !displayedItems.isEmpty {
+                if inline, let openAll, displayedItems.count > 5 {
+                    Button(action: openAll) {
+                        HStack(spacing: 6) {
+                            Text(title).font(.title2.bold())
+                            Image(systemName: "chevron.right").font(.subheadline.weight(.semibold))
+                        }.frame(minHeight: 44)
+                    }.buttonStyle(.plain).accessibilityLabel("See all " + title)
+                } else if inline {
+                    Text(title).font(.title2.bold()).frame(minHeight: 44)
+                }
+                ForEach(inline ? Array(displayedItems.prefix(5)) : displayedItems) { item in
+                    FoundationLibraryItemRow(
+                        item: item, library: library,
+                        isActive: isActive && visible, open: { openedItem = item },
+                        player: player, showsTrackArtwork: true, navigate: { openedItem = $0 })
+                }
+            }
+            if !connectivity.localOnly {
+                if model.searching {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("Searching playlists…").font(.caption).foregroundStyle(.secondary)
+                    }.accessibilityIdentifier("search-playlists-progress")
+                }
+                if model.error != nil {
+                    Text("Playlist search could not finish. Results found so far are shown.")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else if !model.searching, model.incomplete, model.cursor == nil {
+                    Text("Some music relationships could not be checked in this library.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            } else if !inline, displayedItems.isEmpty {
+                Text("No downloaded music in these playlists.").foregroundStyle(.secondary)
+            }
+        }
+    }
+
 }

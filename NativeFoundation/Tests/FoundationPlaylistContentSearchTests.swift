@@ -510,6 +510,133 @@ final class FoundationPlaylistContentSearchTests: XCTestCase {
         XCTAssertTrue(calls.isEmpty, "Retained seed already exhausts the configured item budget")
     }
 
+    @MainActor
+    func testVisibleSearchAutomaticallyCrossesEmptyAndLongPlaylistPagesToMatch() async {
+        let playlist = Self.item("day-drive", kind: .playlist)
+        let library = AutomaticPlaylistLibrary { context, cursor in
+            XCTAssertEqual(context.trackIDs, ["opalite"])
+            if cursor.candidateOffset == 0 {
+                return .init(
+                    items: [], nextStartIndex: 6, hasIncompleteCoverage: true,
+                    partialFailureCount: 0, continuation: .init(candidateOffset: 6, pending: []))
+            }
+            if cursor.pending.isEmpty {
+                return .init(
+                    items: [], nextStartIndex: nil, hasIncompleteCoverage: true,
+                    partialFailureCount: 0,
+                    continuation: .init(
+                        candidateOffset: nil,
+                        pending: [.init(playlist: playlist, trackOffset: 100)]))
+            }
+            XCTAssertEqual(cursor.pending.first?.trackOffset, 100)
+            return .init(
+                items: [playlist], nextStartIndex: nil, hasIncompleteCoverage: false,
+                partialFailureCount: 0)
+        }
+        let model = Self.automaticModel()
+        await model.searchWhileVisible(context: .init(trackIDs: ["opalite"]), library: library)
+        XCTAssertEqual(model.items.map(\.id), ["day-drive"])
+        XCTAssertNil(model.cursor)
+        XCTAssertFalse(model.searching)
+        XCTAssertNil(model.error)
+        let calls = await library.calls
+        XCTAssertEqual(calls, 3)
+    }
+
+    @MainActor
+    func testVisibleSearchStopsOnFailureOrPartialFailureWithoutAutomaticRetry() async {
+        for partial in [false, true] {
+            let library = AutomaticPlaylistLibrary { _, cursor in
+                if !partial { throw FoundationLibraryError.network }
+                return .init(
+                    items: [Self.item("found", kind: .playlist)], nextStartIndex: 6,
+                    hasIncompleteCoverage: true, partialFailureCount: 1,
+                    continuation: .init(candidateOffset: 6, pending: []))
+            }
+            let model = Self.automaticModel()
+            await model.searchWhileVisible(context: .init(trackIDs: ["selected"]), library: library)
+            XCTAssertEqual(model.error, .network)
+            XCTAssertEqual(model.items.map(\.id), partial ? ["found"] : [])
+            await model.searchWhileVisible(context: .init(trackIDs: ["selected"]), library: library)
+            let calls = await library.calls
+            XCTAssertEqual(calls, 1, "Visibility changes must not retry failed work")
+        }
+    }
+
+    @MainActor
+    func testVisibleSearchStopsAtExistingPageBudgetAndNonadvancingCursor() async {
+        for advances in [false, true] {
+            let library = AutomaticPlaylistLibrary { _, cursor in
+                let next = (cursor.candidateOffset ?? 0) + (advances ? 6 : 0)
+                return .init(
+                    items: [], nextStartIndex: next, hasIncompleteCoverage: true,
+                    partialFailureCount: 0, continuation: .init(candidateOffset: next, pending: []))
+            }
+            var limits = FoundationCatalogBudget()
+            limits.maximumPages = 3
+            let model = Self.automaticModel(limits: limits)
+            await model.searchWhileVisible(context: .init(trackIDs: ["selected"]), library: library)
+            XCTAssertEqual(model.error, .invalidResponse)
+            XCTAssertFalse(model.searching)
+            let calls = await library.calls
+            XCTAssertEqual(calls, advances ? 2 : 1)
+        }
+    }
+
+    @MainActor
+    func testVisibleSearchCancellationRejectsOldQueryAndDoesNotStartNextBatch() async {
+        let gate = PlaylistContentGate()
+        let library = AutomaticPlaylistLibrary { context, _ in
+            if context.trackIDs.contains("old-query") { await gate.wait() }
+            return .init(
+                items: [Self.item(context.trackIDs.first!, kind: .playlist)],
+                nextStartIndex: 6, hasIncompleteCoverage: true, partialFailureCount: 0,
+                continuation: .init(candidateOffset: 6, pending: []))
+        }
+        let old = Self.automaticModel()
+        let task = Task {
+            await old.searchWhileVisible(context: .init(trackIDs: ["old-query"]), library: library)
+        }
+        while !(await gate.started) { await Task.yield() }
+        // Navigation, query replacement and Offline Mode all invalidate this same owner.
+        old.cancel()
+        task.cancel()
+        await gate.release()
+        await task.value
+        XCTAssertTrue(old.items.isEmpty)
+        XCTAssertEqual(old.cursor?.candidateOffset, 0)
+        XCTAssertFalse(old.searching)
+        let calls = await library.calls
+        XCTAssertEqual(calls, 1)
+    }
+
+    @MainActor
+    func testPartialSeedCannotRestartAutomatically() async {
+        let library = AutomaticPlaylistLibrary { _, _ in
+            XCTFail("Failed seed cannot auto-retry")
+            throw FoundationLibraryError.network
+        }
+        let model = FoundationPlaylistLookupModel(
+            scope: "all",
+            seed: .init(
+                items: [], nextStartIndex: 6, hasIncompleteCoverage: true, partialFailureCount: 1))
+        await model.searchWhileVisible(context: .init(trackIDs: ["selected"]), library: library)
+        XCTAssertEqual(model.error, .network)
+        let calls = await library.calls
+        XCTAssertEqual(calls, 0)
+    }
+
+    @MainActor
+    private static func automaticModel(limits: FoundationCatalogBudget = .init())
+        -> FoundationPlaylistLookupModel
+    {
+        FoundationPlaylistLookupModel(
+            scope: "all",
+            seed: .init(
+                items: [], nextStartIndex: 0, hasIncompleteCoverage: true, partialFailureCount: 0),
+            limits: limits)
+    }
+
     private static func id(_ suffix: Int) -> String { String(format: "%032x", suffix) }
 
     private static func query(_ request: URLRequest, _ name: String) -> String? {
@@ -608,4 +735,27 @@ private actor TypedPlaylistCalls {
     var offsets: [Int] = []
     func candidate() { candidates += 1 }
     func track(_ offset: Int) { offsets.append(offset) }
+}
+
+private actor AutomaticPlaylistLibrary: FoundationLibrary {
+    let response:
+        @Sendable (FoundationMusicSearchContext, FoundationPlaylistContentCursor) async throws ->
+            FoundationPlaylistContentPage
+    var calls = 0
+    init(
+        response:
+            @escaping @Sendable (FoundationMusicSearchContext, FoundationPlaylistContentCursor)
+            async throws -> FoundationPlaylistContentPage
+    ) {
+        self.response = response
+    }
+    func playlistsContainingMusic(
+        context: FoundationMusicSearchContext, cursor: FoundationPlaylistContentCursor
+    ) async throws -> FoundationPlaylistContentPage {
+        calls += 1
+        return try await response(context, cursor)
+    }
+    func playbackURL(for item: FoundationItem) async throws -> URL {
+        throw FoundationLibraryError.unavailable
+    }
 }
