@@ -65,7 +65,7 @@ private struct FoundationPrimaryGenreContentView: View {
         FoundationCatalogView(
             title: genre.title, model: songs, library: library, player: player,
             isActive: isActive, showsTrackArtwork: true,
-            automaticallyLoadsPages: content == .tracks || !projectedItems.isEmpty,
+            automaticallyLoadsPages: true,
             automaticPageIdentity: content.pageDemandIdentity(for: projectedItems),
             itemProjection: { content.items(in: $0, source: record.snapshot.scope.source) },
             collectionGrid: content != .tracks, emptyMessage: content.emptyMessage,

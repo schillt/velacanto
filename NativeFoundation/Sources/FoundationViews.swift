@@ -1699,10 +1699,27 @@ private struct FoundationFavoriteShelf: View {
     }
 }
 
+/// A repeated end-of-scroll gesture is a new demand, not a reason to drain raw pages.
+struct FoundationCatalogPageDemand {
+    private(set) var epoch = UUID()
+
+    mutating func scrollPhaseChanged(
+        to phase: ScrollPhase, footerVisible: Bool, active: Bool,
+        allowsNetwork: Bool, isLoading: Bool, hasError: Bool
+    ) {
+        guard phase == .interacting, footerVisible, active, allowsNetwork,
+            !isLoading, !hasError
+        else { return }
+        epoch = UUID()
+    }
+}
+
 struct FoundationCatalogView: View {
     @Environment(\.foundationReduceMotion) private var reduceMotion
     @Environment(\.scenePhase) private var scenePhase
     @State private var refreshOnActivation = true
+    @State private var pageDemand = FoundationCatalogPageDemand()
+    @State private var paginationFooterVisible = false
     #if DEBUG
         @Environment(\.foundationTraceOrigin) private var traceOrigin
     #endif
@@ -1824,6 +1841,14 @@ struct FoundationCatalogView: View {
                 .foundationBottomChromeListClearance()
                 .listStyle(.plain)
             }
+        }
+        .onScrollPhaseChange { _, phase in
+            guard automaticallyLoadsPages, model.nextStartIndex != nil else { return }
+            pageDemand.scrollPhaseChanged(
+                to: phase, footerVisible: paginationFooterVisible,
+                active: isActive && isVisible && scenePhase == .active,
+                allowsNetwork: !connectivity.localOnly, isLoading: model.isLoading,
+                hasError: model.errorMessage != nil)
         }
         #if os(iOS)
             .refreshable { requestVisibleRefresh() }
@@ -2035,10 +2060,12 @@ struct FoundationCatalogView: View {
                 }
                 .task(
                     id:
-                        "\(isActive && isVisible && scenePhase == .active)-\(connectivity.localOnly)-\(automaticPageIdentity ?? String(model.nextStartIndex ?? -1))-\(revision)"
+                        "\(isActive && isVisible && scenePhase == .active)-\(connectivity.localOnly)-\(automaticPageIdentity ?? String(model.nextStartIndex ?? -1))-\(pageDemand.epoch)-\(revision)"
                 ) {
                     await loadDemandedPage()
                 }
+                .onAppear { paginationFooterVisible = true }
+                .onDisappear { paginationFooterVisible = false }
             } else {
                 Button("Load more") { reload(.more) }.disabled(
                     model.isLoading || connectivity.localOnly)

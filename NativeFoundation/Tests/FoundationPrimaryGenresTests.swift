@@ -1,5 +1,6 @@
 import Combine
 import Foundation
+import SwiftUI
 import XCTest
 
 @testable import VelacantoFoundation
@@ -869,6 +870,69 @@ final class FoundationPrimaryGenresTests: XCTestCase {
         XCTAssertTrue(
             FoundationPrimaryGenreContent.artists.items(in: model.items, source: source).isEmpty)
         XCTAssertNil(FoundationPrimaryGenreContent.tracks.pageDemandIdentity(for: model.items))
+    }
+
+    func testNewUserScrollDemandReachesAlbumAfterDuplicateOrMissingReferencePage() async throws {
+        let source = try FoundationCatalogSource.jellyfin(scope: String(repeating: "a", count: 64))
+        let first = FoundationItem(
+            id: Self.id(100), title: "One", subtitle: "", kind: .track, duration: 10,
+            album: .init(id: Self.id(10), title: "First Album"), catalogSource: source)
+        let missing = FoundationItem(
+            id: Self.id(101), title: "No References", subtitle: "", kind: .track, duration: 10,
+            catalogSource: source)
+        let later = FoundationItem(
+            id: Self.id(102), title: "Later", subtitle: "", kind: .track, duration: 10,
+            album: .init(id: Self.id(11), title: "Later Album"), catalogSource: source)
+        let model = FoundationBrowseModel()
+        model.configureCatalogPagination()
+        await model.load(.initial) { _ in .init(items: [first], nextStartIndex: 50) }
+        var demand = FoundationCatalogPageDemand()
+        let firstEpoch = demand.epoch
+        let initialIdentity = FoundationPrimaryGenreContent.albums.pageDemandIdentity(
+            for: FoundationPrimaryGenreContent.albums.items(in: model.items, source: source))
+        var offsets: [Int] = []
+        await model.loadNextPage { offset in
+            offsets.append(offset)
+            return .init(items: [first, missing], nextStartIndex: 100)
+        }
+        XCTAssertEqual(model.nextStartIndex, 100)
+        XCTAssertEqual(
+            FoundationPrimaryGenreContent.albums.pageDemandIdentity(
+                for: FoundationPrimaryGenreContent.albums.items(in: model.items, source: source)),
+            initialIdentity)
+        XCTAssertEqual(
+            demand.epoch, firstEpoch, "A duplicate raw page cannot create another demand")
+        for phase: ScrollPhase in [.idle, .tracking, .decelerating, .animating] {
+            demand.scrollPhaseChanged(
+                to: phase, footerVisible: true, active: true,
+                allowsNetwork: true, isLoading: false, hasError: false)
+            XCTAssertEqual(demand.epoch, firstEpoch)
+        }
+        let suppressed: [(footer: Bool, active: Bool, online: Bool, loading: Bool, error: Bool)] = [
+            (false, true, true, false, false), (true, false, true, false, false),
+            (true, true, false, false, false), (true, true, true, true, false),
+            (true, true, true, false, true),
+        ]
+        for state in suppressed {
+            demand.scrollPhaseChanged(
+                to: .interacting, footerVisible: state.footer, active: state.active,
+                allowsNetwork: state.online, isLoading: state.loading, hasError: state.error)
+            XCTAssertEqual(demand.epoch, firstEpoch)
+        }
+        XCTAssertEqual(offsets, [50], "Suppressed phase changes must not fetch another raw page")
+        demand.scrollPhaseChanged(
+            to: .interacting, footerVisible: true, active: true,
+            allowsNetwork: true, isLoading: false, hasError: false)
+        XCTAssertNotEqual(demand.epoch, firstEpoch)
+        await model.loadNextPage { offset in
+            offsets.append(offset)
+            return .init(items: [later], nextStartIndex: nil)
+        }
+        XCTAssertEqual(offsets, [50, 100])
+        XCTAssertEqual(
+            FoundationPrimaryGenreContent.albums.items(in: model.items, source: source).map(\.id),
+            [Self.id(10), Self.id(11)])
+        XCTAssertNil(model.nextStartIndex)
     }
 
     func testVisibleCanonicalGenrePagingIsBoundedOfflineSafeAndRequiresExplicitFailureRetry()
