@@ -1256,6 +1256,261 @@ final class FoundationPrimaryGenresTests: XCTestCase {
         XCTAssertNil(restored.contentMetadataVersion)
     }
 
+    func testPackedGenreIdentitiesPreserveExactUUIDSpellingAndRejectCorruptFrames() throws {
+        let ids = [
+            "abcdefab12345678901234567890abcd", "ABCDEFAB12345678901234567890ABCD",
+            "aBcDeFaB-1234-5678-9012-34567890aBcD",
+        ]
+        let table = try FoundationPrimaryGenreIdentityTable(ids)
+        let encoder = PropertyListEncoder()
+        encoder.outputFormat = .binary
+        let data = try encoder.encode(table)
+        XCTAssertEqual(
+            try PropertyListDecoder().decode(FoundationPrimaryGenreIdentityTable.self, from: data),
+            table)
+        var fields = try XCTUnwrap(
+            PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any])
+        fields["uuidBytes"] = Data([0])
+        let corrupt = try PropertyListSerialization.data(
+            fromPropertyList: fields, format: .binary, options: 0)
+        XCTAssertThrowsError(
+            try PropertyListDecoder().decode(
+                FoundationPrimaryGenreIdentityTable.self, from: corrupt))
+        XCTAssertThrowsError(try FoundationPrimaryGenreIdentityTable([ids[0], ids[0]]))
+        let generic = try FoundationPrimaryGenreIdentityTable(["fixture-track", "fixture-album"])
+        XCTAssertEqual(
+            try PropertyListDecoder().decode(
+                FoundationPrimaryGenreIdentityTable.self, from: encoder.encode(generic)), generic)
+    }
+
+    func testPackedSnapshotKeepsZeroOneTwoPrimaryMembershipAndReadsLegacyEnvelope() throws {
+        let scope = try XCTUnwrap(
+            FoundationJellyfinLibrary(session: Self.session).primaryGenreIndexScope)
+        let (record, _) = orderedGenreRecord(scope: scope)
+        struct Legacy: Encodable {
+            let snapshot: FoundationPrimaryGenreIndex.Snapshot
+            let descriptors: [FoundationItem]
+            let builtWithAppVersion: String?
+            let contentMetadataVersion: Int?
+        }
+        let legacy = Legacy(
+            snapshot: record.snapshot, descriptors: record.descriptors,
+            builtWithAppVersion: "0.6.0(259)", contentMetadataVersion: 1)
+        let encoder = PropertyListEncoder()
+        encoder.outputFormat = .binary
+        let restored = try PropertyListDecoder().decode(
+            FoundationPrimaryGenreRecord.self, from: encoder.encode(legacy))
+        XCTAssertEqual(restored.snapshot, record.snapshot)
+        XCTAssertTrue(restored.isValid(for: scope))
+        XCTAssertEqual(restored.contentMetadataVersion, 1)
+        let ids = [Self.id(1), Self.id(2), Self.id(3)]
+        let a = Self.id(100)
+        let b = Self.id(101)
+        let snapshot = FoundationPrimaryGenreIndex.Snapshot(
+            scope: scope, songCount: 3, censusID: UUID(), completedAt: Date(),
+            songCountsByGenre: [a: 2, b: 1], eligibleGenreIDs: [a, b],
+            primaryBySongID: [ids[0]: [], ids[1]: [a], ids[2]: [a, b]], orderedSongIDs: ids)
+        let packed = try FoundationPrimaryGenrePackedSnapshot(snapshot)
+        XCTAssertEqual(try packed.unpack(), snapshot)
+        let data = try encoder.encode(packed)
+        var fields = try XCTUnwrap(
+            PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any])
+        fields["primaryPairs"] = FoundationPrimaryGenreWords.encode([
+            UInt16.max, 0, UInt16.max, UInt16.max, 0, 1,
+        ])
+        let malformed = try PropertyListSerialization.data(
+            fromPropertyList: fields, format: .binary, options: 0)
+        XCTAssertThrowsError(
+            try PropertyListDecoder().decode(
+                FoundationPrimaryGenrePackedSnapshot.self, from: malformed
+            ).unpack())
+    }
+
+    func testPackedNameRanksKeepEqualNameIDTiesAndNeverPersistSecondSongIdentityTable() throws {
+        let scope = try XCTUnwrap(
+            FoundationJellyfinLibrary(session: Self.session).primaryGenreIndexScope)
+        let (record, _) = orderedGenreRecord(scope: scope)
+        let encoder = PropertyListEncoder()
+        encoder.outputFormat = .binary
+        let data = try encoder.encode(record)
+        let fields = try XCTUnwrap(
+            PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any])
+        XCTAssertNil(fields["snapshot"])
+        let content = try XCTUnwrap(fields["contentIndex"] as? [String: Any])
+        XCTAssertNil(content["tracks"])
+        let ranks = try XCTUnwrap(content["ranks"] as? [String: Any])
+        XCTAssertNil(ranks["songIDs"])
+        XCTAssertEqual(
+            Set(ranks.keys),
+            [
+                "albumIDs", "artistIDs", "trackNames", "albumNames", "artistNames", "trackAlbums",
+                "trackArtists",
+            ])
+        let restored = try PropertyListDecoder().decode(
+            FoundationPrimaryGenreRecord.self, from: data)
+        for kind in [FoundationItem.Kind.track, .album, .artist] {
+            for descending in [false, true] {
+                XCTAssertEqual(
+                    restored.contentSource(genreID: Self.id(1), kind: kind, descending: descending)?
+                        .ids,
+                    record.contentSource(genreID: Self.id(1), kind: kind, descending: descending)?
+                        .ids)
+            }
+        }
+        var builder = FoundationPrimaryGenreContentIndex.Builder()
+        builder.append(
+            ["b", "a"].map {
+                .init(
+                    id: $0, genres: [],
+                    content: .init(
+                        title: "Same", album: .init(id: "album-\($0)", title: "Same"),
+                        artist: .init(id: "artist-\($0)", title: "Same")))
+            }, source: scope.source)
+        let index = try XCTUnwrap(builder.finish(songIDs: ["a", "b"]))
+        for kind in [FoundationItem.Kind.track, .album, .artist] {
+            let ordered = index.orderedIDs(membership: ["b", "a"], kind: kind)
+            XCTAssertEqual(
+                index.orderedIDs(membership: ["b", "a"], kind: kind, descending: true), ordered)
+            XCTAssertEqual(ordered, ordered.sorted())
+        }
+    }
+
+    func testMaximumPackedGenreRecordRetainsEveryNameOrderWithinOriginalEightMiB() async throws {
+        let scope = try XCTUnwrap(
+            FoundationJellyfinLibrary(session: Self.session).primaryGenreIndexScope)
+        let worker = FoundationPrimaryGenreContentWorker()
+        let census = FoundationPrimaryGenreIndex()
+        let generation = try await census.begin(scope: scope)
+        func uuid(_ value: Int) -> String {
+            let raw = Array(
+                Self.id(value).enumerated().map { offset, character in
+                    offset.isMultiple(of: 2) ? String(character) : String(character).uppercased()
+                }.joined())
+            return [
+                String(raw[0..<8]), String(raw[8..<12]), String(raw[12..<16]), String(raw[16..<20]),
+                String(raw[20..<32]),
+            ].joined(separator: "-")
+        }
+        func name(_ value: Int) -> String {
+            String(format: "%08d", value) + String(repeating: "x", count: 504)
+        }
+        let genres = (0..<4096).map {
+            FoundationItemReference(id: uuid(1_000_000 + $0), title: name($0))
+        }
+        var songIDs: [String] = []
+        var albumIDs: [String] = []
+        var artistIDs: [String] = []
+        for start in stride(from: 0, to: 50_000, by: 200) {
+            let rows: [FoundationPrimaryGenreMetadataPage.Song] = (start..<start + 200).map {
+                value in
+                let id = uuid(value + 1)
+                let album = uuid(100_000 + value)
+                let artist = uuid(200_000 + value)
+                songIDs.append(id)
+                albumIDs.append(album)
+                artistIDs.append(artist)
+                return .init(
+                    id: id, genres: [genres[value % 4096], genres[(value + 1) % 4096]],
+                    content: .init(
+                        title: name(50_000 - value),
+                        album: .init(id: album, title: name(50_000 - value)),
+                        artist: .init(id: artist, title: name(50_000 - value)),
+                        duration: Double(value), year: 2000 + value % 25,
+                        dateAdded: Date(timeIntervalSinceReferenceDate: Double(value))))
+            }
+            try await worker.append(rows, source: scope.source)
+            try await census.append(
+                .init(
+                    startIndex: start, total: 50_000,
+                    songs: rows.map { .init(id: $0.id, genreIDs: $0.genres.map(\.id)) },
+                    nextStartIndex: start + 200 < 50_000 ? start + 200 : nil),
+                generation: generation)
+        }
+        let snapshot = try await census.finish(generation: generation)
+        let descriptors = genres.map {
+            FoundationItem(
+                id: $0.id, title: $0.title, subtitle: "", kind: .genre, duration: nil,
+                primaryGenreCensusID: snapshot.censusID, catalogSource: scope.source)
+        }
+        let record = try await worker.finish(snapshot: snapshot, descriptors: descriptors)
+        XCTAssertTrue(record.isValid(for: scope))
+        let encoder = PropertyListEncoder()
+        encoder.outputFormat = .binary
+        let data = try encoder.encode(record)
+        XCTAssertLessThanOrEqual(data.count, 8 * 1_024 * 1_024)
+        print("Maximum packed primary genre record bytes: \(data.count)")
+        let restored = try PropertyListDecoder().decode(
+            FoundationPrimaryGenreRecord.self, from: data)
+        XCTAssertEqual(restored.snapshot, snapshot)
+        XCTAssertEqual(restored, record)
+        let index = try XCTUnwrap(restored.contentIndex)
+        for (kind, expected) in [
+            (FoundationItem.Kind.track, Array(songIDs.reversed())),
+            (.album, Array(albumIDs.reversed())), (.artist, Array(artistIDs.reversed())),
+        ] {
+            let ordered = index.orderedIDs(membership: songIDs, kind: kind)
+            XCTAssertEqual(ordered, expected)
+            XCTAssertEqual(ordered.count, 50_000)
+            XCTAssertEqual(Set(ordered).count, 50_000)
+            XCTAssertEqual(Array(ordered.prefix(50)), Array(expected.prefix(50)))
+            XCTAssertEqual(Array(ordered.suffix(50)), Array(expected.suffix(50)))
+            XCTAssertEqual(
+                index.orderedIDs(membership: songIDs, kind: kind, descending: true),
+                Array(expected.reversed()))
+        }
+    }
+
+    func testTightRecordBudgetOmitsOptionalFactsBeforeAnyMandatoryNameOrMembership() async throws {
+        let scope = try XCTUnwrap(
+            FoundationJellyfinLibrary(session: Self.session).primaryGenreIndexScope)
+        let (record, rows) = orderedGenreRecord(scope: scope)
+        let content = try XCTUnwrap(record.contentIndex)
+        let withoutDates = FoundationPrimaryGenreRecord(
+            snapshot: record.snapshot, descriptors: record.descriptors,
+            contentMetadataVersion: FoundationPrimaryGenreContentIndex.version,
+            contentIndex: content.omitting(.dateAdded))
+        let encoder = PropertyListEncoder()
+        encoder.outputFormat = .binary
+        let target = try encoder.encode(withoutDates).count
+        XCTAssertLessThan(target, try encoder.encode(record).count)
+        let worker = FoundationPrimaryGenreContentWorker(maximumRecordBytes: target)
+        try await worker.append(rows, source: scope.source)
+        let fitted = try await worker.finish(
+            snapshot: record.snapshot, descriptors: record.descriptors)
+        XCTAssertEqual(fitted.snapshot, record.snapshot)
+        let fittedContent = try XCTUnwrap(fitted.contentIndex)
+        XCTAssertFalse(
+            fittedContent.supportedSorts(kind: .track, membership: rows.map(\.id)).contains(
+                .dateAdded))
+        XCTAssertTrue(
+            fittedContent.supportedSorts(kind: .track, membership: rows.map(\.id)).contains(
+                .duration))
+        XCTAssertTrue(
+            fittedContent.supportedSorts(kind: .track, membership: rows.map(\.id)).contains(.year))
+        for kind in [FoundationItem.Kind.track, .album, .artist] {
+            XCTAssertEqual(
+                fitted.contentSource(genreID: Self.id(1), kind: kind)?.ids,
+                record.contentSource(genreID: Self.id(1), kind: kind)?.ids)
+        }
+        XCTAssertLessThanOrEqual(try encoder.encode(fitted).count, target)
+    }
+
+    func testCancelledGenreRankWorkerCannotPublishCompletedOrder() async throws {
+        let scope = try XCTUnwrap(
+            FoundationJellyfinLibrary(session: Self.session).primaryGenreIndexScope)
+        let (record, rows) = orderedGenreRecord(scope: scope)
+        let worker = FoundationPrimaryGenreContentWorker()
+        try await worker.append(rows, source: scope.source)
+        let operation = Task {
+            try await worker.finish(snapshot: record.snapshot, descriptors: record.descriptors)
+        }
+        operation.cancel()
+        do {
+            _ = try await operation.value
+            XCTFail("Cancelled rank preparation cannot publish")
+        } catch is CancellationError {} catch { XCTFail("Unexpected cancellation error: \(error)") }
+    }
+
     func testOrderingMetadataBudgetCannotRemoveExistingGenreEligibility() throws {
         let scope = try XCTUnwrap(
             FoundationJellyfinLibrary(session: Self.session).primaryGenreIndexScope)
@@ -1267,8 +1522,11 @@ final class FoundationPrimaryGenresTests: XCTestCase {
                 content: .init(title: String(repeating: "x", count: 512)))
         }
         builder.append(rows, source: scope.source)
-        XCTAssertTrue(builder.exceededBudget)
-        XCTAssertNil(builder.finish(songIDs: Set(rows.map(\.id))))
+        XCTAssertFalse(builder.exceededBudget)
+        let ordered = try XCTUnwrap(builder.finish(songIDs: Set(rows.map(\.id))))
+        XCTAssertTrue(ordered.tracks.values.allSatisfy { $0.title.isEmpty })
+        XCTAssertEqual(
+            ordered.orderedIDs(membership: rows.map(\.id), kind: .track).count, rows.count)
         let membershipOnly = FoundationPrimaryGenreRecord(
             snapshot: record.snapshot, descriptors: record.descriptors,
             contentMetadataVersion: FoundationPrimaryGenreContentIndex.version)
@@ -1421,19 +1679,26 @@ final class FoundationPrimaryGenresTests: XCTestCase {
                 from: good, options: [], format: nil) as? [String: Any])
         let file = root.appendingPathComponent(cache.scope).appendingPathComponent(
             FoundationArtworkCache.digest("primary") + ".primarygenres")
-        for duplicateOrder in [false, true] {
+        for fault in ["duplicate", "policy", "storage"] {
             var malformed = original
-            var snapshot = try XCTUnwrap(malformed["snapshot"] as? [String: Any])
-            if duplicateOrder {
-                var ids = record.snapshot.orderedSongIDs
-                ids[1] = ids[0]
-                snapshot["orderedSongIDs"] = ids
-            } else {
+            var snapshot = try XCTUnwrap(malformed["packedSnapshot"] as? [String: Any])
+            if fault == "duplicate" {
+                var identities = try XCTUnwrap(snapshot["songIDs"] as? [String: Any])
+                var bytes = try XCTUnwrap(identities["uuidBytes"] as? Data)
+                var spelling = try XCTUnwrap(identities["spelling"] as? Data)
+                bytes.replaceSubrange(16..<32, with: bytes.prefix(16))
+                spelling.replaceSubrange(5..<10, with: spelling.prefix(5))
+                identities["uuidBytes"] = bytes
+                identities["spelling"] = spelling
+                snapshot["songIDs"] = identities
+            } else if fault == "policy" {
                 var scope = try XCTUnwrap(snapshot["scope"] as? [String: Any])
                 scope["policyVersion"] = 1
                 snapshot["scope"] = scope
+            } else {
+                malformed["storageVersion"] = 999
             }
-            malformed["snapshot"] = snapshot
+            malformed["packedSnapshot"] = snapshot
             let data = try PropertyListSerialization.data(
                 fromPropertyList: malformed, format: .binary, options: 0)
             try data.write(to: file, options: .atomic)

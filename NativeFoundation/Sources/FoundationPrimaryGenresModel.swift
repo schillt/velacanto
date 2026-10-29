@@ -163,7 +163,7 @@ final class FoundationPrimaryGenresModel: ObservableObject {
                 let generation = try await index.begin(scope: scope)
                 token = generation
                 var descriptors: [String: FoundationItem] = [:]
-                var content = FoundationPrimaryGenreContentIndex.Builder()
+                let content = FoundationPrimaryGenreContentWorker()
                 var offset = 0
                 var requestedPages = 0
                 let maximumPages = FoundationPrimaryGenreIndex.Limits().pages
@@ -183,7 +183,7 @@ final class FoundationPrimaryGenresModel: ObservableObject {
                         .init(
                             startIndex: page.startIndex, total: page.total, songs: songs,
                             nextStartIndex: page.nextStartIndex), generation: generation)
-                    content.append(page.songs, source: scope.source)
+                    try await content.append(page.songs, source: scope.source)
                     for song in page.songs {
                         for genre in song.genres {
                             if let old = descriptors[genre.id], old.title != genre.title {
@@ -203,27 +203,15 @@ final class FoundationPrimaryGenresModel: ObservableObject {
                 let snapshot = try await index.finish(generation: generation)
                 try Task.checkCancellation()
                 guard self.operationID == owner, self.scope == scope else { return }
-                var result = FoundationPrimaryGenreRecord(
-                    snapshot: snapshot,
-                    descriptors: descriptors.values.map { item in
-                        var canonical = item
-                        canonical.primaryGenreCensusID = snapshot.censusID
-                        return canonical
-                    }.sorted { $0.id < $1.id },
-                    contentMetadataVersion: FoundationPrimaryGenreContentIndex.version,
-                    contentIndex: content.finish(songIDs: Set(snapshot.orderedSongIDs)))
-                if result.contentIndex != nil {
-                    let encoder = PropertyListEncoder()
-                    encoder.outputFormat = .binary
-                    if try encoder.encode(result).count
-                        > FoundationPrimaryGenreContentIndex.maximumBytes
-                    {
-                        // Preserve the complete genre census rather than reducing its supported size.
-                        result = .init(
-                            snapshot: result.snapshot, descriptors: result.descriptors,
-                            contentMetadataVersion: FoundationPrimaryGenreContentIndex.version)
-                    }
-                }
+                let canonicalDescriptors = descriptors.values.map { item in
+                    var canonical = item
+                    canonical.primaryGenreCensusID = snapshot.censusID
+                    return canonical
+                }.sorted { $0.id < $1.id }
+                let result = try await content.finish(
+                    snapshot: snapshot, descriptors: canonicalDescriptors)
+                try Task.checkCancellation()
+                guard self.operationID == owner, self.scope == scope else { return }
                 guard result.isValid(for: scope) else {
                     throw FoundationPrimaryGenreIndex.Failure.unknownMetadata
                 }
