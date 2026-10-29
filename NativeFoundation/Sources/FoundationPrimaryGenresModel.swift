@@ -208,21 +208,17 @@ final class FoundationPrimaryGenresModel: ObservableObject {
                     canonical.primaryGenreCensusID = snapshot.censusID
                     return canonical
                 }.sorted { $0.id < $1.id }
-                let result = try await content.finish(
-                    snapshot: snapshot, descriptors: canonicalDescriptors)
+                let saved = try await content.finish(
+                    snapshot: snapshot, descriptors: canonicalDescriptors,
+                    builtWithAppVersion: self.appVersion)
                 try Task.checkCancellation()
                 guard self.operationID == owner, self.scope == scope else { return }
-                guard result.isValid(for: scope) else {
-                    throw FoundationPrimaryGenreIndex.Failure.unknownMetadata
-                }
+                // The same-generation worker validated and size-fitted the immutable saved record.
+                // The runtime marker remains absent until the existing cache write succeeds.
+                let result = saved.replacingBuiltWithAppVersion(nil)
                 self.record = result
                 self.publicationRevision += 1
                 if let cache = library.catalogPageCache {
-                    let saved = FoundationPrimaryGenreRecord(
-                        snapshot: result.snapshot, descriptors: result.descriptors,
-                        builtWithAppVersion: self.appVersion,
-                        contentMetadataVersion: result.contentMetadataVersion,
-                        contentIndex: result.contentIndex)
                     do {
                         try await cache.writePrimaryGenres(
                             saved,

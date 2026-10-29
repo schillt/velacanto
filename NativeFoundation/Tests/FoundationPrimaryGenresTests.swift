@@ -1432,13 +1432,27 @@ final class FoundationPrimaryGenresTests: XCTestCase {
                 id: $0.id, title: $0.title, subtitle: "", kind: .genre, duration: nil,
                 primaryGenreCensusID: snapshot.censusID, catalogSource: scope.source)
         }
-        let record = try await worker.finish(snapshot: snapshot, descriptors: descriptors)
+        let record = try await worker.finish(
+            snapshot: snapshot, descriptors: descriptors, builtWithAppVersion: "0.6.0(261)")
+        XCTAssertEqual(record.builtWithAppVersion, "0.6.0(261)")
         XCTAssertTrue(record.isValid(for: scope))
         let encoder = PropertyListEncoder()
         encoder.outputFormat = .binary
         let data = try encoder.encode(record)
         XCTAssertLessThanOrEqual(data.count, 8 * 1_024 * 1_024)
         print("Maximum packed primary genre record bytes: \(data.count)")
+        let cacheRoot = FileManager.default.temporaryDirectory.appendingPathComponent(
+            UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: cacheRoot) }
+        let cache = FoundationCatalogPageCache(scope: "maximum-packed-genre", root: cacheRoot)
+        try await cache.writePrimaryGenres(record, key: "complete", permit: .init())
+        let cached = try await cache.readPrimaryGenres(key: "complete", scope: scope)
+        XCTAssertEqual(
+            cached, record, "The exact version-bearing fitted record must pass the real cache cap")
+        let runtime = record.replacingBuiltWithAppVersion(nil)
+        XCTAssertNil(runtime.builtWithAppVersion)
+        XCTAssertEqual(runtime.contentIndex, record.contentIndex)
+        XCTAssertEqual(runtime.snapshot, record.snapshot)
         let restored = try PropertyListDecoder().decode(
             FoundationPrimaryGenreRecord.self, from: data)
         XCTAssertEqual(restored.snapshot, snapshot)
@@ -1467,6 +1481,7 @@ final class FoundationPrimaryGenresTests: XCTestCase {
         let content = try XCTUnwrap(record.contentIndex)
         let withoutDates = FoundationPrimaryGenreRecord(
             snapshot: record.snapshot, descriptors: record.descriptors,
+            builtWithAppVersion: "0.6.0(261)",
             contentMetadataVersion: FoundationPrimaryGenreContentIndex.version,
             contentIndex: content.omitting(.dateAdded))
         let encoder = PropertyListEncoder()
@@ -1476,7 +1491,9 @@ final class FoundationPrimaryGenresTests: XCTestCase {
         let worker = FoundationPrimaryGenreContentWorker(maximumRecordBytes: target)
         try await worker.append(rows, source: scope.source)
         let fitted = try await worker.finish(
-            snapshot: record.snapshot, descriptors: record.descriptors)
+            snapshot: record.snapshot, descriptors: record.descriptors,
+            builtWithAppVersion: "0.6.0(261)")
+        XCTAssertEqual(fitted.builtWithAppVersion, "0.6.0(261)")
         XCTAssertEqual(fitted.snapshot, record.snapshot)
         let fittedContent = try XCTUnwrap(fitted.contentIndex)
         XCTAssertFalse(

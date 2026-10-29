@@ -36,6 +36,20 @@ struct FoundationPrimaryGenreRecord: Equatable, Codable, Sendable {
             (try? contentIndex?.bindingSongIDs(snapshot.orderedSongIDs)) ?? contentIndex
     }
 
+    /// Metadata-only copy: the census worker already bound and validated this immutable content.
+    /// In particular, changing the save marker must not rebuild all track rows on MainActor.
+    func replacingBuiltWithAppVersion(_ version: String?) -> Self {
+        .init(copying: self, builtWithAppVersion: version)
+    }
+
+    private init(copying record: Self, builtWithAppVersion: String?) {
+        snapshot = record.snapshot
+        descriptors = record.descriptors
+        self.builtWithAppVersion = builtWithAppVersion
+        contentMetadataVersion = record.contentMetadataVersion
+        contentIndex = record.contentIndex
+    }
+
     private enum CodingKeys: String, CodingKey {
         case storageVersion, packedSnapshot, snapshot, descriptors, builtWithAppVersion,
             contentMetadataVersion, contentIndex
@@ -931,9 +945,10 @@ actor FoundationPrimaryGenreContentWorker {
             throw FoundationPrimaryGenreIndex.Failure.resourceLimit
         }
     }
-    func finish(snapshot: FoundationPrimaryGenreIndex.Snapshot, descriptors: [FoundationItem])
-        throws -> FoundationPrimaryGenreRecord
-    {
+    func finish(
+        snapshot: FoundationPrimaryGenreIndex.Snapshot, descriptors: [FoundationItem],
+        builtWithAppVersion: String? = nil
+    ) throws -> FoundationPrimaryGenreRecord {
         try Task.checkCancellation()
         let index = builder.finish(songIDs: Set(snapshot.orderedSongIDs))
         builder = .init()  // Release comparison names before encoding or publication.
@@ -944,6 +959,7 @@ actor FoundationPrimaryGenreContentWorker {
         func record(_ content: FoundationPrimaryGenreContentIndex) -> FoundationPrimaryGenreRecord {
             .init(
                 snapshot: snapshot, descriptors: descriptors,
+                builtWithAppVersion: builtWithAppVersion,
                 contentMetadataVersion: FoundationPrimaryGenreContentIndex.version,
                 contentIndex: content)
         }
