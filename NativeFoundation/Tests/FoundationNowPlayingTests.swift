@@ -10,6 +10,134 @@ final class FoundationNowPlayingTests: XCTestCase {
     private let track = FoundationItem(
         id: "synthetic", title: "Test title", subtitle: "Test artist", kind: .track, duration: 8)
 
+    func testPendingSeekHoldsBothPresentationsWhileActualClockStillAdvances() async throws {
+        let seeks = UserSeekProbe()
+        let player = try await readySeekPlayer(seeks)
+        let bridge = FoundationNowPlaying(player: player)
+        defer {
+            bridge.invalidate()
+            player.stop()
+        }
+        try bridge.perform(.seek(6), entryID: player.selectedEntryID)
+        XCTAssertEqual(player.pendingSeekPosition, 6)
+        XCTAssertEqual(player.presentationElapsed, 6)
+        XCTAssertLessThan(player.elapsed, 6)
+        let ticked = expectation(description: "Actual native clock advances during held seek")
+        let tick = player.$elapsed.filter { $0 >= 1 }.first().sink { _ in ticked.fulfill() }
+        let result = await XCTWaiter.fulfillment(of: [ticked], timeout: 5)
+        tick.cancel()
+        XCTAssertEqual(result, .completed)
+        XCTAssertLessThan(player.elapsed, 6)
+        XCTAssertEqual(player.presentationElapsed, 6)
+        let timestamp = Date(timeIntervalSince1970: 100)
+        bridge.refresh(timestamp: timestamp)
+        XCTAssertEqual(
+            bridge.playbackSnapshot,
+            MediaPlaybackSnapshot(state: .buffering, elapsedTime: 6, timestamp: timestamp))
+
+        let completed = expectation(description: "Actual seek completes")
+        let completion = player.playbackPositionChanged.first().sink { completed.fulfill() }
+        seeks.land(0)
+        let landed = await XCTWaiter.fulfillment(of: [completed], timeout: 5)
+        completion.cancel()
+        XCTAssertEqual(landed, .completed)
+        XCTAssertNil(player.pendingSeekPosition)
+        XCTAssertEqual(player.presentationElapsed, 6, accuracy: 0.3)
+        XCTAssertEqual(player.nativePlayer.currentTime().seconds, 6, accuracy: 0.3)
+    }
+
+    func testObsoleteSeekCannotClearLatestTargetAndCancelledLatestRestoresNativeClock() async throws
+    {
+        let seeks = UserSeekProbe()
+        let player = try await readySeekPlayer(seeks)
+        defer { player.stop() }
+        player.pause()
+        let occurrence = try XCTUnwrap(player.selectedEntryID)
+        player.seek(to: 3, entryID: occurrence)
+        player.seek(to: 6, entryID: occurrence)
+        let cleared = expectation(description: "Obsolete completion must not clear latest seek")
+        cleared.isInverted = true
+        let observation = player.$pendingSeekPosition.dropFirst().sink { _ in cleared.fulfill() }
+        seeks.complete(0, finished: false)
+        let obsolete = await XCTWaiter.fulfillment(of: [cleared], timeout: 0.2)
+        observation.cancel()
+        XCTAssertEqual(obsolete, .completed)
+        XCTAssertEqual(player.presentationElapsed, 6)
+        let bridge = FoundationNowPlaying(player: player)
+        defer { bridge.invalidate() }
+        let timestamp = Date(timeIntervalSince1970: 100)
+        bridge.refresh(timestamp: timestamp)
+        XCTAssertEqual(
+            bridge.playbackSnapshot,
+            MediaPlaybackSnapshot(state: .paused, elapsedTime: 6, timestamp: timestamp))
+        let completed = expectation(description: "Latest cancelled seek retires its target")
+        let completion = player.playbackPositionChanged.first().sink { completed.fulfill() }
+        seeks.complete(1, finished: false)
+        let cancelled = await XCTWaiter.fulfillment(of: [completed], timeout: 5)
+        completion.cancel()
+        XCTAssertEqual(cancelled, .completed)
+        XCTAssertNil(player.pendingSeekPosition)
+        XCTAssertEqual(player.presentationElapsed, player.elapsed)
+        XCTAssertEqual(player.elapsed, player.nativePlayer.currentTime().seconds, accuracy: 0.1)
+    }
+
+    func testSeekPresentationRetiresOnStopEndAndNativeFailure() async throws {
+        for boundary in ["stop", "end", "failure"] {
+            let seeks = UserSeekProbe()
+            let player = try await readySeekPlayer(seeks)
+            defer { player.stop() }
+            player.pause()
+            let occurrence = try XCTUnwrap(player.selectedEntryID)
+            let item = try XCTUnwrap(player.nativePlayer.currentItem)
+            player.seek(to: 6, entryID: occurrence)
+            XCTAssertEqual(player.presentationElapsed, 6)
+            switch boundary {
+            case "stop": player.stop()
+            case "end": player.didReachEnd(item)
+            default:
+                let failed = expectation(description: "Native failure")
+                let failure = player.$state.filter { $0 == .failed }.first().sink { _ in
+                    failed.fulfill()
+                }
+                NotificationCenter.default.post(
+                    name: AVPlayerItem.failedToPlayToEndTimeNotification, object: item)
+                let result = await XCTWaiter.fulfillment(of: [failed], timeout: 5)
+                failure.cancel()
+                XCTAssertEqual(result, .completed)
+            }
+            XCTAssertNil(player.pendingSeekPosition, boundary)
+            let stale = expectation(description: "Retired seek cannot publish completion")
+            stale.isInverted = true
+            let event = player.playbackPositionChanged.first().sink { stale.fulfill() }
+            seeks.complete(0, finished: true)
+            let result = await XCTWaiter.fulfillment(of: [stale], timeout: 0.2)
+            event.cancel()
+            XCTAssertEqual(result, .completed)
+            XCTAssertNil(player.pendingSeekPosition, boundary)
+        }
+    }
+
+    private func readySeekPlayer(_ seeks: UserSeekProbe) async throws -> FoundationPlayer {
+        let file = try XCTUnwrap(FoundationTestTones.resolve(FoundationTestTones.items[0]))
+        let player = FoundationPlayer(
+            resolve: { _ in file }, activateSession: {}, deactivateSession: {},
+            seekForUser: { native, target, completion in
+                seeks.calls.append((native, target, completion))
+            })
+        player.nativePlayer.volume = 0
+        let playing = expectation(description: "Real native player ready")
+        let state = player.$state.filter { $0 == .playing }.first().sink { _ in playing.fulfill() }
+        player.setQueue([track], selectedIndex: 0)
+        let result = await XCTWaiter.fulfillment(of: [playing], timeout: 10)
+        state.cancel()
+        XCTAssertEqual(result, .completed)
+        guard result == .completed else {
+            player.stop()
+            return try XCTUnwrap(nil as FoundationPlayer?)
+        }
+        return player
+    }
+
     func testHLSCredentialResourcesPreservePlayingMetadataWithoutPublishingSecrets() async throws {
         let file = try XCTUnwrap(FoundationTestTones.resolve(FoundationTestTones.items[0]))
         let token = "synthetic-metadata-credential-25"
@@ -423,5 +551,21 @@ private actor NowPlayingHandoffProbe {
     func complete() {
         pending?.resume(returning: file)
         pending = nil
+    }
+}
+
+@MainActor
+private final class UserSeekProbe {
+    var calls: [(AVPlayer, CMTime, @Sendable (Bool) -> Void)] = []
+
+    func land(_ index: Int) {
+        let (player, target, completion) = calls[index]
+        player.seek(
+            to: target, toleranceBefore: .zero, toleranceAfter: .zero,
+            completionHandler: completion)
+    }
+
+    func complete(_ index: Int, finished: Bool) {
+        calls[index].2(finished)
     }
 }

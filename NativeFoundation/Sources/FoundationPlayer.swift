@@ -270,6 +270,11 @@ final class FoundationPlayer: ObservableObject {
 
     @Published private(set) var errorMessage: String?
     @Published private(set) var elapsed: Double = 0
+    /// A requested scrub is presentation intent until the native seek completes.
+    /// Reporting, lyrics and continuation still consume the actual playback clock.
+    @Published private(set) var pendingSeekPosition: Double?
+    var presentationElapsed: Double { pendingSeekPosition ?? elapsed }
+    private var pendingSeekID: UUID?
     @Published private(set) var duration: Double = 0
     @Published private(set) var isInterrupted = false
     let playbackPositionChanged = PassthroughSubject<Void, Never>()
@@ -331,6 +336,8 @@ final class FoundationPlayer: ObservableObject {
     // AVAudioSession is process-wide; retiring account owners must finish before a new owner activates.
     private static var lastSessionOperation: Task<Void, Never>?
     private let startPlayback: (AVPlayer) -> Void
+    private let seekForUser:
+        @MainActor (AVPlayer, CMTime, @escaping @Sendable (Bool) -> Void) -> Void
     private let seekForContinuation:
         @MainActor (AVPlayer, CMTime, @escaping @Sendable (Bool) -> Void) -> Void
     private var isStartingPlayback = false
@@ -389,9 +396,18 @@ final class FoundationPlayer: ObservableObject {
                     to: time, toleranceBefore: .zero, toleranceAfter: .zero,
                     completionHandler: completion)
             },
+        seekForUser:
+            @escaping @MainActor (
+                AVPlayer, CMTime, @escaping @Sendable (Bool) -> Void
+            ) -> Void = { player, time, completion in
+                player.seek(
+                    to: time, toleranceBefore: .zero, toleranceAfter: .zero,
+                    completionHandler: completion)
+            },
         reportPlayback: (@Sendable (FoundationPlaybackReport) async throws -> Void)? = nil,
         reportingAllowed: @escaping @MainActor @Sendable () -> Bool = { true }
     ) {
+        self.seekForUser = seekForUser
         self.seekForContinuation = seekForContinuation
         self.reportingAllowed = reportingAllowed
         if let reportPlayback {
@@ -764,17 +780,22 @@ final class FoundationPlayer: ObservableObject {
         else { return }
         let target = CMTime(seconds: min(max(0, seconds), duration), preferredTimescale: 600)
         let seekGeneration = generation
+        let requestID = UUID()
+        pendingSeekID = requestID
+        pendingSeekPosition = target.seconds
         #if DEBUG
             let direction =
                 target.seconds < nativePlayer.currentTime().seconds ? "backward" : "forward"
             FoundationTrace.event("seek.request direction=\(direction)")
         #endif
-        nativePlayer.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero) {
+        seekForUser(nativePlayer, target) {
             [weak self] finished in
             Task { @MainActor in
                 guard let self, self.selectedEntryID == entryID,
-                    self.generation == seekGeneration
+                    self.generation == seekGeneration, self.pendingSeekID == requestID
                 else { return }
+                self.pendingSeekID = nil
+                self.pendingSeekPosition = nil
                 self.refreshTime()
                 if finished {
                     self.reporting?.progress(
@@ -1068,6 +1089,8 @@ final class FoundationPlayer: ObservableObject {
     }
 
     private func discardSelection(retainingNativeItem: Bool = false) {
+        pendingSeekID = nil
+        pendingSeekPosition = nil
         continuationPositionTask?.cancel()
         continuationPositionTask = nil
         pausedContinuationPosition = nil
@@ -1256,6 +1279,8 @@ final class FoundationPlayer: ObservableObject {
         #if DEBUG
             recordSnapshot("item.ended")
         #endif
+        pendingSeekID = nil
+        pendingSeekPosition = nil
         finishReporting()
         let successor: UUID?
         if repeatMode == .one {
@@ -1282,6 +1307,8 @@ final class FoundationPlayer: ObservableObject {
     }
 
     private func fail(_ category: FailureCategory, error: Error?) {
+        pendingSeekID = nil
+        pendingSeekPosition = nil
         continuationPositionTask?.cancel()
         continuationPositionTask = nil
         initialContinuationSeek = nil

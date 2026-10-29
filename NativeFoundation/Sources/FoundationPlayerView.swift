@@ -555,13 +555,15 @@ struct FoundationPlayerView: View {
             Slider(
                 value: Binding(
                     get: {
-                        scrubbing ? scrubPosition : min(player.elapsed, max(0, player.duration))
+                        scrubbing
+                            ? scrubPosition
+                            : min(player.presentationElapsed, max(0, player.duration))
                     },
                     set: { scrubPosition = $0 }
                 ), in: 0...max(1, player.duration),
                 onEditingChanged: { editing in
                     if editing {
-                        scrubPosition = player.elapsed
+                        scrubPosition = player.presentationElapsed
                         scrubEntryID = player.selectedEntryID
                         scrubbing = true
                     } else {
@@ -574,12 +576,12 @@ struct FoundationPlayerView: View {
                 }
             ).accessibilityLabel("Playback position")
                 .accessibilityValue(
-                    "\(Self.time(scrubbing ? scrubPosition : player.elapsed)) of \(Self.time(player.duration))"
+                    "\(Self.time(scrubbing ? scrubPosition : player.presentationElapsed)) of \(Self.time(player.duration))"
                 )
                 .disabled(
                     player.duration <= 0 || player.state == .loading || player.state == .failed)
             HStack {
-                Text(Self.time(scrubbing ? scrubPosition : player.elapsed))
+                Text(Self.time(scrubbing ? scrubPosition : player.presentationElapsed))
                 Spacer()
                 Text(Self.time(player.duration))
             }.font(.caption).monospacedDigit().foregroundStyle(.secondary)

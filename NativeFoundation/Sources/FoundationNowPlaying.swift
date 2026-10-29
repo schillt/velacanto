@@ -53,6 +53,7 @@ final class FoundationNowPlaying: MediaSessionRepresentable {
             player.$state.removeDuplicates().map { _ in () }.eraseToAnyPublisher(),
             player.$wantsPlayback.removeDuplicates().map { _ in () }.eraseToAnyPublisher(),
             player.$duration.removeDuplicates().map { _ in () }.eraseToAnyPublisher(),
+            player.$pendingSeekPosition.removeDuplicates().map { _ in () }.eraseToAnyPublisher(),
             player.$repeatMode.removeDuplicates().map { _ in () }.eraseToAnyPublisher(),
             player.$isInterrupted.removeDuplicates().map { _ in () }.eraseToAnyPublisher(),
             player.playbackPositionChanged.eraseToAnyPublisher()
@@ -99,7 +100,7 @@ final class FoundationNowPlaying: MediaSessionRepresentable {
         }
     }
 
-    private func refresh() {
+    func refresh(timestamp: Date = Date()) {
         guard isLive else { return }
         // Only ended intent rearms primacy; buffering and natural handoff retain their attempt.
         if !player.wantsPlayback || player.isInterrupted {
@@ -124,6 +125,8 @@ final class FoundationNowPlaying: MediaSessionRepresentable {
         let state: MediaPlaybackSnapshot.PlaybackState
         if player.isInterrupted {
             state = .interrupted
+        } else if player.pendingSeekPosition != nil {
+            state = player.wantsPlayback ? .buffering : .paused
         } else {
             switch player.state {
             case .idle, .ended, .failed: state = .stopped
@@ -137,9 +140,11 @@ final class FoundationNowPlaying: MediaSessionRepresentable {
             }
         }
         let nativeTime = player.selectionTask == nil ? player.nativePlayer.currentTime().seconds : 0
-        let elapsed = nativeTime.isFinite ? max(0, nativeTime) : player.elapsed
+        let elapsed =
+            player.pendingSeekPosition
+            ?? (nativeTime.isFinite ? max(0, nativeTime) : player.elapsed)
         playbackSnapshot = MediaPlaybackSnapshot(
-            state: state, elapsedTime: elapsed, timestamp: Date())
+            state: state, elapsedTime: elapsed, timestamp: timestamp)
         availability = Availability(
             play: !player.wantsPlayback, pause: player.wantsPlayback,
             next: player.canAdvance, previous: index > 0 || player.duration > 0,

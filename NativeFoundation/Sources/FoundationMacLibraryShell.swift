@@ -718,7 +718,7 @@ import SwiftUI
         @State private var entryID: UUID?
 
         private var showsDetails: Bool { hovering || scrubbing || keyboardFocused }
-        private var currentPosition: Double { scrubbing ? position : player.elapsed }
+        private var currentPosition: Double { scrubbing ? position : player.presentationElapsed }
 
         var body: some View {
             HStack(spacing: 10) {
@@ -780,7 +780,7 @@ import SwiftUI
                     in: 0...max(1, player.duration),
                     onEditingChanged: { editing in
                         if editing {
-                            position = player.elapsed
+                            position = player.presentationElapsed
                             entryID = player.selectedEntryID
                             scrubbing = true
                         } else {
@@ -797,7 +797,8 @@ import SwiftUI
                 .sliderThumbVisibility(showsDetails ? .visible : .hidden)
                 .focused($focused)
                 .accessibilityLabel("Playback position")
-                .accessibilityValue("\(time(player.elapsed)) of \(time(player.duration))")
+                .accessibilityValue(
+                    "\(time(player.presentationElapsed)) of \(time(player.duration))")
                 Text(time(player.duration)).frame(width: 44, alignment: .trailing)
                     .opacity(showsDetails ? 1 : 0).accessibilityHidden(true)
             }
