@@ -633,6 +633,7 @@ final class FoundationDownloadsUITests: XCTestCase {
         reducedAccessibilityEffects: Bool = false, verifyContentInteraction: Bool = false
     ) {
         continueAfterFailure = false
+        XCUIDevice.shared.orientation = .portrait
         let appearance = colorScheme + (largeText ? " accessibility text" : "")
         for kind in ["album", "artist"] {
             let app = launch(
@@ -681,8 +682,14 @@ final class FoundationDownloadsUITests: XCTestCase {
                                 forDuration: 0.1,
                                 thenDragTo: app.coordinate(
                                     withNormalizedOffset: CGVector(dx: 0.5, dy: 0.14)))
-                        XCTAssertLessThan(
-                            navigation.frame.minY, mediumTitleY - app.frame.height * 0.15,
+                        let expanded = XCTNSPredicateExpectation(
+                            predicate: NSPredicate { _, _ in
+                                MainActor.assumeIsolated {
+                                    navigation.frame.minY < mediumTitleY - app.frame.height * 0.15
+                                }
+                            }, object: nil)
+                        XCTAssertEqual(
+                            XCTWaiter.wait(for: [expanded], timeout: 5), .completed,
                             "Dragging medium content must expand the sheet before scrolling")
                     } else {
                         navigation.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
@@ -4332,6 +4339,7 @@ final class FoundationDownloadsUITests: XCTestCase {
 
     func testRelatedAlbumAndArtistContentDragExpandsMediumSheet() {
         continueAfterFailure = false
+        XCUIDevice.shared.orientation = .portrait
         let app = launch(
             productionShell: true, canonicalDownloadState: "full", longPlayback: true,
             compactFixtureControls: true)
@@ -4346,7 +4354,9 @@ final class FoundationDownloadsUITests: XCTestCase {
             capture("Related \(kind) content at medium detent", in: app)
             let sheet = relatedSheet(app)
             let start = app.coordinate(withNormalizedOffset: .zero).withOffset(
-                CGVector(dx: sheet.frame.midX, dy: sheet.frame.minY + sheet.frame.height * 0.75))
+                CGVector(
+                    dx: sheet.frame.midX - app.frame.minX,
+                    dy: sheet.frame.minY + sheet.frame.height * 0.75 - app.frame.minY))
             start.press(
                 forDuration: 0.1,
                 thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.14)))
