@@ -452,7 +452,7 @@ import SwiftUI
                     .disabled(actions?.canAdvance != true)
                 Divider()
                 Button("Show / Hide Queue") { actions?.queue() }
-                    .keyboardShortcut("q", modifiers: [.command, .shift])
+                    .keyboardShortcut("u", modifiers: [.command, .option])
                     .disabled(actions == nil)
                 Button("Show / Hide Lyrics") { actions?.lyrics() }
                     .keyboardShortcut("l", modifiers: [.command, .shift])
@@ -628,7 +628,7 @@ import SwiftUI
                 }
                 .disabled(player.queue.isEmpty)
                 .foregroundStyle(queueSelected ? Color.accentColor : Color.primary)
-                .help("Queue (⇧⌘Q)").accessibilityLabel("Show queue")
+                .help("Queue (⌥⌘U)").accessibilityLabel("Show queue")
                 .accessibilityAddTraits(queueSelected ? .isSelected : [])
                 FoundationAirPlayPicker(player: player).frame(width: 40, height: 44)
                 volumeButton

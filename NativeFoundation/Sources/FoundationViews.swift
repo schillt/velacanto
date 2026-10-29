@@ -1427,7 +1427,7 @@ struct FoundationLibraryView: View {
                 .foregroundStyle(
                     showingPlayer && macPanel == .queue ? Color.accentColor : Color.primary
                 )
-                .help("Queue (⇧⌘Q)").accessibilityLabel("Show queue")
+                .help("Queue (⌥⌘U)").accessibilityLabel("Show queue")
                 .accessibilityAddTraits(showingPlayer && macPanel == .queue ? .isSelected : [])
             #endif
         }.padding(.horizontal, showNext ? 10 : 6).padding(.vertical, showNext ? 6 : 0)
