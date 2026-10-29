@@ -17,6 +17,7 @@ actor FoundationArtworkCache {
         let result: FoundationCurrentArtwork.Result
         let expiry: Date
         var access: UInt
+        let compactFallback: Bool
         var cost: Int { result.data.count + result.image.bytesPerRow * result.image.height }
     }
     private struct Job {
@@ -184,6 +185,7 @@ actor FoundationArtworkCache {
                     let id = UUID()
                     let disk = disk
                     let needsCompact = needsCompactPreview(for: key)
+                    let maximumMemoryBytes = limits.memoryBytes
                     let task = Task.detached(priority: .utility) { [weak self] in
                         let record = await disk.read(key, allowsSmaller: allowsSmaller)
                         let decoded =
@@ -193,7 +195,10 @@ actor FoundationArtworkCache {
                                 FoundationCurrentArtwork.decode(
                                     $0.data, maximumPixels: $0.key.pixels)
                             }
-                        let compact = needsCompact ? Self.compactPreview(decoded) : nil
+                        let compact =
+                            needsCompact
+                            ? Self.compactPreview(decoded, maximumMemoryBytes: maximumMemoryBytes)
+                            : nil
                         await self?.finishPreview(
                             key: previewKey, id: id, record: record, result: decoded,
                             compact: compact)
@@ -337,6 +342,7 @@ actor FoundationArtworkCache {
             let disk = disk
             let now = now
             let needsCompact = !playback && needsCompactPreview(for: key)
+            let maximumMemoryBytes = limits.memoryBytes
             active += 1
             #if DEBUG
                 let timing = FoundationLoadTiming(.artwork)
@@ -398,7 +404,7 @@ actor FoundationArtworkCache {
                 }
                 let compact: FoundationCurrentArtwork.Result?
                 if needsCompact, !Task.isCancelled, case .success(let value) = outcome {
-                    compact = Self.compactPreview(value?.0)
+                    compact = Self.compactPreview(value?.0, maximumMemoryBytes: maximumMemoryBytes)
                 } else {
                     compact = nil
                 }
@@ -507,10 +513,12 @@ actor FoundationArtworkCache {
     }
 
     /// Called only by existing detached decode workers, never by synchronous presentation.
-    private nonisolated static func compactPreview(_ result: FoundationCurrentArtwork.Result?)
-        -> FoundationCurrentArtwork.Result?
-    {
-        guard let result else { return nil }
+    private nonisolated static func compactPreview(
+        _ result: FoundationCurrentArtwork.Result?, maximumMemoryBytes: Int
+    ) -> FoundationCurrentArtwork.Result? {
+        guard let result,
+            result.data.count + result.image.bytesPerRow * result.image.height <= maximumMemoryBytes
+        else { return nil }
         if max(result.image.width, result.image.height) <= 160 { return result }
         return FoundationCurrentArtwork.decode(result.data, maximumPixels: 160)
     }
@@ -524,7 +532,8 @@ actor FoundationArtworkCache {
         if key.pixels > 160, let compact,
             !memory.containsExact(previewKey, now: instant)
         {
-            memory.remember(compact, key: previewKey, expiry: expiry, now: instant)
+            memory.remember(
+                compact, key: previewKey, expiry: expiry, now: instant, compactFallback: true)
         }
         // Admit the requested full cover last. A visible full result must not be immediately
         // evicted by its own preview, even when compact entries fill the entire budget.
@@ -599,10 +608,16 @@ actor FoundationArtworkCache {
                 {
                     key = Key(identity: revision.identity, pixels: key.pixels)
                 }
-                for candidate in FoundationArtworkCache.renditionCandidates(
-                    key, allowsSmaller: true)
-                {
-                    if let entry = entries[candidate], entry.expiry > now { return entry.result }
+                for fallback in [false, true] {
+                    for candidate in FoundationArtworkCache.renditionCandidates(
+                        key, allowsSmaller: true)
+                    {
+                        if let entry = entries[candidate], entry.expiry > now,
+                            entry.compactFallback == fallback
+                        {
+                            return entry.result
+                        }
+                    }
                 }
                 return nil
             }
@@ -617,14 +632,20 @@ actor FoundationArtworkCache {
         {
             withLock {
                 guard live else { return nil }
-                for candidate in FoundationArtworkCache.renditionCandidates(
-                    key, allowsSmaller: allowsSmaller)
-                {
-                    if var entry = entries[candidate], entry.expiry > now {
-                        clock &+= 1
-                        entry.access = clock
-                        entries[candidate] = entry
-                        return entry.result
+                // Generated compact entries are a presentation fallback, never a reason
+                // to replace an existing requested/full rendition with a different decode.
+                for fallback in [false, true] {
+                    for candidate in FoundationArtworkCache.renditionCandidates(
+                        key, allowsSmaller: allowsSmaller)
+                    {
+                        if var entry = entries[candidate], entry.expiry > now,
+                            entry.compactFallback == fallback
+                        {
+                            clock &+= 1
+                            entry.access = clock
+                            entries[candidate] = entry
+                            return entry.result
+                        }
                     }
                 }
                 return nil
@@ -653,7 +674,8 @@ actor FoundationArtworkCache {
         }
 
         func remember(
-            _ result: FoundationCurrentArtwork.Result, key: Key, expiry: Date, now: Date
+            _ result: FoundationCurrentArtwork.Result, key: Key, expiry: Date, now: Date,
+            compactFallback: Bool = false
         ) {
             let state: (entries: [Key: Entry], access: UInt)? = withLock {
                 guard live else { return nil }
@@ -661,7 +683,9 @@ actor FoundationArtworkCache {
                 return (entries, clock)
             }
             guard let state else { return }
-            let entry = Entry(result: result, expiry: expiry, access: state.access)
+            let entry = Entry(
+                result: result, expiry: expiry, access: state.access,
+                compactFallback: compactFallback)
             guard entry.cost <= max(0, limits.memoryBytes) else { return }
             // Only the owning actor mutates this store, and this method never suspends.
             // Plan eviction off-lock so a first-frame peek never waits for a large LRU scan.
