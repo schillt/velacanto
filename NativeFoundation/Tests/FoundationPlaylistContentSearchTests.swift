@@ -431,7 +431,7 @@ final class FoundationPlaylistContentSearchTests: XCTestCase {
         while !(await gate.started) { await Task.yield() }
         model.cancel()
         await gate.release()
-        await task.value
+        _ = await task.value
         XCTAssertEqual(model.items, [seedItem])
         XCTAssertEqual(model.cursor, cursor)
         XCTAssertFalse(model.loading)
