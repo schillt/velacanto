@@ -725,6 +725,30 @@ final class FoundationPlaylistContentSearchTests: XCTestCase {
         model.releaseVisible(second)
     }
 
+    @MainActor
+    func testUpstreamCancellationStopsVisibleProducerQuietlyWithoutAnotherRead() async {
+        for categorized in [false, true] {
+            let library = AutomaticPlaylistLibrary { _, _ in
+                if categorized { throw FoundationLibraryError.cancelled }
+                throw CancellationError()
+            }
+            let model = Self.automaticModel()
+            let client = UUID()
+            let producer = model.registerVisible(
+                client,
+                context: .init(trackIDs: ["opalite"]), library: library)
+            await producer?.value
+            XCTAssertFalse(
+                Task.isCancelled, "Provider cancellation does not cancel the caller task")
+            XCTAssertNil(model.error)
+            XCTAssertFalse(model.searching)
+            XCTAssertEqual(model.cursor?.candidateOffset, 0)
+            let reads = await library.calls
+            XCTAssertEqual(reads, 1)
+            model.releaseVisible(client)
+        }
+    }
+
     private static func id(_ suffix: Int) -> String { String(format: "%032x", suffix) }
 
     private static func query(_ request: URLRequest, _ name: String) -> String? {

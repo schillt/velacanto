@@ -678,7 +678,7 @@ struct FoundationSearchResolver: Sendable {
         searching = true
         defer { if searchOwner == identity { searching = false } }
         while let previous = cursor, searchOwner == identity, !Task.isCancelled, error == nil {
-            await load(context: context, library: library)
+            guard await load(context: context, library: library) else { return }
             guard searchOwner == identity, !Task.isCancelled, error == nil else { return }
             if cursor == previous {
                 error = .invalidResponse
@@ -699,11 +699,12 @@ struct FoundationSearchResolver: Sendable {
         searching = false
     }
 
-    func load(context: FoundationMusicSearchContext, library: any FoundationLibrary) async {
-        guard !loading, library.metadataScopeID == scope, let cursor else { return }
+    @discardableResult
+    func load(context: FoundationMusicSearchContext, library: any FoundationLibrary) async -> Bool {
+        guard !loading, library.metadataScopeID == scope, let cursor else { return false }
         guard budget.canRequestPage else {
             error = .invalidResponse
-            return
+            return false
         }
         let identity = UUID()
         owner = identity
@@ -714,7 +715,7 @@ struct FoundationSearchResolver: Sendable {
         do {
             let page = try await library.playlistsContainingMusic(context: context, cursor: cursor)
             try Task.checkCancellation()
-            guard owner == identity, library.metadataScopeID == scope else { return }
+            guard owner == identity, library.metadataScopeID == scope else { return false }
             let raw = FoundationPage(items: page.items, nextStartIndex: nil)
             guard let cost = budget.cost(of: raw), budget.canRetain(cost) else {
                 throw FoundationLibraryError.invalidResponse
@@ -730,12 +731,14 @@ struct FoundationSearchResolver: Sendable {
                 }
             incomplete = page.hasIncompleteCoverage
             if page.partialFailureCount > 0 { error = .network }
+            return true
         } catch {
             guard owner == identity, library.metadataScopeID == scope, !Task.isCancelled else {
-                return
+                return false
             }
             let category = FoundationLibraryError.category(error)
             if category != .cancelled { self.error = category }
+            return false
         }
     }
 }
