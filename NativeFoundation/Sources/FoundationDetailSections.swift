@@ -141,6 +141,9 @@ struct FoundationOverviewSheet: View {
     let dismiss: () -> Void
     @Environment(\.foundationBrowsingColorScheme) private var browsingColorScheme
     @Environment(\.colorScheme) private var inheritedColorScheme
+    #if os(iOS)
+        @State private var detent = PresentationDetent.medium
+    #endif
     #if os(macOS)
         @ScaledMetric(relativeTo: .body) private var textSize = 15.0
     #endif
@@ -161,7 +164,9 @@ struct FoundationOverviewSheet: View {
                     .padding(.horizontal, 24).padding(.vertical, 24)
                     .frame(maxWidth: .infinity, alignment: .center)
             }
-            #if os(macOS)
+            #if os(iOS)
+                .scrollDisabled(detent != .large)
+            #else
                 .background(.background)
             #endif
             .navigationTitle("About " + item.title)
@@ -197,7 +202,7 @@ struct FoundationOverviewSheet: View {
         .environment(\.colorScheme, browsingColorScheme ?? inheritedColorScheme)
         .accessibilityAction(.escape, dismiss)
         #if os(iOS)
-            .presentationDetents([.medium, .large])
+            .presentationDetents([.medium, .large], selection: $detent)
             .presentationDragIndicator(.visible)
             .presentationContentInteraction(.resizes)
         #else

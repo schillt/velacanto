@@ -1396,6 +1396,10 @@ private struct FoundationPlayerRelatedSheet: View {
 
     private var presentedContent: some View {
         catalogContent
+            #if os(iOS)
+                // A medium sheet owns vertical dragging; content scrolls only after expansion.
+                .scrollDisabled(detent != .large)
+            #endif
             .accessibilityElement(children: .contain)
             .accessibilityLabel(item.kind == .artist ? "Artist details" : "Album details")
             .accessibilityIdentifier("now-playing-related-sheet")

@@ -676,6 +676,16 @@ final class FoundationDownloadsUITests: XCTestCase {
                 if reopening == 0 {
                     let mediumTitleY = navigation.frame.minY
                     if verifyContentInteraction {
+                        let mediumTextOffset = body.frame.minY - navigation.frame.minY
+                        let shortStart = app.coordinate(
+                            withNormalizedOffset: CGVector(dx: 0.5, dy: 0.82))
+                        shortStart.press(
+                            forDuration: 0.1,
+                            thenDragTo: shortStart.withOffset(CGVector(dx: 0, dy: -12)),
+                            withVelocity: .slow, thenHoldForDuration: 0.2)
+                        XCTAssertEqual(
+                            body.frame.minY - navigation.frame.minY, mediumTextOffset, accuracy: 2,
+                            "A short medium-height drag must not scroll the reading text")
                         // Start on the reading content, leaving the native grabber untouched.
                         app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.82))
                             .press(
@@ -4448,7 +4458,8 @@ final class FoundationDownloadsUITests: XCTestCase {
         continueAfterFailure = false
         XCUIDevice.shared.orientation = .portrait
         let app = launch(
-            productionShell: true, canonicalDownloadState: "full", longPlayback: true,
+            productionShell: true, largeText: true, canonicalDownloadState: "full",
+            longPlayback: true,
             compactFixtureControls: true)
         selectTab("Library", in: app)
         openCanonicalCollection("album", fromDownloads: false, in: app)
@@ -4460,15 +4471,30 @@ final class FoundationDownloadsUITests: XCTestCase {
             assertRelatedDetent("medium", in: app)
             capture("Related \(kind) content at medium detent", in: app)
             let sheet = relatedSheet(app)
+            let title = sheet.staticTexts["Fixture " + kind].firstMatch
+            XCTAssertTrue(title.exists && title.frame.height > 0)
+            let mediumTitleOffset = title.frame.minY - sheet.frame.minY
             let start = app.coordinate(withNormalizedOffset: .zero).withOffset(
                 CGVector(
                     dx: sheet.frame.midX - app.frame.minX,
                     dy: sheet.frame.minY + sheet.frame.height * 0.75 - app.frame.minY))
             start.press(
+                forDuration: 0.1, thenDragTo: start.withOffset(CGVector(dx: 0, dy: -12)),
+                withVelocity: .slow, thenHoldForDuration: 0.2)
+            assertRelatedDetent("medium", in: app)
+            XCTAssertEqual(
+                title.frame.minY - sheet.frame.minY, mediumTitleOffset, accuracy: 2,
+                "Medium-height detail content must stay fixed relative to its sheet")
+            start.press(
                 forDuration: 0.1,
                 thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.14)))
             assertRelatedDetent("large", in: app)
             capture("Related \(kind) body drag expands before content scrolling", in: app)
+            let expandedTitleOffset = title.frame.minY - sheet.frame.minY
+            sheet.swipeUp()
+            XCTAssertLessThan(
+                title.frame.minY - sheet.frame.minY, expandedTitleOffset - 20,
+                "Large-height detail content must remain scrollable")
             closeRelatedSheet(app)
         }
         XCTAssertTrue(app.buttons["Pause"].waitForExistence(timeout: 5))
@@ -4491,6 +4517,8 @@ final class FoundationDownloadsUITests: XCTestCase {
         let initialLabel = pin.label
         XCTAssertGreaterThanOrEqual(pin.frame.width, 44)
         XCTAssertGreaterThanOrEqual(pin.frame.height, 44)
+        XCTAssertLessThanOrEqual(pin.frame.width, 46)
+        XCTAssertLessThanOrEqual(pin.frame.height, 46)
         pin.tap()
         XCTAssertNotEqual(pin.label, initialLabel)
         pin.tap()

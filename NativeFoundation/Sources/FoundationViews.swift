@@ -1894,7 +1894,7 @@ struct FoundationCatalogView: View {
         }
         .overlay(alignment: .topTrailing) {
             if relatedItemSheet, headerItem != nil {
-                FoundationImmersiveCollectionActions { catalogActions }
+                FoundationImmersiveCollectionActions(compact: true) { catalogActions }
             }
         }
         .environment(\.foundationCollectionOperationOwner, collectionOperationOwner)
@@ -3395,13 +3395,14 @@ struct FoundationAlbumShelfCard: View {
 /// The same canonical actions stay available without adding a sheet title bar.
 private struct FoundationImmersiveCollectionActions<Controls: View>: View {
     @Environment(\.foundationReduceTransparency) private var reduceTransparency
+    var compact = false
     @ViewBuilder let controls: () -> Controls
 
     var body: some View {
         HStack(spacing: 4) { controls() }
             .font(.title3.weight(.semibold))
-            .buttonStyle(FoundationImmersiveActionStyle())
-            .padding(4)
+            .buttonStyle(FoundationImmersiveActionStyle(side: compact ? 44 : 48))
+            .padding(compact ? 0 : 4)
             .background {
                 if reduceTransparency { Capsule().fill(.background) }
             }
@@ -3412,9 +3413,11 @@ private struct FoundationImmersiveCollectionActions<Controls: View>: View {
 }
 
 private struct FoundationImmersiveActionStyle: ButtonStyle {
+    let side: CGFloat
+
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .frame(width: 48, height: 48)
+            .frame(width: side, height: side)
             .contentShape(Rectangle())
             .opacity(configuration.isPressed ? 0.6 : 1)
     }
