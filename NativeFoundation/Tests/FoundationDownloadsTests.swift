@@ -1146,7 +1146,7 @@ final class FoundationDownloadsTests: XCTestCase {
             defer { manager.invalidate() }
             let connectivity = FoundationConnectivity(monitorConnectivity: false, retry: {})
             let state = RecreatedArtworkState()
-            state.selectedItem = albums[0]
+            state.select(albums[0])
             let content = RecreatedArtworkHost(
                 state: state, item: album, library: library, gate: gate
             )
@@ -1170,8 +1170,7 @@ final class FoundationDownloadsTests: XCTestCase {
             #endif
             for index in albums.indices {
                 if index > 0 {
-                    state.selectedItem = albums[index]
-                    state.incarnation = UUID()
+                    state.select(albums[index])
                 }
                 let identity = state.incarnation
                 try await waitUntil { state.firstFrames[identity] != nil }
@@ -2884,8 +2883,18 @@ private actor DownloadProgressReporter {
     @MainActor
     private final class RecreatedArtworkState: ObservableObject {
         struct Frame { let image: Image? }
-        @Published var incarnation = UUID()
-        @Published var selectedItem: FoundationItem?
+        struct Selection {
+            let incarnation: UUID
+            let item: FoundationItem?
+        }
+        @Published var selection = Selection(incarnation: UUID(), item: nil)
+        var incarnation: UUID {
+            get { selection.incarnation }
+            set { selection = Selection(incarnation: newValue, item: selection.item) }
+        }
+        func select(_ item: FoundationItem) {
+            selection = Selection(incarnation: UUID(), item: item)
+        }
         var firstFrames: [UUID: Frame] = [:]
         var completed: [UUID: Bool] = [:]
     }
@@ -2898,21 +2907,23 @@ private actor DownloadProgressReporter {
         let gate: RecreatedArtworkReadGate
 
         var body: some View {
+            let selection = state.selection
             FoundationCatalogArtwork(
-                item: state.selectedItem ?? item, library: library, isActive: true, size: 144
+                item: selection.item ?? item, library: library, isActive: true, size: 144
             )
-            .id(state.incarnation)
             .environment(
                 \.foundationArtworkTaskObservation,
                 .init(
-                    phase: state.incarnation,
+                    phase: selection.incarnation,
                     rendered: { phase, image in
                         if state.firstFrames[phase] == nil {
                             state.firstFrames[phase] = .init(image: image)
                         }
                     },
                     beforeLoad: { try await gate.wait() }
-                ) { phase, active in state.completed[phase] = active })
+                ) { phase, active in state.completed[phase] = active }
+            )
+            .id(selection.incarnation)
         }
     }
 
