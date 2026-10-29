@@ -210,10 +210,12 @@ struct FoundationOfflineBrowsingBanner: View {
 }
 
 private struct FoundationOfflineBrowsingBannerPlacement: ViewModifier {
+    let drawsBackground: Bool
+
     func body(content: Content) -> some View {
         #if os(iOS)
             content.safeAreaInset(edge: .top, spacing: 0) {
-                FoundationOfflineBrowsingBanner()
+                FoundationOfflineBrowsingBanner(drawsBackground: drawsBackground)
             }
         #else
             content
@@ -223,8 +225,8 @@ private struct FoundationOfflineBrowsingBannerPlacement: ViewModifier {
 
 extension View {
     /// Native-title browsing pages attach this to their content inside NavigationStack.
-    func foundationOfflineBrowsingBanner() -> some View {
-        modifier(FoundationOfflineBrowsingBannerPlacement())
+    func foundationOfflineBrowsingBanner(drawsBackground: Bool = true) -> some View {
+        modifier(FoundationOfflineBrowsingBannerPlacement(drawsBackground: drawsBackground))
     }
 }
 

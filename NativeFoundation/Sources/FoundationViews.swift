@@ -4322,7 +4322,6 @@ private struct FoundationDetailPresentation: ViewModifier {
                         .ignoresSafeArea()
                     }
                 }
-                .environment(\.colorScheme, resolvedScheme)
                 #if os(iOS)
                     .tint(resolvedScheme == .dark ? .white : .black)
                     .ignoresSafeArea(.container, edges: .top)
@@ -4331,8 +4330,11 @@ private struct FoundationDetailPresentation: ViewModifier {
                     .toolbarBackground(.hidden, for: .navigationBar)
                     .toolbarColorScheme(resolvedScheme, for: .navigationBar)
                     .toolbar(.visible, for: .navigationBar)
-                    .foundationOfflineBrowsingBanner()
+                    // The artwork and native scroll edge already own this header's surface.
+                    .foundationOfflineBrowsingBanner(drawsBackground: false)
                 #endif
+                // Include the status accessory in the same appearance as its collection.
+                .environment(\.colorScheme, resolvedScheme)
         } else {
             content.foundationCatalogHeader(title)
         }

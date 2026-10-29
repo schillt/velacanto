@@ -2032,6 +2032,33 @@ final class FoundationDownloadsUITests: XCTestCase {
         return CGRect(x: numbers[0], y: numbers[1], width: numbers[2], height: numbers[3])
     }
 
+    func testOfflineImmersiveAlbumHeaderKeepsArtworkSurfaceInBothAppearances() {
+        continueAfterFailure = false
+        XCUIDevice.shared.orientation = .portrait
+        for scheme in ["light", "dark"] {
+            let app = launch(
+                productionShell: true, canonicalDownloadState: "full", artworkCache: true,
+                colorScheme: scheme,
+                compactFixtureControls: true)
+            selectTab("Library", in: app)
+            openCanonicalCollection("album", fromDownloads: false, in: app, useVerifiedCenter: true)
+            let detail = app.descendants(matching: .any)["collection-detail-album-album"]
+            XCTAssertTrue(detail.exists)
+            capture("\(scheme) online album native header and artwork surface", in: app)
+            toggleAlphabetNetwork(app, offline: true)
+            let banner = app.descendants(matching: .any)["browsing-offline-status"]
+            XCTAssertTrue(banner.waitForExistence(timeout: 5))
+            XCTAssertTrue(detail.exists)
+            XCTAssertFalse(app.buttons["offline-retry"].exists)
+            capture("\(scheme) offline status inherits album surface at top", in: app)
+            app.swipeUp()
+            XCTAssertTrue(detail.exists)
+            XCTAssertTrue(banner.exists)
+            capture("\(scheme) offline album native collapsed header", in: app)
+            app.terminate()
+        }
+    }
+
     func testOfflinePreservesAlbumHomeAndPlayerWithoutPlaybackBadges() {
         continueAfterFailure = false
         let app = launch(productionShell: true)
