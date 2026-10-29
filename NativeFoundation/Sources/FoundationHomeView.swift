@@ -233,6 +233,9 @@ struct FoundationHomeView<Profile: View>: View {
 
     private var naturalContent: some View {
         LazyVStack(alignment: .leading, spacing: 28) {
+            FoundationFeatureIntroductionOffer(
+                sync: actions.pinSync,
+                isActive: isActive && isVisible && !connectivity.localOnly)
             if connectivity.hasConnectionIssue
                 || [recentTracks, favorites, recentAlbums].contains(
                     where: \.hasConnectionIssue)

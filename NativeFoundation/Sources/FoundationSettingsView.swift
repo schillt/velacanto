@@ -125,6 +125,12 @@ struct FoundationSettingsView: View {
                 }
                 Section {
                     NavigationLink {
+                        FoundationFeatureIntroductionView(sync: pinSync, replay: true)
+                    } label: {
+                        Label("What’s New & Walkthrough", systemImage: "sparkles")
+                    }
+                    .accessibilityIdentifier("settings-feature-introduction")
+                    NavigationLink {
                         FoundationLicensesView()
                     } label: {
                         Label("Open-source licenses", systemImage: "doc.text")
