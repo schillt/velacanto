@@ -91,7 +91,7 @@ struct FoundationRemoteListeningActivity: Identifiable, Equatable, Sendable {
         let candidates: [Self] = sessions.compactMap { session in
             guard canonicalUserID(session.userID) == owner,
                 session.isActive == true,
-                let device = session.deviceID, !device.isEmpty, device.utf8.count <= 128,
+                let device = remoteDeviceID(session.deviceID),
                 device.caseInsensitiveCompare(ownDeviceID) != .orderedSame,
                 let sessionID = occurrenceID(session.id), let media = session.nowPlayingItem,
                 media.type == "Audio", let itemID = catalogID(media.id),
@@ -162,6 +162,16 @@ struct FoundationRemoteListeningActivity: Identifiable, Equatable, Sendable {
         let result = String(String.UnicodeScalarView(cleaned))
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return result.isEmpty ? nil : String(result.prefix(256))
+    }
+
+    /// Remote clients own these opaque values. Jellyfin Web encodes its user agent and
+    /// timestamp, so its valid device IDs can exceed the native client's 128-byte limit.
+    /// Preserve the entire value; never decode, trim, truncate or substitute an identity.
+    static func remoteDeviceID(_ value: String?) -> String? {
+        guard let value, !value.isEmpty, value.utf8.count <= 2048,
+            !value.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) })
+        else { return nil }
+        return value
     }
 
     /// Session/queue occurrence IDs are opaque strings, never catalog URL components.
@@ -529,7 +539,9 @@ struct FoundationRemoteContinuationOffer: Sendable {
         Array(Set(queue.map(\.itemID))).filter { items[$0] == nil }.sorted()
     }
     func matching(_ previous: Self) throws -> Self {
-        guard fingerprint == previous.fingerprint else { throw FoundationHandoffError.changed }
+        guard FoundationRemoteListeningActivity.remoteDeviceID(deviceID) != nil,
+            deviceID == previous.deviceID, fingerprint == previous.fingerprint
+        else { throw FoundationHandoffError.changed }
         return self
     }
     func resolving(_ additional: [FoundationItem], authoritative: Bool = false) throws -> Self {
@@ -599,7 +611,7 @@ struct FoundationRemoteContinuationOffer: Sendable {
         let matches = sessions.filter { $0.id == sessionID }
         guard matches.count == 1, let session = matches.first,
             Activity.canonicalUserID(session.userID) == owner,
-            let device = Activity.occurrenceID(session.deviceID),
+            let device = Activity.remoteDeviceID(session.deviceID),
             device.caseInsensitiveCompare(ownDeviceID) != .orderedSame,
             session.isActive == true, session.playState?.isPaused == false,
             let current = session.nowPlayingItem, current.type == "Audio",
@@ -676,7 +688,8 @@ struct FoundationRemoteContinuationOffer: Sendable {
         guard matches.count == 1, let session = matches.first,
             let owner = Activity.canonicalUserID(userID),
             Activity.canonicalUserID(session.userID) == owner,
-            session.deviceID == expected.deviceID
+            let device = Activity.remoteDeviceID(session.deviceID),
+            device == expected.deviceID
         else { return false }
         return session.nowPlayingItem == nil
     }

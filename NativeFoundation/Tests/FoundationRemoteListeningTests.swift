@@ -763,6 +763,132 @@ private enum CrossClientFixtures {
 }
 
 final class FoundationRemoteContinuationTests: XCTestCase {
+    func testOpaqueRemoteDeviceByteBoundariesApplyToDiscoveryAndQueuePreparation() throws {
+        for device in [
+            String(repeating: "a", count: 128), String(repeating: "b", count: 129),
+            String(repeating: "c", count: 512), String(repeating: "d", count: 2048),
+            String(repeating: "é", count: 1024),
+        ] {
+            var row = CrossClientFixtures.row()
+            row["DeviceId"] = device
+            XCTAssertEqual(try CrossClientFixtures.activity(row).remoteDeviceID, device)
+            XCTAssertEqual(try CrossClientFixtures.offer(row).deviceID, device)
+        }
+        for device in [
+            "", String(repeating: "a", count: 2049), String(repeating: "é", count: 1025),
+            "leading\ncontrol", "trailing-control\u{7F}", "embedded\0control",
+        ] {
+            var row = CrossClientFixtures.row()
+            row["DeviceId"] = device
+            let discovered = try FoundationRemoteListeningActivity.decode(
+                CrossClientFixtures.data([row]), userID: CrossClientFixtures.owner,
+                ownDeviceID: "own-device", now: Date())
+            XCTAssertTrue(discovered.isEmpty)
+            XCTAssertThrowsError(try CrossClientFixtures.offer(row))
+        }
+        var missing = CrossClientFixtures.row()
+        missing.removeValue(forKey: "DeviceId")
+        XCTAssertTrue(
+            try FoundationRemoteListeningActivity.decode(
+                CrossClientFixtures.data([missing]), userID: CrossClientFixtures.owner,
+                ownDeviceID: "own-device", now: Date()
+            ).isEmpty)
+        XCTAssertThrowsError(try CrossClientFixtures.offer(missing))
+        // This policy is for remote opaque device IDs, not our native current identity.
+        XCTAssertThrowsError(
+            try FoundationRemoteListeningActivity.decode(
+                CrossClientFixtures.data([CrossClientFixtures.row()]),
+                userID: CrossClientFixtures.owner, ownDeviceID: String(repeating: "x", count: 129),
+                now: Date()))
+    }
+
+    func testLongOpaqueDeviceKeepsExactMatchingAndExistingOccurrenceLimits() throws {
+        var row = CrossClientFixtures.row()
+        let device = "AbC/" + String(repeating: "d", count: 200) + "+1"
+        row["DeviceId"] = device
+        let original = try CrossClientFixtures.offer(row)
+        XCTAssertEqual(original.deviceID, device)
+        XCTAssertEqual(try CrossClientFixtures.offer(row).matching(original).deviceID, device)
+        row["DeviceId"] = device.lowercased()
+        XCTAssertThrowsError(try CrossClientFixtures.offer(row).matching(original))
+        row["DeviceId"] = device + "different"
+        XCTAssertThrowsError(try CrossClientFixtures.offer(row).matching(original))
+        row["DeviceId"] = device
+        row.removeValue(forKey: "NowPlayingItem")
+        XCTAssertTrue(
+            try FoundationRemoteContinuationOffer.stopped(
+                CrossClientFixtures.data([row]), expected: original,
+                userID: CrossClientFixtures.owner))
+        row["DeviceId"] = device.lowercased()
+        XCTAssertFalse(
+            try FoundationRemoteContinuationOffer.stopped(
+                CrossClientFixtures.data([row]), expected: original,
+                userID: CrossClientFixtures.owner))
+        row = CrossClientFixtures.row()
+        row["DeviceId"] = device
+        row["PlaylistItemId"] = String(repeating: "p", count: 129)
+        XCTAssertThrowsError(try CrossClientFixtures.offer(row))
+    }
+
+    func testWebGeneratedLongDeviceUsesExistingRequestAndStopBoundaries() async throws {
+        // Matches official Web generation with a wholly synthetic user-agent and timestamp.
+        let userAgent =
+            "SyntheticBrowser/1.0 (SyntheticPlatform) " + String(repeating: "x", count: 90)
+        let device = Data((userAgent + "|1700000000000").utf8).base64EncodedString()
+            .replacingOccurrences(of: "=", with: "1")
+        XCTAssertGreaterThan(device.utf8.count, 128)
+        var row = CrossClientFixtures.row()
+        row["DeviceId"] = device
+        let recorder = CrossClientTransport(customSource: try CrossClientFixtures.data([row]))
+        let library = FoundationJellyfinLibrary(
+            session: CrossClientFixtures.session, load: { try await recorder.load($0) })
+        let activities = try await library.remoteListeningActivity()
+        let activity = try XCTUnwrap(activities.first)
+        XCTAssertEqual(activity.remoteDeviceID, device)
+        let offer = try await library.prepareRemoteContinuation(activity)
+        XCTAssertEqual(offer.deviceID, device)
+        let refreshed = try await library.refreshRemoteContinuation(offer)
+        XCTAssertEqual(refreshed.deviceID, device)
+        XCTAssertEqual(refreshed.queue, offer.queue)
+        try await library.stopRemoteContinuation(refreshed)
+        let confirmed = try await library.confirmRemoteContinuationStopped(refreshed)
+        XCTAssertFalse(confirmed, "A command response alone never proves the source stopped")
+        let requests = await recorder.requests
+        XCTAssertEqual(requests.count, 6)
+        XCTAssertEqual(requests.map { $0.httpMethod }, ["GET", "GET", "GET", "GET", "POST", "GET"])
+        XCTAssertEqual(requests.filter { $0.url?.path.hasSuffix("/Items") == true }.count, 1)
+        XCTAssertEqual(requests.filter { $0.url?.path.hasSuffix("/Playing/Stop") == true }.count, 1)
+        for request in requests {
+            XCTAssertFalse(request.url!.absoluteString.contains(device))
+            XCTAssertFalse(
+                (request.value(forHTTPHeaderField: "Authorization") ?? "").contains(device))
+            XCTAssertNil(request.httpBody)
+        }
+        XCTAssertEqual(
+            offer.entries.map(\.item.id),
+            [CrossClientFixtures.first, CrossClientFixtures.current, CrossClientFixtures.first])
+        XCTAssertEqual(Set(offer.entries.map(\.id)).count, 3)
+    }
+
+    func testChangedOpaqueDeviceFailsBeforeMetadataOrStopRequests() async throws {
+        var original = CrossClientFixtures.row()
+        let device = "CaseSensitive" + String(repeating: "x", count: 200)
+        original["DeviceId"] = device
+        var fresh = original
+        fresh["DeviceId"] = device.lowercased()
+        let recorder = CrossClientTransport(customSource: try CrossClientFixtures.data([fresh]))
+        let library = FoundationJellyfinLibrary(
+            session: CrossClientFixtures.session, load: { try await recorder.load($0) })
+        do {
+            _ = try await library.prepareRemoteContinuation(CrossClientFixtures.activity(original))
+            XCTFail("Changed device must not retarget the browser card")
+        } catch { XCTAssertEqual(error as? FoundationHandoffError, .changed) }
+        let requests = await recorder.requests
+        XCTAssertEqual(requests.count, 1)
+        XCTAssertEqual(requests.first?.httpMethod, "GET")
+        XCTAssertEqual(requests.first?.url?.path, "/jellyfin/Sessions")
+    }
+
     func testDiscoveryIncludesBrowserAndUnknownClientsWithoutNativeInstructions() throws {
         for client in ["Jellyfin Web", "Another client"] {
             var row = CrossClientFixtures.row()

@@ -969,7 +969,8 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
         -> FoundationRemoteContinuationOffer
     {
         guard activity.receiverScope == listeningActivityScope,
-            !activity.usesNativeHandoff, !activity.sessionID.isEmpty
+            !activity.usesNativeHandoff, !activity.sessionID.isEmpty,
+            FoundationRemoteListeningActivity.remoteDeviceID(activity.remoteDeviceID) != nil
         else {
             throw FoundationHandoffError.unavailable
         }
@@ -983,7 +984,7 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
                     scope: listeningActivityScope,
                     catalogSource: source, now: Date())
                 guard offer.activityID == activity.id, offer.client == activity.client,
-                    offer.deviceID.lowercased() == activity.remoteDeviceID?.lowercased(),
+                    offer.deviceID == activity.remoteDeviceID,
                     offer.queue.first(where: { $0.sourceID == offer.sourceOccurrence })?.itemID
                         == activity.item.id
                 else {
@@ -1129,7 +1130,8 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
 
     func stopRemoteContinuation(_ expected: FoundationRemoteContinuationOffer) async throws {
         guard expected.scope == listeningActivityScope, expected.supportsRemoteControl,
-            Self.validID(expected.sessionID)
+            Self.validID(expected.sessionID),
+            FoundationRemoteListeningActivity.remoteDeviceID(expected.deviceID) != nil
         else { throw FoundationHandoffError.unavailable }
         try await FoundationRequestIntent.$isPlayback.withValue(false) {
             try await FoundationRemoteListeningDeadline.run {
