@@ -1107,7 +1107,9 @@ final class FoundationDownloadsTests: XCTestCase {
         func testRecreatedCoverKeepsRenderedLeafWhileReleasedPreviewUpgradesToFull() async throws {
             let directory = try root()
             let data = try artworkData(width: 640, height: 640)
-            let cache = FoundationArtworkCache(scope: "recreated-view", root: directory)
+            // Match production's independent artwork-cache and downloaded-media owners.
+            let cacheRoot = directory.appendingPathComponent("artwork-cache", isDirectory: true)
+            let cache = FoundationArtworkCache(scope: "recreated-view", root: cacheRoot)
             addTeardownBlock { _ = await cache.invalidate(removeDisk: true) }
             let gate = RecreatedArtworkReadGate()
             addTeardownBlock { await gate.release() }
@@ -1141,6 +1143,12 @@ final class FoundationDownloadsTests: XCTestCase {
                 scope: "recreated-view", library: library, root: directory,
                 monitorConnectivity: false)
             defer { manager.invalidate() }
+            let records =
+                FileManager.default.enumerator(
+                    at: cacheRoot, includingPropertiesForKeys: nil)?.allObjects
+                .compactMap { $0 as? URL }.filter { $0.pathExtension == "art" } ?? []
+            XCTAssertEqual(records.count, 24, "Download inventory must not remove artwork records")
+            XCTAssertTrue(records.allSatisfy { $0.lastPathComponent.hasSuffix("-640.art") })
             let connectivity = FoundationConnectivity(monitorConnectivity: false, retry: {})
             let state = RecreatedArtworkState()
             let content = RecreatedArtworkHost(
