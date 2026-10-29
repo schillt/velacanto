@@ -43,7 +43,6 @@ struct FoundationCatalogArtwork: View {
         case current(FoundationCurrentArtwork.Result?)
     }
     @Environment(\.displayScale) private var displayScale
-    @Environment(\.foundationReduceMotion) private var reduceMotion
     @State private var isLoadingUpgrade = false
     @State private var loadGeneration = UUID()
     @State private var installedCurrentRevision: UUID?
@@ -66,8 +65,6 @@ struct FoundationCatalogArtwork: View {
     var loadedImage: Binding<Image?>? = nil
     var upperEdgeColors: Binding<[Color]?>? = nil
     @State private var image: Image?
-    @State private var installedDecodedIdentity: ObjectIdentifier?
-    @State private var imageRevision = UUID()
     @State private var installedPixels = 0
     @State private var installedIdentity: String?
     @State private var installedRetainedArtworkIdentity: String?
@@ -102,16 +99,11 @@ struct FoundationCatalogArtwork: View {
                                 FoundationArtworkLeafObservation(
                                     observation: observation, image: displayImage))
                         #endif
-                        .id(imageRevision)
-                        .transition(.opacity)
                 } else {
                     Image(systemName: item.kind == .artist ? "music.mic" : "music.note")
                         .foregroundStyle(.secondary)
                 }
             }
-            // Animate decoded-image replacement only; sizing and sampled-color bindings
-            // retain their existing publication behavior. Clearing identity is immediate.
-            .animation(artworkArrivalAnimation, value: imageRevision)
         }
         .frame(width: size, height: displayHeight ?? size)
         .clipShape(
@@ -200,11 +192,6 @@ struct FoundationCatalogArtwork: View {
         return library.immediateArtworkResult(for: item, size: targetPixels)
     }
 
-    private var artworkArrivalAnimation: Animation? {
-        if case .current = source { return nil }
-        return reduceMotion ? nil : .easeInOut(duration: 0.2)
-    }
-
     private func loadCatalogArtwork() async {
         let generation = loadGeneration
         do {
@@ -277,15 +264,8 @@ struct FoundationCatalogArtwork: View {
                 return
             }
         }
-        let decodedIdentity = cgImage.map { ObjectIdentifier($0) }
-        // A recreated lazy card can receive the shared decoded cache hit on its first task.
-        // Install that first cover immediately; only replacements of a usable cover crossfade.
-        if decodedIdentity != nil, installedDecodedIdentity != nil,
-            decodedIdentity != installedDecodedIdentity
-        {
-            imageRevision = UUID()
-        }
-        installedDecodedIdentity = decodedIdentity
+        // Resolution upgrades replace pixels within this same image leaf. Scoped identity
+        // clearing still owns actual item/revision changes; equivalent covers never fade out.
         installedPixels = cgImage.map { max($0.width, $0.height) } ?? 0
         image = displayImage ?? cgImage.map { Image(decorative: $0, scale: 1) }
         loadedImage?.wrappedValue = image
