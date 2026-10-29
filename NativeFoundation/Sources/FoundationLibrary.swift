@@ -2070,7 +2070,7 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
             return .init(
                 id: id, genres: genres,
                 content: .init(
-                    title: item.title, sortName: item.sortName, album: item.album,
+                    title: item.title, album: item.album,
                     artist: item.artist,
                     duration: item.duration.flatMap { $0.isFinite && $0 >= 0 ? $0 : nil },
                     year: entry.productionYear.flatMap { (1...9999).contains($0) ? $0 : nil },

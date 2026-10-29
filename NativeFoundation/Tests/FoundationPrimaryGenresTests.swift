@@ -1229,6 +1229,12 @@ final class FoundationPrimaryGenresTests: XCTestCase {
         XCTAssertTrue(legacy.isValid(for: scope))
         XCTAssertEqual(legacy.matchingItems(), current.matchingItems())
         XCTAssertNil(legacy.contentSource(genreID: Self.id(1), kind: .album))
+        let unsupported = FoundationPrimaryGenreRecord(
+            snapshot: current.snapshot, descriptors: current.descriptors,
+            contentMetadataVersion: FoundationPrimaryGenreContentIndex.version + 1,
+            contentIndex: current.contentIndex)
+        XCTAssertNil(unsupported.contentSource(genreID: Self.id(1), kind: .album))
+        XCTAssertNil(unsupported.contentSource(genreID: Self.id(1), kind: .track))
         let downloaded = [
             FoundationItem(
                 id: Self.id(1000), title: "Z Track", subtitle: "", kind: .track, duration: 10,

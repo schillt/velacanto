@@ -46,6 +46,7 @@ private struct FoundationPrimaryGenreContentView: View {
     @State private var descending = false
     @State private var downloadedOnly = false
     @State private var prepared: Prepared?
+    @State private var unavailableKey: String?
 
     private struct Prepared {
         let key: String
@@ -92,8 +93,9 @@ private struct FoundationPrimaryGenreContentView: View {
                     title: genre.title, source: prepared.source, localItems: prepared.localItems,
                     library: library, player: player, isActive: isActive
                 ).id(prepared.key)
-            } else if record.contentIndex != nil || connectivity.localOnly || downloadedOnly
-                || genres.isBuilding
+            } else if genres.isBuilding
+                || (unavailableKey != queryKey
+                    && (record.contentIndex != nil || connectivity.localOnly || downloadedOnly))
             {
                 ProgressView("Preparing genre…")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -101,7 +103,9 @@ private struct FoundationPrimaryGenreContentView: View {
             } else {
                 ContentUnavailableView(
                     "Genre view unavailable", systemImage: "music.note.list",
-                    description: Text("Your music is still available from Library.")
+                    description: Text(
+                        "Alphabetical browsing is unavailable. Choose Downloaded to browse music saved on this device, or continue from Library."
+                    )
                 )
                 .foundationCatalogHeader(genre.title)
             }
@@ -125,6 +129,7 @@ private struct FoundationPrimaryGenreContentView: View {
                 library.primaryGenreIndexScope == record.snapshot.scope
             else { return }
             let key = queryKey
+            unavailableKey = nil
             let ready = readySongs
             let local = record.offlineContent(
                 genreID: genre.id, kind: content.kind, downloaded: ready,
@@ -138,7 +143,11 @@ private struct FoundationPrimaryGenreContentView: View {
                     let next = record.contentSource(
                         genreID: genre.id, kind: content.kind, sort: effectiveSort,
                         descending: descending)
-                else { return }
+                else {
+                    guard !Task.isCancelled, key == queryKey else { return }
+                    unavailableKey = key
+                    return
+                }
                 source = next
             }
             guard !Task.isCancelled, key == queryKey else { return }
