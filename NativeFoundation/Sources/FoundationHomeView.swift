@@ -441,7 +441,7 @@ private struct FoundationContinueListening: View {
     }
 
     private var selected: FoundationRemoteListeningActivity? {
-        guard active else { return nil }
+        guard !connectivity.localOnly, !library.listeningActivityScope.isEmpty else { return nil }
         return FoundationContinueListeningSelection.select(
             model.activities, dismissed: dismissals.keys)
     }
@@ -458,26 +458,28 @@ private struct FoundationContinueListening: View {
         VStack(alignment: .leading, spacing: 0) {
             if let activity = selected {
                 continueListening(activity)
-                    .id(activity.id)
             }
         }
         .padding(.bottom, selected == nil ? 0 : 28)
         .task(id: taskIdentity) {
             guard !Task.isCancelled else { return }
-            model.cancel()
+            model.suspend()
             guard active, !Task.isCancelled else { return }
+            model.removeExpiredActivities()
             await model.refresh { try await library.remoteListeningActivity() }
-            guard !Task.isCancelled else { return }
+        }
+        .task(id: expiryIdentity) {
+            guard active, !Task.isCancelled else { return }
             await model.expireVisibleActivity()
         }
         .onDisappear {
-            model.cancel()
+            model.suspend()
             showingGuide = false
             inlineInstructionsForID = nil
         }
         .onChange(of: active) { _, value in
             if !value {
-                model.cancel()
+                model.suspend()
                 showingGuide = false
                 inlineInstructionsForID = nil
             }
@@ -491,6 +493,11 @@ private struct FoundationContinueListening: View {
                 instruction: instruction, suppressed: $guideSuppressed,
                 done: { showingGuide = false })
         }
+    }
+
+    private var expiryIdentity: String {
+        // A finite expiry belongs to the accepted snapshot, independent of an in-flight refresh.
+        "\(library.listeningActivityScope):\(active):\(model.snapshotRevision)"
     }
 
     private var taskIdentity: String {
@@ -511,16 +518,18 @@ private struct FoundationContinueListening: View {
         inlineInstructionsForID = nil
     }
 
-    /// Reuses the existing artwork/title/details/progress-circle media-card layout.
-    /// It deliberately has no player or audio-command callback.
+    /// The heading stays outside the native swipe surface. Dismissal is presentation-only.
     private func continueListening(_ activity: FoundationRemoteListeningActivity) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            cardHeading(activity)
+            Text("Continue listening from \(activity.deviceLabel)")
+                .font(.subheadline.weight(.semibold))
+                .textCase(.uppercase).tracking(1)
+                .foregroundStyle(.secondary)
+                .accessibilityAddTraits(.isHeader)
+                .accessibilityIdentifier("continue-listening-heading")
             VStack(alignment: .leading, spacing: 12) {
-                HStack(spacing: 8) {
-                    mediaButton(activity)
-                    progressButton(activity)
-                }
+                mediaButton(activity)
+                    .accessibilityAction(named: "Dismiss") { dismiss(activity) }
                 if inlineInstructionsForID == activity.id {
                     Text(instruction).font(.subheadline).foregroundStyle(.secondary)
                     Button("Handoff Help") { showingGuide = true }
@@ -528,34 +537,18 @@ private struct FoundationContinueListening: View {
             }
             .padding(12)
             .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 16))
-        }
-        .accessibilityIdentifier("continue-listening-remote-card")
-        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-            Button(role: .destructive) {
-                dismiss(activity)
-            } label: {
-                Label("Dismiss", systemImage: "trash")
+            .accessibilityIdentifier("continue-listening-remote-card")
+            .contextMenu {
+                Button("Dismiss", systemImage: "xmark", role: .destructive) { dismiss(activity) }
             }
-        }
-    }
-
-    private func cardHeading(_ activity: FoundationRemoteListeningActivity) -> some View {
-        HStack {
-            Text("Continue listening from \(activity.deviceLabel)")
-                .font(.subheadline.weight(.semibold))
-                .textCase(.uppercase).tracking(1)
-                .foregroundStyle(.secondary)
-                .accessibilityAddTraits(.isHeader)
-            Spacer(minLength: 8)
-            Button {
-                dismiss(activity)
-            } label: {
-                Image(systemName: "trash").frame(width: 44, height: 44)
+            .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                Button(role: .destructive) {
+                    dismiss(activity)
+                } label: {
+                    Label("Dismiss", systemImage: "xmark")
+                }
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Dismiss Continue Listening")
-            .accessibilityHint("Hides this card. Playback continues on the other device.")
-            .accessibilityIdentifier("continue-listening-dismiss")
+            .id(activity.id)
         }
     }
 
@@ -574,11 +567,13 @@ private struct FoundationContinueListening: View {
                     source: .catalog, item: artwork, library: library, isActive: active, size: 64
                 ).id(artworkIdentity)
                 mediaDetails(activity)
+                progressIndicator(activity)
             }.contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Continue listening instructions")
         .accessibilityValue(accessibilityValue)
+        .accessibilityHint("Shows Handoff instructions. Does not start playback.")
     }
 
     private func mediaDetails(_ activity: FoundationRemoteListeningActivity) -> some View {
@@ -593,28 +588,21 @@ private struct FoundationContinueListening: View {
         }.frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private func progressButton(_ activity: FoundationRemoteListeningActivity) -> some View {
-        Button {
-            openInstructions(for: activity)
-        } label: {
-            Image(systemName: "play.fill")
-                .font(.title3.weight(.semibold)).foregroundStyle(.primary)
-                .frame(width: 44, height: 44)
-                .background(.quaternary, in: Circle())
-                .overlay {
-                    Circle().trim(from: 0, to: activity.progress.fraction)
-                        .stroke(
-                            .primary.opacity(0.75),
-                            style: StrokeStyle(lineWidth: 2, lineCap: .round)
-                        )
-                        .rotationEffect(.degrees(-90)).padding(2)
-                        .allowsHitTesting(false).accessibilityHidden(true)
-                }
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("How to continue listening here")
-        .accessibilityValue(activity.progress.accessibilityValue)
-        .accessibilityHint("Shows Handoff instructions. Does not start playback.")
+    private func progressIndicator(_ activity: FoundationRemoteListeningActivity) -> some View {
+        Image(systemName: "play.fill")
+            .font(.title3.weight(.semibold)).foregroundStyle(.primary)
+            .frame(width: 44, height: 44)
+            .background(.quaternary, in: Circle())
+            .overlay {
+                Circle().trim(from: 0, to: activity.progress.fraction)
+                    .stroke(
+                        .primary.opacity(0.75),
+                        style: StrokeStyle(lineWidth: 2, lineCap: .round)
+                    )
+                    .rotationEffect(.degrees(-90)).padding(2)
+                    .allowsHitTesting(false)
+            }
+            .accessibilityHidden(true)
     }
 
 }

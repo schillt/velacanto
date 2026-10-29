@@ -302,12 +302,27 @@ enum FoundationRemoteListeningDeadline {
 final class FoundationRemoteListeningModel: ObservableObject {
     @Published private(set) var activities: [FoundationRemoteListeningActivity] = []
     @Published private(set) var unavailable = false
+    @Published private(set) var snapshotRevision = UUID()
     private var generation = UUID()
 
-    func cancel() {
+    /// Retire in-flight work without blanking a still-fresh remote snapshot.
+    /// Scene transitions and ordinary refreshes are not authoritative playback changes.
+    func suspend() {
         generation = UUID()
-        activities = []
         unavailable = false
+    }
+
+    func cancel() {
+        suspend()
+        snapshotRevision = UUID()
+        activities = []
+    }
+
+    func removeExpiredActivities(now: Date = Date()) {
+        let fresh = activities.filter { $0.checkedInAt.addingTimeInterval(90) > now }
+        guard fresh != activities else { return }
+        snapshotRevision = UUID()
+        activities = fresh
     }
 
     /// Remove stale hints without rereading the server. The view's foreground task owns
@@ -317,17 +332,18 @@ final class FoundationRemoteListeningModel: ObservableObject {
         sleep: @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) }
     ) async {
         guard !Task.isCancelled else { return }
-        let expected = generation
+        let expected = snapshotRevision
         let deadlines = Set(activities.map { $0.checkedInAt.addingTimeInterval(90) }).sorted()
         do {
             for deadline in deadlines {
                 try await sleep(.seconds(max(0, deadline.timeIntervalSince(now()))))
                 try Task.checkCancellation()
-                guard generation == expected else { return }
+                // A later snapshot owns its own deadlines. An old expiry cannot remove it.
+                guard snapshotRevision == expected else { return }
                 activities.removeAll { $0.checkedInAt.addingTimeInterval(90) <= deadline }
             }
         } catch {
-            if generation == expected { activities = [] }
+            // Cancellation (including a scene transition) is not an empty server response.
         }
     }
 
@@ -335,12 +351,13 @@ final class FoundationRemoteListeningModel: ObservableObject {
         using load: @Sendable () async throws -> [FoundationRemoteListeningActivity]
     ) async {
         guard !Task.isCancelled else { return }
-        cancel()
+        suspend()
         let expected = generation
         do {
             let result = try await load()
             try Task.checkCancellation()
             guard generation == expected else { return }
+            snapshotRevision = UUID()
             activities = result
         } catch {
             guard generation == expected, !Task.isCancelled else { return }

@@ -5626,7 +5626,7 @@ final class FoundationDownloadsUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Continue listening here"].waitForExistence(timeout: 5))
         app.buttons["Done"].firstMatch.tap()
         XCTAssertEqual(app.staticTexts["fixture-playback-identity"].label, identity)
-        app.buttons["How to continue listening here"].tap()
+        media.tap()
         let suppress = app.switches["Don’t show this guide again"].firstMatch
         XCTAssertTrue(suppress.waitForExistence(timeout: 5))
         XCTAssertEqual(suppress.value as? String, "0")
@@ -5644,7 +5644,7 @@ final class FoundationDownloadsUITests: XCTestCase {
         capture("Remote card metadata artwork and half-progress ring", in: app)
     }
 
-    func testRemoteContinueListeningTrashRefreshNewTrackAndNativeSwipe() throws {
+    func testRemoteContinueListeningCardDismissRefreshAndFixedHeadingNativeSwipe() throws {
         continueAfterFailure = false
         let app = launch(
             productionShell: true, canonicalDownloadState: "full", artworkCache: true,
@@ -5655,7 +5655,11 @@ final class FoundationDownloadsUITests: XCTestCase {
         let card = app.descendants(matching: .any)["continue-listening-remote-card"]
         XCTAssertTrue(card.waitForExistence(timeout: 5))
         let before = app.staticTexts["fixture-playback-identity"].label
-        app.buttons["continue-listening-dismiss"].tap()
+        XCTAssertFalse(app.buttons["continue-listening-dismiss"].exists)
+        card.press(forDuration: 1)
+        let dismissMenuItem = app.buttons["Dismiss"].firstMatch
+        XCTAssertTrue(dismissMenuItem.waitForExistence(timeout: 5))
+        dismissMenuItem.tap()
         XCTAssertFalse(card.exists)
         chromeScroll(app, "home").swipeDown()
         XCTAssertFalse(card.exists)
@@ -5672,17 +5676,21 @@ final class FoundationDownloadsUITests: XCTestCase {
         closeAlphabetFixtureControls(app)
         chromeScroll(app, "home").swipeDown()
         XCTAssertTrue(card.waitForExistence(timeout: 5))
+        let heading = app.staticTexts["continue-listening-heading"]
+        XCTAssertTrue(heading.exists)
+        let headingX = heading.frame.minX
         let partialStart = card.coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: 0.5))
         partialStart.press(
             forDuration: 0.05,
             thenDragTo: card.coordinate(withNormalizedOffset: CGVector(dx: 0.45, dy: 0.5)),
             withVelocity: .slow, thenHoldForDuration: 0)
-        let nativeTrash = app.buttons["Dismiss"].firstMatch
-        XCTAssertTrue(nativeTrash.waitForExistence(timeout: 5))
-        nativeTrash.tap()
+        let nativeDismiss = app.buttons["Dismiss"].firstMatch
+        XCTAssertTrue(nativeDismiss.waitForExistence(timeout: 5))
+        XCTAssertEqual(heading.frame.minX, headingX, accuracy: 1, "Only the card should slide")
+        nativeDismiss.tap()
         XCTAssertFalse(card.exists)
         XCTAssertEqual(app.staticTexts["fixture-playback-identity"].label, before)
-        capture("Native left swipe and trash cleared remote-only card", in: app)
+        capture("Card-only native swipe keeps heading fixed and dismisses remote hint", in: app)
         advanceRemoteFixture(app, generation: 2)
         chromeScroll(app, "home").swipeDown()
         XCTAssertTrue(card.waitForExistence(timeout: 5))

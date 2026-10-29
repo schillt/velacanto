@@ -323,6 +323,96 @@ final class FoundationRemoteListeningTests: XCTestCase {
     }
 
     @MainActor
+    func testRefreshRetainsCardUntilAuthoritativeTrackAndProgressReplaceIt() async {
+        let model = FoundationRemoteListeningModel()
+        await model.refresh { [Self.activity] }
+        let gate = RemoteListeningGate()
+        let updated = FoundationRemoteListeningActivity(
+            id: Self.activity.id, deviceKey: Self.activity.deviceKey, deviceLabel: "Mac",
+            checkedInAt: Self.now, item: Self.activity.item, albumTitle: "Album", elapsed: 110)
+        let refresh = Task {
+            await model.refresh {
+                await gate.wait()
+                return [updated]
+            }
+        }
+        await gate.waitForStart()
+        XCTAssertEqual(model.activities, [Self.activity], "Refreshing must not remove the card")
+        await gate.release()
+        await refresh.value
+        XCTAssertEqual(model.activities, [updated])
+        XCTAssertEqual(model.activities.first?.id, Self.activity.id)
+        XCTAssertEqual(model.activities.first?.progress.label, "1:50 / 3:00")
+        await model.refresh { [] }
+        XCTAssertTrue(model.activities.isEmpty, "An authoritative end must still remove the card")
+    }
+
+    @MainActor
+    func testSceneSuspensionRetainsFreshCardAndRejectsRetiredResponse() async {
+        let model = FoundationRemoteListeningModel()
+        await model.refresh { [Self.activity] }
+        let gate = RemoteListeningGate()
+        let refresh = Task {
+            await model.refresh {
+                await gate.wait()
+                return []
+            }
+        }
+        await gate.waitForStart()
+        model.suspend()
+        XCTAssertEqual(model.activities, [Self.activity])
+        await gate.release()
+        await refresh.value
+        XCTAssertEqual(model.activities, [Self.activity])
+        await model.refresh { throw FoundationLibraryError.unavailable }
+        XCTAssertTrue(model.unavailable)
+        XCTAssertEqual(model.activities, [Self.activity], "Transient failure is not a remote stop")
+        model.removeExpiredActivities(now: Self.now.addingTimeInterval(89))
+        XCTAssertEqual(model.activities, [Self.activity])
+        model.removeExpiredActivities(now: Self.now.addingTimeInterval(90))
+        XCTAssertTrue(
+            model.activities.isEmpty, "A retained card cannot outlive its freshness bound")
+    }
+
+    @MainActor
+    func testRefreshDoesNotRetireAcceptedSnapshotsIndependentExpiry() async {
+        let model = FoundationRemoteListeningModel()
+        await model.refresh { [Self.activity] }
+        let expiryGate = RemoteListeningGate()
+        let expiry = Task {
+            await model.expireVisibleActivity(now: { Self.now }) { _ in await expiryGate.wait() }
+        }
+        await expiryGate.waitForStart()
+        let refreshGate = RemoteListeningGate()
+        let refresh = Task {
+            await model.refresh {
+                await refreshGate.wait()
+                throw FoundationLibraryError.unavailable
+            }
+        }
+        await refreshGate.waitForStart()
+        XCTAssertEqual(model.activities, [Self.activity])
+        await expiryGate.release()
+        await expiry.value
+        XCTAssertTrue(model.activities.isEmpty, "A stalled refresh must not extend freshness")
+        await refreshGate.release()
+        await refresh.value
+        XCTAssertTrue(model.activities.isEmpty)
+    }
+
+    @MainActor
+    func testCancelledExpiryPreservesCardAndExplicitResetStillClearsIt() async {
+        let model = FoundationRemoteListeningModel()
+        await model.refresh { [Self.activity] }
+        await model.expireVisibleActivity(
+            now: { Self.now }, sleep: { _ in throw CancellationError() })
+        XCTAssertEqual(model.activities, [Self.activity])
+        model.cancel()
+        XCTAssertTrue(model.activities.isEmpty)
+        XCTAssertFalse(model.unavailable)
+    }
+
+    @MainActor
     func testForegroundExpiryDoesNotPollAndRetiredExpiryCannotClearFreshActivity() async {
         let model = FoundationRemoteListeningModel()
         await model.refresh { [Self.activity] }
