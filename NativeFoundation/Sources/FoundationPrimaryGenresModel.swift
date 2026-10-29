@@ -116,7 +116,9 @@ final class FoundationPrimaryGenresModel: ObservableObject {
         guard let scope else { return }
         await restoreBoundCache()
         guard allowsNetwork, automaticNetworkAllowed, self.scope == scope, !Task.isCancelled,
-            !isBuilding, record?.builtWithAppVersion != appVersion
+            !isBuilding,
+            record?.builtWithAppVersion != appVersion
+                || record?.contentMetadataVersion != FoundationPrimaryGenreContentIndex.version
         else { return }
         if let automaticAttempt, automaticAttempt.scope == scope,
             automaticAttempt.version == appVersion
@@ -161,6 +163,7 @@ final class FoundationPrimaryGenresModel: ObservableObject {
                 let generation = try await index.begin(scope: scope)
                 token = generation
                 var descriptors: [String: FoundationItem] = [:]
+                var content = FoundationPrimaryGenreContentIndex.Builder()
                 var offset = 0
                 var requestedPages = 0
                 let maximumPages = FoundationPrimaryGenreIndex.Limits().pages
@@ -180,6 +183,7 @@ final class FoundationPrimaryGenresModel: ObservableObject {
                         .init(
                             startIndex: page.startIndex, total: page.total, songs: songs,
                             nextStartIndex: page.nextStartIndex), generation: generation)
+                    content.append(page.songs, source: scope.source)
                     for song in page.songs {
                         for genre in song.genres {
                             if let old = descriptors[genre.id], old.title != genre.title {
@@ -199,13 +203,27 @@ final class FoundationPrimaryGenresModel: ObservableObject {
                 let snapshot = try await index.finish(generation: generation)
                 try Task.checkCancellation()
                 guard self.operationID == owner, self.scope == scope else { return }
-                let result = FoundationPrimaryGenreRecord(
+                var result = FoundationPrimaryGenreRecord(
                     snapshot: snapshot,
                     descriptors: descriptors.values.map { item in
                         var canonical = item
                         canonical.primaryGenreCensusID = snapshot.censusID
                         return canonical
-                    }.sorted { $0.id < $1.id })
+                    }.sorted { $0.id < $1.id },
+                    contentMetadataVersion: FoundationPrimaryGenreContentIndex.version,
+                    contentIndex: content.finish(songIDs: Set(snapshot.orderedSongIDs)))
+                if result.contentIndex != nil {
+                    let encoder = PropertyListEncoder()
+                    encoder.outputFormat = .binary
+                    if try encoder.encode(result).count
+                        > FoundationPrimaryGenreContentIndex.maximumBytes
+                    {
+                        // Preserve the complete genre census rather than reducing its supported size.
+                        result = .init(
+                            snapshot: result.snapshot, descriptors: result.descriptors,
+                            contentMetadataVersion: FoundationPrimaryGenreContentIndex.version)
+                    }
+                }
                 guard result.isValid(for: scope) else {
                     throw FoundationPrimaryGenreIndex.Failure.unknownMetadata
                 }
@@ -214,7 +232,9 @@ final class FoundationPrimaryGenresModel: ObservableObject {
                 if let cache = library.catalogPageCache {
                     let saved = FoundationPrimaryGenreRecord(
                         snapshot: result.snapshot, descriptors: result.descriptors,
-                        builtWithAppVersion: self.appVersion)
+                        builtWithAppVersion: self.appVersion,
+                        contentMetadataVersion: result.contentMetadataVersion,
+                        contentIndex: result.contentIndex)
                     do {
                         try await cache.writePrimaryGenres(
                             saved,

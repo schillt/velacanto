@@ -4025,6 +4025,12 @@ final class FoundationDownloadsUITests: XCTestCase {
         XCTAssertTrue(
             picker.waitForExistence(timeout: 5), "\(title) must show its segmented control")
         XCTAssertTrue(picker.isHittable, "Genre choices must be visible without opening a menu")
+        let navigation = app.navigationBars[title]
+        XCTAssertTrue(navigation.exists)
+        XCTAssertTrue(
+            navigation.frame.contains(CGPoint(x: picker.frame.midX, y: picker.frame.midY)),
+            "The icon segments belong in the native title bar")
+        XCTAssertTrue(app.buttons["primary-genre-sort-filter"].isHittable)
         for choice in ["Albums", "Tracks", "Artists"] {
             XCTAssertTrue(picker.buttons[choice].exists)
         }

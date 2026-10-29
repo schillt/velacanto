@@ -1222,22 +1222,49 @@
 
         func primaryGenreSongs(ids: [String]) async throws -> [FoundationItem] {
             guard ids.count <= 50 else { throw FoundationLibraryError.invalidResponse }
-            return ids.map { id in
-                if id == track.id { return track }
-                if id == "home-boundary-song" || id.hasPrefix("home-late-song-") {
-                    return FoundationItem(
-                        id: id, title: "Final Home Album", subtitle: "Final Home Subtitle",
-                        kind: .track,
-                        duration: 30,
-                        album: .init(
-                            id: "home-boundary-album", title: "Final Home Album",
-                            primaryImageTag: "synthetic"))
-                }
+            return ids.map(primaryGenreSong)
+        }
+
+        private func primaryGenreSong(_ id: String) -> FoundationItem {
+            if id == track.id { return track }
+            if id == "home-boundary-song" || id.hasPrefix("home-late-song-") {
                 return FoundationItem(
-                    id: id, title: "Primary Song " + String(id.suffix(1)),
-                    subtitle: "Synthetic song-only genre",
-                    kind: .track, duration: 30)
+                    id: id, title: "Final Home Album", subtitle: "Final Home Subtitle",
+                    kind: .track,
+                    duration: 30,
+                    album: .init(
+                        id: "home-boundary-album", title: "Final Home Album",
+                        primaryImageTag: "synthetic"))
             }
+            return FoundationItem(
+                id: id, title: "Primary Song " + String(id.suffix(1)),
+                subtitle: "Synthetic song-only genre", kind: .track, duration: 30)
+        }
+
+        func primaryGenreCollections(ids: [String], kind: FoundationItem.Kind) async throws
+            -> [FoundationItem]
+        {
+            guard ids.count <= 50 else { throw FoundationLibraryError.invalidResponse }
+            return try ids.map { id in
+                if kind == .album, id == album.id { return album }
+                if kind == .artist, id == "artist" {
+                    return FoundationItem(
+                        id: id, title: "Fixture Artist", subtitle: "", kind: .artist,
+                        duration: nil, primaryImageTag: "synthetic")
+                }
+                if kind == .album, id == "home-boundary-album" {
+                    return FoundationItem(
+                        id: id, title: "Final Home Album", subtitle: "", kind: .album,
+                        duration: nil, primaryImageTag: "synthetic")
+                }
+                throw FoundationLibraryError.unavailable
+            }
+        }
+
+        private func genreContent(_ id: String) -> FoundationPrimaryGenreContentMetadata {
+            let item = primaryGenreSong(id)
+            return .init(
+                title: item.title, album: item.album, artist: item.artist, duration: item.duration)
         }
 
         func primaryGenreMetadataPage(startIndex: Int) async throws
@@ -1266,7 +1293,13 @@
                     ]
                 }
                 primaryMetadataReturned += 1
-                return .init(startIndex: 0, total: songs.count, songs: songs, nextStartIndex: nil)
+                return .init(
+                    startIndex: 0, total: songs.count,
+                    songs: songs.map {
+                        var song = $0
+                        song.content = genreContent(song.id)
+                        return song
+                    }, nextStartIndex: nil)
             }
             let held =
                 ProcessInfo.processInfo.arguments.contains("-fixtureHoldPrimaryGenreMetadata")
@@ -1306,7 +1339,9 @@
                 songs: sets.enumerated().map {
                     .init(
                         id: $0.offset == 0 ? track.id : "primary-song-\($0.offset)",
-                        genres: $0.element)
+                        genres: $0.element,
+                        content: genreContent(
+                            $0.offset == 0 ? track.id : "primary-song-\($0.offset)"))
                 }, nextStartIndex: nil)
         }
 

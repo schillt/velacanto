@@ -563,6 +563,8 @@ protocol FoundationLibrary: Sendable {
     func primaryGenreMetadataPage(startIndex: Int) async throws
         -> FoundationPrimaryGenreMetadataPage
     func primaryGenreSongs(ids: [String]) async throws -> [FoundationItem]
+    func primaryGenreCollections(ids: [String], kind: FoundationItem.Kind) async throws
+        -> [FoundationItem]
     func albums(genreID: String, startIndex: Int) async throws -> FoundationPage
     func setFavorite(for item: FoundationItem, isFavorite: Bool) async throws
     func playbackURL(for item: FoundationItem) async throws -> URL
@@ -727,6 +729,11 @@ extension FoundationLibrary {
     }
 
     func primaryGenreSongs(ids: [String]) async throws -> [FoundationItem] {
+        throw FoundationLibraryError.unavailable
+    }
+    func primaryGenreCollections(ids: [String], kind: FoundationItem.Kind) async throws
+        -> [FoundationItem]
+    {
         throw FoundationLibraryError.unavailable
     }
     var primaryGenreIndexScope: FoundationPrimaryGenreIndex.Scope? { nil }
@@ -1969,7 +1976,47 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
         return ids.compactMap { byID[$0] }
     }
 
-    /// Explicit user-started tag census only; ordinary browsing never calls this operation.
+    /// One visible page resolves only IDs proven by the canonical song census.
+    /// Album-artist containers are shared across libraries; their membership proof is the
+    /// selected-library song relationship, not an unsupported artist-child ParentId query.
+    func primaryGenreCollections(ids: [String], kind: FoundationItem.Kind) async throws
+        -> [FoundationItem]
+    {
+        guard catalogAvailable else { throw FoundationLibraryError.unavailable }
+        guard [.album, .artist].contains(kind), (1...50).contains(ids.count),
+            ids.allSatisfy(Self.validID), Set(ids).count == ids.count
+        else { throw FoundationLibraryError.invalidResponse }
+        var parameters = Paths.GetItemsParameters()
+        parameters.userID = session.userID
+        parameters.parentID = kind == .artist ? nil : musicLibraryID
+        parameters.isRecursive = true
+        parameters.includeItemTypes = [Self.itemType(kind)]
+        parameters.ids = ids
+        parameters.startIndex = 0
+        parameters.limit = ids.count
+        parameters.enableImages = true
+        parameters.imageTypeLimit = 1
+        parameters.enableImageTypes = [.primary]
+        parameters.enableUserData = true
+        parameters.enableTotalRecordCount = true
+        let result: BaseItemDtoQueryResult = try await FoundationRequestIntent.$isPlayback
+            .withValue(false) {
+                try await send(
+                    Paths.getItems(parameters: parameters), maximumBytes: 4 * 1_024 * 1_024)
+            }
+        try Task.checkCancellation()
+        guard let entries = result.items, result.startIndex == 0,
+            result.totalRecordCount == ids.count, entries.count == ids.count
+        else { throw FoundationLibraryError.unavailable }
+        let mapped = try mappedItems(entries, kinds: [kind])
+        guard Set(mapped.map(\.id)) == Set(ids), Set(mapped.map(\.id)).count == mapped.count else {
+            throw FoundationLibraryError.unavailable
+        }
+        let byID = Dictionary(uniqueKeysWithValues: mapped.map { ($0.id, $0) })
+        return ids.compactMap { byID[$0] }
+    }
+
+    /// The app-owned complete metadata census; ordinary browsing never calls this operation.
     func primaryGenreMetadataPage(startIndex: Int) async throws
         -> FoundationPrimaryGenreMetadataPage
     {
@@ -1982,7 +2029,7 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
         parameters.parentID = musicLibraryID
         parameters.isRecursive = true
         parameters.includeItemTypes = [.audio]
-        parameters.fields = [.genres]
+        parameters.fields = [.genres, .dateCreated]
         parameters.startIndex = startIndex
         parameters.limit = 200
         parameters.sortBy = [.sortName, .name]
@@ -2019,7 +2066,17 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
             guard Set(raw.filter { !$0.isEmpty }) == Set(genres.map(\.title)) else {
                 throw FoundationPrimaryGenreIndex.Failure.unknownMetadata
             }
-            return .init(id: id, genres: genres)
+            let item = try mappedItems([entry], kinds: [.track])[0]
+            return .init(
+                id: id, genres: genres,
+                content: .init(
+                    title: item.title, sortName: item.sortName, album: item.album,
+                    artist: item.artist,
+                    duration: item.duration.flatMap { $0.isFinite && $0 >= 0 ? $0 : nil },
+                    year: entry.productionYear.flatMap { (1...9999).contains($0) ? $0 : nil },
+                    dateAdded: entry.dateCreated.flatMap {
+                        $0.timeIntervalSinceReferenceDate.isFinite ? $0 : nil
+                    }))
         }
         let (end, overflow) = startIndex.addingReportingOverflow(entries.count)
         guard !overflow, end <= total, !entries.isEmpty || end == total else {

@@ -333,7 +333,11 @@ final class FoundationPrimaryGenresTests: XCTestCase {
             XCTAssertEqual(value("parentId"), Self.id(77))
             XCTAssertEqual(value("userId"), Self.session.userID)
             XCTAssertEqual(value("includeItemTypes"), "Audio")
-            XCTAssertEqual(value("fields"), "Genres")
+            XCTAssertEqual(
+                Set(
+                    query.filter { $0.name == "fields" }.compactMap(\.value)
+                        .flatMap { $0.split(separator: ",").map(String.init) }),
+                Set(["Genres", "DateCreated"]))
             XCTAssertEqual(value("enableImages"), "false")
             XCTAssertEqual(value("enableUserData"), "false")
             XCTAssertEqual(value("limit"), "200")
@@ -1004,6 +1008,348 @@ final class FoundationPrimaryGenresTests: XCTestCase {
         }
         XCTAssertEqual(counts, [50, 50, 50, 25])
         XCTAssertTrue(requests.allSatisfy { !$0.url!.absoluteString.contains("genreIds") })
+    }
+
+    private func orderedGenreRecord(scope: FoundationPrimaryGenreIndex.Scope)
+        -> (FoundationPrimaryGenreRecord, [FoundationPrimaryGenreMetadataPage.Song])
+    {
+        let rows: [FoundationPrimaryGenreMetadataPage.Song] = (0..<125).map { offset in
+            let album = (offset * 7) % 65
+            let artist = (offset * 11) % 53
+            return .init(
+                id: Self.id(1000 + offset), genres: [.init(id: Self.id(1), title: "Genre")],
+                content: .init(
+                    title: String(format: "Title %03d", (offset * 37) % 125),
+                    album: .init(
+                        id: Self.id(10_000 + album), title: String(format: "Album %03d", 64 - album)
+                    ),
+                    artist: .init(
+                        id: Self.id(20_000 + artist),
+                        title: String(format: "Artist %03d", 52 - artist)),
+                    duration: offset.isMultiple(of: 10) ? nil : Double(500 - offset),
+                    year: offset.isMultiple(of: 9) ? nil : 2000 + offset % 5,
+                    dateAdded: offset.isMultiple(of: 8)
+                        ? nil : Date(timeIntervalSince1970: 1_600_000_000 + Double(offset))))
+        }
+        var builder = FoundationPrimaryGenreContentIndex.Builder()
+        builder.append(rows, source: scope.source)
+        let census = UUID()
+        let ids = rows.map(\.id)
+        let record = FoundationPrimaryGenreRecord(
+            snapshot: .init(
+                scope: scope, songCount: ids.count, censusID: census, completedAt: Date(),
+                songCountsByGenre: [Self.id(1): ids.count], eligibleGenreIDs: [Self.id(1)],
+                primaryBySongID: Dictionary(uniqueKeysWithValues: ids.map { ($0, [Self.id(1)]) }),
+                orderedSongIDs: ids),
+            descriptors: [
+                .init(
+                    id: Self.id(1), title: "Genre", subtitle: "", kind: .genre,
+                    duration: nil, primaryGenreCensusID: census, catalogSource: scope.source)
+            ],
+            contentMetadataVersion: FoundationPrimaryGenreContentIndex.version,
+            contentIndex: builder.finish(songIDs: Set(ids)))
+        return (record, rows)
+    }
+
+    func testFullGenreAlphabeticalOrderPrecedesPagingForAllThreeMediaTypes() async throws {
+        let requests = PrimaryGenreRequests()
+        let resolver = FoundationJellyfinLibrary(session: Self.session) { request in
+            await requests.append(request)
+            let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!
+                .queryItems!
+            let ids = query.filter { $0.name == "ids" }.compactMap(\.value)
+            let type = query.first { $0.name == "includeItemTypes" }!.value!
+            let entries = ids.reversed().map { id -> [String: Any] in
+                let value = Int(id, radix: 16)!
+                let title: String
+                switch type {
+                case "Audio": title = String(format: "Title %03d", ((value - 1000) * 37) % 125)
+                case "MusicAlbum": title = String(format: "Album %03d", 64 - (value - 10_000))
+                default: title = String(format: "Artist %03d", 52 - (value - 20_000))
+                }
+                return [
+                    "Id": id, "Name": title, "Type": type,
+                    "ImageTags": ["Primary": "synthetic"],
+                ]
+            }
+            let data = try JSONSerialization.data(withJSONObject: [
+                "Items": entries, "StartIndex": 0, "TotalRecordCount": entries.count,
+            ])
+            return (
+                data,
+                HTTPURLResponse(
+                    url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            )
+        }.scoped(to: Self.id(77))
+        let scope = try XCTUnwrap(resolver.primaryGenreIndexScope)
+        let (record, rows) = orderedGenreRecord(scope: scope)
+        XCTAssertTrue(record.isValid(for: scope))
+        let expectedTracks = rows.sorted { $0.content!.title < $1.content!.title }.map(\.id)
+        let expectedAlbums = (0..<65).reversed().map { Self.id(10_000 + $0) }
+        let expectedArtists = (0..<53).reversed().map { Self.id(20_000 + $0) }
+        XCTAssertNotEqual(Array(expectedTracks.prefix(50)), Array(rows.prefix(50).map(\.id)))
+        for (kind, expected) in [
+            (FoundationItem.Kind.track, expectedTracks), (.album, expectedAlbums),
+            (.artist, expectedArtists),
+        ] {
+            let source = try XCTUnwrap(record.contentSource(genreID: Self.id(1), kind: kind))
+            XCTAssertEqual(source.ids, expected)
+            let reverse = try XCTUnwrap(
+                record.contentSource(genreID: Self.id(1), kind: kind, descending: true))
+            XCTAssertEqual(reverse.ids, Array(expected.reversed()))
+            var offset: Int? = 0
+            var result: [String] = []
+            var titles: [String] = []
+            while let current = offset {
+                let page = try await source.page(startIndex: current, library: resolver)
+                XCTAssertLessThanOrEqual(page.items.count, 50)
+                result += page.items.map(\.id)
+                titles += page.items.map(\.title)
+                XCTAssertTrue(page.items.allSatisfy { $0.catalogSource == scope.source })
+                if kind != .track {
+                    XCTAssertTrue(page.items.allSatisfy { $0.primaryImageTag == "synthetic" })
+                }
+                offset = page.nextStartIndex
+            }
+            XCTAssertEqual(
+                result, expected, "Concatenated pages must preserve complete logical order")
+            XCTAssertEqual(titles, titles.sorted())
+            let finished = try await source.page(startIndex: expected.count, library: resolver)
+            XCTAssertTrue(finished.items.isEmpty)
+        }
+        let captured = await requests.requests
+        XCTAssertEqual(
+            captured.count, 7, "125 tracks,65 albums,53 artists require3+2+2 bounded reads")
+        for request in captured {
+            let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!
+                .queryItems!
+            XCTAssertLessThanOrEqual(query.filter { $0.name == "ids" }.count, 50)
+            XCTAssertNil(query.first { $0.name == "genreIds" })
+            let artist = query.first { $0.name == "includeItemTypes" }?.value == "MusicArtist"
+            XCTAssertEqual(query.first { $0.name == "parentId" }?.value, artist ? nil : Self.id(77))
+        }
+        let source = try XCTUnwrap(record.contentSource(genreID: Self.id(1), kind: .album))
+        do {
+            _ = try await source.page(startIndex: 0, library: resolver.scoped(to: Self.id(78)))
+            XCTFail("Changed library cannot resolve an old logical genre source")
+        } catch { XCTAssertEqual(error as? FoundationLibraryError, .unavailable) }
+        let after = await requests.requests
+        XCTAssertEqual(after.count, captured.count)
+    }
+
+    func testMissingGenreCollectionMetadataDoesNotSilentlyCompleteAFilteredPage() async throws {
+        let requests = PrimaryGenreRequests()
+        let resolver = FoundationJellyfinLibrary(session: Self.session) { request in
+            await requests.append(request)
+            let data = Data("{\"Items\":[],\"StartIndex\":0,\"TotalRecordCount\":0}".utf8)
+            return (
+                data,
+                HTTPURLResponse(
+                    url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            )
+        }.scoped(to: Self.id(77))
+        let scope = try XCTUnwrap(resolver.primaryGenreIndexScope)
+        let (record, _) = orderedGenreRecord(scope: scope)
+        let source = try XCTUnwrap(record.contentSource(genreID: Self.id(1), kind: .album))
+        do {
+            _ = try await source.page(startIndex: 0, library: resolver)
+            XCTFail("Missing canonical album metadata must not become a successful empty result")
+        } catch { XCTAssertEqual(error as? FoundationLibraryError, .unavailable) }
+        let captured = await requests.requests
+        XCTAssertEqual(captured.count, 1)
+        XCTAssertEqual(source.ids.count, 65)
+    }
+
+    func testGenreDownloadedFilterAppliesBeforeSortingDeduplicationAndPaging() throws {
+        let scope = try XCTUnwrap(
+            FoundationJellyfinLibrary(session: Self.session).scoped(to: Self.id(77))
+                .primaryGenreIndexScope)
+        let (record, rows) = orderedGenreRecord(scope: scope)
+        let readyRows = rows.enumerated().filter { $0.offset.isMultiple(of: 3) }.map(\.element)
+        let ready = Set(readyRows.map(\.id) + [Self.id(999_999)])
+        let expectedTracks = readyRows.sorted { $0.content!.title < $1.content!.title }.map(\.id)
+        let expectedAlbums = Array(Set(readyRows.compactMap { $0.content?.album?.id })).sorted(
+            by: >)
+        let expectedArtists = Array(Set(readyRows.compactMap { $0.content?.artist?.id })).sorted(
+            by: >)
+        for (kind, expected) in [
+            (FoundationItem.Kind.track, expectedTracks), (.album, expectedAlbums),
+            (.artist, expectedArtists),
+        ] {
+            let source = try XCTUnwrap(
+                record.contentSource(genreID: Self.id(1), kind: kind, readySongIDs: ready))
+            XCTAssertEqual(source.ids, expected)
+            XCTAssertFalse(source.ids.contains(Self.id(999_999)))
+            XCTAssertTrue(
+                try XCTUnwrap(
+                    record.contentSource(genreID: Self.id(1), kind: kind, readySongIDs: [])
+                ).ids.isEmpty)
+        }
+    }
+
+    func testGenreSortOptionsUseOwnMediaFactsAndUnknownValuesRemainLast() throws {
+        let scope = try XCTUnwrap(
+            FoundationJellyfinLibrary(session: Self.session).primaryGenreIndexScope)
+        let (record, rows) = orderedGenreRecord(scope: scope)
+        let index = try XCTUnwrap(record.contentIndex)
+        XCTAssertEqual(index.supportedSorts(kind: .album, membership: rows.map(\.id)), [.name])
+        XCTAssertEqual(index.supportedSorts(kind: .artist, membership: rows.map(\.id)), [.name])
+        XCTAssertEqual(
+            Set(index.supportedSorts(kind: .track, membership: rows.map(\.id))),
+            Set(FoundationPrimaryGenreSort.allCases))
+        let duration = try XCTUnwrap(
+            record.contentSource(
+                genreID: Self.id(1), kind: .track, sort: .duration, descending: true))
+        let known = duration.ids.compactMap { index.tracks[$0]?.duration }
+        XCTAssertEqual(known, known.sorted(by: >))
+        let firstUnknown = try XCTUnwrap(
+            duration.ids.firstIndex { index.tracks[$0]?.duration == nil })
+        XCTAssertTrue(
+            duration.ids[firstUnknown...].allSatisfy { index.tracks[$0]?.duration == nil })
+        XCTAssertNil(record.contentSource(genreID: Self.id(1), kind: .album, sort: .year))
+        XCTAssertNil(record.contentSource(genreID: Self.id(1), kind: .artist, sort: .dateAdded))
+        var builder = FoundationPrimaryGenreContentIndex.Builder()
+        builder.append(
+            [
+                .init(id: "b", genres: [], content: .init(title: "Same")),
+                .init(id: "a", genres: [], content: .init(title: "Same")),
+            ], source: scope.source)
+        let ties = try XCTUnwrap(builder.finish(songIDs: ["a", "b"]))
+        XCTAssertEqual(ties.orderedIDs(membership: ["b", "a"], kind: .track), ["a", "b"])
+        XCTAssertEqual(
+            ties.orderedIDs(membership: ["b", "a"], kind: .track, descending: true), ["a", "b"])
+    }
+
+    func testLegacyGenreRecordKeepsEligibilityAndOfflineAlbumsWithoutClaimingPartialSort() throws {
+        let scope = try XCTUnwrap(
+            FoundationJellyfinLibrary(session: Self.session).primaryGenreIndexScope)
+        let (current, _) = orderedGenreRecord(scope: scope)
+        let legacy = FoundationPrimaryGenreRecord(
+            snapshot: current.snapshot, descriptors: current.descriptors)
+        XCTAssertTrue(legacy.isValid(for: scope))
+        XCTAssertEqual(legacy.matchingItems(), current.matchingItems())
+        XCTAssertNil(legacy.contentSource(genreID: Self.id(1), kind: .album))
+        let downloaded = [
+            FoundationItem(
+                id: Self.id(1000), title: "Z Track", subtitle: "", kind: .track, duration: 10,
+                album: .init(id: "z-album", title: "Z Album")),
+            FoundationItem(
+                id: Self.id(1001), title: "A Track", subtitle: "", kind: .track, duration: 10,
+                album: .init(id: "a-album", title: "A Album")),
+        ]
+        XCTAssertEqual(
+            legacy.offlineContent(genreID: Self.id(1), kind: .album, downloaded: downloaded).map(
+                \.id), ["a-album", "z-album"])
+        XCTAssertEqual(
+            legacy.offlineContent(genreID: Self.id(1), kind: .track, downloaded: downloaded).map(
+                \.id), [Self.id(1001), Self.id(1000)])
+        let data = try PropertyListEncoder().encode(legacy)
+        let restored = try PropertyListDecoder().decode(
+            FoundationPrimaryGenreRecord.self, from: data)
+        XCTAssertEqual(restored, legacy)
+        XCTAssertNil(restored.contentMetadataVersion)
+    }
+
+    func testOrderingMetadataBudgetCannotRemoveExistingGenreEligibility() throws {
+        let scope = try XCTUnwrap(
+            FoundationJellyfinLibrary(session: Self.session).primaryGenreIndexScope)
+        let (record, _) = orderedGenreRecord(scope: scope)
+        var builder = FoundationPrimaryGenreContentIndex.Builder()
+        let rows: [FoundationPrimaryGenreMetadataPage.Song] = (0..<20_000).map {
+            .init(
+                id: Self.id($0 + 1000), genres: [],
+                content: .init(title: String(repeating: "x", count: 512)))
+        }
+        builder.append(rows, source: scope.source)
+        XCTAssertTrue(builder.exceededBudget)
+        XCTAssertNil(builder.finish(songIDs: Set(rows.map(\.id))))
+        let membershipOnly = FoundationPrimaryGenreRecord(
+            snapshot: record.snapshot, descriptors: record.descriptors,
+            contentMetadataVersion: FoundationPrimaryGenreContentIndex.version)
+        XCTAssertTrue(membershipOnly.isValid(for: scope))
+        XCTAssertEqual(membershipOnly.matchingItems(), record.matchingItems())
+        XCTAssertEqual(membershipOnly.songIDs(for: Self.id(1)), record.songIDs(for: Self.id(1)))
+        XCTAssertNil(membershipOnly.contentSource(genreID: Self.id(1), kind: .track))
+    }
+
+    func testOrderingRecordRoundTripAndEightMiBCacheLimitPreservePriorRecord() async throws {
+        let scope = try XCTUnwrap(
+            FoundationJellyfinLibrary(session: Self.session).primaryGenreIndexScope)
+        let (record, _) = orderedGenreRecord(scope: scope)
+        let encoder = PropertyListEncoder()
+        encoder.outputFormat = .binary
+        let data = try encoder.encode(record)
+        XCTAssertLessThan(data.count, 8 * 1_024 * 1_024)
+        XCTAssertEqual(
+            try PropertyListDecoder().decode(FoundationPrimaryGenreRecord.self, from: data), record)
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let cache = FoundationCatalogPageCache(scope: "ordered-record-cache", root: root)
+        try await cache.writePrimaryGenres(
+            record, key: "content-index", permit: FoundationPageWritePermit())
+        let ids = (0..<18_000).map { Self.id(50_000 + $0) }
+        let tracks = Dictionary(
+            uniqueKeysWithValues: ids.map { id in
+                (
+                    id,
+                    FoundationPrimaryGenreContentIndex.Track(
+                        title: String(repeating: "x", count: 480) + id, albumID: nil, artistID: nil,
+                        duration: nil, year: nil, dateAdded: nil)
+                )
+            })
+        let census = UUID()
+        var descriptor = record.descriptors[0]
+        descriptor.primaryGenreCensusID = census
+        let tooLarge = FoundationPrimaryGenreRecord(
+            snapshot: .init(
+                scope: scope, songCount: ids.count, censusID: census, completedAt: Date(),
+                songCountsByGenre: [Self.id(1): ids.count], eligibleGenreIDs: [Self.id(1)],
+                primaryBySongID: Dictionary(uniqueKeysWithValues: ids.map { ($0, [Self.id(1)]) }),
+                orderedSongIDs: ids), descriptors: [descriptor],
+            contentMetadataVersion: FoundationPrimaryGenreContentIndex.version,
+            contentIndex: .init(tracks: tracks, albums: [:], artists: [:]))
+        XCTAssertTrue(tooLarge.isValid(for: scope))
+        XCTAssertGreaterThan(try encoder.encode(tooLarge).count, 8 * 1_024 * 1_024)
+        do {
+            try await cache.writePrimaryGenres(
+                tooLarge, key: "content-index", permit: FoundationPageWritePermit())
+            XCTFail("Ordering metadata cannot widen the existing eight-MiB record cap")
+        } catch { XCTAssertEqual(error as? FoundationPrimaryGenreIndex.Failure, .resourceLimit) }
+        let retained = try await cache.readPrimaryGenres(key: "content-index", scope: scope)
+        XCTAssertEqual(
+            retained, record, "An oversized replacement must preserve the prior complete record")
+    }
+
+    func testContentSchemaUpgradeRebuildsOnceEvenWhenTheAppVersionMarkerIsCurrent() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let cache = FoundationCatalogPageCache(scope: "content-schema-upgrade", root: root)
+        let recorder = PrimaryGenreRequests()
+        let library = try library(recorder: recorder, cache: cache)
+        let first = FoundationPrimaryGenresModel(library: library, appVersion: "0.6.0(256)")
+        await first.prepareAutomaticallyIfNeeded(allowsNetwork: true)
+        await first.buildCompletion?.value
+        let fresh = try XCTUnwrap(first.record)
+        let legacy = FoundationPrimaryGenreRecord(
+            snapshot: fresh.snapshot, descriptors: fresh.descriptors,
+            builtWithAppVersion: "0.6.0(256)")
+        try await cache.writePrimaryGenres(
+            legacy, key: library.catalogCacheKey("primary-genres-v2"),
+            permit: FoundationPageWritePermit())
+        let next = FoundationPrimaryGenresModel(library: library, appVersion: "0.6.0(256)")
+        await next.prepareAutomaticallyIfNeeded(allowsNetwork: false)
+        XCTAssertEqual(next.record, legacy)
+        let before = await recorder.requests.count
+        await next.prepareAutomaticallyIfNeeded(allowsNetwork: true)
+        await next.buildCompletion?.value
+        XCTAssertEqual(
+            next.record?.contentMetadataVersion, FoundationPrimaryGenreContentIndex.version)
+        XCTAssertNotNil(next.record?.contentIndex)
+        let after = await recorder.requests.count
+        XCTAssertEqual(after, before + 2)
+        await next.prepareAutomaticallyIfNeeded(allowsNetwork: true)
+        let final = await recorder.requests.count
+        XCTAssertEqual(final, after, "The schema upgrade cannot become a foreground census loop")
     }
 
     func testAccountOwnerSharesOneBuildAndFreshSnapshotAcrossTwoWindowsAndRetiresBoth() async throws
