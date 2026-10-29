@@ -963,8 +963,9 @@ final class FoundationRemoteContinuationTests: XCTestCase {
         let query = URLComponents(url: requests.last!.url!, resolvingAgainstBaseURL: false)?
             .queryItems
         XCTAssertEqual(
-            query?.first(where: { $0.name == "ids" })?.value,
-            [CrossClientFixtures.first, CrossClientFixtures.current].joined(separator: ","))
+            query?.filter { $0.name == "ids" }.compactMap(\.value),
+            [CrossClientFixtures.first, CrossClientFixtures.current])
+        XCTAssertEqual(query?.filter { $0.name == "ids" }.count, 2)
         XCTAssertNil(query?.first(where: { $0.name == "parentId" }))
         XCTAssertEqual(
             query?.first(where: { $0.name == "userId" })?.value, CrossClientFixtures.owner)
@@ -1015,10 +1016,11 @@ final class FoundationRemoteContinuationTests: XCTestCase {
         let requests = await recorder.requests.filter { $0.url?.path.hasSuffix("/Items") == true }
         let batches = requests.map { request in
             URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems?
-                .first(where: { $0.name == "ids" })?.value?.split(separator: ",").map(String.init)
-                ?? []
+                .filter { $0.name == "ids" }.compactMap(\.value) ?? []
         }
+        XCTAssertEqual(requests.count, 3)
         XCTAssertEqual(batches.map(\.count), [200, 200, 1])
+        XCTAssertEqual(batches.flatMap { $0 }, ids.sorted())
         XCTAssertEqual(Set(batches.flatMap { $0 }), Set(ids))
     }
     func testCumulativeMetadataBudgetFailsWholePreparationWithoutControl() async throws {
@@ -1164,8 +1166,10 @@ private actor CrossClientTransport {
             try Task.checkCancellation()
             let ids =
                 URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems?
-                .first(where: { $0.name == "ids" })?.value?.split(separator: ",").map(String.init)
-                ?? []
+                .filter { $0.name == "ids" }.compactMap(\.value) ?? []
+            guard !ids.isEmpty,
+                ids.allSatisfy({ FoundationRemoteListeningActivity.catalogID($0) == $0 })
+            else { throw FoundationLibraryError.invalidResponse }
             let rows =
                 missingMetadata
                 ? []
