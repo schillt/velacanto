@@ -1172,6 +1172,11 @@
         func artworkCounts() -> String {
             "Album \(fetches["album", default: 0]), Artist \(fetches["artist", default: 0]), Playlist \(fetches["playlist", default: 0]), Genre \(fetches["genre", default: 0])"
         }
+        nonisolated func immediateArtworkResult(for item: FoundationItem, size: Int)
+            -> FoundationCurrentArtwork.Result?
+        {
+            usesCache ? cache.immediateResult(for: item, pixels: size) : nil
+        }
         func artworkResult(for item: FoundationItem, size: Int, allowsNetwork: Bool) async throws
             -> FoundationCurrentArtwork.Result?
         {

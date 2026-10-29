@@ -492,6 +492,124 @@ final class FoundationArtworkCacheTests: XCTestCase {
             UUID().uuidString, isDirectory: true)
     }
 
+    func testImmediateArtworkLookupSharesDecodedIdentityAndRejectsExpiryRevisionAndRetirement()
+        async throws
+    {
+        let root = root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let clock = ArtworkCacheClock()
+        let cache = FoundationArtworkCache(scope: "immediate-a", root: root, now: { clock.read() })
+        let other = FoundationArtworkCache(scope: "immediate-b", root: root)
+        let album = item("album", tag: "first")
+        let probe = ArtworkCacheProbe(data: try image())
+        XCTAssertNil(cache.immediateResult(for: album, pixels: 640))
+        let initial = try await cache.result(
+            for: album, pixels: 640, allowsNetwork: true,
+            load: { try await probe.load($0, $1) })
+        let loaded = try XCTUnwrap(initial)
+        for _ in 0..<20 {
+            let result = try XCTUnwrap(cache.immediateResult(for: album, pixels: 640))
+            XCTAssertEqual(result.id, loaded.id)
+            XCTAssertTrue(
+                result.image === loaded.image, "A peek never creates another decoded image")
+        }
+        XCTAssertEqual(
+            cache.immediateResult(for: item("album", tag: nil), pixels: 640)?.id, loaded.id)
+        XCTAssertNil(cache.immediateResult(for: item("album", tag: "second"), pixels: 640))
+        XCTAssertNil(other.immediateResult(for: album, pixels: 640))
+        let reads = await probe.count
+        XCTAssertEqual(reads, 1)
+        clock.advance(30 * 86_400 + 1)
+        XCTAssertNil(cache.immediateResult(for: album, pixels: 640))
+        _ = await cache.invalidate(removeDisk: false)
+        XCTAssertNil(cache.immediateResult(for: album, pixels: 640))
+        _ = await other.invalidate(removeDisk: true)
+    }
+
+    func testImmediatePeekDoesNotChangeLRUEvictionOrMemoryBudget() async throws {
+        let root = root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let data = try image(width: 160, height: 160)
+        let decoded = try XCTUnwrap(FoundationCurrentArtwork.decode(data, maximumPixels: 160))
+        let cost = data.count + decoded.image.bytesPerRow * decoded.image.height
+        let cache = FoundationArtworkCache(
+            scope: "immediate-bounded", root: root,
+            limits: .init(memoryBytes: cost * 2, diskBytes: 0))
+        let probe = ArtworkCacheProbe(data: data)
+        for id in ["a", "b"] {
+            _ = try await cache.result(
+                for: item(id), pixels: 160, allowsNetwork: true,
+                load: { try await probe.load($0, $1) })
+        }
+        for _ in 0..<20 { XCTAssertNotNil(cache.immediateResult(for: item("a"), pixels: 160)) }
+        _ = try await cache.result(
+            for: item("c"), pixels: 160, allowsNetwork: true,
+            load: { try await probe.load($0, $1) })
+        XCTAssertNil(
+            cache.immediateResult(for: item("a"), pixels: 160),
+            "Peek is read-only, not LRU promotion")
+        XCTAssertNotNil(cache.immediateResult(for: item("b"), pixels: 160))
+        XCTAssertNotNil(cache.immediateResult(for: item("c"), pixels: 160))
+        let usage = await cache.usage()
+        XCTAssertLessThanOrEqual(usage.memory, cost * 2)
+        let reads = await probe.count
+        XCTAssertEqual(reads, 3)
+        _ = await cache.invalidate(removeDisk: true)
+    }
+
+    func testImmediateColdLookupWaitsForNormalAsyncDiskOwner() async throws {
+        let root = root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let cache = FoundationArtworkCache(scope: "immediate-cold", root: root)
+        let album = item("album")
+        let probe = ArtworkCacheProbe(data: try image())
+        _ = try await cache.result(
+            for: album, pixels: 640, allowsNetwork: true,
+            load: { try await probe.load($0, $1) })
+        _ = await cache.invalidate(removeDisk: false)
+        let restored = FoundationArtworkCache(scope: "immediate-cold", root: root)
+        XCTAssertNil(
+            restored.immediateResult(for: album, pixels: 640), "No synchronous disk read/decode")
+        let local = try await restored.result(
+            for: item("album", tag: nil), pixels: 640, allowsNetwork: false,
+            load: { _, _ in
+                XCTFail("Cold offline cache must not fetch")
+                return nil
+            })
+        let result = try XCTUnwrap(local)
+        XCTAssertEqual(restored.immediateResult(for: album, pixels: 640)?.id, result.id)
+        XCTAssertEqual(
+            restored.immediateResult(for: item("album", tag: nil), pixels: 640)?.id, result.id)
+        _ = await restored.invalidate(removeDisk: true)
+    }
+
+    func testScopedProductionImmediateLookupPreservesAccountSourceValidation() async throws {
+        let root = root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let cache = FoundationArtworkCache(scope: "immediate-production", root: root)
+        let library = FoundationJellyfinLibrary(
+            session: .init(
+                serverURL: URL(string: "https://example.invalid")!, accessToken: "synthetic",
+                userID: "user", deviceID: "device"),
+            load: { _ in
+                XCTFail("A synchronous peek never sends a request")
+                throw FoundationLibraryError.unavailable
+            },
+            artworkCache: cache)
+        let album = item("11111111111111111111111111111111")
+        let data = try image()
+        let loaded = try await cache.result(
+            for: album, pixels: 640, allowsNetwork: true, load: { _, _ in data })
+        let result = try XCTUnwrap(loaded)
+        let scoped: any FoundationLibrary = library.scoped(to: "selected-music-library")
+        XCTAssertEqual(scoped.immediateArtworkResult(for: album, size: 640)?.id, result.id)
+        var foreign = album
+        foreign.catalogSource = try .jellyfin(scope: String(repeating: "b", count: 64))
+        XCTAssertNil(scoped.immediateArtworkResult(for: foreign, size: 640))
+        _ = await cache.invalidate(removeDisk: true)
+        XCTAssertNil(scoped.immediateArtworkResult(for: album, size: 640))
+    }
+
     func testHomeAlbumAndLibraryTrackReuseOneDecodedResult() async throws {
         let root = root()
         defer { try? FileManager.default.removeItem(at: root) }

@@ -1102,6 +1102,75 @@ final class FoundationDownloadsTests: XCTestCase {
     }
 
     #if DEBUG
+
+        func testRecreatedArtworkFirstDrawUsesWarmDecodedCoverWhileAsyncReadIsHeld() async throws {
+            let directory = try root()
+            let data = try artworkData()
+            let cache = FoundationArtworkCache(scope: "recreated-view", root: directory)
+            addTeardownBlock { _ = await cache.invalidate(removeDisk: true) }
+            let gate = RecreatedArtworkReadGate()
+            addTeardownBlock { await gate.release() }
+            let library = FoundationJellyfinLibrary(
+                session: .init(
+                    serverURL: URL(string: "https://example.invalid")!, accessToken: "synthetic",
+                    userID: "user", deviceID: "device"),
+                load: { _ in
+                    await gate.recordGET()
+                    XCTFail("Recreated warm covers must not need another artwork GET")
+                    throw FoundationLibraryError.unavailable
+                }, artworkCache: cache)
+            let album = FoundationItem(
+                id: "11111111111111111111111111111111", title: "Synthetic cover", subtitle: "",
+                kind: .album, duration: nil, primaryImageTag: "first")
+            let cached = try await cache.result(
+                for: album, pixels: 160, allowsNetwork: true, load: { _, _ in data })
+            let expected = Image(decorative: try XCTUnwrap(cached).image, scale: 1)
+            let manager = FoundationDownloads(
+                scope: "recreated-view", library: library, root: directory,
+                monitorConnectivity: false)
+            defer { manager.invalidate() }
+            let connectivity = FoundationConnectivity(monitorConnectivity: false, retry: {})
+            let state = RecreatedArtworkState()
+            let content = RecreatedArtworkHost(
+                state: state, item: album, library: library, gate: gate
+            )
+            .environmentObject(manager).environmentObject(connectivity)
+            .environment(\.displayScale, 1)
+            #if os(macOS)
+                let window = NSWindow(
+                    contentRect: NSRect(x: 0, y: 0, width: 200, height: 200),
+                    styleMask: [.titled], backing: .buffered, defer: false)
+                window.isReleasedWhenClosed = false
+                window.contentView = NSHostingView(rootView: content)
+                window.orderFront(nil)
+                defer { window.close() }
+            #else
+                let scene = try XCTUnwrap(
+                    UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+                let window = UIWindow(windowScene: scene)
+                window.rootViewController = UIHostingController(rootView: content)
+                window.makeKeyAndVisible()
+                defer { window.isHidden = true }
+            #endif
+            for incarnation in 1...3 {
+                if incarnation > 1 { state.incarnation = UUID() }
+                let identity = state.incarnation
+                try await waitUntil { state.firstFrames[identity] != nil }
+                try await waitUntilAsync { await gate.begun >= incarnation }
+                let first = try XCTUnwrap(state.firstFrames[identity])
+                XCTAssertEqual(
+                    first.image, expected,
+                    "Recreated view \(incarnation) must draw its warm cover before any asynchronous read"
+                )
+                XCTAssertNil(state.completed[identity], "The asynchronous read is still held")
+            }
+            await gate.release()
+            try await waitUntil { state.completed[state.incarnation] == true }
+            let requests = await gate.requests
+            XCTAssertEqual(requests, 0)
+            let pending = await gate.pending
+            XCTAssertEqual(pending, 0)
+        }
         func testRemovedAndRecreatedPlaylistRejectsOldReconciliationSnapshot() async throws {
             let oldTrack = item("old-owner-track")
             let newTrack = item("new-owner-track")
@@ -2721,6 +2790,73 @@ private actor DownloadProgressReporter {
             .environment(
                 \.foundationArtworkTaskObservation,
                 .init(phase: state.phase) { phase, active in state.completed[phase] = active })
+        }
+    }
+
+    @MainActor
+    private final class RecreatedArtworkState: ObservableObject {
+        struct Frame { let image: Image? }
+        @Published var incarnation = UUID()
+        var firstFrames: [UUID: Frame] = [:]
+        var completed: [UUID: Bool] = [:]
+    }
+
+    @MainActor
+    private struct RecreatedArtworkHost: View {
+        @ObservedObject var state: RecreatedArtworkState
+        let item: FoundationItem
+        let library: any FoundationLibrary
+        let gate: RecreatedArtworkReadGate
+
+        var body: some View {
+            FoundationCatalogArtwork(item: item, library: library, isActive: true, size: 144)
+                .id(state.incarnation)
+                .environment(
+                    \.foundationArtworkTaskObservation,
+                    .init(
+                        phase: state.incarnation,
+                        rendered: { phase, image in
+                            if state.firstFrames[phase] == nil {
+                                state.firstFrames[phase] = .init(image: image)
+                            }
+                        },
+                        beforeLoad: { try await gate.wait() }
+                    ) { phase, active in state.completed[phase] = active })
+        }
+    }
+
+    private actor RecreatedArtworkReadGate {
+        private var waiters: [UUID: CheckedContinuation<Void, Error>] = [:]
+        private(set) var begun = 0
+        private(set) var requests = 0
+        var pending: Int { waiters.count }
+
+        func recordGET() { requests += 1 }
+
+        func wait() async throws {
+            let id = UUID()
+            try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { continuation in
+                    if Task.isCancelled {
+                        continuation.resume(throwing: CancellationError())
+                    } else {
+                        waiters[id] = continuation
+                        begun += 1
+                    }
+                }
+            } onCancel: {
+                Task { await self.cancel(id) }
+            }
+        }
+
+        private func cancel(_ id: UUID) {
+            waiters.removeValue(forKey: id)?.resume(throwing: CancellationError())
+        }
+
+        func release() {
+            let pending = waiters.values
+            waiters.removeAll()
+            for waiter in pending { waiter.resume() }
         }
     }
 

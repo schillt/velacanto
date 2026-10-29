@@ -1,9 +1,11 @@
 import SwiftUI
 
 #if DEBUG
-    /// Hosted regression tests observe actual task completion, never image identities or payloads.
+    /// Synthetic hosted tests observe first-frame reuse and task epochs; nil in ordinary views.
     struct FoundationArtworkTaskObservation: Sendable {
         let phase: UUID
+        var rendered: (@MainActor @Sendable (UUID, Image?) -> Void)? = nil
+        var beforeLoad: (@Sendable () async throws -> Void)? = nil
         let finished: @MainActor @Sendable (UUID, Bool) -> Void
     }
 
@@ -69,6 +71,9 @@ struct FoundationCatalogArtwork: View {
             // Capture the immutable render epoch before the asynchronous task can be replaced.
             let observation = taskObservation
             let observedActive = isActive
+            let _ = observation.map { observation in
+                observation.rendered?(observation.phase, displayImage)
+            }
         #endif
         ZStack {
             RoundedRectangle(cornerRadius: artworkCornerRadius).fill(
@@ -109,7 +114,14 @@ struct FoundationCatalogArtwork: View {
                 }
             #endif
             guard isActive, !Task.isCancelled else { return }
+            #if DEBUG
+                if let beforeLoad = observation?.beforeLoad {
+                    do { try await beforeLoad() } catch { return }
+                }
+            #endif
             prepareArtworkIdentity()
+            let warm = immediateCatalogResult
+            if let warm { installImage(warm.image) }
             if case .current(let result) = source, let result {
                 if installedCurrentRevision != result.revision {
                     installedCurrentRevision = result.revision
@@ -121,6 +133,12 @@ struct FoundationCatalogArtwork: View {
             isLoadingUpgrade = installedPixels < targetPixels
             defer { if loadGeneration == generation { isLoadingUpgrade = false } }
             let retainedIdentity = downloads.retainedArtworkIdentity(for: item)
+            if let warm, max(warm.image.width, warm.image.height) >= targetPixels {
+                // The account cache already supplies the current cover at this rendition.
+                // A recreated card must not replace it with a second decode of retained bytes.
+                installedRetainedArtworkIdentity = retainedIdentity
+                installedRetainedArtworkPixels = targetPixels
+            }
             if let retainedIdentity,
                 installedRetainedArtworkIdentity != retainedIdentity
                     || installedRetainedArtworkPixels < targetPixels,
@@ -154,7 +172,13 @@ struct FoundationCatalogArtwork: View {
             return (installedCurrentRevision == result?.revision ? image : nil)
                 ?? result.map { Image(decorative: $0.image, scale: 1) }
         }
-        return image
+        if installedIdentity == artworkIdentity, let image { return image }
+        return immediateCatalogResult.map { Image(decorative: $0.image, scale: 1) }
+    }
+
+    private var immediateCatalogResult: FoundationCurrentArtwork.Result? {
+        guard case .catalog = source else { return nil }
+        return library.immediateArtworkResult(for: item, size: targetPixels)
     }
 
     private var artworkArrivalAnimation: Animation? {
@@ -181,9 +205,12 @@ struct FoundationCatalogArtwork: View {
         }
     }
 
+    private var artworkIdentity: String {
+        "\(library.metadataScopeID)-\(FoundationArtworkCache.key(item, pixels: targetPixels).identity)"
+    }
+
     private func prepareArtworkIdentity() {
-        let identity =
-            "\(library.catalogScopeID)-\(FoundationArtworkCache.key(item, pixels: targetPixels).identity)"
+        let identity = artworkIdentity
         guard installedIdentity != identity else { return }
         installImage(nil)
         installedIdentity = identity
@@ -208,7 +235,7 @@ struct FoundationCatalogArtwork: View {
     private var artworkTaskIdentity: String {
         let key = FoundationArtworkCache.key(item, pixels: targetPixels)
         let identity =
-            "\(library.catalogScopeID)-\(currentResultRevision?.uuidString ?? "catalog")-\(isActive)-\(key.identity)-\(key.pixels)-\(downloads.retainedArtworkIdentity(for: item) ?? "")-\(connectivity.localOnly)-\(connectivity.successfulRetryRevision)"
+            "\(library.metadataScopeID)-\(currentResultRevision?.uuidString ?? "catalog")-\(isActive)-\(key.identity)-\(key.pixels)-\(downloads.retainedArtworkIdentity(for: item) ?? "")-\(connectivity.localOnly)-\(connectivity.successfulRetryRevision)"
         #if DEBUG
             // A hosted proof can force each conservative activation epoch to execute. Ordinary
             // views have no observer and keep their original task identity/coalescing behavior.

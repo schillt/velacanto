@@ -487,6 +487,9 @@ protocol FoundationLibrary: Sendable {
     var catalogScopeID: String { get }
     func catalogCacheKey(_ key: String) -> String
     func retryArtwork(for item: FoundationItem) async
+    /// First-frame reuse only: no I/O, decoding, request admission or asynchronous fallback.
+    func immediateArtworkResult(for item: FoundationItem, size: Int)
+        -> FoundationCurrentArtwork.Result?
     func cachedArtworkResult(for item: FoundationItem, size: Int) async throws
         -> FoundationCurrentArtwork.Result?
     func downloadSource(for item: FoundationItem) async throws -> FoundationDownloadSource
@@ -582,6 +585,9 @@ extension FoundationLibrary {
     var catalogPageCache: FoundationCatalogPageCache? { nil }
     var catalogScopeID: String { "all" }
     func catalogCacheKey(_ key: String) -> String { key }
+    func immediateArtworkResult(for item: FoundationItem, size: Int)
+        -> FoundationCurrentArtwork.Result?
+    { nil }
     func cachedArtworkResult(for item: FoundationItem, size: Int) async throws
         -> FoundationCurrentArtwork.Result?
     { nil }
@@ -2578,6 +2584,13 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
     func retryArtwork(for item: FoundationItem) async {
         guard acceptsCatalogItem(item) else { return }
         await artworkCache?.clearFailures(for: item)
+    }
+
+    func immediateArtworkResult(for item: FoundationItem, size: Int)
+        -> FoundationCurrentArtwork.Result?
+    {
+        guard acceptsCatalogItem(item) else { return nil }
+        return artworkCache?.immediateResult(for: item, pixels: size)
     }
 
     func cachedArtworkResult(for item: FoundationItem, size: Int) async throws
