@@ -40,6 +40,31 @@ struct FoundationRemoteListeningActivity: Identifiable, Equatable, Sendable {
     let item: FoundationItem
     let albumTitle: String
     let elapsed: Double?
+    let sessionID: String
+    let client: String
+    let remoteDeviceID: String?
+    let receiverScope: String?
+
+    init(
+        id: String, deviceKey: String, deviceLabel: String, checkedInAt: Date,
+        item: FoundationItem, albumTitle: String, elapsed: Double?,
+        sessionID: String = "", client: String = "Velacanto Native", remoteDeviceID: String? = nil,
+        receiverScope: String? = nil
+    ) {
+        self.id = id
+        self.deviceKey = deviceKey
+        self.deviceLabel = deviceLabel
+        self.checkedInAt = checkedInAt
+        self.item = item
+        self.albumTitle = albumTitle
+        self.elapsed = elapsed
+        self.sessionID = sessionID
+        self.client = client
+        self.remoteDeviceID = remoteDeviceID
+        self.receiverScope = receiverScope
+    }
+
+    var usesNativeHandoff: Bool { client == "Velacanto Native" }
 
     var progress: FoundationListeningProgress {
         FoundationListeningProgress(elapsed: elapsed, duration: item.duration)
@@ -65,35 +90,16 @@ struct FoundationRemoteListeningActivity: Identifiable, Equatable, Sendable {
         }
         let candidates: [Self] = sessions.compactMap { session in
             guard canonicalUserID(session.userID) == owner,
-                session.client == "Velacanto Native", session.isActive == true,
+                session.isActive == true,
                 let device = session.deviceID, !device.isEmpty, device.utf8.count <= 128,
                 device.caseInsensitiveCompare(ownDeviceID) != .orderedSame,
                 let sessionID = occurrenceID(session.id), let media = session.nowPlayingItem,
-                media.type == "Audio", let itemID = token(media.id),
+                media.type == "Audio", let itemID = catalogID(media.id),
                 session.playState?.isPaused == false,
                 let checkIn = date(session.lastPlaybackCheckIn),
                 now.timeIntervalSince(checkIn) >= -5, now.timeIntervalSince(checkIn) <= 90
             else { return nil }
-            let artistName =
-                text(media.albumArtist)
-                ?? text((media.artists ?? []).prefix(4).joined(separator: ", ")) ?? "Unknown Artist"
-            let album = token(media.albumID).map {
-                FoundationItemReference(
-                    id: $0, title: text(media.album) ?? "Unknown Album",
-                    primaryImageTag: token(media.albumPrimaryImageTag), catalogSource: catalogSource
-                )
-            }
-            let artist = (media.albumArtists ?? media.artistItems ?? []).prefix(16).compactMap {
-                reference -> FoundationItemReference? in
-                guard let id = token(reference.id) else { return nil }
-                return FoundationItemReference(
-                    id: id, title: text(reference.name) ?? artistName, catalogSource: catalogSource)
-            }.first
-            let item = FoundationItem(
-                id: itemID, title: text(media.name) ?? "Untitled", subtitle: artistName,
-                kind: .track, duration: seconds(media.runTimeTicks),
-                primaryImageTag: token(media.imageTags?["Primary"]), album: album,
-                artist: artist, catalogSource: catalogSource)
+            let item = canonicalItem(media, catalogSource: catalogSource)
             let occurrence = [
                 catalogSource?.identity ?? owner, sessionID, device.lowercased(),
                 itemID, occurrenceID(session.playlistItemID) ?? "",
@@ -101,9 +107,15 @@ struct FoundationRemoteListeningActivity: Identifiable, Equatable, Sendable {
             return Self(
                 id: FoundationMusicLibraryStore.digest(occurrence),
                 deviceKey: FoundationMusicLibraryStore.digest(device.lowercased()),
-                deviceLabel: FoundationClientDeviceName.activityLabel(session.deviceName),
+                deviceLabel: session.client == "Velacanto Native"
+                    ? FoundationClientDeviceName.activityLabel(session.deviceName)
+                    : text(session.client) ?? "another player",
                 checkedInAt: checkIn, item: item, albumTitle: text(media.album) ?? "Unknown Album",
-                elapsed: seconds(session.playState?.positionTicks))
+                elapsed: seconds(session.playState?.positionTicks), sessionID: sessionID,
+                client: text(session.client) ?? "Unknown player", remoteDeviceID: device,
+                receiverScope: catalogSource.map {
+                    FoundationMusicLibraryStore.digest($0.identity + "\0" + ownDeviceID)
+                })
         }
         var seen: Set<String> = []
         return Array(
@@ -112,12 +124,37 @@ struct FoundationRemoteListeningActivity: Identifiable, Equatable, Sendable {
             }.filter { seen.insert($0.deviceKey).inserted }.prefix(3))
     }
 
-    private static func seconds(_ ticks: Int64?) -> Double? {
+    fileprivate static func canonicalItem(
+        _ media: ActivitySession.Item, catalogSource: FoundationCatalogSource?
+    ) -> FoundationItem {
+        let artistName =
+            text(media.albumArtist)
+            ?? text((media.artists ?? []).prefix(4).joined(separator: ", ")) ?? "Unknown Artist"
+        let album = catalogID(media.albumID).map {
+            FoundationItemReference(
+                id: $0, title: text(media.album) ?? "Unknown Album",
+                primaryImageTag: token(media.albumPrimaryImageTag), catalogSource: catalogSource)
+        }
+        let artist = (media.albumArtists ?? media.artistItems ?? []).prefix(16).compactMap {
+            reference -> FoundationItemReference? in
+            guard let id = catalogID(reference.id) else { return nil }
+            return FoundationItemReference(
+                id: id, title: text(reference.name) ?? artistName,
+                catalogSource: catalogSource)
+        }.first
+        return FoundationItem(
+            id: catalogID(media.id) ?? "", title: text(media.name) ?? "Untitled",
+            subtitle: artistName, kind: .track, duration: seconds(media.runTimeTicks),
+            primaryImageTag: token(media.imageTags?["Primary"]), album: album,
+            artist: artist, catalogSource: catalogSource)
+    }
+
+    fileprivate static func seconds(_ ticks: Int64?) -> Double? {
         guard let ticks, ticks >= 0 else { return nil }
         return Double(ticks) / 10_000_000
     }
 
-    private static func text(_ value: String?) -> String? {
+    fileprivate static func text(_ value: String?) -> String? {
         guard let value, value.utf8.count <= 2048 else { return nil }
         let cleaned = value.unicodeScalars.filter {
             !CharacterSet.controlCharacters.contains($0)
@@ -128,21 +165,36 @@ struct FoundationRemoteListeningActivity: Identifiable, Equatable, Sendable {
     }
 
     /// Session/queue occurrence IDs are opaque strings, never catalog URL components.
-    private static func occurrenceID(_ value: String?) -> String? {
+    fileprivate static func occurrenceID(_ value: String?) -> String? {
         guard let value, !value.isEmpty, value.utf8.count <= 128,
             !value.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) })
         else { return nil }
         return value
     }
 
-    private static func token(_ value: String?) -> String? {
+    /// Catalog GUIDs have N/D/case variants. Queue occurrence and device/session
+    /// identifiers stay opaque and are never passed through this canonicalizer.
+    static func catalogID(_ value: String?) -> String? {
+        guard let value else { return nil }
+        if value.utf8.count == 32,
+            value.utf8.allSatisfy({
+                (48...57).contains($0) || (65...70).contains($0) || (97...102).contains($0)
+            })
+        {
+            return value.lowercased()
+        }
+        guard let uuid = UUID(uuidString: value) else { return nil }
+        return uuid.uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+    }
+
+    fileprivate static func token(_ value: String?) -> String? {
         guard let value, !value.isEmpty, value.utf8.count <= 128,
             FoundationJellyfinLibrary.validID(value)
         else { return nil }
         return value
     }
 
-    private static func canonicalUserID(_ text: String?) -> String? {
+    fileprivate static func canonicalUserID(_ text: String?) -> String? {
         guard let text else { return nil }
         let compact = text.replacingOccurrences(of: "-", with: "").lowercased()
         guard compact.count == 32, compact.allSatisfy({ $0.isASCII && $0.isHexDigit }),
@@ -152,7 +204,7 @@ struct FoundationRemoteListeningActivity: Identifiable, Equatable, Sendable {
         return compact
     }
 
-    private struct ActivitySession: Decodable {
+    fileprivate struct ActivitySession: Decodable {
         let id: String?
         let userID: String?
         let client: String?
@@ -163,6 +215,9 @@ struct FoundationRemoteListeningActivity: Identifiable, Equatable, Sendable {
         let playlistItemID: String?
         let nowPlayingItem: Item?
         let playState: State?
+        let nowPlayingQueue: [QueueItem]?
+        let nowPlayingQueueFullItems: [Item]?
+        let supportsRemoteControl: Bool?
         enum CodingKeys: String, CodingKey {
             case id = "Id"
             case userID = "UserId"
@@ -174,6 +229,17 @@ struct FoundationRemoteListeningActivity: Identifiable, Equatable, Sendable {
             case playlistItemID = "PlaylistItemId"
             case nowPlayingItem = "NowPlayingItem"
             case playState = "PlayState"
+            case nowPlayingQueue = "NowPlayingQueue"
+            case nowPlayingQueueFullItems = "NowPlayingQueueFullItems"
+            case supportsRemoteControl = "SupportsRemoteControl"
+        }
+        struct QueueItem: Decodable {
+            let id: String?
+            let playlistItemID: String?
+            enum CodingKeys: String, CodingKey {
+                case id = "Id"
+                case playlistItemID = "PlaylistItemId"
+            }
         }
         struct Item: Decodable {
             let id: String?
@@ -214,9 +280,13 @@ struct FoundationRemoteListeningActivity: Identifiable, Equatable, Sendable {
         struct State: Decodable {
             let isPaused: Bool?
             let positionTicks: Int64?
+            let repeatMode: String?
+            let playbackOrder: String?
             enum CodingKeys: String, CodingKey {
                 case isPaused = "IsPaused"
                 case positionTicks = "PositionTicks"
+                case repeatMode = "RepeatMode"
+                case playbackOrder = "PlaybackOrder"
             }
         }
     }
@@ -412,5 +482,202 @@ struct FoundationHandoffListeningGuide: View {
                 ToolbarItem(placement: .confirmationAction) { Button("Done", action: done) }
             }
         }
+    }
+}
+
+/// A complete, memory-only source-reported queue. No delivery locations or source credentials.
+/// Server RPC has no compare-and-stop precondition: source completion is explicitly best effort.
+struct FoundationRemoteContinuationOffer: Sendable {
+    struct Occurrence: Equatable, Sendable {
+        let itemID: String
+        let sourceID: String
+        let localID: UUID
+    }
+    let scope: String
+    let sessionID: String
+    let deviceID: String
+    let client: String
+    let sourceOccurrence: String
+    let queue: [Occurrence]
+    let repeatMode: FoundationHandoffPayload.RepeatMode
+    let position: Double
+    let checkedInAt: Date
+    let supportsRemoteControl: Bool
+    let items: [String: FoundationItem]
+
+    var activityID: String {
+        guard let current = queue.first(where: { $0.sourceID == sourceOccurrence }),
+            let account = items[current.itemID]?.catalogSource?.identity
+        else { return "" }
+        return FoundationMusicLibraryStore.digest(
+            [
+                account, sessionID, deviceID.lowercased(),
+                current.itemID, sourceOccurrence,
+            ].joined(separator: "\0"))
+    }
+
+    var fingerprint: String {
+        let parts =
+            [
+                scope, sessionID, deviceID.lowercased(), client, sourceOccurrence,
+                repeatMode.rawValue,
+            ] + queue.flatMap { [$0.itemID, $0.sourceID] }
+        let framed = parts.map { "\($0.utf8.count):\($0)" }.joined()
+        return FoundationMusicLibraryStore.digest(framed)
+    }
+    var missingItemIDs: [String] {
+        Array(Set(queue.map(\.itemID))).filter { items[$0] == nil }.sorted()
+    }
+    func matching(_ previous: Self) throws -> Self {
+        guard fingerprint == previous.fingerprint else { throw FoundationHandoffError.changed }
+        return self
+    }
+    func resolving(_ additional: [FoundationItem], authoritative: Bool = false) throws -> Self {
+        var metadata = items
+        let wanted = Set(queue.map(\.itemID))
+        for item in additional {
+            guard item.kind == .track, wanted.contains(item.id) else {
+                throw FoundationHandoffError.unavailable
+            }
+            if authoritative || metadata[item.id] == nil { metadata[item.id] = item }
+        }
+        return Self(
+            scope: scope, sessionID: sessionID, deviceID: deviceID, client: client,
+            sourceOccurrence: sourceOccurrence, queue: queue, repeatMode: repeatMode,
+            position: position, checkedInAt: checkedInAt,
+            supportsRemoteControl: supportsRemoteControl, items: metadata)
+    }
+    private static func occurrenceID(_ value: String, scope: String, sessionID: String) -> UUID {
+        let hash = FoundationMusicLibraryStore.digest(scope + "\0" + sessionID + "\0" + value)
+        let text = String(hash.prefix(32))
+        let formatted = [0..<8, 8..<12, 12..<16, 16..<20, 20..<32].map { range in
+            String(
+                text[
+                    text.index(
+                        text.startIndex, offsetBy: range.lowerBound)..<text.index(
+                            text.startIndex, offsetBy: range.upperBound)])
+        }.joined(separator: "-")
+        // digest always yields64 hexadecimal characters; this is not untrusted parsing.
+        return UUID(uuidString: formatted)!
+    }
+    var entries: [FoundationQueueEntry] {
+        queue.compactMap { entry in
+            items[entry.itemID].map {
+                FoundationQueueEntry(id: entry.localID, item: $0)
+            }
+        }
+    }
+    var selected: UUID { Self.occurrenceID(sourceOccurrence, scope: scope, sessionID: sessionID) }
+    func payload(scope contextScope: String, id: UUID) throws -> FoundationHandoffPayload {
+        guard missingItemIDs.isEmpty, entries.count == queue.count else {
+            throw FoundationHandoffError.unavailable
+        }
+        let result = FoundationHandoffPayload(
+            header: .init(id: id, scope: contextScope, kind: .playback),
+            session: .init(
+                entries: entries.map(FoundationHandoffPayload.Track.init), selected: selected,
+                position: position, shuffle: false, repeatMode: repeatMode, wasPlaying: true),
+            destination: nil)
+        _ = try result.encoded()
+        return result
+    }
+
+    static func decode(
+        _ data: Data, sessionID: String, userID: String,
+        ownDeviceID: String, scope: String, catalogSource: FoundationCatalogSource, now: Date
+    ) throws -> Self {
+        typealias Activity = FoundationRemoteListeningActivity
+        guard data.count <= FoundationHandoffPayload.maximumBytes,
+            FoundationJellyfinLibrary.validID(sessionID),
+            !ownDeviceID.isEmpty, ownDeviceID.utf8.count <= 128,
+            let owner = Activity.canonicalUserID(userID)
+        else {
+            throw FoundationHandoffError.invalid
+        }
+        let sessions = try JSONDecoder().decode([Activity.ActivitySession].self, from: data)
+        guard sessions.count <= 512 else { throw FoundationHandoffError.tooLarge }
+        let matches = sessions.filter { $0.id == sessionID }
+        guard matches.count == 1, let session = matches.first,
+            Activity.canonicalUserID(session.userID) == owner,
+            let device = Activity.occurrenceID(session.deviceID),
+            device.caseInsensitiveCompare(ownDeviceID) != .orderedSame,
+            session.isActive == true, session.playState?.isPaused == false,
+            let current = session.nowPlayingItem, current.type == "Audio",
+            let currentID = Activity.catalogID(current.id),
+            let selected = Activity.occurrenceID(session.playlistItemID),
+            let position = Activity.seconds(session.playState?.positionTicks), position.isFinite,
+            position <= Double(Int64.max / 600) - 1
+        else { throw FoundationHandoffError.unavailable }
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        var checkIn = session.lastPlaybackCheckIn.flatMap { formatter.date(from: $0) }
+        if checkIn == nil {
+            formatter.formatOptions = [.withInternetDateTime]
+            checkIn = session.lastPlaybackCheckIn.flatMap { formatter.date(from: $0) }
+        }
+        guard let checkIn, (-5...90).contains(now.timeIntervalSince(checkIn)) else {
+            throw FoundationHandoffError.expired
+        }
+        guard let source = session.nowPlayingQueue, !source.isEmpty else {
+            throw FoundationHandoffError.unavailable
+        }
+        guard source.count <= FoundationHandoffPayload.maximumEntries else {
+            throw FoundationHandoffError.tooLarge
+        }
+        let queue = try source.map { row -> Occurrence in
+            guard let id = Activity.catalogID(row.id),
+                let occurrence = Activity.occurrenceID(row.playlistItemID)
+            else {
+                throw FoundationHandoffError.invalid
+            }
+            return .init(
+                itemID: id, sourceID: occurrence,
+                localID: Self.occurrenceID(occurrence, scope: scope, sessionID: sessionID))
+        }
+        guard Set(queue.map(\.sourceID)).count == queue.count,
+            queue.first(where: { $0.sourceID == selected })?.itemID == currentID
+        else {
+            throw FoundationHandoffError.invalid
+        }
+        let repeatMode: FoundationHandoffPayload.RepeatMode
+        switch session.playState?.repeatMode {
+        case "RepeatNone": repeatMode = .off
+        case "RepeatAll": repeatMode = .all
+        case "RepeatOne": repeatMode = .one
+        default: throw FoundationHandoffError.unavailable
+        }
+        var items: [String: FoundationItem] = [:]
+        let wanted = Set(queue.map(\.itemID))
+        for media in (session.nowPlayingQueueFullItems ?? []) {
+            guard media.type == "Audio", let id = Activity.catalogID(media.id),
+                wanted.contains(id), items[id] == nil
+            else {
+                throw FoundationHandoffError.invalid
+            }
+            items[id] = Activity.canonicalItem(media, catalogSource: catalogSource)
+        }
+        items[currentID] = Activity.canonicalItem(current, catalogSource: catalogSource)
+        return Self(
+            scope: scope, sessionID: sessionID, deviceID: device,
+            client: Activity.text(session.client) ?? "Unknown player", sourceOccurrence: selected,
+            queue: queue, repeatMode: repeatMode, position: position, checkedInAt: checkIn,
+            supportsRemoteControl: session.supportsRemoteControl == true, items: items)
+    }
+
+    /// One confirmation read; absence/ambiguity is not reported as a verified stop.
+    static func stopped(_ data: Data, expected: Self, userID: String) throws -> Bool {
+        typealias Activity = FoundationRemoteListeningActivity
+        guard data.count <= FoundationHandoffPayload.maximumBytes else {
+            throw FoundationHandoffError.tooLarge
+        }
+        let sessions = try JSONDecoder().decode([Activity.ActivitySession].self, from: data)
+        guard sessions.count <= 512 else { throw FoundationHandoffError.tooLarge }
+        let matches = sessions.filter { $0.id == expected.sessionID }
+        guard matches.count == 1, let session = matches.first,
+            let owner = Activity.canonicalUserID(userID),
+            Activity.canonicalUserID(session.userID) == owner,
+            session.deviceID == expected.deviceID
+        else { return false }
+        return session.nowPlayingItem == nil
     }
 }

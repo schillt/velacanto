@@ -17,8 +17,47 @@ final class FoundationHandoffController: NSObject, ObservableObject, NSUserActiv
         let selectedItem: FoundationItem
         let context: UUID
         let intent: UUID
+        var remoteOffer: FoundationRemoteContinuationOffer? = nil
         var id: UUID { payload.header.id }
     }
+
+    /// The same continuation owner handles a server-backed source. It never treats
+    /// an HTTP dispatch as the native peer acknowledgement used by Apple Handoff.
+    @MainActor private final class RemoteTransfer {
+        let id = UUID()
+        let activityID: String
+        let context: UUID
+        var intent: UUID
+        let library: any FoundationLibrary
+        let allowsNetworking: @MainActor () -> Bool
+        var offer: FoundationRemoteContinuationOffer?
+        var generation: UInt64?
+        var completion: (@MainActor () -> Void)?
+        var onStarted: (@MainActor () -> Void)?
+        var didStart = false
+        init(
+            activityID: String, context: UUID, intent: UUID, library: any FoundationLibrary,
+            completion: @escaping @MainActor () -> Void,
+            onStarted: @escaping @MainActor () -> Void,
+            allowsNetworking: @escaping @MainActor () -> Bool
+        ) {
+            self.activityID = activityID
+            self.context = context
+            self.intent = intent
+            self.library = library
+            self.completion = completion
+            self.onStarted = onStarted
+            self.allowsNetworking = allowsNetworking
+        }
+        func prepared() {
+            let callback = completion
+            completion = nil
+            callback?()
+        }
+    }
+    private var remoteTransfer: RemoteTransfer?
+    private var remoteTask: Task<Void, Never>?
+    private var remoteObservation: AnyCancellable?
 
     private struct Context {
         let id = UUID()
@@ -52,6 +91,7 @@ final class FoundationHandoffController: NSObject, ObservableObject, NSUserActiv
 
     @Published private(set) var pending: Pending?
     @Published var notice: String?
+    @Published private(set) var remoteNotice = false
     @Published private(set) var presentationOwner: UUID?
     func claimPresentation(_ owner: UUID) {
         if presentationOwner == nil { presentationOwner = owner }
@@ -153,6 +193,8 @@ final class FoundationHandoffController: NSObject, ObservableObject, NSUserActiv
     }
 
     func invalidate() {
+        retireRemote()
+        remoteNotice = false
         context = nil
         player = nil
         subscriptions.removeAll()
@@ -202,6 +244,7 @@ final class FoundationHandoffController: NSObject, ObservableObject, NSUserActiv
     func receive(_ activity: NSUserActivity, prepare: @escaping @MainActor () async -> Bool) -> Bool
     {
         guard activity.activityType == FoundationHandoffPayload.activityType else { return false }
+        remoteNotice = false
         do {
             guard let data = activity.userInfo?[FoundationHandoffPayload.userInfoKey] as? Data
             else {
@@ -261,7 +304,221 @@ final class FoundationHandoffController: NSObject, ObservableObject, NSUserActiv
         return true
     }
 
+    /// Only an explicit non-native card action calls this. Discovery and help are read-only.
+    func prepareRemoteContinuation(
+        _ activity: FoundationRemoteListeningActivity,
+        library: any FoundationLibrary,
+        allowsNetworking: @escaping @MainActor () -> Bool = { true },
+        onStarted: @escaping @MainActor () -> Void = {},
+        completion: @escaping @MainActor () -> Void = {}
+    ) {
+        remoteNotice = true
+        guard allowsNetworking(), !activity.usesNativeHandoff, let context, player != nil else {
+            completion()
+            notice = "Sign in to the matching music account before continuing."
+            return
+        }
+        retireIncoming()
+        let transfer = RemoteTransfer(
+            activityID: activity.id, context: context.id, intent: intent,
+            library: library, completion: completion, onStarted: onStarted,
+            allowsNetworking: allowsNetworking)
+        remoteTransfer = transfer
+        notice = nil
+        remoteTask = Task { [weak self, weak transfer] in
+            guard let transfer else { return }
+            do {
+                guard transfer.allowsNetworking() else { throw FoundationHandoffError.unavailable }
+                let offer = try await library.prepareRemoteContinuation(activity)
+                try Task.checkCancellation()
+                guard let self, self.remoteIsCurrent(transfer) else { return }
+                guard transfer.allowsNetworking() else { throw FoundationHandoffError.unavailable }
+                let payload = try offer.payload(scope: context.scope, id: transfer.id)
+                guard let selected = offer.entries.first(where: { $0.id == offer.selected }) else {
+                    throw FoundationHandoffError.invalid
+                }
+                transfer.offer = offer
+                self.pending = .init(
+                    payload: payload, selectedItem: selected.item,
+                    context: context.id, intent: transfer.intent, remoteOffer: offer)
+                transfer.prepared()
+                self.remoteTask = nil
+            } catch {
+                guard !Task.isCancelled, let self, self.remoteTransfer === transfer else { return }
+                self.failRemote(transfer, error: error)
+            }
+        }
+    }
+
+    /// Hiding/navigating away from an unconfirmed card cannot leave a late confirmation.
+    func cancelRemotePreparation(activityID: String) {
+        guard let transfer = remoteTransfer, transfer.activityID == activityID,
+            transfer.generation == nil
+        else { return }
+        retireRemote()
+    }
+
+    private func remoteIsCurrent(_ transfer: RemoteTransfer) -> Bool {
+        remoteTransfer === transfer && context?.id == transfer.context && intent == transfer.intent
+    }
+
+    private func acceptRemote(_ pending: Pending, transfer: RemoteTransfer) {
+        guard remoteIsCurrent(transfer), pending.id == transfer.id, let offered = transfer.offer,
+            transfer.generation == nil
+        else {
+            dismissPending()
+            return
+        }
+        self.pending = nil
+        remoteTask = Task { [weak self, weak transfer] in
+            guard let transfer else { return }
+            do {
+                // Revalidate source identity, current occurrence, full queue and repeat
+                // before changing this device's queue. Position changes alone are allowed.
+                guard transfer.allowsNetworking() else { throw FoundationHandoffError.unavailable }
+                let fresh = try await transfer.library.authorizeRemoteContinuation(offered)
+                try Task.checkCancellation()
+                guard let self, self.remoteIsCurrent(transfer), let player = self.player else {
+                    return
+                }
+                guard transfer.allowsNetworking() else { throw FoundationHandoffError.unavailable }
+                _ = try fresh.matching(offered)
+                guard fresh.missingItemIDs.isEmpty else { throw FoundationHandoffError.unavailable }
+                transfer.offer = fresh
+                self.retireOutgoing()
+                self.intent = UUID()
+                transfer.intent = self.intent
+                self.applying = true
+                let snapshot = FoundationPlaybackSnapshot(
+                    entries: fresh.entries,
+                    selectedEntryID: fresh.selected, shuffleEnabled: false,
+                    repeatMode: FoundationPlayer.RepeatMode(rawValue: fresh.repeatMode.rawValue)
+                        ?? .off,
+                    visibleEntryIDs: fresh.entries.map(\.id))
+                let accepted = player.continueSession(
+                    snapshot, position: fresh.position, wasPlaying: true,
+                    finalPosition: { [weak self, weak transfer] in
+                        guard let self, let transfer, self.remoteIsCurrent(transfer),
+                            transfer.allowsNetworking(), let expected = transfer.offer
+                        else { throw FoundationHandoffError.changed }
+                        do {
+                            // One fresh read at native readiness, before the one initial seek.
+                            let latest = try await transfer.library.refreshRemoteContinuation(
+                                expected)
+                            try Task.checkCancellation()
+                            guard self.remoteIsCurrent(transfer), transfer.allowsNetworking(),
+                                self.player?.continuationGeneration == transfer.generation
+                            else {
+                                throw FoundationHandoffError.changed
+                            }
+                            _ = try latest.matching(expected)
+                            transfer.offer = latest
+                            return latest.position
+                        } catch {
+                            if !Task.isCancelled, self.remoteIsCurrent(transfer) {
+                                self.failRemote(transfer, error: error)
+                            }
+                            throw error
+                        }
+                    })
+                self.applying = false
+                guard accepted else { throw FoundationHandoffError.invalid }
+                transfer.generation = player.continuationGeneration
+                self.remoteTask = nil
+                self.remoteObservation = player.$state.sink { [weak self, weak transfer] state in
+                    Task { @MainActor [weak self, weak transfer] in
+                        guard let self, let transfer, self.remoteIsCurrent(transfer) else { return }
+                        if state == .playing {
+                            self.completeRemoteAfterNativeStart(transfer)
+                        } else if state == .failed {
+                            self.failRemote(transfer, error: FoundationHandoffError.unavailable)
+                        }
+                    }
+                }
+                self.publishActivity()
+            } catch {
+                guard !Task.isCancelled, let self, self.remoteTransfer === transfer else { return }
+                self.failRemote(transfer, error: error)
+            }
+        }
+    }
+
+    private func completeRemoteAfterNativeStart(_ transfer: RemoteTransfer) {
+        guard remoteIsCurrent(transfer), !transfer.didStart,
+            let generation = transfer.generation, let expected = transfer.offer,
+            player?.isNativeContinuationPlaying(
+                generation: generation, occurrence: expected.selected) == true
+        else { return }
+        transfer.didStart = true
+        let started = transfer.onStarted
+        transfer.onStarted = nil
+        started?()
+        remoteTask = Task { [weak self, weak transfer] in
+            guard let transfer else { return }
+            var confirmed = false
+            do {
+                guard transfer.allowsNetworking() else { throw FoundationHandoffError.unavailable }
+                let fresh = try await transfer.library.refreshRemoteContinuation(expected)
+                try Task.checkCancellation()
+                guard let self, self.remoteIsCurrent(transfer) else { return }
+                guard
+                    self.player?.isNativeContinuationPlaying(
+                        generation: generation, occurrence: expected.selected) == true
+                else { throw FoundationHandoffError.unavailable }
+                guard transfer.allowsNetworking() else { throw FoundationHandoffError.unavailable }
+                _ = try fresh.matching(expected)
+                guard fresh.supportsRemoteControl else { throw FoundationHandoffError.unavailable }
+                // Owner accepted best effort: the server has no atomic expected-occurrence
+                // Stop. This single command follows actual receiving native playback.
+                try await transfer.library.stopRemoteContinuation(fresh)
+                try Task.checkCancellation()
+                guard self.remoteIsCurrent(transfer) else { return }
+                if transfer.allowsNetworking() {
+                    confirmed =
+                        (try? await transfer.library.confirmRemoteContinuationStopped(fresh))
+                        == true
+                }
+            } catch {}
+            guard !Task.isCancelled, let self, self.remoteIsCurrent(transfer) else { return }
+            self.retireRemote()
+            if !confirmed {
+                self.notice =
+                    "Playback started here, but the original player may still be playing. Stop it there if needed."
+            }
+        }
+    }
+
+    private func failRemote(_ transfer: RemoteTransfer, error: Error) {
+        guard remoteTransfer === transfer else { return }
+        let hadApplied = transfer.generation != nil
+        retireRemote()
+        notice =
+            hadApplied
+            ? "Playback could not continue from that player. The original player was not stopped."
+            : ((error as? FoundationHandoffError) == .tooLarge
+                ? FoundationHandoffError.tooLarge.errorDescription
+                : "The reported queue is unavailable or changed. No incomplete queue was applied.")
+    }
+
+    private func retireRemote() {
+        let transfer = remoteTransfer
+        remoteTransfer = nil
+        remoteTask?.cancel()
+        remoteTask = nil
+        remoteObservation?.cancel()
+        remoteObservation = nil
+        if pending?.remoteOffer != nil { pending = nil }
+        transfer?.prepared()
+        if let generation = transfer?.generation {
+            player?.cancelPendingContinuation(generation: generation)
+        }
+    }
+
     func acceptPending() {
+        if let pending, pending.remoteOffer != nil, let transfer = remoteTransfer {
+            acceptRemote(pending, transfer: transfer)
+            return
+        }
         guard let pending, let context, context.id == pending.context,
             intent == pending.intent, pending.payload.session != nil,
             acceptanceTask == nil
@@ -518,6 +775,7 @@ final class FoundationHandoffController: NSObject, ObservableObject, NSUserActiv
     }
 
     private func retireIncoming() {
+        retireRemote()
         let cancelledGeneration = appliedGeneration
         let cancelledPlayer = player
         let waiting = awaitedControl

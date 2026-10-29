@@ -477,6 +477,15 @@ actor FoundationArtistDetailMemo {
 protocol FoundationLibrary: Sendable {
     var listeningActivityScope: String { get }
     func remoteListeningActivity() async throws -> [FoundationRemoteListeningActivity]
+    func prepareRemoteContinuation(_ activity: FoundationRemoteListeningActivity) async throws
+        -> FoundationRemoteContinuationOffer
+    func authorizeRemoteContinuation(_ expected: FoundationRemoteContinuationOffer) async throws
+        -> FoundationRemoteContinuationOffer
+    func refreshRemoteContinuation(_ expected: FoundationRemoteContinuationOffer) async throws
+        -> FoundationRemoteContinuationOffer
+    func stopRemoteContinuation(_ expected: FoundationRemoteContinuationOffer) async throws
+    func confirmRemoteContinuationStopped(_ expected: FoundationRemoteContinuationOffer)
+        async throws -> Bool
     func reportPlayback(_ event: FoundationPlaybackReport) async throws
     func retireAlphabetCapability() async
     func alphabetCapability() async -> FoundationAlphabetCapability
@@ -570,6 +579,21 @@ extension FoundationLibrary {
     var supportsOfflinePlaylistPreparation: Bool { false }
     var listeningActivityScope: String { "" }
     func remoteListeningActivity() async throws -> [FoundationRemoteListeningActivity] { [] }
+    func prepareRemoteContinuation(_ activity: FoundationRemoteListeningActivity) async throws
+        -> FoundationRemoteContinuationOffer
+    { throw FoundationHandoffError.unavailable }
+    func authorizeRemoteContinuation(_ expected: FoundationRemoteContinuationOffer) async throws
+        -> FoundationRemoteContinuationOffer
+    { throw FoundationHandoffError.unavailable }
+    func refreshRemoteContinuation(_ expected: FoundationRemoteContinuationOffer) async throws
+        -> FoundationRemoteContinuationOffer
+    { throw FoundationHandoffError.unavailable }
+    func stopRemoteContinuation(_ expected: FoundationRemoteContinuationOffer) async throws {
+        throw FoundationHandoffError.unavailable
+    }
+    func confirmRemoteContinuationStopped(_ expected: FoundationRemoteContinuationOffer)
+        async throws -> Bool
+    { false }
     func playbackResource(for item: FoundationItem) async throws -> FoundationPlaybackResource {
         FoundationPlaybackResource(url: try await playbackURL(for: item))
     }
@@ -933,6 +957,207 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
     }
 
     var supportsOfflinePlaylistPreparation: Bool { true }
+    /// Explicit card action only; Home discovery never prepares media or sends controls.
+    func prepareRemoteContinuation(_ activity: FoundationRemoteListeningActivity) async throws
+        -> FoundationRemoteContinuationOffer
+    {
+        guard activity.receiverScope == listeningActivityScope,
+            !activity.usesNativeHandoff, !activity.sessionID.isEmpty
+        else {
+            throw FoundationHandoffError.unavailable
+        }
+        return try await FoundationRequestIntent.$isPlayback.withValue(false) {
+            try await FoundationRemoteListeningDeadline.run {
+                let data = try await remoteContinuationData()
+                let source = try FoundationCatalogSource.jellyfin(scope: catalogAccountIdentity)
+                var offer = try FoundationRemoteContinuationOffer.decode(
+                    data, sessionID: activity.sessionID,
+                    userID: session.userID, ownDeviceID: session.deviceID,
+                    scope: listeningActivityScope,
+                    catalogSource: source, now: Date())
+                guard offer.activityID == activity.id, offer.client == activity.client,
+                    offer.deviceID.lowercased() == activity.remoteDeviceID?.lowercased(),
+                    offer.queue.first(where: { $0.sourceID == offer.sourceOccurrence })?.itemID
+                        == activity.item.id
+                else {
+                    throw FoundationHandoffError.changed
+                }
+                // FullItems is display metadata, not a user-authorization bypass.
+                let verified = try await authorizedRemoteQueueItems(
+                    offer,
+                    remainingBytes: FoundationHandoffPayload.maximumBytes - data.count)
+                offer = try offer.resolving(verified.items, authoritative: true)
+                guard offer.missingItemIDs.isEmpty else { throw FoundationHandoffError.unavailable }
+                return offer
+            }
+        }
+    }
+
+    /// Recheck every queued permission, then obtain the latest matching source
+    /// snapshot immediately before the controller changes its receiving queue.
+    func authorizeRemoteContinuation(_ expected: FoundationRemoteContinuationOffer) async throws
+        -> FoundationRemoteContinuationOffer
+    {
+        guard expected.scope == listeningActivityScope else {
+            throw FoundationHandoffError.differentAccount
+        }
+        return try await FoundationRequestIntent.$isPlayback.withValue(false) {
+            try await FoundationRemoteListeningDeadline.run {
+                let verified = try await authorizedRemoteQueueItems(
+                    expected,
+                    remainingBytes: FoundationHandoffPayload.maximumBytes)
+                let data = try await remoteContinuationData()
+                guard data.count <= FoundationHandoffPayload.maximumBytes - verified.bytes else {
+                    throw FoundationHandoffError.tooLarge
+                }
+                let fresh = try FoundationRemoteContinuationOffer.decode(
+                    data,
+                    sessionID: expected.sessionID, userID: session.userID,
+                    ownDeviceID: session.deviceID,
+                    scope: listeningActivityScope,
+                    catalogSource: try .jellyfin(scope: catalogAccountIdentity), now: Date())
+                return try fresh.matching(expected).resolving(verified.items, authoritative: true)
+            }
+        }
+    }
+
+    /// Finite sequential ID batches, never one request per track or background loading.
+    /// This is a post-buffer cumulative decode budget, not a transport allocation cap.
+    private func authorizedRemoteQueueItems(
+        _ offer: FoundationRemoteContinuationOffer,
+        remainingBytes: Int
+    ) async throws -> (items: [FoundationItem], bytes: Int) {
+        let ids = Array(Set(offer.queue.map(\.itemID))).sorted()
+        guard !ids.isEmpty, ids.count <= FoundationHandoffPayload.maximumEntries,
+            ids.allSatisfy(Self.validID), remainingBytes >= 0
+        else { throw FoundationHandoffError.tooLarge }
+        var resultItems: [FoundationItem] = []
+        var consumedBytes = 0
+        let source = try FoundationCatalogSource.jellyfin(scope: catalogAccountIdentity)
+        for start in stride(from: 0, to: ids.count, by: 200) {
+            try Task.checkCancellation()
+            let requested = Array(ids[start..<min(start + 200, ids.count)])
+            var parameters = Paths.GetItemsParameters()
+            parameters.userID = session.userID
+            // Account-owned audio, never the unrelated browsing ParentId filter.
+            parameters.ids = requested
+            parameters.includeItemTypes = [.audio]
+            parameters.isRecursive = true
+            parameters.startIndex = 0
+            parameters.limit = requested.count
+            parameters.fields = []
+            parameters.enableUserData = false
+            parameters.enableImages = true
+            parameters.imageTypeLimit = 1
+            parameters.enableImageTypes = [.primary]
+            parameters.enableTotalRecordCount = true
+            let data = try await responseData(
+                Paths.getItems(parameters: parameters), requestTimeout: 8)
+            try Task.checkCancellation()
+            guard data.count <= remainingBytes - consumedBytes else {
+                throw FoundationHandoffError.tooLarge
+            }
+            consumedBytes += data.count
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .custom { decoder in
+                let text = try decoder.singleValueContainer().decode(String.self)
+                guard text.utf8.count <= 64 else { throw FoundationLibraryError.invalidResponse }
+                let formatter = ISO8601DateFormatter()
+                formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+                if let value = formatter.date(from: text) { return value }
+                formatter.formatOptions = [.withInternetDateTime]
+                guard let value = formatter.date(from: text) else {
+                    throw FoundationLibraryError.invalidResponse
+                }
+                return value
+            }
+            let result = try decoder.decode(BaseItemDtoQueryResult.self, from: data)
+            guard let rows = result.items, result.startIndex == 0,
+                result.totalRecordCount == requested.count, rows.count == requested.count
+            else {
+                throw FoundationHandoffError.unavailable
+            }
+            let canonicalRows = try rows.map { row in
+                guard let id = FoundationRemoteListeningActivity.catalogID(row.id) else {
+                    throw FoundationHandoffError.unavailable
+                }
+                var row = row
+                row.id = id
+                return row
+            }
+            let mapped = try mappedItems(canonicalRows, kinds: [.track]).map { item in
+                var item = item
+                item.catalogSource = source
+                return item
+            }
+            guard Set(mapped.map(\.id)) == Set(requested),
+                Set(mapped.map(\.id)).count == mapped.count
+            else {
+                throw FoundationHandoffError.unavailable
+            }
+            resultItems += mapped
+        }
+        return (resultItems, consumedBytes)
+    }
+
+    func refreshRemoteContinuation(_ expected: FoundationRemoteContinuationOffer) async throws
+        -> FoundationRemoteContinuationOffer
+    {
+        guard expected.scope == listeningActivityScope else {
+            throw FoundationHandoffError.differentAccount
+        }
+        return try await FoundationRequestIntent.$isPlayback.withValue(false) {
+            try await FoundationRemoteListeningDeadline.run {
+                let fresh = try FoundationRemoteContinuationOffer.decode(
+                    try await remoteContinuationData(),
+                    sessionID: expected.sessionID, userID: session.userID,
+                    ownDeviceID: session.deviceID,
+                    scope: listeningActivityScope,
+                    catalogSource: try .jellyfin(scope: catalogAccountIdentity), now: Date())
+                return try fresh.matching(expected).resolving(
+                    expected.entries.map(\.item), authoritative: true)
+            }
+        }
+    }
+
+    func stopRemoteContinuation(_ expected: FoundationRemoteContinuationOffer) async throws {
+        guard expected.scope == listeningActivityScope, expected.supportsRemoteControl,
+            Self.validID(expected.sessionID)
+        else { throw FoundationHandoffError.unavailable }
+        try await FoundationRequestIntent.$isPlayback.withValue(false) {
+            try await FoundationRemoteListeningDeadline.run {
+                // Exactly one best-effort command. No toggle, retries or source credentials.
+                _ = try await responseData(
+                    Paths.sendPlaystateCommand(sessionID: expected.sessionID, command: "Stop"),
+                    requestTimeout: 8)
+            }
+        }
+    }
+
+    func confirmRemoteContinuationStopped(_ expected: FoundationRemoteContinuationOffer)
+        async throws -> Bool
+    {
+        guard expected.scope == listeningActivityScope else {
+            throw FoundationHandoffError.differentAccount
+        }
+        return try await FoundationRequestIntent.$isPlayback.withValue(false) {
+            try await FoundationRemoteListeningDeadline.run {
+                try FoundationRemoteContinuationOffer.stopped(
+                    try await remoteContinuationData(), expected: expected, userID: session.userID)
+            }
+        }
+    }
+
+    private func remoteContinuationData() async throws -> Data {
+        let data = try await responseData(
+            Paths.getSessions(parameters: .init(activeWithinSeconds: 90)), requestTimeout: 8)
+        try Task.checkCancellation()
+        guard data.count <= FoundationHandoffPayload.maximumBytes else {
+            throw FoundationHandoffError.tooLarge
+        }
+        return data
+    }
+
     var supportsPlaylistManagement: Bool { true }
     var supportsPlaylistReordering: Bool { true }
 

@@ -69,7 +69,10 @@ struct FoundationHandoffPresentation: ViewModifier {
     }
 
     private var title: String {
-        guard let pending = controller.pending else { return "Handoff" }
+        guard let pending = controller.pending else {
+            return controller.remoteNotice ? "Continue Listening" : "Handoff"
+        }
+        if let remote = pending.remoteOffer { return "Continue listening from \(remote.client)?" }
         guard pending.payload.session?.wasPlaying == true else { return "Continue VelaCanto?" }
         let device = pending.payload.header.sourceDevice?.displayName ?? "your other device"
         return "Continue listening from \(device)?"
@@ -101,7 +104,14 @@ struct FoundationHandoffPresentation: ViewModifier {
                     Button("OK") { controller.notice = nil }
                 }
             } message: {
-                if let pending = controller.pending, let session = pending.payload.session {
+                if let remote = controller.pending?.remoteOffer {
+                    Text(
+                        "Continue the complete reported queue here at its latest available position? Its current order and repeat setting are preserved; the original unshuffled queue is not available. After playback starts here, VelaCanto will try once to stop the original player. That player could change before the stop arrives."
+                            + (remote.supportsRemoteControl
+                                ? ""
+                                : " This player currently does not support remote stopping; you may need to stop it there.")
+                    )
+                } else if let pending = controller.pending, let session = pending.payload.session {
                     Text(
                         session.wasPlaying
                             ? "Move playback and the full queue here at the current position? After playback starts here, the other device’s playback and queue will be cleared."

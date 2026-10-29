@@ -430,11 +430,13 @@ private struct FoundationContinueListening: View {
     @EnvironmentObject private var connectivity: FoundationConnectivity
     @EnvironmentObject private var dismissals: FoundationContinueListeningDismissals
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.foundationHandoff) private var handoff
     let library: any FoundationLibrary
     let isActive: Bool
     let refreshRevision: Int
     @StateObject private var model = FoundationRemoteListeningModel()
     @State private var showingGuide = false
+    @State private var preparingRemoteID: String?
     @State private var inlineInstructionsForID: String?
     @AppStorage(FoundationHandoffGuidePreference.key) private var guideSuppressed = false
 
@@ -478,18 +480,25 @@ private struct FoundationContinueListening: View {
             await model.expireVisibleActivity()
         }
         .onDisappear {
+            cancelUnconfirmedRemote()
             model.suspend()
             showingGuide = false
             inlineInstructionsForID = nil
         }
         .onChange(of: active) { _, value in
             if !value {
+                cancelUnconfirmedRemote()
                 model.suspend()
                 showingGuide = false
                 inlineInstructionsForID = nil
             }
         }
-        .onChange(of: selected?.id) { _, _ in
+        .onChange(of: selected?.id) { old, _ in
+            if let old { handoff?.cancelRemotePreparation(activityID: old) }
+            if let preparingRemoteID {
+                handoff?.cancelRemotePreparation(activityID: preparingRemoteID)
+            }
+            preparingRemoteID = nil
             showingGuide = false
             inlineInstructionsForID = nil
         }
@@ -510,6 +519,25 @@ private struct FoundationContinueListening: View {
     }
 
     private func openInstructions(for activity: FoundationRemoteListeningActivity) {
+        guard selected?.id == activity.id else { return }
+        guard activity.usesNativeHandoff else {
+            guard activity.receiverScope == library.listeningActivityScope,
+                let handoff, preparingRemoteID == nil
+            else { return }
+            preparingRemoteID = activity.id
+            let offeredScope = library.listeningActivityScope
+            handoff.prepareRemoteContinuation(
+                activity, library: library, allowsNetworking: { !connectivity.localOnly },
+                onStarted: {
+                    // Retire only this known source card after actual receiving playback.
+                    // An unrelated native Handoff source is never inferred or suppressed.
+                    dismissals.dismiss(activity.id, scope: offeredScope)
+                },
+                completion: {
+                    if preparingRemoteID == activity.id { preparingRemoteID = nil }
+                })
+            return
+        }
         switch FoundationContinueListeningInstructionAction.onTap(guideSuppressed: guideSuppressed)
         {
         case .fullGuide: showingGuide = true
@@ -517,13 +545,28 @@ private struct FoundationContinueListening: View {
         }
     }
 
+    private func cancelUnconfirmedRemote() {
+        if let preparingRemoteID {
+            handoff?.cancelRemotePreparation(activityID: preparingRemoteID)
+        }
+        // Preparation completion clears the spinner before the user confirms.
+        // Leaving this card must also retire that already-prepared confirmation.
+        if let selected { handoff?.cancelRemotePreparation(activityID: selected.id) }
+        preparingRemoteID = nil
+    }
+
     private func dismiss(_ activity: FoundationRemoteListeningActivity) {
+        guard selected?.id == activity.id else { return }
+        handoff?.cancelRemotePreparation(activityID: activity.id)
+        preparingRemoteID = nil
         dismissals.dismiss(activity.id, scope: library.listeningActivityScope)
         showingGuide = false
         inlineInstructionsForID = nil
     }
 
     /// The heading stays outside the native swipe surface. Dismissal is presentation-only.
+    /// Reuses the existing artwork/title/details/progress-circle media-card layout.
+    /// Native sources show Handoff help; other clients explicitly prepare a confirmed queue transfer.
     private func continueListening(_ activity: FoundationRemoteListeningActivity) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Continue listening from \(activity.deviceLabel)")
@@ -576,9 +619,16 @@ private struct FoundationContinueListening: View {
             }.contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Continue listening instructions")
+        .disabled(preparingRemoteID != nil || (!activity.usesNativeHandoff && handoff == nil))
+        .accessibilityLabel(
+            activity.usesNativeHandoff
+                ? "Continue listening instructions" : "Continue listening here"
+        )
         .accessibilityValue(accessibilityValue)
-        .accessibilityHint("Shows Handoff instructions. Does not start playback.")
+        .accessibilityHint(
+            activity.usesNativeHandoff
+                ? "Shows Handoff instructions. Does not start playback."
+                : "Prepares the complete reported queue for confirmation before starting here.")
     }
 
     private func mediaDetails(_ activity: FoundationRemoteListeningActivity) -> some View {
@@ -596,8 +646,14 @@ private struct FoundationContinueListening: View {
     private func progressIndicator(_ activity: FoundationRemoteListeningActivity) -> some View {
         Image(systemName: "play.fill")
             .font(.title3.weight(.semibold)).foregroundStyle(.primary)
+            .opacity(preparingRemoteID == activity.id ? 0 : 1)
             .frame(width: 44, height: 44)
             .background(.quaternary, in: Circle())
+            .overlay {
+                if preparingRemoteID == activity.id {
+                    ProgressView().accessibilityLabel("Preparing reported queue")
+                }
+            }
             .overlay {
                 Circle().trim(from: 0, to: activity.progress.fraction)
                     .stroke(
