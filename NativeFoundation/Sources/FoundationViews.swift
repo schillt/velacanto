@@ -2792,10 +2792,6 @@ struct FoundationTrackList: View {
                                 Text(subtitle).font(.caption).foregroundStyle(.secondary)
                                     .lineLimit(2)
                             }
-                            if connectivity.localOnly, !downloads.isReady(item) {
-                                Label("Not downloaded", systemImage: "icloud.slash")
-                                    .font(.caption).foregroundStyle(.secondary)
-                            }
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
