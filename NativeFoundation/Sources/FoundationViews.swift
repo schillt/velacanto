@@ -1718,6 +1718,11 @@ struct FoundationCatalogView: View {
     let isActive: Bool
     var isFavorites = false
     var showsTrackArtwork = false
+    var automaticallyLoadsPages = false
+    var automaticPageIdentity: String? = nil
+    var itemProjection: (([FoundationItem]) -> [FoundationItem])? = nil
+    var collectionGrid = false
+    var emptyMessage: String? = nil
     var headerItem: FoundationItem?
     var coverageMessage: String? = nil
     var localItems: (() -> [FoundationItem])? = nil
@@ -1969,12 +1974,13 @@ struct FoundationCatalogView: View {
     }
 
     private var displayedItems: [FoundationItem] {
-        let items = isFavorites ? actions.favoriteItems(in: model.items) : model.items
+        let raw = isFavorites ? actions.favoriteItems(in: model.items) : model.items
+        let items = itemProjection?(raw) ?? raw
         return connectivity.localOnly ? downloads.itemsWithDownloadedMusic(in: items) : items
     }
 
     private var showsCollectionGrid: Bool {
-        headerItem?.kind == .artist
+        collectionGrid || headerItem?.kind == .artist
             || (!displayedItems.isEmpty
                 && displayedItems.allSatisfy { $0.kind == .album || $0.kind == .playlist })
     }
@@ -2001,10 +2007,12 @@ struct FoundationCatalogView: View {
         }
         if !connectivity.localOnly, model.loaded, displayedItems.isEmpty {
             Text(
-                coverageMessage != nil
-                    ? "No matches in the playlists checked."
-                    : model.nextStartIndex == nil
-                        ? "No items found." : "No matches in this page. Load more to continue.")
+                emptyMessage
+                    ?? (coverageMessage != nil
+                        ? "No matches in the playlists checked."
+                        : model.nextStartIndex == nil
+                            ? "No items found." : "No matches in this page. Load more to continue.")
+            )
         }
         if let error = model.errorMessage, !model.hasConnectionIssue, !connectivity.localOnly {
             Text(error).foregroundStyle(.red)
@@ -2017,8 +2025,38 @@ struct FoundationCatalogView: View {
             FoundationLoadingPlaceholder(layout: showsCollectionGrid ? .albumGrid : .rows)
         }
         if model.nextStartIndex != nil, !connectivity.localOnly {
-            Button("Load more") { reload(.more) }.disabled(
-                model.isLoading || connectivity.localOnly)
+            if automaticallyLoadsPages {
+                VStack(spacing: 0) {
+                    if model.isLoading {
+                        ProgressView("Loading more…")
+                    } else {
+                        Color.clear.frame(height: 1).accessibilityHidden(true)
+                    }
+                }
+                .task(
+                    id:
+                        "\(isActive && isVisible && scenePhase == .active)-\(connectivity.localOnly)-\(automaticPageIdentity ?? String(model.nextStartIndex ?? -1))-\(revision)"
+                ) {
+                    await loadDemandedPage()
+                }
+            } else {
+                Button("Load more") { reload(.more) }.disabled(
+                    model.isLoading || connectivity.localOnly)
+            }
+        }
+    }
+
+    /// A visible footer owns one demand. Busy initial publication does not consume it.
+    private func loadDemandedPage() async {
+        guard isActive, isVisible, scenePhase == .active, !connectivity.localOnly,
+            !Task.isCancelled
+        else { return }
+        for await _ in model.$isLoading.filter({ !$0 }).values {
+            guard !Task.isCancelled else { return }
+            await model.loadNextPage(
+                ifActive: isActive && isVisible && scenePhase == .active,
+                allowsNetwork: !connectivity.localOnly, using: loader)
+            return
         }
     }
 

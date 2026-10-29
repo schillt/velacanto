@@ -806,6 +806,142 @@ final class FoundationPrimaryGenresTests: XCTestCase {
         } catch { XCTAssertEqual(error as? FoundationLibraryError, .unavailable) }
     }
 
+    func testCanonicalGenreModesProjectOnlyLoadedScopedSongReferences() throws {
+        let source = try FoundationCatalogSource.jellyfin(scope: String(repeating: "a", count: 64))
+        let foreign = FoundationCatalogSource.local(sourceID: UUID())
+        let first = FoundationItem(
+            id: Self.id(100), title: "One", subtitle: "", kind: .track, duration: 10,
+            album: .init(id: Self.id(10), title: "First Album"),
+            artist: .init(id: Self.id(20), title: "First Artist"), catalogSource: source)
+        let repeated = FoundationItem(
+            id: Self.id(101), title: "Two", subtitle: "", kind: .track, duration: 10,
+            album: first.album, artist: first.artist, catalogSource: source)
+        let second = FoundationItem(
+            id: Self.id(102), title: "Three", subtitle: "", kind: .track, duration: 10,
+            album: .init(id: Self.id(11), title: "Second Album"),
+            artist: .init(id: Self.id(21), title: "Second Artist"), catalogSource: source)
+        let missing = FoundationItem(
+            id: Self.id(103), title: "No References", subtitle: "", kind: .track, duration: 10,
+            catalogSource: source)
+        var foreignSong = second
+        foreignSong.catalogSource = foreign
+        var foreignReference = second
+        foreignReference.album = .init(
+            id: Self.id(99), title: "Foreign Album", catalogSource: foreign)
+        foreignReference.artist = .init(
+            id: Self.id(98), title: "Foreign Artist", catalogSource: foreign)
+        let songs = [first, repeated, second, missing, foreignSong, foreignReference]
+        let albums = FoundationPrimaryGenreContent.albums.items(in: songs, source: source)
+        let artists = FoundationPrimaryGenreContent.artists.items(in: songs, source: source)
+        XCTAssertEqual(albums.map(\.id), [Self.id(10), Self.id(11)])
+        XCTAssertEqual(artists.map(\.id), [Self.id(20), Self.id(21)])
+        XCTAssertTrue(albums.allSatisfy { $0.kind == .album && $0.catalogSource == source })
+        XCTAssertTrue(artists.allSatisfy { $0.kind == .artist && $0.catalogSource == source })
+        XCTAssertEqual(first.relatedAlbum?.id, albums.first?.id)
+        XCTAssertEqual(first.relatedArtist?.id, artists.first?.id)
+        XCTAssertEqual(
+            FoundationPrimaryGenreContent.tracks.items(in: songs, source: source).map(\.id),
+            [first.id, repeated.id, second.id, missing.id, foreignReference.id])
+    }
+
+    func testGenreProjectionKeepsRawPaginationAndStopsDuplicateCollectionDemand() async throws {
+        let source = try FoundationCatalogSource.jellyfin(scope: String(repeating: "a", count: 64))
+        let track = FoundationItem(
+            id: Self.id(100), title: "One", subtitle: "", kind: .track, duration: 10,
+            album: .init(id: Self.id(10), title: "Album"), catalogSource: source)
+        let missing = FoundationItem(
+            id: Self.id(101), title: "No References", subtitle: "", kind: .track, duration: 10,
+            catalogSource: source)
+        let model = FoundationBrowseModel()
+        model.configureCatalogPagination()
+        await model.load(.initial) { _ in .init(items: [track], nextStartIndex: 50) }
+        let first = FoundationPrimaryGenreContent.albums.items(in: model.items, source: source)
+        let demand = FoundationPrimaryGenreContent.albums.pageDemandIdentity(for: first)
+        await model.loadNextPage { offset in
+            XCTAssertEqual(offset, 50)
+            return .init(items: [track, missing], nextStartIndex: 100)
+        }
+        XCTAssertEqual(model.nextStartIndex, 100)
+        XCTAssertNil(model.errorMessage)
+        let second = FoundationPrimaryGenreContent.albums.items(in: model.items, source: source)
+        XCTAssertEqual(second, first)
+        XCTAssertEqual(FoundationPrimaryGenreContent.albums.pageDemandIdentity(for: second), demand)
+        XCTAssertTrue(
+            FoundationPrimaryGenreContent.artists.items(in: model.items, source: source).isEmpty)
+        XCTAssertNil(FoundationPrimaryGenreContent.tracks.pageDemandIdentity(for: model.items))
+    }
+
+    func testVisibleCanonicalGenrePagingIsBoundedOfflineSafeAndRequiresExplicitFailureRetry()
+        async throws
+    {
+        let recorder = PrimaryGenreRequests()
+        let resolver = FoundationJellyfinLibrary(session: Self.session) { request in
+            await recorder.append(request)
+            let requests = await recorder.requests
+            if requests.count == 2 { throw URLError(.timedOut) }
+            let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!
+                .queryItems!
+            let ids = query.filter { $0.name == "ids" }.compactMap(\.value)
+            let items = ids.reversed().map { ["Id": $0, "Name": "Synthetic", "Type": "Audio"] }
+            let data = try JSONSerialization.data(withJSONObject: [
+                "Items": items, "StartIndex": 0, "TotalRecordCount": ids.count,
+            ])
+            return (
+                data,
+                HTTPURLResponse(
+                    url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            )
+        }.scoped(to: Self.id(77))
+        let scope = try XCTUnwrap(resolver.primaryGenreIndexScope)
+        let ids = (100..<225).map(Self.id)
+        let census = UUID()
+        let record = FoundationPrimaryGenreRecord(
+            snapshot: .init(
+                scope: scope, songCount: ids.count, censusID: census, completedAt: Date(),
+                songCountsByGenre: [Self.id(1): ids.count], eligibleGenreIDs: [Self.id(1)],
+                primaryBySongID: Dictionary(uniqueKeysWithValues: ids.map { ($0, [Self.id(1)]) }),
+                orderedSongIDs: ids),
+            descriptors: [
+                .init(
+                    id: Self.id(1), title: "Genre", subtitle: "", kind: .genre,
+                    duration: nil, primaryGenreCensusID: census, catalogSource: scope.source)
+            ])
+        let model = FoundationBrowseModel()
+        model.configureCatalogPagination()
+        let load: (Int) async throws -> FoundationPage = {
+            try await record.songPage(genreID: Self.id(1), startIndex: $0, library: resolver)
+        }
+        await model.load(.initial, using: load)
+        XCTAssertEqual(model.items.count, 50)
+        XCTAssertEqual(model.nextStartIndex, 50)
+        await model.loadNextPage(ifActive: false, using: load)
+        await model.loadNextPage(allowsNetwork: false, using: load)
+        let admitted = await recorder.requests
+        XCTAssertEqual(admitted.count, 1)
+        await model.loadNextPage(using: load)
+        XCTAssertNotNil(model.errorMessage)
+        XCTAssertEqual(model.items.count, 50)
+        await model.loadNextPage(using: load)
+        let afterFailure = await recorder.requests
+        XCTAssertEqual(afterFailure.count, 2, "Visible demand must not automatically retry failure")
+        await model.load(.more, using: load)
+        XCTAssertNil(model.errorMessage)
+        XCTAssertEqual(model.items.count, 100)
+        XCTAssertEqual(model.nextStartIndex, 100)
+        await model.loadNextPage(using: load)
+        XCTAssertEqual(model.items.map(\.id), ids)
+        XCTAssertNil(model.nextStartIndex)
+        await model.loadNextPage(using: load)
+        let requests = await recorder.requests
+        XCTAssertEqual(requests.count, 4)
+        let counts = requests.map {
+            URLComponents(url: $0.url!, resolvingAgainstBaseURL: false)!.queryItems!
+                .filter { $0.name == "ids" }.count
+        }
+        XCTAssertEqual(counts, [50, 50, 50, 25])
+        XCTAssertTrue(requests.allSatisfy { !$0.url!.absoluteString.contains("genreIds") })
+    }
+
     func testAccountOwnerSharesOneBuildAndFreshSnapshotAcrossTwoWindowsAndRetiresBoth() async throws
     {
         let recorder = PrimaryGenreRequests()

@@ -14,7 +14,7 @@ struct FoundationPrimaryGenreDestination: View {
         if let record = genres.canonicalRecord(
             for: genre, libraryScope: library.primaryGenreIndexScope)
         {
-            FoundationPrimaryGenreSongs(
+            FoundationPrimaryGenreContentView(
                 genre: genre, record: record, library: library, player: player, isActive: isActive
             ).id(record.snapshot.censusID)
         } else {
@@ -27,7 +27,7 @@ struct FoundationPrimaryGenreDestination: View {
     }
 }
 
-private struct FoundationPrimaryGenreSongs: View {
+private struct FoundationPrimaryGenreContentView: View {
     @EnvironmentObject private var downloads: FoundationDownloads
     let genre: FoundationItem
     let record: FoundationPrimaryGenreRecord
@@ -36,6 +36,7 @@ private struct FoundationPrimaryGenreSongs: View {
     let isActive: Bool
     let songIDs: [String]
     @StateObject private var songs: FoundationBrowseModel
+    @State private var content = FoundationPrimaryGenreContent.albums
 
     init(
         genre: FoundationItem, record: FoundationPrimaryGenreRecord,
@@ -56,14 +57,91 @@ private struct FoundationPrimaryGenreSongs: View {
         record.readySongs(membershipIDs: songIDs, from: downloads.downloadedSongs)
     }
 
+    private var projectedItems: [FoundationItem] {
+        content.items(in: songs.items, source: record.snapshot.scope.source)
+    }
+
     var body: some View {
         FoundationCatalogView(
             title: genre.title, model: songs, library: library, player: player,
-            isActive: isActive, showsTrackArtwork: true, localItems: { readySongs }
+            isActive: isActive, showsTrackArtwork: true,
+            automaticallyLoadsPages: content == .tracks || !projectedItems.isEmpty,
+            automaticPageIdentity: content.pageDemandIdentity(for: projectedItems),
+            itemProjection: { content.items(in: $0, source: record.snapshot.scope.source) },
+            collectionGrid: content != .tracks, emptyMessage: content.emptyMessage,
+            localItems: { readySongs }
         ) { offset in
             try await record.songPage(genreID: genre.id, startIndex: offset, library: library)
         }
+        .id(content)
         .accessibilityIdentifier("primary-genre-songs")
+        #if os(macOS)
+            .navigationTitle("")
+            .toolbar {
+                ToolbarItem(placement: .principal) {
+                    Menu {
+                        contentChoices
+                    } label: {
+                        HStack(spacing: 5) {
+                            Text(genre.title).font(.headline)
+                            Image(systemName: "chevron.down").font(.caption)
+                        }
+                    }
+                    .menuIndicator(.hidden)
+                    .accessibilityLabel(genre.title + " view options")
+                    .accessibilityValue(content.rawValue)
+                    .accessibilityIdentifier("primary-genre-title-menu")
+                }
+            }
+        #else
+            .toolbarTitleMenu { contentChoices }
+        #endif
+    }
+
+    private var contentChoices: some View {
+        Picker("Browse genre", selection: $content) {
+            ForEach(FoundationPrimaryGenreContent.allCases) { kind in
+                Text(kind.rawValue).tag(kind)
+            }
+        }
+        .pickerStyle(.inline)
+        .accessibilityIdentifier("primary-genre-content-picker")
+    }
+}
+
+/// Collection membership comes from the same canonical songs, not provider album genre tags.
+/// A page with repeated/missing references never triggers a hidden search for a new collection.
+enum FoundationPrimaryGenreContent: String, CaseIterable, Identifiable {
+    case tracks = "Tracks"
+    case albums = "Albums"
+    case artists = "Artists"
+
+    var id: Self { self }
+
+    var emptyMessage: String? {
+        switch self {
+        case .tracks: nil
+        case .albums: "No album information in the loaded tracks."
+        case .artists: "No artist information in the loaded tracks."
+        }
+    }
+
+    /// A raw cursor advancing through duplicate/missing references cannot start a crawl.
+    func pageDemandIdentity(for items: [FoundationItem]) -> String? {
+        self == .tracks ? nil : "\(rawValue)-\(items.count)-\(items.last?.id ?? "")"
+    }
+
+    func items(in songs: [FoundationItem], source: FoundationCatalogSource) -> [FoundationItem] {
+        let scoped = songs.filter {
+            $0.kind == .track && ($0.catalogSource == nil || $0.catalogSource == source)
+        }
+        guard self != .tracks else { return scoped }
+        var seen: Set<String> = []
+        return scoped.compactMap { song in
+            let item = self == .albums ? song.relatedAlbum : song.relatedArtist
+            guard let item, seen.insert(item.id).inserted else { return nil }
+            return item
+        }
     }
 }
 

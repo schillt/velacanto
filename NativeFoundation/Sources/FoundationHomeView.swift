@@ -639,8 +639,10 @@ private struct FoundationHomeGenreShelf: View {
         primaryGenres.readySongs(for: genre, libraryScope: library.primaryGenreIndexScope)
     }
 
-    private var displayedSongs: [FoundationItem] {
-        connectivity.localOnly ? readySongs : songs.items
+    private var displayedAlbums: [FoundationItem] {
+        FoundationPrimaryGenreContent.albums.items(
+            in: connectivity.localOnly ? readySongs : songs.items,
+            source: record.snapshot.scope.source)
     }
 
     var body: some View {
@@ -658,18 +660,18 @@ private struct FoundationHomeGenreShelf: View {
             .accessibilityLabel("See all " + genre.title.lowercased())
             .accessibilityAddTraits(.isHeader)
             .accessibilityIdentifier("home-shelf-" + genre.title)
-            if !displayedSongs.isEmpty {
+            if !displayedAlbums.isEmpty {
                 ScrollView(.horizontal) {
                     LazyHStack(alignment: .top, spacing: 16) {
-                        ForEach(Array(displayedSongs.prefix(previewLimit)), id: \.id) { song in
+                        ForEach(Array(displayedAlbums.prefix(previewLimit)), id: \.id) { album in
                             FoundationAlbumShelfCard(
-                                item: song, library: library, player: player,
+                                item: album, library: library, player: player,
                                 isActive: isActive && isVisible,
-                                open: { openedItem = song }, navigate: { openedItem = $0 },
-                                artworkItem: song.catalogArtworkItem
+                                open: { openedItem = album }, navigate: { openedItem = $0 },
+                                artworkItem: album
                             )
                             .accessibilityIdentifier(
-                                "home-genre-song-\(genre.id)-\(song.id)")
+                                "home-genre-album-\(genre.id)-\(album.id)")
                         }
                     }.scrollTargetLayout()
                 }
@@ -690,8 +692,9 @@ private struct FoundationHomeGenreShelf: View {
                     songs.request(songs.retryRequest)
                     retryRevision += 1
                 }
-            } else if displayedSongs.isEmpty, songs.loaded || connectivity.localOnly {
-                Text("No indexed songs are available in this page.").foregroundStyle(.secondary)
+            } else if displayedAlbums.isEmpty, songs.loaded || connectivity.localOnly {
+                Text("No album information is available for these tracks.").foregroundStyle(
+                    .secondary)
             }
         }
         .onAppear { isVisible = true }

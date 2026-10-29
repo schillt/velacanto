@@ -3843,6 +3843,7 @@ final class FoundationDownloadsUITests: XCTestCase {
         tapVisible(genre, in: app)
         XCTAssertTrue(
             app.descendants(matching: .any)["primary-genre-songs"].waitForExistence(timeout: 5))
+        selectCanonicalGenreContent("Tracks", title: "Fixture Genre", in: app)
         XCTAssertTrue(
             app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Fixture Tone"))
                 .firstMatch.waitForExistence(timeout: 5))
@@ -3873,6 +3874,7 @@ final class FoundationDownloadsUITests: XCTestCase {
         tapVisible(restored, in: app)
         XCTAssertTrue(
             app.descendants(matching: .any)["primary-genre-songs"].waitForExistence(timeout: 5))
+        selectCanonicalGenreContent("Tracks", title: "Fixture Genre", in: app)
         XCTAssertTrue(
             app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Fixture Tone"))
                 .firstMatch.waitForExistence(timeout: 5))
@@ -3902,10 +3904,10 @@ final class FoundationDownloadsUITests: XCTestCase {
             {
                 let heading = app.buttons["home-shelf-" + title]
                 revealHomeGenrePreview(heading, in: app)
-                let card = app.buttons["home-genre-song-" + id + "-tone"]
+                let card = app.buttons["home-genre-album-" + id + "-album"]
                 XCTAssertTrue(
                     card.waitForExistence(timeout: 10),
-                    "Automatic publication must render preview songs for every eligible shelf")
+                    "Automatic publication must render preview albums for every eligible shelf")
                 revealHomeGenrePreview(card, in: app)
                 XCTAssertTrue(card.isHittable)
                 XCTAssertGreaterThanOrEqual(card.frame.width, 140)
@@ -3921,6 +3923,20 @@ final class FoundationDownloadsUITests: XCTestCase {
                 selectTab("Home", in: app)
             }
         }
+    }
+
+    private func selectCanonicalGenreContent(
+        _ content: String, title: String, in app: XCUIApplication
+    ) {
+        let titleMenu = app.navigationBars.buttons.matching(
+            NSPredicate(format: "label BEGINSWITH %@", title)
+        ).firstMatch
+        XCTAssertTrue(
+            titleMenu.waitForExistence(timeout: 5), "Genre title must expose its native menu")
+        titleMenu.tap()
+        let choice = app.buttons[content]
+        XCTAssertTrue(choice.waitForExistence(timeout: 5))
+        choice.tap()
     }
 
     private func revealHomeGenrePreview(_ element: XCUIElement, in app: XCUIApplication) {
@@ -3962,6 +3978,12 @@ final class FoundationDownloadsUITests: XCTestCase {
         tapVisible(shelf, in: app)
         XCTAssertTrue(
             app.descendants(matching: .any)["primary-genre-songs"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["View Fixture Album"].waitForExistence(timeout: 5))
+        selectCanonicalGenreContent("Artists", title: "Fixture Genre", in: app)
+        XCTAssertTrue(app.buttons["View Fixture Artist"].waitForExistence(timeout: 5))
+        selectCanonicalGenreContent("Albums", title: "Fixture Genre", in: app)
+        XCTAssertTrue(app.buttons["View Fixture Album"].waitForExistence(timeout: 5))
+        selectCanonicalGenreContent("Tracks", title: "Fixture Genre", in: app)
         XCTAssertTrue(
             app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Primary Song 2"))
                 .firstMatch.exists, "Home genre routes must preserve song-only canonical membership"
@@ -3984,6 +4006,7 @@ final class FoundationDownloadsUITests: XCTestCase {
         tapVisible(app.buttons["Fixture Genre"], in: app)
         XCTAssertTrue(
             app.descendants(matching: .any)["primary-genre-songs"].waitForExistence(timeout: 5))
+        selectCanonicalGenreContent("Tracks", title: "Fixture Genre", in: app)
         XCTAssertTrue(
             app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Primary Song 2"))
                 .firstMatch.exists,
@@ -3999,6 +4022,7 @@ final class FoundationDownloadsUITests: XCTestCase {
         tapVisible(pinned, in: app)
         XCTAssertTrue(
             app.descendants(matching: .any)["primary-genre-songs"].waitForExistence(timeout: 5))
+        selectCanonicalGenreContent("Tracks", title: "Fixture Genre", in: app)
         XCTAssertTrue(
             app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Primary Song 2"))
                 .firstMatch.exists,
