@@ -86,13 +86,6 @@ struct FoundationHomeView<Profile: View>: View {
                     FoundationTrace.event("ui origin=home disappeared")
                 #endif
             }
-            .refreshable {
-                guard isActive, !connectivity.localOnly else { return }
-                recentTracks.request(.refresh)
-                favorites.request(.refresh)
-                recentAlbums.request(.refresh)
-                refreshRevision += 1
-            }
             .foundationLibraryRefresh(
                 revision: actions.libraryRefreshRevision,
                 active: isActive && isVisible && !connectivity.localOnly
@@ -167,6 +160,13 @@ struct FoundationHomeView<Profile: View>: View {
             #else
                 naturalContent
             #endif
+        }
+        .refreshable {
+            guard isActive, !connectivity.localOnly else { return }
+            recentTracks.request(.refresh)
+            favorites.request(.refresh)
+            recentAlbums.request(.refresh)
+            refreshRevision += 1
         }
         .swipeActionsContainer()
         .accessibilityIdentifier("foundation-home-scroll")
