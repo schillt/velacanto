@@ -637,6 +637,69 @@ final class FoundationPlaylistContentSearchTests: XCTestCase {
             limits: limits)
     }
 
+    @MainActor
+    func testVisibleClientsHandOverHeldPageInEitherOrderWithoutDuplicateReads() async {
+        for registerSuccessorFirst in [false, true] {
+            let gate = PlaylistContentGate()
+            let library = AutomaticPlaylistLibrary { _, cursor in
+                if cursor.candidateOffset == 0 {
+                    await gate.wait()
+                    return .init(
+                        items: [], nextStartIndex: 6, hasIncompleteCoverage: true,
+                        partialFailureCount: 0)
+                }
+                return .init(
+                    items: [Self.item("day-drive", kind: .playlist)], nextStartIndex: nil,
+                    hasIncompleteCoverage: false, partialFailureCount: 0)
+            }
+            let model = Self.automaticModel()
+            let inline = UUID()
+            let full = UUID()
+            let context = FoundationMusicSearchContext(trackIDs: ["opalite"])
+            let producer = model.registerVisible(inline, context: context, library: library)
+            while !(await gate.started) { await Task.yield() }
+            if registerSuccessorFirst {
+                model.registerVisible(full, context: context, library: library)
+                model.releaseVisible(inline)
+            } else {
+                model.releaseVisible(inline)
+                model.registerVisible(full, context: context, library: library)
+            }
+            await gate.release()
+            await producer?.value
+            XCTAssertEqual(model.items.map(\.id), ["day-drive"])
+            XCTAssertNil(model.cursor)
+            XCTAssertNil(model.error)
+            let reads = await library.calls
+            XCTAssertEqual(reads, 2, "Handover shares the held request, then advances exactly once")
+            model.releaseVisible(full)
+        }
+    }
+
+    @MainActor
+    func testLastVisibleClientLeavingCancelsAndRejectsLatePageWithoutContinuation() async {
+        let gate = PlaylistContentGate()
+        let library = AutomaticPlaylistLibrary { _, _ in
+            await gate.wait()
+            return .init(
+                items: [Self.item("late", kind: .playlist)], nextStartIndex: 6,
+                hasIncompleteCoverage: true, partialFailureCount: 0)
+        }
+        let model = Self.automaticModel()
+        let client = UUID()
+        let producer = model.registerVisible(
+            client, context: .init(trackIDs: ["opalite"]), library: library)
+        while !(await gate.started) { await Task.yield() }
+        model.releaseVisible(client)
+        while model.searching { await Task.yield() }
+        await gate.release()
+        await producer?.value
+        XCTAssertTrue(model.items.isEmpty)
+        XCTAssertEqual(model.cursor?.candidateOffset, 0)
+        let reads = await library.calls
+        XCTAssertEqual(reads, 1)
+    }
+
     private static func id(_ suffix: Int) -> String { String(format: "%032x", suffix) }
 
     private static func query(_ request: URLRequest, _ name: String) -> String? {

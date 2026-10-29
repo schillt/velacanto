@@ -692,6 +692,7 @@ private struct FoundationPlaylistLookupView: View {
     var inline = false
     var openAll: (() -> Void)? = nil
     @State private var visible = false
+    @State private var visibilityOwner = UUID()
     @State private var openedItem: FoundationItem?
 
     private var displayedItems: [FoundationItem] {
@@ -711,17 +712,25 @@ private struct FoundationPlaylistLookupView: View {
         .foundationCollectionDestination(
             item: $openedItem, library: library, player: player, isActive: isActive
         )
-        .onAppear { visible = true }
+        .onAppear {
+            visible = true
+            registerVisibility()
+        }
         .onDisappear {
             visible = false
-            model.cancel()
+            model.releaseVisible(visibilityOwner)
         }
-        .onChange(of: connectivity.localOnly) { _, _ in model.cancel() }
-        .onChange(of: isActive) { _, active in if !active { model.cancel() } }
-        .task(id: "\(isActive && visible)-\(connectivity.localOnly)") {
-            guard isActive, visible, !connectivity.localOnly else { return }
-            await model.searchWhileVisible(context: context, library: library)
+        .onChange(of: connectivity.localOnly) { _, offline in
+            if offline { model.cancel() } else { registerVisibility() }
         }
+        .onChange(of: isActive) { _, active in
+            if active { registerVisibility() } else { model.releaseVisible(visibilityOwner) }
+        }
+    }
+
+    private func registerVisibility() {
+        guard isActive, visible, !connectivity.localOnly else { return }
+        model.registerVisible(visibilityOwner, context: context, library: library)
     }
 
     private var contents: some View {
@@ -745,7 +754,7 @@ private struct FoundationPlaylistLookupView: View {
                 }
             }
             if !connectivity.localOnly {
-                if model.searching {
+                if model.searching || (model.cursor != nil && model.error == nil) {
                     HStack(spacing: 8) {
                         ProgressView().controlSize(.small)
                         Text("Searching playlists…").font(.caption).foregroundStyle(.secondary)

@@ -595,6 +595,10 @@ struct FoundationSearchResolver: Sendable {
     @Published private(set) var loading = false
     @Published private(set) var searching = false
     private var searchOwner = UUID()
+    private var visibleClients: Set<UUID> = []
+    private var visibleTask: Task<Void, Never>?
+    private var visibleJob = UUID()
+    private var visibilityRevision = 0
     private var owner = UUID()
     private var budget = FoundationCatalogBudget()
     private let scope: String
@@ -629,6 +633,41 @@ struct FoundationSearchResolver: Sendable {
         if seed.partialFailureCount > 0 { error = .network }
     }
 
+    /// Inline and full results register independently while sharing one producer.
+    @discardableResult
+    func registerVisible(
+        _ client: UUID, context: FoundationMusicSearchContext,
+        library: any FoundationLibrary
+    ) -> Task<Void, Never>? {
+        guard library.metadataScopeID == scope else { return nil }
+        visibleClients.insert(client)
+        visibilityRevision += 1
+        guard visibleTask == nil, error == nil, cursor != nil else { return visibleTask }
+        let job = UUID()
+        visibleJob = job
+        visibleTask = Task { [weak self] in
+            guard let self, visibleJob == job, !visibleClients.isEmpty, !Task.isCancelled else {
+                return
+            }
+            await searchWhileVisible(context: context, library: library)
+            if visibleJob == job { visibleTask = nil }
+        }
+        return visibleTask
+    }
+
+    func releaseVisible(_ client: UUID) {
+        guard visibleClients.remove(client) != nil else { return }
+        visibilityRevision += 1
+        guard visibleClients.isEmpty else { return }
+        let revision = visibilityRevision
+        // Defer cleanup to the next actor turn so synchronous SwiftUI view
+        // handover can register its successor without cancelling a shared read.
+        Task { [weak self] in
+            guard let self, visibilityRevision == revision, visibleClients.isEmpty else { return }
+            cancel()
+        }
+    }
+
     /// The caller owns visibility/query lifetime. Each step uses the unchanged
     /// bounded provider batch and ordinary admission; errors never auto-retry.
     func searchWhileVisible(context: FoundationMusicSearchContext, library: any FoundationLibrary)
@@ -650,6 +689,11 @@ struct FoundationSearchResolver: Sendable {
     }
 
     func cancel() {
+        visibleClients.removeAll()
+        visibilityRevision += 1
+        visibleJob = UUID()
+        visibleTask?.cancel()
+        visibleTask = nil
         owner = UUID()
         searchOwner = UUID()
         loading = false
