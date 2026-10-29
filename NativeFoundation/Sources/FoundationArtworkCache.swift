@@ -602,21 +602,39 @@ actor FoundationArtworkCache {
         }
 
         func remember(_ result: FoundationCurrentArtwork.Result, key: Key, expiry: Date) {
-            withLock {
-                guard live else { return }
+            let state: (entries: [Key: Entry], access: UInt)? = withLock {
+                guard live else { return nil }
                 clock &+= 1
-                let entry = Entry(result: result, expiry: expiry, access: clock)
-                guard entry.cost <= max(0, limits.memoryBytes) else { return }
-                entries[key] = entry
-                while entries.values.reduce(0, { $0 + $1.cost }) > max(0, limits.memoryBytes),
-                    let oldest = entries.min(by: { $0.value.access < $1.value.access })?.key
-                {
-                    entries.removeValue(forKey: oldest)
+                return (entries, clock)
+            }
+            guard let state else { return }
+            let entry = Entry(result: result, expiry: expiry, access: state.access)
+            guard entry.cost <= max(0, limits.memoryBytes) else { return }
+            // Only the owning actor mutates this store, and this method never suspends.
+            // Plan eviction off-lock so a first-frame peek never waits for a large LRU scan.
+            // The temporary dictionary shares decoded objects; it is not another image cache.
+            var next = state.entries
+            next[key] = entry
+            var total = next.values.reduce(0) { $0 + $1.cost }
+            if total > max(0, limits.memoryBytes) {
+                for (key, value) in next.sorted(by: { $0.value.access < $1.value.access }) {
+                    guard total > max(0, limits.memoryBytes) else { break }
+                    next.removeValue(forKey: key)
+                    total -= value.cost
+                }
+            }
+            withExtendedLifetime(state.entries) {
+                withLock {
+                    guard live else { return }
+                    entries = next
                 }
             }
         }
 
-        var bytes: Int { withLock { entries.values.reduce(0) { $0 + $1.cost } } }
+        var bytes: Int {
+            let snapshot = withLock { entries }
+            return snapshot.values.reduce(0) { $0 + $1.cost }
+        }
 
         func invalidate() {
             withLock {
