@@ -442,8 +442,10 @@ private struct FoundationContinueListening: View {
 
     private var selected: FoundationRemoteListeningActivity? {
         guard !connectivity.localOnly, !library.listeningActivityScope.isEmpty else { return nil }
+        let now = Date()
         return FoundationContinueListeningSelection.select(
-            model.activities, dismissed: dismissals.keys)
+            model.activities.filter { $0.checkedInAt.addingTimeInterval(90) > now },
+            dismissed: dismissals.keys)
     }
 
     private var instruction: String {
