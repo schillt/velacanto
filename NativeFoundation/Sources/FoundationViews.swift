@@ -1851,7 +1851,7 @@ struct FoundationCatalogView: View {
                 hasError: model.errorMessage != nil)
         }
         #if os(iOS)
-            .refreshable { requestVisibleRefresh() }
+            .modifier(FoundationCollectionPullRefresh(action: requestVisibleRefresh))
         #endif
         .foundationLibraryRefresh(
             revision: actions.libraryRefreshRevision,
@@ -2545,7 +2545,7 @@ struct FoundationTrackList: View {
     var body: some View {
         trackSurface
             #if os(iOS)
-                .refreshable { requestVisibleRefresh() }
+                .modifier(FoundationCollectionPullRefresh(action: requestVisibleRefresh))
             #endif
             .foundationLibraryRefresh(
                 revision: actions.libraryRefreshRevision,
@@ -4493,6 +4493,23 @@ private struct FoundationMiniPlayerLabel: View {
                 .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
             } else {
                 content
+            }
+        }
+    }
+#endif
+
+#if os(iOS)
+    /// Sheet content dragging belongs to the native detents and dismissal gesture.
+    /// Only ordinary collection pages install the pull-to-refresh capability.
+    private struct FoundationCollectionPullRefresh: ViewModifier {
+        @Environment(\.foundationRelatedItemSheet) private var relatedItemSheet
+        let action: @MainActor () async -> Void
+
+        @ViewBuilder func body(content: Content) -> some View {
+            if relatedItemSheet {
+                content
+            } else {
+                content.refreshable { await action() }
             }
         }
     }

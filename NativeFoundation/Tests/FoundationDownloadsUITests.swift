@@ -4495,7 +4495,20 @@ final class FoundationDownloadsUITests: XCTestCase {
             XCTAssertLessThan(
                 title.frame.minY - sheet.frame.minY, expandedTitleOffset - 20,
                 "Large-height detail content must remain scrollable")
-            closeRelatedSheet(app)
+            // Dismiss from the content, not the grabber, so a refresh control cannot consume the drag.
+            for _ in 0..<3 where relatedSheet(app).exists {
+                let current = relatedSheet(app)
+                let contentStart = current.coordinate(
+                    withNormalizedOffset: CGVector(dx: 0.5, dy: 0.65))
+                contentStart.press(
+                    forDuration: 0.1,
+                    thenDragTo: app.coordinate(
+                        withNormalizedOffset: CGVector(dx: 0.5, dy: 0.98)),
+                    withVelocity: .slow, thenHoldForDuration: 0.2)
+            }
+            let dismissed = XCTNSPredicateExpectation(
+                predicate: NSPredicate(format: "exists == false"), object: relatedSheet(app))
+            XCTAssertEqual(XCTWaiter.wait(for: [dismissed], timeout: 5), .completed)
         }
         XCTAssertTrue(app.buttons["Pause"].waitForExistence(timeout: 5))
     }
