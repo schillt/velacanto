@@ -526,6 +526,136 @@ final class FoundationArtworkCacheTests: XCTestCase {
         _ = await other.invalidate(removeDisk: true)
     }
 
+    func testCompactPreviewsSurviveTwentyFourFullCoversWithinTheExistingMemoryBudget()
+        async throws
+    {
+        let root = root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let clock = ArtworkCacheClock()
+        let cache = FoundationArtworkCache(
+            scope: "compact-working-set", root: root, now: { clock.read() })
+        let other = FoundationArtworkCache(scope: "different-account", root: root)
+        let data = try image(width: 640, height: 640)
+        let probe = ArtworkCacheProbe(data: data)
+        let albums = (0..<24).map { item("cover-\($0)") }
+        for album in albums {
+            let full = try await cache.result(
+                for: album, pixels: 640, allowsNetwork: true,
+                load: { try await probe.load($0, $1) })
+            XCTAssertEqual(try XCTUnwrap(full).image.width, 640)
+            let usage = await cache.usage()
+            XCTAssertLessThanOrEqual(usage.memory, 16 * 1_024 * 1_024)
+        }
+        let compact = try XCTUnwrap(cache.immediateResult(for: albums[0], pixels: 640))
+        XCTAssertEqual(compact.image.width, 160, "The oldest full image was evicted")
+        for album in albums {
+            XCTAssertNotNil(cache.immediateResult(for: album, pixels: 640))
+            XCTAssertNil(other.immediateResult(for: album, pixels: 640))
+        }
+        XCTAssertNil(cache.immediateResult(for: item("cover-0", tag: "changed"), pixels: 640))
+        await cache.flushPersistence()
+        let files =
+            FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil)?
+            .allObjects.compactMap { $0 as? URL }.filter { $0.pathExtension == "art" } ?? []
+        XCTAssertEqual(files.count, 24)
+        XCTAssertTrue(files.allSatisfy { $0.lastPathComponent.hasSuffix("-640.art") })
+        let offlineFull = try await cache.result(
+            for: albums[0], pixels: 640, allowsNetwork: false,
+            load: { _, _ in
+                XCTFail("Offline full-rendition recovery must stay on disk")
+                return nil
+            })
+        XCTAssertEqual(offlineFull?.image.width, 640)
+        // Re-upgrade, then evict only that full rendition again. The compact CGImage stays
+        // identical: a valid preview is reused rather than decoded on every disk upgrade.
+        for album in albums {
+            _ = try await cache.result(
+                for: album, pixels: 640, allowsNetwork: true,
+                load: { _, _ in
+                    XCTFail("Persisted full covers must upgrade from disk without a GET")
+                    return nil
+                })
+        }
+        XCTAssertTrue(cache.immediateResult(for: albums[0], pixels: 640)?.image === compact.image)
+        let reads = await probe.count
+        XCTAssertEqual(reads, 24)
+        clock.advance(30 * 86_400 + 1)
+        for album in albums { XCTAssertNil(cache.immediateResult(for: album, pixels: 640)) }
+        _ = try await cache.result(
+            for: item("fresh-after-expiry"), pixels: 640, allowsNetwork: true,
+            load: { _, _ in data })
+        let afterExpiry = await cache.usage()
+        XCTAssertLessThan(
+            afterExpiry.memory, 2 * 1_024 * 1_024,
+            "Expired compact entries must be removed before rendition-priority eviction")
+        _ = await cache.invalidate(removeDisk: true)
+        let retired = await cache.usage()
+        XCTAssertEqual(retired.memory, 0)
+        XCTAssertEqual(retired.disk, 0)
+        _ = await other.invalidate(removeDisk: true)
+    }
+
+    func testUpgradeLRURemainsIndependentOfCompactPreviewRetention() async throws {
+        let root = root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let data = try image(width: 640, height: 640)
+        let full = try XCTUnwrap(FoundationCurrentArtwork.decode(data, maximumPixels: 640))
+        let compact = try XCTUnwrap(FoundationCurrentArtwork.decode(data, maximumPixels: 160))
+        let budget =
+            2 * (data.count + full.image.bytesPerRow * full.image.height)
+            + 4 * (data.count + compact.image.bytesPerRow * compact.image.height)
+        let cache = FoundationArtworkCache(
+            scope: "rendition-lru", root: root, limits: .init(memoryBytes: budget))
+        for id in ["a", "b", "c"] {
+            _ = try await cache.result(
+                for: item(id), pixels: 640, allowsNetwork: true, load: { _, _ in data })
+        }
+        XCTAssertEqual(cache.immediateResult(for: item("a"), pixels: 640)?.image.width, 160)
+        _ = try await cache.result(
+            for: item("b"), pixels: 640, allowsNetwork: true,
+            load: { _, _ in
+                XCTFail("A full memory hit must not fetch")
+                return nil
+            })
+        _ = try await cache.result(
+            for: item("d"), pixels: 640, allowsNetwork: true, load: { _, _ in data })
+        XCTAssertEqual(cache.immediateResult(for: item("b"), pixels: 640)?.image.width, 640)
+        XCTAssertEqual(cache.immediateResult(for: item("c"), pixels: 640)?.image.width, 160)
+        XCTAssertEqual(cache.immediateResult(for: item("d"), pixels: 640)?.image.width, 640)
+        let usage = await cache.usage()
+        XCTAssertLessThanOrEqual(usage.memory, budget)
+        _ = await cache.invalidate(removeDisk: true)
+    }
+
+    func testFullArtworkAdmissionCanEvictCompactPreviewsInsteadOfStarving() async throws {
+        let root = root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fullData = try image(width: 640, height: 640)
+        let full = try XCTUnwrap(FoundationCurrentArtwork.decode(fullData, maximumPixels: 640))
+        let compactData = try image(width: 160, height: 160)
+        let compact = try XCTUnwrap(
+            FoundationCurrentArtwork.decode(compactData, maximumPixels: 160))
+        let budget =
+            fullData.count + full.image.bytesPerRow * full.image.height
+            + compactData.count + compact.image.bytesPerRow * compact.image.height
+        let cache = FoundationArtworkCache(
+            scope: "compact-pressure", root: root, limits: .init(memoryBytes: budget))
+        for index in 0..<24 {
+            _ = try await cache.result(
+                for: item("small-\(index)"), pixels: 160, allowsNetwork: true,
+                load: { _, _ in compactData })
+        }
+        let admitted = try await cache.result(
+            for: item("visible-full"), pixels: 640, allowsNetwork: true,
+            load: { _, _ in fullData })
+        XCTAssertTrue(
+            cache.immediateResult(for: item("visible-full"), pixels: 640)?.image
+                === admitted?.image)
+        let usage = await cache.usage()
+        XCTAssertLessThanOrEqual(usage.memory, budget)
+        _ = await cache.invalidate(removeDisk: true)
+    }
+
     func testImmediatePeekDoesNotChangeLRUEvictionOrMemoryBudget() async throws {
         let root = root()
         defer { try? FileManager.default.removeItem(at: root) }

@@ -43,14 +43,15 @@ final class FoundationDownloadsTests: XCTestCase {
         XCTAssertTrue(settled, "Download work did not settle before the deadline")
     }
 
-    private func artworkData() throws -> Data {
+    private func artworkData(width: Int = 1024, height: Int = 512) throws -> Data {
         let context = try XCTUnwrap(
             CGContext(
-                data: nil, width: 1024, height: 512, bitsPerComponent: 8, bytesPerRow: 1024 * 4,
+                data: nil, width: width, height: height, bitsPerComponent: 8,
+                bytesPerRow: width * 4,
                 space: CGColorSpaceCreateDeviceRGB(),
                 bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
         context.setFillColor(CGColor(red: 0.4, green: 0.2, blue: 0.1, alpha: 1))
-        context.fill(CGRect(x: 0, y: 0, width: 1024, height: 512))
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
         let image = try XCTUnwrap(context.makeImage())
         let data = NSMutableData()
         let destination = try XCTUnwrap(
@@ -1103,6 +1104,93 @@ final class FoundationDownloadsTests: XCTestCase {
 
     #if DEBUG
 
+        func testTwentyFourCoverWorkingSetRecreationDrawsBeforeAsyncDiskRead() async throws {
+            let directory = try root()
+            let data = try artworkData(width: 640, height: 640)
+            let cache = FoundationArtworkCache(scope: "recreated-view", root: directory)
+            addTeardownBlock { _ = await cache.invalidate(removeDisk: true) }
+            let gate = RecreatedArtworkReadGate()
+            addTeardownBlock { await gate.release() }
+            let library = FoundationJellyfinLibrary(
+                session: .init(
+                    serverURL: URL(string: "https://example.invalid")!, accessToken: "synthetic",
+                    userID: "user", deviceID: "device"),
+                load: { _ in
+                    await gate.recordGET()
+                    XCTFail("Recreated warm covers must not need another artwork GET")
+                    throw FoundationLibraryError.unavailable
+                }, artworkCache: cache)
+            let album = FoundationItem(
+                id: "11111111111111111111111111111111", title: "Synthetic cover", subtitle: "",
+                kind: .album, duration: nil, primaryImageTag: "first")
+            let albums = (0..<24).map { index in
+                FoundationItem(
+                    id: String(format: "%032x", index + 1), title: "Synthetic cover", subtitle: "",
+                    kind: .album, duration: nil, primaryImageTag: "first")
+            }
+            for entry in albums {
+                _ = try await cache.result(
+                    for: entry, pixels: 640, allowsNetwork: true, load: { _, _ in data })
+                let usage = await cache.usage()
+                XCTAssertLessThanOrEqual(usage.memory, 16 * 1_024 * 1_024)
+            }
+            let expected = albums.map { entry in
+                cache.immediateResult(for: entry, pixels: 640).map {
+                    Image(decorative: $0.image, scale: 1)
+                }
+            }
+            XCTAssertEqual(cache.immediateResult(for: albums[0], pixels: 640)?.image.width, 160)
+            let manager = FoundationDownloads(
+                scope: "recreated-view", library: library, root: directory,
+                monitorConnectivity: false)
+            defer { manager.invalidate() }
+            let connectivity = FoundationConnectivity(monitorConnectivity: false, retry: {})
+            let state = RecreatedArtworkState()
+            state.selectedItem = albums[0]
+            let content = RecreatedArtworkHost(
+                state: state, item: album, library: library, gate: gate
+            )
+            .environmentObject(manager).environmentObject(connectivity)
+            .environment(\.displayScale, 3)
+            #if os(macOS)
+                let window = NSWindow(
+                    contentRect: NSRect(x: 0, y: 0, width: 200, height: 200),
+                    styleMask: [.titled], backing: .buffered, defer: false)
+                window.isReleasedWhenClosed = false
+                window.contentView = NSHostingView(rootView: content)
+                window.orderFront(nil)
+                defer { window.close() }
+            #else
+                let scene = try XCTUnwrap(
+                    UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+                let window = UIWindow(windowScene: scene)
+                window.rootViewController = UIHostingController(rootView: content)
+                window.makeKeyAndVisible()
+                defer { window.isHidden = true }
+            #endif
+            for index in albums.indices {
+                if index > 0 {
+                    state.selectedItem = albums[index]
+                    state.incarnation = UUID()
+                }
+                let identity = state.incarnation
+                try await waitUntil { state.firstFrames[identity] != nil }
+                try await waitUntilAsync { await gate.begun >= index + 1 }
+                let first = try XCTUnwrap(state.firstFrames[identity])
+                XCTAssertNotNil(
+                    first.image, "A recreated loaded cover must never start as a placeholder")
+                XCTAssertEqual(
+                    first.image, expected[index],
+                    "Every cover must draw its retained preview or full image before async load")
+                XCTAssertNil(state.completed[identity], "The asynchronous disk path is still held")
+            }
+            await gate.release()
+            try await waitUntil { state.completed[state.incarnation] == true }
+            let requests = await gate.requests
+            XCTAssertEqual(requests, 0)
+            let pending = await gate.pending
+            XCTAssertEqual(pending, 0)
+        }
         func testRecreatedArtworkFirstDrawUsesWarmDecodedCoverWhileAsyncReadIsHeld() async throws {
             let directory = try root()
             let data = try artworkData()
@@ -2797,6 +2885,7 @@ private actor DownloadProgressReporter {
     private final class RecreatedArtworkState: ObservableObject {
         struct Frame { let image: Image? }
         @Published var incarnation = UUID()
+        @Published var selectedItem: FoundationItem?
         var firstFrames: [UUID: Frame] = [:]
         var completed: [UUID: Bool] = [:]
     }
@@ -2809,19 +2898,21 @@ private actor DownloadProgressReporter {
         let gate: RecreatedArtworkReadGate
 
         var body: some View {
-            FoundationCatalogArtwork(item: item, library: library, isActive: true, size: 144)
-                .id(state.incarnation)
-                .environment(
-                    \.foundationArtworkTaskObservation,
-                    .init(
-                        phase: state.incarnation,
-                        rendered: { phase, image in
-                            if state.firstFrames[phase] == nil {
-                                state.firstFrames[phase] = .init(image: image)
-                            }
-                        },
-                        beforeLoad: { try await gate.wait() }
-                    ) { phase, active in state.completed[phase] = active })
+            FoundationCatalogArtwork(
+                item: state.selectedItem ?? item, library: library, isActive: true, size: 144
+            )
+            .id(state.incarnation)
+            .environment(
+                \.foundationArtworkTaskObservation,
+                .init(
+                    phase: state.incarnation,
+                    rendered: { phase, image in
+                        if state.firstFrames[phase] == nil {
+                            state.firstFrames[phase] = .init(image: image)
+                        }
+                    },
+                    beforeLoad: { try await gate.wait() }
+                ) { phase, active in state.completed[phase] = active })
         }
     }
 
