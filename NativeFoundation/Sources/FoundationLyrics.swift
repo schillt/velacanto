@@ -6,6 +6,11 @@ struct FoundationLyrics: Equatable, Sendable {
         let id: Int
         let text: String
         let start: Double?
+
+        /// Only an explicit timed blank marks an instrumental passage.
+        var isInstrumental: Bool {
+            start != nil && text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
     }
     let lines: [Line]
     var text: String {
@@ -255,7 +260,7 @@ private struct FoundationTimedLyricsView: View {
                                 .accessibilityAddTraits(activeLine == line.id ? .isSelected : [])
                             } else {
                                 row(line, isCurrent: activeLine == line.id)
-                                    .accessibilityHidden(line.text.isEmpty)
+                                    .accessibilityHidden(line.text.isEmpty && !line.isInstrumental)
                             }
                         }
                         .id(line.id)
@@ -311,7 +316,8 @@ private struct FoundationTimedLyricsView: View {
     }
 
     private func row(_ line: FoundationLyrics.Line, isCurrent: Bool) -> some View {
-        Text(line.text.isEmpty ? " " : line.text)
+        Text(line.isInstrumental ? "•••" : (line.text.isEmpty ? " " : line.text))
+            .accessibilityLabel(line.isInstrumental ? "Instrumental" : line.text)
             .font(.system(.title2, design: .default, weight: isCurrent ? .bold : .semibold))
             .lineSpacing(4)
             .foregroundStyle(

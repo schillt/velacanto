@@ -175,6 +175,28 @@ final class FoundationLyricsTests: XCTestCase {
         }
     }
 
+    func testExplicitTimedBlanksRemainInstrumentalBoundariesWithoutChangingUntimedSpacing()
+        async throws
+    {
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            let body =
+                #"{"Lyrics":[{"Text":"First","Start":0},{"Text":" \n ","Start":20000000},{"Text":"Second","Start":40000000},{"Text":""},{"Text":"…","Start":60000000}]}"#
+            return (Data(body.utf8), Self.response(request, status: 200))
+        }
+        let result = try await library.lyrics(for: item)
+        let lyrics = try XCTUnwrap(result)
+        XCTAssertEqual(lyrics.lines.map(\.id), [0, 1, 2, 3, 4])
+        XCTAssertEqual(lyrics.lines.map(\.start), [0, 2, 4, nil, 6])
+        XCTAssertEqual(lyrics.lines.map(\.text), ["First", "", "Second", "", "…"])
+        XCTAssertEqual(lyrics.lines.map(\.isInstrumental), [false, true, false, false, false])
+        XCTAssertEqual(lyrics.activeLine(at: 2, duration: 10), 1)
+        XCTAssertEqual(lyrics.activeLine(at: 4, duration: 10), 2)
+        // Untimed paragraphs retain their original spacing, including internal blank lines.
+        let untimed = FoundationLyrics(text: "First\n\nSecond")
+        XCTAssertEqual(untimed.text, "First\n\nSecond")
+        XCTAssertFalse(untimed.lines[0].isInstrumental)
+    }
+
     func testMissingResourceDoesNotSwallowAuthenticationSecurityOrMalformedResponses() async throws
     {
         for (status, expected) in [
