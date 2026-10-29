@@ -646,11 +646,10 @@ struct FoundationSearchResolver: Sendable {
         let job = UUID()
         visibleJob = job
         visibleTask = Task { [weak self] in
-            guard let self, visibleJob == job, !visibleClients.isEmpty, !Task.isCancelled else {
-                return
-            }
+            guard let self else { return }
+            defer { if visibleJob == job { visibleTask = nil } }
+            guard visibleJob == job, !visibleClients.isEmpty, !Task.isCancelled else { return }
             await searchWhileVisible(context: context, library: library)
-            if visibleJob == job { visibleTask = nil }
         }
         return visibleTask
     }

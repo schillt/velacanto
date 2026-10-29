@@ -700,6 +700,31 @@ final class FoundationPlaylistContentSearchTests: XCTestCase {
         XCTAssertEqual(reads, 1)
     }
 
+    @MainActor
+    func testVisibleSearchCanRestartAfterClientLeavesBeforeProducerStarts() async {
+        let library = AutomaticPlaylistLibrary { _, _ in
+            .init(
+                items: [Self.item("day-drive", kind: .playlist)], nextStartIndex: nil,
+                hasIncompleteCoverage: false, partialFailureCount: 0)
+        }
+        let model = Self.automaticModel()
+        let context = FoundationMusicSearchContext(trackIDs: ["opalite"])
+        let first = UUID()
+        let abandoned = model.registerVisible(first, context: context, library: library)
+        model.releaseVisible(first)
+        await abandoned?.value
+        let beforeReentry = await library.calls
+        XCTAssertEqual(beforeReentry, 0)
+        let second = UUID()
+        let restarted = model.registerVisible(second, context: context, library: library)
+        await restarted?.value
+        XCTAssertEqual(model.items.map(\.id), ["day-drive"])
+        XCTAssertNil(model.cursor)
+        let afterReentry = await library.calls
+        XCTAssertEqual(afterReentry, 1)
+        model.releaseVisible(second)
+    }
+
     private static func id(_ suffix: Int) -> String { String(format: "%032x", suffix) }
 
     private static func query(_ request: URLRequest, _ name: String) -> String? {
