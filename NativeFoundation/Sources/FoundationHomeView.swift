@@ -277,18 +277,19 @@ struct FoundationHomeView<Profile: View>: View {
                 connectivity.localOnly
                 ? Set(primaryGenres.items(localOnly: true).map(\.id)) : nil
             let genres = record.prominentGenres(eligibleIDs: eligible)
+            // A new census retires the group; each sibling keeps its canonical genre identity.
             LazyVStack(alignment: .leading, spacing: 28) {
                 ForEach(genres, id: \.genreIdentity) { genre in
                     FoundationHomeGenreShelf(
                         genre: genre, record: record, library: library, player: player,
                         isActive: isActive, refreshRevision: refreshRevision,
                         openedItem: $openedItem
-                    ).id(record.snapshot.censusID)
+                    )
                 }
                 if connectivity.localOnly, let error = primaryGenres.offlineErrorMessage {
                     Text(error).foregroundStyle(.secondary)
                 }
-            }
+            }.id(record.snapshot.censusID)
         } else if !connectivity.localOnly {
             VStack(alignment: .leading, spacing: 12) {
                 Text("Primary Genres").font(.title2.bold())
