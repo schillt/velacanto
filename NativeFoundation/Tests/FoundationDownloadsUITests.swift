@@ -4068,9 +4068,9 @@ final class FoundationDownloadsUITests: XCTestCase {
             primaryGenres: true, automaticGenres: true)
         selectTab("Home", in: app)
         let shelf = app.buttons["home-shelf-Fixture Genre"]
-        XCTAssertTrue(shelf.waitForExistence(timeout: 10))
         XCTAssertFalse(app.buttons["primary-genres-build"].exists)
         revealHomeGenrePreview(shelf, in: app)
+        XCTAssertTrue(shelf.waitForExistence(timeout: 10))
         shelf.tap()
         XCTAssertTrue(
             app.descendants(matching: .any)["primary-genre-songs"].waitForExistence(timeout: 5))
