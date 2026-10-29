@@ -3744,6 +3744,36 @@ final class FoundationDownloadsUITests: XCTestCase {
         capture("Cold downloaded primary genre resolves songs without a prior album page", in: app)
     }
 
+    func testHomeAutomaticGenrePreviewCardsRenderAcrossSiblingShelvesAndTabReentry() {
+        continueAfterFailure = false
+        let app = launch(
+            productionShell: true, canonicalDownloadState: "full", compactFixtureControls: true,
+            primaryGenres: true, automaticGenres: true)
+        selectTab("Home", in: app)
+        XCTAssertFalse(app.buttons["primary-genres-build"].exists)
+        for pass in 0..<2 {
+            for (id, title) in [("genre", "Fixture Genre"), ("other-genre", "Fixture Other Genre")]
+            {
+                let heading = app.buttons["home-shelf-" + title]
+                reveal(heading, in: app)
+                let card = app.buttons["home-genre-song-" + id + "-tone"]
+                XCTAssertTrue(
+                    card.waitForExistence(timeout: 10),
+                    "Automatic publication must render preview songs for every eligible shelf")
+                reveal(card, in: app)
+                XCTAssertTrue(card.isHittable)
+                XCTAssertGreaterThanOrEqual(card.frame.width, 140)
+                XCTAssertGreaterThanOrEqual(card.frame.height, 144)
+                XCTAssertTrue(app.frame.contains(CGPoint(x: card.frame.midX, y: card.frame.midY)))
+                capture("Home \(title) populated preview pass \(pass)", in: app)
+            }
+            if pass == 0 {
+                selectTab("Library", in: app)
+                selectTab("Home", in: app)
+            }
+        }
+    }
+
     func testHomeAutomaticallyPreparedGenresOpenCanonicalSongMembership() {
         continueAfterFailure = false
         let app = launch(

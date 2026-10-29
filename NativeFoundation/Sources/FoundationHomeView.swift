@@ -672,7 +672,10 @@ private struct FoundationHomeGenreShelf: View {
                                 item: song, library: library, player: player,
                                 isActive: isActive && isVisible,
                                 open: { openedItem = song }, navigate: { openedItem = $0 },
-                                artworkItem: song.catalogArtworkItem)
+                                artworkItem: song.catalogArtworkItem
+                            )
+                            .accessibilityIdentifier(
+                                "home-genre-song-\(genre.id)-\(song.id)")
                         }
                     }.scrollTargetLayout()
                 }
