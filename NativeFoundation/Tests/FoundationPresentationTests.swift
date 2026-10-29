@@ -103,12 +103,12 @@ final class FoundationPresentationTests: XCTestCase {
                 let content = try XCTUnwrap(sheet.contentView)
                 content.layoutSubtreeIfNeeded()
                 content.displayIfNeeded()
-                let requestedAppearance: NSAppearance.Name = scheme == .light ? .aqua : .darkAqua
-                XCTAssertEqual(
-                    sheet.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]),
-                    requestedAppearance)
                 XCTAssertEqual(
                     window.appearance?.name, parentAppearance, "The presenter is unchanged")
+                XCTAssertTrue(
+                    containsAccessibilityIdentifier("overview-reading-footer", in: content),
+                    "The reading surface owns its semantic footer")
+                XCTAssertTrue(containsAccessibilityIdentifier("overview-done", in: content))
                 let bitmap = try XCTUnwrap(
                     content.bitmapImageRepForCachingDisplay(in: content.bounds))
                 content.cacheDisplay(in: content.bounds, to: bitmap)
@@ -143,9 +143,9 @@ final class FoundationPresentationTests: XCTestCase {
                     0.2126 * footerColor.redComponent
                     + 0.7152 * footerColor.greenComponent + 0.0722 * footerColor.blueComponent
                 if scheme == .light {
-                    XCTAssertGreaterThan(footerLuma, 0.7, "Native Done footer must follow Light")
+                    XCTAssertGreaterThan(footerLuma, 0.7, "Reading footer must follow Light")
                 } else {
-                    XCTAssertLessThan(footerLuma, 0.3, "Native Done footer must follow Dark")
+                    XCTAssertLessThan(footerLuma, 0.3, "Reading footer must follow Dark")
                 }
 
                 // Sample only the reading interior, excluding native chrome, edges and scrollbar.
@@ -174,6 +174,27 @@ final class FoundationPresentationTests: XCTestCase {
                 XCTAssertGreaterThan(
                     backgroundPixels, 1000, "The reading surface must follow \(scheme)")
                 window.endSheet(sheet)
+            }
+        }
+
+        private func containsAccessibilityIdentifier(
+            _ identifier: String, in element: NSObject, depth: Int = 0
+        ) -> Bool {
+            guard depth < 24 else { return false }
+            // In-process public NSAccessibility getters also cover SwiftUI's virtual elements.
+            let identifierSelector = NSSelectorFromString("accessibilityIdentifier")
+            if element.responds(to: identifierSelector),
+                element.perform(identifierSelector)?.takeUnretainedValue() as? String == identifier
+            {
+                return true
+            }
+            let childrenSelector = NSSelectorFromString("accessibilityChildren")
+            guard element.responds(to: childrenSelector),
+                let children = element.perform(childrenSelector)?.takeUnretainedValue()
+                    as? [NSObject]
+            else { return false }
+            return children.contains {
+                containsAccessibilityIdentifier(identifier, in: $0, depth: depth + 1)
             }
         }
 
@@ -828,6 +849,7 @@ private actor SongAlphabetFixture {
                     ) { presented = false }
                 }
                 .foregroundStyle(Color.white)
+                .preferredColorScheme(.dark)
                 .environment(\.colorScheme, .dark)
                 .environment(\.foundationBrowsingColorScheme, scheme)
                 .onAppear { presented = true }

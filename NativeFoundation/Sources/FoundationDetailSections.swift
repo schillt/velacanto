@@ -2,8 +2,6 @@ import SwiftUI
 
 #if os(iOS)
     import UIKit
-#else
-    import AppKit
 #endif
 
 /// Capture the window's semantic appearance before immersive artwork changes detail colors.
@@ -173,24 +171,25 @@ struct FoundationOverviewSheet: View {
                 .toolbarBackground(.hidden, for: .navigationBar)
             #endif
             #if os(macOS)
-                .toolbarColorScheme(
-                    browsingColorScheme ?? inheritedColorScheme, for: .windowToolbar
-                )
-                .toolbarBackground(.background, for: .windowToolbar)
-                .toolbar {
-                    ToolbarItem(placement: .confirmationAction) {
+                .safeAreaInset(edge: .bottom, spacing: 0) {
+                    HStack {
+                        Spacer()
                         Button("Done", action: dismiss)
+                        .buttonStyle(.glassProminent)
+                        .keyboardShortcut(.defaultAction)
+                        .accessibilityIdentifier("overview-done")
                     }
+                    .padding(.horizontal, 24).padding(.vertical, 16)
+                    .background(.background)
+                    .accessibilityElement(children: .contain)
+                    .accessibilityIdentifier("overview-reading-footer")
                 }
             #endif
         }
         #if os(macOS)
             // Reset the immersive presenter's style before resolving hierarchical text and actions.
             .foregroundStyle(Color.primary)
-            .background {
-                FoundationOverviewSheetAppearance(
-                    scheme: browsingColorScheme ?? inheritedColorScheme)
-            }
+            .onExitCommand(perform: dismiss)
         #endif
         // Immersive detail controls may use a white tint; native sheet actions use the app accent.
         .tint(.accentColor)
@@ -206,81 +205,6 @@ struct FoundationOverviewSheet: View {
         #endif
     }
 }
-
-#if os(macOS)
-    /// SwiftUI's window-toolbar preferences do not control a native sheet's confirmation footer.
-    /// Own only this attached reading sheet's appearance, never its presenting window or NSApp.
-    private struct FoundationOverviewSheetAppearance: NSViewRepresentable {
-        let scheme: ColorScheme
-
-        func makeNSView(context: Context) -> FoundationOverviewSheetAppearanceView {
-            FoundationOverviewSheetAppearanceView()
-        }
-
-        func updateNSView(_ view: FoundationOverviewSheetAppearanceView, context: Context) {
-            view.scheme = scheme
-            view.applyToAttachedSheet()
-        }
-
-        static func dismantleNSView(
-            _ view: FoundationOverviewSheetAppearanceView, coordinator: Void
-        ) {
-            view.restoreAppearance()
-        }
-    }
-
-    private final class FoundationOverviewSheetAppearanceView: NSView {
-        var scheme: ColorScheme = .light
-        private weak var styledWindow: NSWindow?
-        private var previousAppearance: NSAppearance?
-        private var appliedAppearance: NSAppearance?
-
-        override func hitTest(_ point: NSPoint) -> NSView? { nil }
-
-        override func viewDidMoveToWindow() {
-            super.viewDidMoveToWindow()
-            if styledWindow !== window { restoreAppearance() }
-            applyToAttachedSheet()
-        }
-
-        override func viewWillDraw() {
-            // Attachment may occur after viewDidMoveToWindow; native drawing is the next boundary.
-            applyToAttachedSheet()
-            super.viewWillDraw()
-        }
-
-        func applyToAttachedSheet() {
-            guard let window, let parent = window.sheetParent,
-                parent.attachedSheet === window
-            else { return }
-            let name: NSAppearance.Name = scheme == .dark ? .darkAqua : .aqua
-            if styledWindow === window, window.appearance === appliedAppearance,
-                appliedAppearance?.name == name
-            {
-                return
-            }
-            if styledWindow !== window {
-                restoreAppearance()
-                styledWindow = window
-                previousAppearance = window.appearance
-            }
-            guard let appearance = NSAppearance(named: name) else { return }
-            appliedAppearance = appearance
-            window.appearance = appearance
-        }
-
-        func restoreAppearance() {
-            if let styledWindow, let appliedAppearance,
-                styledWindow.appearance === appliedAppearance
-            {
-                styledWindow.appearance = previousAppearance
-            }
-            styledWindow = nil
-            previousAppearance = nil
-            appliedAppearance = nil
-        }
-    }
-#endif
 
 /// Reuses catalog ownership and cards; each optional shelf fails independently.
 struct FoundationRelatedSection<Card: View>: View {
