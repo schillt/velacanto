@@ -742,7 +742,14 @@ struct FoundationLibraryView: View {
                 Label {
                     Text(title).font(.system(size: 14)).lineLimit(1)
                 } icon: {
-                    Image(systemName: symbol).font(.system(size: 18))
+                    if case .playlist(let item) = route {
+                        FoundationMacSidebarPlaylistArtwork(
+                            item: item, library: library, isActive: scenePhase == .active
+                        )
+                        .id("\(library.catalogScopeID)-\(item.sharedArtworkIdentity)")
+                    } else {
+                        Image(systemName: symbol).font(.system(size: 18))
+                    }
                 }
                 .labelStyle(FoundationMacSidebarLabelStyle())
                 .frame(

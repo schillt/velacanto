@@ -35,6 +35,29 @@ import SwiftUI
         }
     }
 
+    /// Keep the native playlist glyph until the shared artwork loader supplies an image.
+    struct FoundationMacSidebarPlaylistArtwork: View {
+        let item: FoundationItem
+        let library: any FoundationLibrary
+        let isActive: Bool
+        @State private var loadedImage: Image?
+
+        var body: some View {
+            ZStack {
+                FoundationCatalogArtwork(
+                    item: item, library: library, isActive: isActive, size: 20,
+                    cornerRadius: 4, loadedImage: $loadedImage
+                )
+                .opacity(loadedImage == nil ? 0 : 1)
+                if loadedImage == nil {
+                    Image(systemName: "music.note.list").font(.system(size: 18))
+                }
+            }
+            .frame(width: 20, height: 20)
+            .accessibilityHidden(true)
+        }
+    }
+
     struct FoundationMacNavigationItem: Hashable {
         var item: FoundationItem
         let headerOwnerID = UUID().uuidString
