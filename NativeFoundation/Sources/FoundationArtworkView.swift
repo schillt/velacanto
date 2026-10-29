@@ -207,8 +207,14 @@ struct FoundationCatalogArtwork: View {
 
     private var artworkTaskIdentity: String {
         let key = FoundationArtworkCache.key(item, pixels: targetPixels)
-        return
+        let identity =
             "\(library.catalogScopeID)-\(currentResultRevision?.uuidString ?? "catalog")-\(isActive)-\(key.identity)-\(key.pixels)-\(downloads.retainedArtworkIdentity(for: item) ?? "")-\(connectivity.localOnly)-\(connectivity.successfulRetryRevision)"
+        #if DEBUG
+            // A hosted proof can force each conservative activation epoch to execute. Ordinary
+            // views have no observer and keep their original task identity/coalescing behavior.
+            if let phase = taskObservation?.phase { return "\(identity)-proof-\(phase)" }
+        #endif
+        return identity
     }
 
     private func installImage(

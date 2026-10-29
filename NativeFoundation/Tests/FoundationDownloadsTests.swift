@@ -1570,14 +1570,21 @@ final class FoundationDownloadsTests: XCTestCase {
                 defer { window.isHidden = true }
             #endif
             try await waitUntil { state.image == expected && state.completed[state.phase] == true }
+            XCTAssertEqual(
+                state.completed[state.phase], true,
+                "Initial artwork phase \(state.phase) not completed; observed \(state.completed)")
             let initial = state.images.count
-            for active in [false, true, false, true] {
+            for (index, active) in [false, true, false, true].enumerated() {
                 // Observe the actual artwork task epoch, not a SwiftUI body callback or image count.
                 // A late canceled task carries its old phase and cannot acknowledge this boundary.
                 let phase = UUID()
                 state.phase = phase
                 state.active = active
                 try await waitUntil { state.completed[phase] == active }
+                XCTAssertEqual(
+                    state.completed[phase], active,
+                    "Artwork boundary \(index) expected \(active) for phase \(phase); observed \(state.completed)"
+                )
                 XCTAssertEqual(
                     state.image, expected, "A visibility change keeps the installed cover")
                 XCTAssertTrue(
