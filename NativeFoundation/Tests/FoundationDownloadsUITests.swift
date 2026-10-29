@@ -5962,7 +5962,21 @@ final class FoundationDownloadsUITests: XCTestCase {
         let heading = app.staticTexts["continue-listening-heading"]
         XCTAssertTrue(heading.exists && heading.isHittable)
         capture("Home top immediately before the single refresh gesture", in: app)
-        home.swipeDown()
+        // The previous synthesized swipe was only200pt/0.2s over inner content.
+        // Pull slowly in the observed outer gutter so a nested carousel cannot win it.
+        let pullStart = home.coordinate(withNormalizedOffset: CGVector(dx: 0.98, dy: 0.15))
+        let pullEnd = home.coordinate(withNormalizedOffset: CGVector(dx: 0.98, dy: 0.80))
+        XCTAssertTrue(home.frame.contains(pullStart.screenPoint))
+        XCTAssertTrue(home.frame.contains(pullEnd.screenPoint))
+        let gesture = XCTAttachment(
+            string:
+                "outer gutter native drag \(pullStart.screenPoint) -> \(pullEnd.screenPoint); slow")
+        gesture.name = "Home deliberate native pull geometry"
+        gesture.lifetime = .keepAlways
+        add(gesture)
+        pullStart.press(
+            forDuration: 0.05, thenDragTo: pullEnd,
+            withVelocity: .slow, thenHoldForDuration: 0.2)
         // Poll only the existing read-only diagnostic control. Never resend the
         // gesture, mutate the remote actor, or invoke refresh through fixture code.
         for _ in 0..<3 {
