@@ -442,12 +442,15 @@ final class FoundationDownloadsUITests: XCTestCase {
         sharedChromeEvidence: Bool = false, remoteListening: Bool = false,
         queueArtworkTransition: Bool = false, lyricsPresentation: Bool = false,
         missingLyrics: Bool = false, remoteFavoriteRefresh: Bool = false,
-        automaticGenres: Bool = false
+        automaticGenres: Bool = false, progressivePlaylistSearch: Bool = false
     )
         -> XCUIApplication
     {
         let app = XCUIApplication(bundleIdentifier: "com.chameleonenterprise.velacanto.uitesting")
         app.launchArguments = ["-foundationDownloadsUITesting", "-foundationTesting"]
+        if progressivePlaylistSearch {
+            app.launchArguments.append("-fixtureProgressivePlaylistSearch")
+        }
         if lyricsPresentation { app.launchArguments.append("-fixtureLyricsPresentation") }
         if remoteFavoriteRefresh { app.launchArguments.append("-fixtureRemoteFavoriteRefresh") }
         if missingLyrics { app.launchArguments.append("-fixtureMissingLyrics") }
@@ -2576,6 +2579,84 @@ final class FoundationDownloadsUITests: XCTestCase {
         wait(for: [gone], timeout: 5)
         XCTAssertTrue(app.buttons["View Fixture Album"].waitForExistence(timeout: 5))
         capture("Artist loaded canonical grid replaces shimmer", in: app)
+    }
+
+    func testPlaylistSearchStartsBelowFoldAndSharesProgressWithSeeAll() {
+        continueAfterFailure = false
+        let app = launch(
+            productionShell: true, compactFixtureControls: true, progressivePlaylistSearch: true)
+        selectTab("Search", in: app)
+        let field = app.textFields["Search music"]
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        field.tap()
+        field.typeText("Opalite")
+        tapNativeChrome(app.buttons["Dismiss search keyboard"], in: app)
+        let counts = app.buttons["Read catalog counts"]
+        // Read the fixture's actual request counter before scrolling to the
+        // below-fold section; startup must not depend on exposing its rows.
+        for _ in 0..<5 {
+            tapNativeChrome(counts, in: app)
+            if (counts.value as? String ?? "").contains("playlist-search 1") { break }
+        }
+        let started = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "value CONTAINS %@", "playlist-search 1"), object: counts
+        )
+        XCTAssertEqual(XCTWaiter.wait(for: [started], timeout: 5), .completed)
+        let progress = app.descendants(matching: .any)["search-playlists-progress"].firstMatch
+        reveal(progress, in: app)
+        XCTAssertGreaterThan(progress.frame.height, 0)
+        XCTAssertFalse(app.buttons["search-playlist-check-more"].exists)
+        capture(
+            "Zero-match playlist search progresses automatically below earlier sections", in: app)
+        tapNativeChrome(app.buttons["Release playlist search batch"], in: app)
+        let seeAll = app.buttons["See all Playlists with “Opalite”"]
+        XCTAssertTrue(seeAll.waitForExistence(timeout: 5))
+        tapVisible(seeAll, in: app)
+        XCTAssertTrue(app.navigationBars["Playlists with “Opalite”"].waitForExistence(timeout: 5))
+        XCTAssertTrue(progress.waitForExistence(timeout: 5))
+        tapNativeChrome(counts, in: app)
+        XCTAssertTrue((counts.value as? String ?? "").contains("playlist-search 2"))
+        capture("See All shares in-flight automatic playlist search", in: app)
+        tapNativeChrome(app.buttons["Release playlist search batch"], in: app)
+        let dayDrive = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Day Drive"))
+            .firstMatch
+        XCTAssertTrue(dayDrive.waitForExistence(timeout: 5))
+        reveal(dayDrive, in: app)
+        let finished = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == false"), object: progress)
+        XCTAssertEqual(XCTWaiter.wait(for: [finished], timeout: 5), .completed)
+        tapNativeChrome(counts, in: app)
+        let completed = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "value CONTAINS %@", "playlist-search 2"), object: counts
+        )
+        XCTAssertEqual(XCTWaiter.wait(for: [completed], timeout: 5), .completed)
+        XCTAssertFalse((counts.value as? String ?? "").contains("playlist-search-cancelled"))
+        capture("Day Drive appears after the automatic continuation completes", in: app)
+    }
+
+    func testPlaylistSearchCancelsHeldBatchWhenLeavingSearch() {
+        continueAfterFailure = false
+        let app = launch(
+            productionShell: true, compactFixtureControls: true, progressivePlaylistSearch: true)
+        selectTab("Search", in: app)
+        let field = app.textFields["Search music"]
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        field.tap()
+        field.typeText("Opalite")
+        tapNativeChrome(app.buttons["Dismiss search keyboard"], in: app)
+        let progress = app.descendants(matching: .any)["search-playlists-progress"].firstMatch
+        reveal(progress, in: app)
+        selectTab("Home", in: app)
+        let counts = app.buttons["Read catalog counts"]
+        tapNativeChrome(counts, in: app)
+        let cancelled = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "value CONTAINS %@", "playlist-search-cancelled 1"),
+            object: counts)
+        XCTAssertEqual(XCTWaiter.wait(for: [cancelled], timeout: 5), .completed)
+        XCTAssertTrue((counts.value as? String ?? "").contains("playlist-search 1"))
+        tapNativeChrome(app.buttons["Release playlist search batch"], in: app)
+        XCTAssertFalse(progress.exists)
+        capture("Leaving Search cancels its held playlist batch", in: app)
     }
 
     func testSearchLiquidGlassReducedEffectsLargeTextKeepsQueryAndFocus() {

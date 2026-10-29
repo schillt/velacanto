@@ -169,6 +169,11 @@
 
         private var fixtureControlBand: some View {
             HStack {
+                if ProcessInfo.processInfo.arguments.contains("-fixtureProgressivePlaylistSearch") {
+                    Button("Next batch") {
+                        Task { await fixture.library.releasePlaylistSearchBatch() }
+                    }.accessibilityLabel("Release playlist search batch")
+                }
                 Button("Fixture controls") { showingFixtureControls = true }
                     .frame(minWidth: 44, minHeight: 44)
                     .modifier(
@@ -1348,6 +1353,16 @@
         func search(query: String, kind: FoundationItem.Kind, startIndex: Int, limit: Int)
             async throws -> FoundationPage
         {
+            if ProcessInfo.processInfo.arguments.contains("-fixtureProgressivePlaylistSearch") {
+                let items =
+                    query.localizedStandardContains("Opalite")
+                    ? (1...5).map { index in
+                        FoundationItem(
+                            id: "opalite-\(kind)-\(index)", title: "Opalite \(kind) \(index)",
+                            subtitle: "Synthetic search", kind: kind, duration: nil)
+                    } : []
+                return .init(items: items, nextStartIndex: nil)
+            }
             if alphabetCatalog {
                 catalogRequests["\(kind)-search-\(startIndex)", default: 0] += 1
                 let items = alphabetItems(kind: kind).filter {
@@ -1384,6 +1399,72 @@
                 items: items.filter { $0.title.localizedStandardContains(query) },
                 nextStartIndex: nil)
         }
+        private var playlistSearchBatch: (id: UUID, continuation: CheckedContinuation<Void, Error>)?
+
+        func releasePlaylistSearchBatch() {
+            let pending = playlistSearchBatch
+            playlistSearchBatch = nil
+            pending?.continuation.resume()
+        }
+
+        private func cancelPlaylistSearchBatch(_ id: UUID) {
+            guard playlistSearchBatch?.id == id else { return }
+            catalogRequests["playlist-search-cancelled", default: 0] += 1
+            let pending = playlistSearchBatch
+            playlistSearchBatch = nil
+            pending?.continuation.resume(throwing: CancellationError())
+        }
+
+        func playlistsContainingMusic(context: FoundationMusicSearchContext, startIndex: Int)
+            async throws -> FoundationPlaylistContentPage
+        {
+            guard ProcessInfo.processInfo.arguments.contains("-fixtureProgressivePlaylistSearch")
+            else { throw FoundationLibraryError.unavailable }
+            return .init(
+                items: [], nextStartIndex: 6, hasIncompleteCoverage: true, partialFailureCount: 0)
+        }
+
+        func playlistsContainingMusic(
+            context: FoundationMusicSearchContext, cursor: FoundationPlaylistContentCursor
+        ) async throws -> FoundationPlaylistContentPage {
+            guard ProcessInfo.processInfo.arguments.contains("-fixtureProgressivePlaylistSearch")
+            else { throw FoundationLibraryError.unavailable }
+            catalogRequests["playlist-search", default: 0] += 1
+            let id = UUID()
+            try await withTaskCancellationHandler {
+                try Task.checkCancellation()
+                try await withCheckedThrowingContinuation {
+                    (continuation: CheckedContinuation<Void, Error>) in
+                    if Task.isCancelled {
+                        continuation.resume(throwing: CancellationError())
+                    } else if playlistSearchBatch != nil {
+                        continuation.resume(throwing: FoundationLibraryError.invalidResponse)
+                    } else {
+                        playlistSearchBatch = (id, continuation)
+                    }
+                }
+            } onCancel: {
+                Task { await self.cancelPlaylistSearchBatch(id) }
+            }
+            try Task.checkCancellation()
+            let first = cursor.candidateOffset == 6
+            let items =
+                first
+                ? (1...6).map { index in
+                    FoundationItem(
+                        id: "search-playlist-\(index)", title: "Search Drive \(index)",
+                        subtitle: "Synthetic playlist", kind: .playlist, duration: nil)
+                }
+                : [
+                    FoundationItem(
+                        id: "day-drive", title: "Day Drive", subtitle: "Synthetic playlist",
+                        kind: .playlist, duration: nil)
+                ]
+            return .init(
+                items: items, nextStartIndex: first ? 12 : nil, hasIncompleteCoverage: first,
+                partialFailureCount: 0)
+        }
+
         func playlists(startIndex: Int) async throws -> FoundationPage {
             if alphabetCatalog {
                 return try await alphabetBrowse(kind: .playlist, startIndex: startIndex)
