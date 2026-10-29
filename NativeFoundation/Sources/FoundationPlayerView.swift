@@ -51,7 +51,7 @@ struct FoundationPlayerView: View {
     }
 
     private var lyricsUnavailable: Bool {
-        current?.hasLyrics == false
+        connectivity.localOnly || current?.hasLyrics == false
             || (player.selectedEntryID != nil && missingLyricsEntryID == player.selectedEntryID)
     }
 

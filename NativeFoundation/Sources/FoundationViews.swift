@@ -1263,7 +1263,9 @@ struct FoundationLibraryView: View {
 
     #if os(macOS)
         private var lyricsUnavailable: Bool {
-            displayedQueue.first(where: { $0.id == displayedEntryID })?.item.hasLyrics == false
+            connectivity.localOnly
+                || displayedQueue.first(where: { $0.id == displayedEntryID })?.item.hasLyrics
+                    == false
                 || (displayedEntryID != nil && missingLyricsEntryID == displayedEntryID)
         }
 
