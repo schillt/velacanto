@@ -290,7 +290,9 @@ private struct FoundationSearchOverview: View {
 
     var body: some View {
         ScrollView {
-            LazyVStack(alignment: .leading, spacing: 24) {
+            // The bounded overview must instantiate the playlist lookup even when
+            // earlier result sections place it below the initial viewport.
+            VStack(alignment: .leading, spacing: 24) {
                 if connectivity.hasConnectionIssue
                     || sections.contains(where: { $0.model.hasConnectionIssue })
                 {
@@ -754,7 +756,7 @@ private struct FoundationPlaylistLookupView: View {
                 }
             }
             if !connectivity.localOnly {
-                if model.searching || (model.cursor != nil && model.error == nil) {
+                if model.showsSearchProgress {
                     HStack(spacing: 8) {
                         ProgressView().controlSize(.small)
                         Text("Searching playlists…").font(.caption).foregroundStyle(.secondary)

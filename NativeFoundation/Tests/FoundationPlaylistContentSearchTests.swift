@@ -534,10 +534,13 @@ final class FoundationPlaylistContentSearchTests: XCTestCase {
                 partialFailureCount: 0)
         }
         let model = Self.automaticModel()
+        XCTAssertTrue(
+            model.showsSearchProgress, "Pending empty results have visible progress before startup")
         await model.searchWhileVisible(context: .init(trackIDs: ["opalite"]), library: library)
         XCTAssertEqual(model.items.map(\.id), ["day-drive"])
         XCTAssertNil(model.cursor)
         XCTAssertFalse(model.searching)
+        XCTAssertFalse(model.showsSearchProgress)
         XCTAssertNil(model.error)
         let calls = await library.calls
         XCTAssertEqual(calls, 3)
@@ -743,6 +746,8 @@ final class FoundationPlaylistContentSearchTests: XCTestCase {
             XCTAssertNil(model.error)
             XCTAssertFalse(model.searching)
             XCTAssertEqual(model.cursor?.candidateOffset, 0)
+            XCTAssertFalse(
+                model.showsSearchProgress, "Upstream cancellation must not leave a spinner")
             let reads = await library.calls
             XCTAssertEqual(reads, 1)
             model.releaseVisible(client)

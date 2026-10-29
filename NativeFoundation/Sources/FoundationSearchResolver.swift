@@ -594,6 +594,10 @@ struct FoundationSearchResolver: Sendable {
     @Published private(set) var error: FoundationLibraryError?
     @Published private(set) var loading = false
     @Published private(set) var searching = false
+    @Published private(set) var hasStartedSearch = false
+    var showsSearchProgress: Bool {
+        searching || (!hasStartedSearch && cursor != nil && error == nil)
+    }
     private var searchOwner = UUID()
     private var visibleClients: Set<UUID> = []
     private var visibleTask: Task<Void, Never>?
@@ -675,6 +679,7 @@ struct FoundationSearchResolver: Sendable {
         guard !searching, !loading, error == nil, library.metadataScopeID == scope else { return }
         let identity = UUID()
         searchOwner = identity
+        hasStartedSearch = true
         searching = true
         defer { if searchOwner == identity { searching = false } }
         while let previous = cursor, searchOwner == identity, !Task.isCancelled, error == nil {
