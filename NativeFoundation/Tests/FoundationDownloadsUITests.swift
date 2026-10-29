@@ -3749,18 +3749,26 @@ final class FoundationDownloadsUITests: XCTestCase {
         let app = launch(
             productionShell: true, canonicalDownloadState: "full", compactFixtureControls: true,
             primaryGenres: true, automaticGenres: true)
+        selectTab("Library", in: app)
+        tapVisibleCenter(app.buttons["library-category-genres"], in: app)
+        for title in ["Fixture Genre", "Fixture Other Genre"] {
+            XCTAssertTrue(
+                app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", title))
+                    .firstMatch.waitForExistence(timeout: 10),
+                "The canonical snapshot must contain both eligible genres before Home proof")
+        }
         selectTab("Home", in: app)
         XCTAssertFalse(app.buttons["primary-genres-build"].exists)
         for pass in 0..<2 {
             for (id, title) in [("genre", "Fixture Genre"), ("other-genre", "Fixture Other Genre")]
             {
                 let heading = app.buttons["home-shelf-" + title]
-                reveal(heading, in: app)
+                revealHomeGenrePreview(heading, in: app)
                 let card = app.buttons["home-genre-song-" + id + "-tone"]
                 XCTAssertTrue(
                     card.waitForExistence(timeout: 10),
                     "Automatic publication must render preview songs for every eligible shelf")
-                reveal(card, in: app)
+                revealHomeGenrePreview(card, in: app)
                 XCTAssertTrue(card.isHittable)
                 XCTAssertGreaterThanOrEqual(card.frame.width, 140)
                 XCTAssertGreaterThanOrEqual(card.frame.height, 144)
@@ -3772,6 +3780,33 @@ final class FoundationDownloadsUITests: XCTestCase {
                 selectTab("Home", in: app)
             }
         }
+    }
+
+    private func revealHomeGenrePreview(_ element: XCUIElement, in app: XCUIApplication) {
+        let scroll = app.scrollViews["foundation-home-scroll"]
+        XCTAssertTrue(scroll.exists)
+        for _ in 0..<6 {
+            let viewport = scroll.frame.intersection(app.frame)
+            let visible = viewport.insetBy(dx: 0, dy: 100)
+            let frame = element.exists ? element.frame : .zero
+            if frame.width > 0, frame.height > 0,
+                visible.contains(CGPoint(x: frame.midX, y: frame.midY)), element.isHittable
+            {
+                return
+            }
+            let upward = frame.height == 0 || frame.midY >= visible.midY
+            let start = scroll.coordinate(
+                withNormalizedOffset: CGVector(dx: 0.5, dy: upward ? 0.75 : 0.3))
+            let end = scroll.coordinate(
+                withNormalizedOffset: CGVector(dx: 0.5, dy: upward ? 0.3 : 0.75))
+            start.press(forDuration: 0.1, thenDragTo: end)
+        }
+        capture("Home genre preview target missing after bounded scroll", in: app)
+        let hierarchy = XCTAttachment(string: app.debugDescription)
+        hierarchy.name = "Home genre preview bounded scroll hierarchy"
+        hierarchy.lifetime = .keepAlways
+        add(hierarchy)
+        XCTFail("Home must render and expose every eligible genre preview target")
     }
 
     func testHomeAutomaticallyPreparedGenresOpenCanonicalSongMembership() {
