@@ -69,43 +69,12 @@ private struct FoundationPrimaryGenreContentView: View {
             automaticPageIdentity: content.pageDemandIdentity(for: projectedItems),
             itemProjection: { content.items(in: $0, source: record.snapshot.scope.source) },
             collectionGrid: content != .tracks, emptyMessage: content.emptyMessage,
-            localItems: { readySongs }
+            genreContentSelection: $content, localItems: { readySongs }
         ) { offset in
             try await record.songPage(genreID: genre.id, startIndex: offset, library: library)
         }
         .id(content)
         .accessibilityIdentifier("primary-genre-songs")
-        #if os(macOS)
-            .navigationTitle("")
-            .toolbar {
-                ToolbarItem(placement: .principal) {
-                    Menu {
-                        contentChoices
-                    } label: {
-                        HStack(spacing: 5) {
-                            Text(genre.title).font(.headline)
-                            Image(systemName: "chevron.down").font(.caption)
-                        }
-                    }
-                    .menuIndicator(.hidden)
-                    .accessibilityLabel(genre.title + " view options")
-                    .accessibilityValue(content.rawValue)
-                    .accessibilityIdentifier("primary-genre-title-menu")
-                }
-            }
-        #else
-            .toolbarTitleMenu { contentChoices }
-        #endif
-    }
-
-    private var contentChoices: some View {
-        Picker("Browse genre", selection: $content) {
-            ForEach(FoundationPrimaryGenreContent.allCases) { kind in
-                Text(kind.rawValue).tag(kind)
-            }
-        }
-        .pickerStyle(.inline)
-        .accessibilityIdentifier("primary-genre-content-picker")
     }
 }
 

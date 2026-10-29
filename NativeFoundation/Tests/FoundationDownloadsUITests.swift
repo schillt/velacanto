@@ -4021,15 +4021,17 @@ final class FoundationDownloadsUITests: XCTestCase {
     private func selectCanonicalGenreContent(
         _ content: String, title: String, in app: XCUIApplication
     ) {
-        let titleMenu = app.navigationBars.buttons.matching(
-            NSPredicate(format: "label BEGINSWITH %@", title)
-        ).firstMatch
+        let picker = app.segmentedControls["primary-genre-content-picker"]
         XCTAssertTrue(
-            titleMenu.waitForExistence(timeout: 5), "Genre title must expose its native menu")
-        titleMenu.tap()
-        let choice = app.buttons[content]
-        XCTAssertTrue(choice.waitForExistence(timeout: 5))
+            picker.waitForExistence(timeout: 5), "\(title) must show its segmented control")
+        XCTAssertTrue(picker.isHittable, "Genre choices must be visible without opening a menu")
+        for choice in ["Albums", "Tracks", "Artists"] {
+            XCTAssertTrue(picker.buttons[choice].exists)
+        }
+        let choice = picker.buttons[content]
         choice.tap()
+        XCTAssertTrue(picker.buttons[content].isSelected)
+        capture("Genre segmented control selected \(content)", in: app)
     }
 
     private func revealHomeGenrePreview(_ element: XCUIElement, in app: XCUIApplication) {
@@ -4068,10 +4070,15 @@ final class FoundationDownloadsUITests: XCTestCase {
         let shelf = app.buttons["home-shelf-Fixture Genre"]
         XCTAssertTrue(shelf.waitForExistence(timeout: 10))
         XCTAssertFalse(app.buttons["primary-genres-build"].exists)
-        tapVisible(shelf, in: app)
+        revealHomeGenrePreview(shelf, in: app)
+        shelf.tap()
         XCTAssertTrue(
             app.descendants(matching: .any)["primary-genre-songs"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["View Fixture Album"].waitForExistence(timeout: 5))
+        let picker = app.segmentedControls["primary-genre-content-picker"]
+        XCTAssertTrue(picker.waitForExistence(timeout: 5))
+        XCTAssertTrue(picker.isHittable)
+        XCTAssertTrue(picker.buttons["Albums"].isSelected)
         selectCanonicalGenreContent("Artists", title: "Fixture Genre", in: app)
         XCTAssertTrue(app.buttons["View Fixture Artist"].waitForExistence(timeout: 5))
         selectCanonicalGenreContent("Albums", title: "Fixture Genre", in: app)
@@ -4081,7 +4088,9 @@ final class FoundationDownloadsUITests: XCTestCase {
             app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Primary Song 2"))
                 .firstMatch.exists, "Home genre routes must preserve song-only canonical membership"
         )
-        capture("Home automatic genres open canonical songs", in: app)
+        selectCanonicalGenreContent("Albums", title: "Fixture Genre", in: app)
+        XCTAssertTrue(app.buttons["View Fixture Album"].waitForExistence(timeout: 5))
+        capture("Home automatic genres use visible native segments and canonical content", in: app)
     }
 
     func testNewAndPinnedGenresUseCanonicalSongDestinationsWithoutAlbumGenreQueries() {

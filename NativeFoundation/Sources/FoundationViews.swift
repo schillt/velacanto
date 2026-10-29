@@ -1740,6 +1740,7 @@ struct FoundationCatalogView: View {
     var itemProjection: (([FoundationItem]) -> [FoundationItem])? = nil
     var collectionGrid = false
     var emptyMessage: String? = nil
+    var genreContentSelection: Binding<FoundationPrimaryGenreContent>? = nil
     var headerItem: FoundationItem?
     var coverageMessage: String? = nil
     var localItems: (() -> [FoundationItem])? = nil
@@ -1759,6 +1760,9 @@ struct FoundationCatalogView: View {
             if showsCollectionGrid {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
+                        if genreContentSelection != nil {
+                            genreContentSelector.padding([.horizontal, .top])
+                        }
                         if let headerItem {
                             // Realize the first song request with the hero, even on tall layouts.
                             VStack(spacing: 0) {
@@ -1834,6 +1838,11 @@ struct FoundationCatalogView: View {
                 .foundationBottomChromeScrollClearance()
             } else {
                 List {
+                    if genreContentSelection != nil {
+                        genreContentSelector
+                            .listRowSeparator(.hidden)
+                            .listRowBackground(Color.clear)
+                    }
                     if let headerItem { identityHeader(headerItem).listRowSeparator(.hidden) }
                     resultRows
                     pageState
@@ -1963,6 +1972,24 @@ struct FoundationCatalogView: View {
             #else
                 await model.refreshVisible(allowsNetwork: !connectivity.localOnly, using: loader)
             #endif
+        }
+    }
+
+    @ViewBuilder private var genreContentSelector: some View {
+        if let selection = genreContentSelection {
+            Picker("Genre content", selection: selection) {
+                ForEach(
+                    [FoundationPrimaryGenreContent.albums, .tracks, .artists]
+                ) { kind in
+                    Text(kind.rawValue).tag(kind)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .accessibilityLabel("Genre content")
+            .frame(maxWidth: 420)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .accessibilityIdentifier("primary-genre-content-picker")
         }
     }
 
