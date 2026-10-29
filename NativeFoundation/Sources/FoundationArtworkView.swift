@@ -6,7 +6,22 @@ import SwiftUI
         let phase: UUID
         var rendered: (@MainActor @Sendable (UUID, Image?) -> Void)? = nil
         var beforeLoad: (@Sendable () async throws -> Void)? = nil
+        var leafUpdated: (@MainActor @Sendable (UUID, UUID, Image?) -> Void)? = nil
         let finished: @MainActor @Sendable (UUID, Bool) -> Void
+    }
+
+    /// Test-only leaf lifetime observation: no logging, timers, or effect when no observer exists.
+    private struct FoundationArtworkLeafObservation: ViewModifier {
+        let observation: FoundationArtworkTaskObservation?
+        let image: Image?
+        @State private var lifetime = UUID()
+
+        func body(content: Content) -> some View {
+            content.onChange(of: image, initial: true) { _, image in
+                guard let observation else { return }
+                observation.leafUpdated?(observation.phase, lifetime, image)
+            }
+        }
     }
 
     private struct FoundationArtworkTaskObservationKey: EnvironmentKey {
@@ -82,6 +97,11 @@ struct FoundationCatalogArtwork: View {
                 if let displayImage {
                     displayImage.resizable().scaledToFill()
                         .scaleEffect(item.kind == .genre ? 2 : 1, anchor: .topLeading)
+                        #if DEBUG
+                            .modifier(
+                                FoundationArtworkLeafObservation(
+                                    observation: observation, image: displayImage))
+                        #endif
                         .id(imageRevision)
                         .transition(.opacity)
                 } else {

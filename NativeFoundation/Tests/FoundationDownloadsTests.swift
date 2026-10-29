@@ -1104,6 +1104,102 @@ final class FoundationDownloadsTests: XCTestCase {
 
     #if DEBUG
 
+        func testRecreatedCoverKeepsRenderedLeafWhileReleasedPreviewUpgradesToFull() async throws {
+            let directory = try root()
+            let data = try artworkData(width: 640, height: 640)
+            let cache = FoundationArtworkCache(scope: "recreated-view", root: directory)
+            addTeardownBlock { _ = await cache.invalidate(removeDisk: true) }
+            let gate = RecreatedArtworkReadGate()
+            addTeardownBlock { await gate.release() }
+            let library = FoundationJellyfinLibrary(
+                session: .init(
+                    serverURL: URL(string: "https://example.invalid")!, accessToken: "synthetic",
+                    userID: "user", deviceID: "device"),
+                load: { _ in
+                    await gate.recordGET()
+                    XCTFail("Recreated warm covers must not need another artwork GET")
+                    throw FoundationLibraryError.unavailable
+                }, artworkCache: cache)
+            let album = FoundationItem(
+                id: "11111111111111111111111111111111", title: "Synthetic cover", subtitle: "",
+                kind: .album, duration: nil, primaryImageTag: "first")
+            _ = try await cache.result(
+                for: album, pixels: 640, allowsNetwork: true, load: { _, _ in data })
+            // Real Home-sized pressure evicts the full rendition while retaining its preview.
+            for index in 0..<23 {
+                let sibling = FoundationItem(
+                    id: String(format: "%032x", index + 1), title: "Sibling", subtitle: "",
+                    kind: .album, duration: nil, primaryImageTag: "first")
+                _ = try await cache.result(
+                    for: sibling, pixels: 640, allowsNetwork: true, load: { _, _ in data })
+            }
+            await cache.flushPersistence()
+            let preview = try XCTUnwrap(cache.immediateResult(for: album, pixels: 640))
+            XCTAssertEqual(preview.image.width, 160)
+            let expectedPreview = Image(decorative: preview.image, scale: 1)
+            let manager = FoundationDownloads(
+                scope: "recreated-view", library: library, root: directory,
+                monitorConnectivity: false)
+            defer { manager.invalidate() }
+            let connectivity = FoundationConnectivity(monitorConnectivity: false, retry: {})
+            let state = RecreatedArtworkState()
+            let content = RecreatedArtworkHost(
+                state: state, item: album, library: library, gate: gate
+            )
+            .environmentObject(manager).environmentObject(connectivity)
+            .environment(\.displayScale, 3)
+            #if os(macOS)
+                let window = NSWindow(
+                    contentRect: NSRect(x: 0, y: 0, width: 200, height: 200),
+                    styleMask: [.titled], backing: .buffered, defer: false)
+                window.isReleasedWhenClosed = false
+                window.contentView = NSHostingView(rootView: content)
+                window.orderFront(nil)
+                defer { window.close() }
+            #else
+                let scene = try XCTUnwrap(
+                    UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+                let window = UIWindow(windowScene: scene)
+                window.rootViewController = UIHostingController(rootView: content)
+                window.makeKeyAndVisible()
+                defer { window.isHidden = true }
+            #endif
+            let initial = state.incarnation
+            try await waitUntil { state.leafFrames[initial]?.last?.image == expectedPreview }
+            try await waitUntilAsync { await gate.begun >= 1 }
+            state.incarnation = UUID()
+            let recreated = state.incarnation
+            try await waitUntil { state.leafFrames[recreated]?.last?.image == expectedPreview }
+            try await waitUntilAsync { await gate.begun >= 2 }
+            XCTAssertNotEqual(
+                state.leafFrames[initial]?.first?.lifetime,
+                state.leafFrames[recreated]?.first?.lifetime,
+                "This check must actually recreate the artwork node")
+            XCTAssertEqual(state.firstFrames[recreated]?.image, expectedPreview)
+            XCTAssertNil(state.completed[recreated], "The upgrade has not been released")
+            await gate.release()
+            // Await an actual leaf update with the full bitmap, not just task completion or
+            // a held first-body observation. No animation-duration sleep is needed.
+            try await waitUntil {
+                guard state.completed[recreated] == true,
+                    let full = cache.immediateResult(for: album, pixels: 640),
+                    full.image.width == 640
+                else { return false }
+                return state.leafFrames[recreated]?.last?.image
+                    == Image(decorative: full.image, scale: 1)
+            }
+            let frames = try XCTUnwrap(state.leafFrames[recreated])
+            XCTAssertEqual(
+                Set(frames.map(\.lifetime)).count, 1,
+                "A same-cover resolution upgrade must not replace the rendered image leaf")
+            XCTAssertTrue(frames.allSatisfy { $0.image != nil })
+            XCTAssertTrue(state.renderedImages[recreated]?.allSatisfy { $0 != nil } == true)
+            XCTAssertEqual(cache.immediateResult(for: album, pixels: 640)?.image.width, 640)
+            let requests = await gate.requests
+            XCTAssertEqual(requests, 0)
+            let pending = await gate.pending
+            XCTAssertEqual(pending, 0)
+        }
         func testTwentyFourCoverWorkingSetRecreationDrawsBeforeAsyncDiskRead() async throws {
             let directory = try root()
             let data = try artworkData(width: 640, height: 640)
@@ -2883,6 +2979,10 @@ private actor DownloadProgressReporter {
     @MainActor
     private final class RecreatedArtworkState: ObservableObject {
         struct Frame { let image: Image? }
+        struct LeafFrame {
+            let lifetime: UUID
+            let image: Image?
+        }
         struct Selection {
             let incarnation: UUID
             let item: FoundationItem?
@@ -2896,6 +2996,8 @@ private actor DownloadProgressReporter {
             selection = Selection(incarnation: UUID(), item: item)
         }
         var firstFrames: [UUID: Frame] = [:]
+        var renderedImages: [UUID: [Image?]] = [:]
+        var leafFrames: [UUID: [LeafFrame]] = [:]
         var completed: [UUID: Bool] = [:]
     }
 
@@ -2919,8 +3021,13 @@ private actor DownloadProgressReporter {
                         if state.firstFrames[phase] == nil {
                             state.firstFrames[phase] = .init(image: image)
                         }
+                        state.renderedImages[phase, default: []].append(image)
                     },
-                    beforeLoad: { try await gate.wait() }
+                    beforeLoad: { try await gate.wait() },
+                    leafUpdated: { phase, lifetime, image in
+                        state.leafFrames[phase, default: []].append(
+                            .init(lifetime: lifetime, image: image))
+                    }
                 ) { phase, active in state.completed[phase] = active }
             )
             .id(selection.incarnation)
