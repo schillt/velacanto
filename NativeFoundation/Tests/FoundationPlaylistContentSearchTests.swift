@@ -875,4 +875,10 @@ private actor AutomaticPlaylistLibrary: FoundationLibrary {
     func playbackURL(for item: FoundationItem) async throws -> URL {
         throw FoundationLibraryError.unavailable
     }
+    func albums(startIndex: Int) async throws -> FoundationPage {
+        throw FoundationLibraryError.unavailable
+    }
+    func tracks(albumID: String, startIndex: Int) async throws -> FoundationPage {
+        throw FoundationLibraryError.unavailable
+    }
 }
