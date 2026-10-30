@@ -1006,7 +1006,8 @@ private struct FoundationQueueView: View {
                         set: { player.setShuffle($0) }
                     )
                 ) {
-                    Image(systemName: "shuffle").frame(width: labelWidth, height: 22)
+                    Label("Shuffle", systemImage: "shuffle")
+                        .frame(width: labelWidth, height: 22)
                 }
                 .accessibilityLabel("Shuffle")
                 .accessibilityValue(player.shuffleEnabled ? "On" : "Off")
@@ -1021,7 +1022,7 @@ private struct FoundationQueueView: View {
                         }
                     )
                 ) {
-                    Image(systemName: player.repeatMode == .one ? "repeat.1" : "repeat")
+                    Label("Repeat", systemImage: player.repeatMode == .one ? "repeat.1" : "repeat")
                         .frame(width: labelWidth, height: 22)
                 }
                 .accessibilityLabel("Repeat")
