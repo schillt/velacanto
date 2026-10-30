@@ -203,6 +203,63 @@ struct FoundationPrimaryGenreRecord: Equatable, Codable, Sendable {
     }
 }
 
+/// Counts only: never retains/logs a title, identifier, account, source URL, or media payload.
+enum FoundationPrimaryGenreContentIssue: String, CaseIterable, Sendable {
+    case rawGenreFieldsMissing = "provider genre fields missing"
+    case rawGenreDescriptorInvalid = "provider genre descriptor invalid"
+    case rawGenreReferenceMismatch = "provider genre names and references differ"
+    case missingMetadata = "missing song metadata"
+    case duplicateTrack = "duplicate song metadata"
+    case emptyTrackTitle = "empty song title"
+    case oversizedTrackTitle = "song title exceeds the ordering limit"
+    case controlTrackTitle = "song title contains a control character"
+    case emptyAlbumName = "empty album name"
+    case oversizedAlbumName = "album name exceeds the ordering limit"
+    case controlAlbumName = "album name contains a control character"
+    case emptyArtistName = "empty artist name"
+    case oversizedArtistName = "artist name exceeds the ordering limit"
+    case controlArtistName = "artist name contains a control character"
+    case invalidReference = "invalid album or artist reference"
+    case invalidNumeric = "invalid song sorting value"
+    case conflictingAlbumName = "different names for the same album"
+    case conflictingArtistName = "different names for the same artist"
+    case coverageMismatch = "incomplete sorting membership"
+    case rankingFailure = "rank construction failed"
+    case rankBindingFailure = "rank binding failed"
+}
+
+#if DEBUG
+    struct FoundationPrimaryGenreContentFailure: Error, Equatable, Sendable {
+        let counts: [FoundationPrimaryGenreContentIssue: Int]
+        var settingsSummary: String {
+            FoundationPrimaryGenreContentIssue.allCases.compactMap { issue in
+                guard let count = counts[issue], count > 0 else { return nil }
+                return "\(issue.rawValue): \(min(count, 500_000))"
+            }.joined(separator: "; ")
+        }
+    }
+
+#endif
+
+#if DEBUG
+    /// One ephemeral recorder belongs to one existing census task; ordinary browsing has no recorder.
+    final class FoundationPrimaryGenreCensusDiagnostic: @unchecked Sendable {
+        @TaskLocal static var current: FoundationPrimaryGenreCensusDiagnostic?
+        private let lock = NSLock()
+        private var counts: [FoundationPrimaryGenreContentIssue: Int] = [:]
+        func note(_ issue: FoundationPrimaryGenreContentIssue) {
+            lock.lock()
+            defer { lock.unlock() }
+            counts[issue] = min(500_000, (counts[issue] ?? 0) + 1)
+        }
+        func report() -> FoundationPrimaryGenreContentFailure? {
+            lock.lock()
+            defer { lock.unlock() }
+            return counts.isEmpty ? nil : .init(counts: counts)
+        }
+    }
+#endif
+
 /// Small ordering facts from the existing complete metadata census, never a track DTO or media URL.
 struct FoundationPrimaryGenreContentMetadata: Equatable, Sendable {
     let title: String
@@ -556,7 +613,17 @@ struct FoundationPrimaryGenreContentIndex: Equatable, Codable, Sendable {
         private var artists: [String: String] = [:]
         private var bytes = 0
         private var complete = true
+        #if DEBUG
+            private(set) var issueCounts: [FoundationPrimaryGenreContentIssue: Int] = [:]
+        #endif
         private(set) var exceededBudget = false
+
+        private mutating func note(_ issue: FoundationPrimaryGenreContentIssue) {
+            complete = false
+            #if DEBUG
+                issueCounts[issue] = min(500_000, (issueCounts[issue] ?? 0) + 1)
+            #endif
+        }
 
         mutating func append(
             _ songs: [FoundationPrimaryGenreMetadataPage.Song], source: FoundationCatalogSource
@@ -564,17 +631,23 @@ struct FoundationPrimaryGenreContentIndex: Equatable, Codable, Sendable {
             guard !exceededBudget else { return }
             for song in songs {
                 guard let item = song.content else {
-                    complete = false
+                    note(.missingMetadata)
                     continue
                 }
-                guard Self.validate(item, source: source), tracks[song.id] == nil else {
-                    complete = false
+                if let issue = Self.validationIssue(item, source: source) {
+                    note(issue)
+                    continue
+                }
+                guard tracks[song.id] == nil else {
+                    note(.duplicateTrack)
                     continue
                 }
                 for (reference, isAlbum) in [(item.album, true), (item.artist, false)] {
                     guard let reference else { continue }
                     let old = isAlbum ? albums[reference.id] : artists[reference.id]
-                    if let old, old != reference.title { complete = false }
+                    if let old, old != reference.title {
+                        note(isAlbum ? .conflictingAlbumName : .conflictingArtistName)
+                    }
                     if old == nil {
                         bytes += reference.id.utf8.count + reference.title.utf8.count
                         if isAlbum {
@@ -604,31 +677,69 @@ struct FoundationPrimaryGenreContentIndex: Equatable, Codable, Sendable {
             }
         }
 
-        func finish(songIDs: Set<String>) -> FoundationPrimaryGenreContentIndex? {
+        mutating func finish(songIDs: Set<String>) -> FoundationPrimaryGenreContentIndex? {
             guard complete, !exceededBudget else { return nil }
             let result = FoundationPrimaryGenreContentIndex(
                 tracks: tracks, albums: albums, artists: artists)
-            guard result.isValid(songIDs: songIDs),
-                let ranks = try? FoundationPrimaryGenreNameRanks.make(
+            guard result.isValid(songIDs: songIDs) else {
+                note(.coverageMismatch)
+                return nil
+            }
+            let ranks: FoundationPrimaryGenreNameRanks
+            do {
+                ranks = try FoundationPrimaryGenreNameRanks.make(
                     tracks: tracks, albums: albums, artists: artists)
-            else { return nil }
+            } catch {
+                if !(error is CancellationError) { note(.rankingFailure) }
+                return nil
+            }
             let ranked = FoundationPrimaryGenreContentIndex(
                 tracks: tracks, albums: [:], artists: [:], nameRanks: ranks)
-            return try? ranked.bindingSongIDs(ranks.songIDs)
+            do { return try ranked.bindingSongIDs(ranks.songIDs) } catch {
+                if !(error is CancellationError) { note(.rankBindingFailure) }
+                return nil
+            }
         }
 
-        private static func validate(
+        private static func validationIssue(
             _ item: FoundationPrimaryGenreContentMetadata, source: FoundationCatalogSource
-        ) -> Bool {
-            FoundationPrimaryGenreContentIndex.validText(item.title)
-                && [item.album, item.artist].compactMap { $0 }.allSatisfy {
-                    FoundationPrimaryGenreContentIndex.validID($0.id)
-                        && FoundationPrimaryGenreContentIndex.validText($0.title)
-                        && ($0.catalogSource == nil || $0.catalogSource == source)
+        ) -> FoundationPrimaryGenreContentIssue? {
+            func textIssue(
+                _ text: String, empty: FoundationPrimaryGenreContentIssue,
+                oversized: FoundationPrimaryGenreContentIssue,
+                control: FoundationPrimaryGenreContentIssue
+            ) -> FoundationPrimaryGenreContentIssue? {
+                if text.isEmpty { return empty }
+                if text.utf8.count > 512 { return oversized }
+                if text.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) {
+                    return control
                 }
-                && (item.duration.map { $0.isFinite && $0 >= 0 } ?? true)
-                && (item.year.map { (1...9999).contains($0) } ?? true)
-                && (item.dateAdded.map { $0.timeIntervalSinceReferenceDate.isFinite } ?? true)
+                return nil
+            }
+            if let issue = textIssue(
+                item.title, empty: .emptyTrackTitle, oversized: .oversizedTrackTitle,
+                control: .controlTrackTitle)
+            {
+                return issue
+            }
+            for (reference, isAlbum) in [(item.album, true), (item.artist, false)] {
+                guard let reference else { continue }
+                guard FoundationPrimaryGenreContentIndex.validID(reference.id),
+                    reference.catalogSource == nil || reference.catalogSource == source
+                else { return .invalidReference }
+                if let issue = textIssue(
+                    reference.title, empty: isAlbum ? .emptyAlbumName : .emptyArtistName,
+                    oversized: isAlbum ? .oversizedAlbumName : .oversizedArtistName,
+                    control: isAlbum ? .controlAlbumName : .controlArtistName)
+                {
+                    return issue
+                }
+            }
+            guard item.duration.map({ $0.isFinite && $0 >= 0 }) ?? true,
+                item.year.map({ (1...9999).contains($0) }) ?? true,
+                item.dateAdded.map({ $0.timeIntervalSinceReferenceDate.isFinite }) ?? true
+            else { return .invalidNumeric }
+            return nil
         }
     }
 }
@@ -951,9 +1062,19 @@ actor FoundationPrimaryGenreContentWorker {
     ) throws -> FoundationPrimaryGenreRecord {
         try Task.checkCancellation()
         let index = builder.finish(songIDs: Set(snapshot.orderedSongIDs))
+        #if DEBUG
+            let issues = builder.issueCounts
+        #endif
         builder = .init()  // Release comparison names before encoding or publication.
         try Task.checkCancellation()
-        guard var content = index else { throw FoundationPrimaryGenreIndex.Failure.unknownMetadata }
+        guard var content = index else {
+            #if DEBUG
+                throw FoundationPrimaryGenreContentFailure(
+                    counts: issues.isEmpty ? [.coverageMismatch: 1] : issues)
+            #else
+                throw FoundationPrimaryGenreIndex.Failure.unknownMetadata
+            #endif
+        }
         let encoder = PropertyListEncoder()
         encoder.outputFormat = .binary
         func record(_ content: FoundationPrimaryGenreContentIndex) -> FoundationPrimaryGenreRecord {

@@ -1256,6 +1256,132 @@ final class FoundationPrimaryGenresTests: XCTestCase {
         XCTAssertNil(restored.contentMetadataVersion)
     }
 
+    func testGenreProviderDiagnosticDistinguishesRawMissingInvalidAndMismatchedMetadata()
+        async throws
+    {
+        let cases: [(FoundationPrimaryGenreContentIssue, [String: Any])] = [
+            (.rawGenreFieldsMissing, [:]),
+            (
+                .rawGenreDescriptorInvalid,
+                [
+                    "Genres": ["Private Genre"],
+                    "GenreItems": [["Id": "invalid", "Name": "Private Genre"]],
+                ]
+            ),
+            (
+                .rawGenreReferenceMismatch,
+                [
+                    "Genres": ["Private Genre"],
+                    "GenreItems": [["Id": Self.id(2), "Name": "Other Private Genre"]],
+                ]
+            ),
+        ]
+        for (expected, fields) in cases {
+            var entry: [String: Any] = [
+                "Id": Self.id(1), "Name": "Private Song Name", "Type": "Audio",
+            ]
+            entry.merge(fields) { _, value in value }
+            let data = try JSONSerialization.data(withJSONObject: [
+                "Items": [entry], "StartIndex": 0, "TotalRecordCount": 1,
+            ])
+            let library = FoundationJellyfinLibrary(session: Self.session) { request in
+                (
+                    data,
+                    HTTPURLResponse(
+                        url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+                )
+            }
+            let recorder = FoundationPrimaryGenreCensusDiagnostic()
+            do {
+                _ = try await FoundationPrimaryGenreCensusDiagnostic.$current.withValue(recorder) {
+                    try await library.primaryGenreMetadataPage(startIndex: 0)
+                }
+                XCTFail("Invalid raw genre metadata must retain the original failure")
+            } catch {
+                XCTAssertEqual(error as? FoundationPrimaryGenreIndex.Failure, .unknownMetadata)
+            }
+            XCTAssertEqual(recorder.report()?.counts, [expected: 1])
+            XCTAssertFalse(recorder.report()?.settingsSummary.contains("Private") == true)
+        }
+    }
+
+    func testGenreBuilderDiagnosticCountsNameValidationConflictAndCoverageWithoutPayloads() throws {
+        let scope = try XCTUnwrap(
+            FoundationJellyfinLibrary(session: Self.session).primaryGenreIndexScope)
+        let cases: [(FoundationPrimaryGenreContentIssue, FoundationPrimaryGenreContentMetadata)] = [
+            (.emptyTrackTitle, .init(title: "")),
+            (.oversizedTrackTitle, .init(title: String(repeating: "private", count: 100))),
+            (.controlTrackTitle, .init(title: "private\nname")),
+            (.emptyAlbumName, .init(title: "private", album: .init(id: Self.id(5), title: ""))),
+            (
+                .oversizedArtistName,
+                .init(
+                    title: "private",
+                    artist: .init(id: Self.id(6), title: String(repeating: "private", count: 100)))
+            ),
+        ]
+        for (expected, metadata) in cases {
+            var builder = FoundationPrimaryGenreContentIndex.Builder()
+            builder.append(
+                [.init(id: Self.id(1), genres: [], content: metadata)], source: scope.source)
+            XCTAssertNil(builder.finish(songIDs: [Self.id(1)]))
+            XCTAssertEqual(builder.issueCounts, [expected: 1])
+            XCTAssertFalse(
+                FoundationPrimaryGenreContentFailure(counts: builder.issueCounts).settingsSummary
+                    .contains("private"))
+        }
+        var conflict = FoundationPrimaryGenreContentIndex.Builder()
+        conflict.append(
+            (0..<2).map { value in
+                .init(
+                    id: Self.id(value + 1), genres: [],
+                    content: .init(
+                        title: "private", album: .init(id: Self.id(5), title: "private-\(value)"),
+                        artist: .init(id: Self.id(6), title: "private-\(value)")))
+            }, source: scope.source)
+        XCTAssertNil(conflict.finish(songIDs: [Self.id(1), Self.id(2)]))
+        XCTAssertEqual(conflict.issueCounts, [.conflictingAlbumName: 1, .conflictingArtistName: 1])
+        var coverage = FoundationPrimaryGenreContentIndex.Builder()
+        coverage.append(
+            [.init(id: Self.id(1), genres: [], content: .init(title: "private"))],
+            source: scope.source)
+        XCTAssertNil(coverage.finish(songIDs: [Self.id(1), Self.id(2)]))
+        XCTAssertEqual(coverage.issueCounts, [.coverageMismatch: 1])
+    }
+
+    func testGenreDiagnosticUsesOnlyExistingAutomaticCensusAndRetiresWithAccount() async throws {
+        let requests = PrimaryGenreRequests()
+        let data = try JSONSerialization.data(withJSONObject: [
+            "Items": [
+                [
+                    "Id": Self.id(1), "Name": "", "Type": "Audio", "Genres": ["private"],
+                    "GenreItems": [["Id": Self.id(2), "Name": "private"]],
+                ]
+            ], "StartIndex": 0, "TotalRecordCount": 1,
+        ])
+        let library = FoundationJellyfinLibrary(session: Self.session) { request in
+            await requests.append(request)
+            return (
+                data,
+                HTTPURLResponse(
+                    url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            )
+        }
+        let model = FoundationPrimaryGenresModel(library: library, appVersion: "diagnostic")
+        await model.prepareAutomaticallyIfNeeded(allowsNetwork: true)
+        await model.buildCompletion?.value
+        XCTAssertNil(model.record, "Diagnostics must not change canonical publication behavior")
+        XCTAssertEqual(model.preparationDiagnostic?.counts, [.emptyTrackTitle: 1])
+        XCTAssertEqual(
+            model.errorMessage, "Some song tags were unavailable. No partial index was saved.")
+        await model.prepareAutomaticallyIfNeeded(allowsNetwork: true)
+        await model.prepareAutomaticallyIfNeeded(allowsNetwork: true)
+        let count = await requests.requests.count
+        XCTAssertEqual(count, 1, "Diagnostics cannot add a provider read or foreground retry")
+        model.bind(library.scoped(to: Self.id(3)))
+        XCTAssertNil(model.preparationDiagnostic)
+    }
+
     func testPackedGenreIdentitiesPreserveExactUUIDSpellingAndRejectCorruptFrames() throws {
         let ids = [
             "abcdefab12345678901234567890abcd", "ABCDEFAB12345678901234567890ABCD",

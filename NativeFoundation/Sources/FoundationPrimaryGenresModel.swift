@@ -11,6 +11,9 @@ final class FoundationPrimaryGenresModel: ObservableObject {
     @Published private(set) var totalSongs: Int?
     @Published private(set) var errorMessage: String?
     @Published private(set) var publicationRevision = 0
+    #if DEBUG
+        @Published private(set) var preparationDiagnostic: FoundationPrimaryGenreContentFailure?
+    #endif
 
     private var library: any FoundationLibrary
     private var scope: FoundationPrimaryGenreIndex.Scope?
@@ -153,12 +156,18 @@ final class FoundationPrimaryGenresModel: ObservableObject {
         let library = library
         let index = index
         errorMessage = nil
+        #if DEBUG
+            preparationDiagnostic = nil
+        #endif
         processedSongs = 0
         totalSongs = nil
         isBuilding = true
         job = Task { [weak self] in
             guard let self else { return }
             var token: FoundationPrimaryGenreIndex.Generation?
+            #if DEBUG
+                let diagnostic = FoundationPrimaryGenreCensusDiagnostic()
+            #endif
             do {
                 let generation = try await index.begin(scope: scope)
                 token = generation
@@ -173,7 +182,14 @@ final class FoundationPrimaryGenresModel: ObservableObject {
                         throw FoundationPrimaryGenreIndex.Failure.resourceLimit
                     }
                     requestedPages += 1
-                    let page = try await library.primaryGenreMetadataPage(startIndex: offset)
+                    #if DEBUG
+                        let page = try await FoundationPrimaryGenreCensusDiagnostic.$current
+                            .withValue(diagnostic) {
+                                try await library.primaryGenreMetadataPage(startIndex: offset)
+                            }
+                    #else
+                        let page = try await library.primaryGenreMetadataPage(startIndex: offset)
+                    #endif
                     try Task.checkCancellation()
                     guard self.operationID == owner, self.scope == scope else { return }
                     let songs = page.songs.map {
@@ -236,6 +252,10 @@ final class FoundationPrimaryGenresModel: ObservableObject {
                 if let token { await index.cancel(generation: token) }
                 guard self.operationID == owner, self.scope == scope else { return }
                 if !Task.isCancelled {
+                    #if DEBUG
+                        self.preparationDiagnostic =
+                            (error as? FoundationPrimaryGenreContentFailure) ?? diagnostic.report()
+                    #endif
                     self.errorMessage = Self.message(for: error, hasPrevious: self.record != nil)
                 }
             }
@@ -247,6 +267,9 @@ final class FoundationPrimaryGenresModel: ObservableObject {
     }
 
     func cancel() {
+        #if DEBUG
+            preparationDiagnostic = nil
+        #endif
         operationID = UUID()
         permit.revoke()
         job?.cancel()
@@ -383,6 +406,11 @@ final class FoundationPrimaryGenresModel: ObservableObject {
         let retained =
             hasPrevious
             ? " The previous complete index is still in use." : " No partial index was saved."
+        #if DEBUG
+            if error is FoundationPrimaryGenreContentFailure {
+                return "Some song tags were unavailable." + retained
+            }
+        #endif
         switch error as? FoundationPrimaryGenreIndex.Failure {
         case .resourceLimit:
             return "This library exceeds the primary genre indexing limits." + retained

@@ -2052,6 +2052,9 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
                 throw FoundationLibraryError.invalidResponse
             }
             guard let raw = entry.genres, let references = entry.genreItems else {
+                #if DEBUG
+                    FoundationPrimaryGenreCensusDiagnostic.current?.note(.rawGenreFieldsMissing)
+                #endif
                 throw FoundationPrimaryGenreIndex.Failure.unknownMetadata
             }
             guard raw.count <= 128, references.count <= 128 else {
@@ -2061,11 +2064,18 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
                 guard let id = reference.id, Self.validID(id), let title = reference.name,
                     !title.isEmpty, title.utf8.count <= 512
                 else {
+                    #if DEBUG
+                        FoundationPrimaryGenreCensusDiagnostic.current?.note(
+                            .rawGenreDescriptorInvalid)
+                    #endif
                     throw FoundationPrimaryGenreIndex.Failure.unknownMetadata
                 }
                 return .init(id: id, title: title)
             }
             guard Set(raw.filter { !$0.isEmpty }) == Set(genres.map(\.title)) else {
+                #if DEBUG
+                    FoundationPrimaryGenreCensusDiagnostic.current?.note(.rawGenreReferenceMismatch)
+                #endif
                 throw FoundationPrimaryGenreIndex.Failure.unknownMetadata
             }
             let item = try mappedItems([entry], kinds: [.track])[0]

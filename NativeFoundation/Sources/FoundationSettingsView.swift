@@ -315,6 +315,13 @@ private struct FoundationGenreSettingsSection: View {
                 .foregroundStyle(.secondary)
             }
             if let error = genres.errorMessage { Text(error).foregroundStyle(.secondary) }
+            #if DEBUG
+                if let report = genres.preparationDiagnostic {
+                    Text("Genre preparation diagnostic (observed): " + report.settingsSummary)
+                        .font(.caption).foregroundStyle(.secondary)
+                        .accessibilityIdentifier("settings-genre-preparation-diagnostic")
+                }
+            #endif
             if let error = genres.offlineErrorMessage { Text(error).foregroundStyle(.secondary) }
         }
     }
