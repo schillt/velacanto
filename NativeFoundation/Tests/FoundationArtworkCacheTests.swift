@@ -764,8 +764,13 @@ final class FoundationArtworkCacheTests: XCTestCase {
                 space: CGColorSpace(name: CGColorSpace.sRGB)!,
                 bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue))
         context.draw(background, in: CGRect(x: 0, y: 0, width: 640, height: 640))
-        context.setFillColor(CGColor(red: CGFloat(index) / 96, green: 0.3, blue: 0.8, alpha: 1))
-        context.fill(CGRect(x: 0, y: 0, width: 640, height: 4))
+        // Binary high-contrast cells remain distinct after JPEG quantization; a thin
+        // gradual-color stripe collapsed three fixture identities at quality 0.88.
+        for bit in 0..<7 {
+            let white: CGFloat = index & (1 << bit) == 0 ? 0 : 1
+            context.setFillColor(CGColor(gray: white, alpha: 1))
+            context.fill(CGRect(x: CGFloat(bit * 16), y: 0, width: 16, height: 16))
+        }
         let data = NSMutableData()
         let destination = try XCTUnwrap(
             CGImageDestinationCreateWithData(
