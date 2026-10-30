@@ -106,7 +106,7 @@ struct FoundationHandoffPresentation: ViewModifier {
             } message: {
                 if let remote = controller.pending?.remoteOffer {
                     Text(
-                        "Continue the complete reported queue here at its latest available position? Its current order and repeat setting are preserved; the original unshuffled queue is not available. After playback starts here, VelaCanto will try once to stop the original player. That player could change before the stop arrives."
+                        "Continue the complete reported queue here at its latest available position? Its reported order and repeat setting are preserved; the original unshuffled queue is not available. After playback starts here, VelaCanto will try once to stop the original player. That player could change before the stop arrives."
                             + (remote.supportsRemoteControl
                                 ? ""
                                 : " This player currently does not support remote stopping; you may need to stop it there.")
