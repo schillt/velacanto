@@ -70,6 +70,22 @@ struct FoundationRemoteListeningActivity: Identifiable, Equatable, Sendable {
         FoundationListeningProgress(elapsed: elapsed, duration: item.duration)
     }
 
+    /// Display-only estimate between playing reports. Continuation still uses the source snapshot.
+    func presentationProgress(at date: Date) -> FoundationListeningProgress {
+        guard let elapsed, elapsed.isFinite, elapsed >= 0 else { return progress }
+        let age = date.timeIntervalSince(checkedInAt)
+        // Match the decoder's tolerated future skew; never extrapolate beyond freshness.
+        guard age.isFinite, age >= -5 else { return progress }
+        let estimate = elapsed + min(90, max(0, age))
+        let bounded: Double
+        if let duration = item.duration, duration.isFinite, duration > 0 {
+            bounded = min(duration, estimate)
+        } else {
+            bounded = estimate
+        }
+        return FoundationListeningProgress(elapsed: bounded, duration: item.duration)
+    }
+
     static func decode(
         _ data: Data, userID: String, ownDeviceID: String, now: Date,
         catalogSource: FoundationCatalogSource? = nil
@@ -323,6 +339,29 @@ struct FoundationListeningProgress: Equatable, Sendable {
 
     var label: String { "\(time(elapsed)) / \(time(duration))" }
     var accessibilityValue: String { "Elapsed \(time(elapsed)), duration \(time(duration))" }
+}
+
+/// Only the progress content redraws each second, with no model writes or remote requests.
+struct FoundationRemoteListeningProgressView<Content: View>: View {
+    let activity: FoundationRemoteListeningActivity
+    let isActive: Bool
+    @ViewBuilder let content: (FoundationListeningProgress) -> Content
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var isVisible = false
+
+    var body: some View {
+        Group {
+            if isActive && isVisible && scenePhase == .active {
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    content(activity.presentationProgress(at: context.date))
+                }
+            } else {
+                content(activity.progress)
+            }
+        }
+        .onAppear { isVisible = true }
+        .onDisappear { isVisible = false }
+    }
 }
 
 /// Choose first, then hide: dismissing the freshest activity must not reveal a fallback.

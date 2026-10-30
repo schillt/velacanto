@@ -623,7 +623,8 @@ private struct FoundationContinueListening: View {
         let artwork = item.catalogArtworkItem
         let artworkIdentity: String = artwork.id + (artwork.primaryImageTag ?? "")
         let accessibilityValue: String = [
-            item.title, item.subtitle, activity.albumTitle, activity.progress.accessibilityValue,
+            item.title, item.subtitle, activity.albumTitle,
+            "Reported " + activity.progress.accessibilityValue,
         ].joined(separator: ", ")
         return Button {
             openInstructions(for: activity)
@@ -656,8 +657,12 @@ private struct FoundationContinueListening: View {
                 .foregroundStyle(.secondary).lineLimit(1)
             Text(activity.albumTitle).font(.caption)
                 .foregroundStyle(.secondary).lineLimit(1)
-            Text(activity.progress.label).font(.caption.monospacedDigit())
-                .foregroundStyle(.secondary)
+            FoundationRemoteListeningProgressView(activity: activity, isActive: active) {
+                progress in
+                Text(progress.label).font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            .accessibilityHidden(true)  // Button exposes reported time without tick announcements.
         }.frame(maxWidth: .infinity, alignment: .leading)
     }
 
@@ -673,13 +678,16 @@ private struct FoundationContinueListening: View {
                 }
             }
             .overlay {
-                Circle().trim(from: 0, to: activity.progress.fraction)
-                    .stroke(
-                        .primary.opacity(0.75),
-                        style: StrokeStyle(lineWidth: 2, lineCap: .round)
-                    )
-                    .rotationEffect(.degrees(-90)).padding(2)
-                    .allowsHitTesting(false)
+                FoundationRemoteListeningProgressView(activity: activity, isActive: active) {
+                    progress in
+                    Circle().trim(from: 0, to: progress.fraction)
+                        .stroke(
+                            .primary.opacity(0.75),
+                            style: StrokeStyle(lineWidth: 2, lineCap: .round)
+                        )
+                        .rotationEffect(.degrees(-90)).padding(2)
+                }
+                .allowsHitTesting(false)
             }
             .accessibilityHidden(true)
     }
