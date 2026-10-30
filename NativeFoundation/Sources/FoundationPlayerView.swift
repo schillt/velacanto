@@ -828,14 +828,26 @@ private struct FoundationQueueView: View {
                         }
                         .toolbar {
                             if isPresented {
+                                // Each native toolbar item owns one toggle's accessibility name.
                                 ToolbarItem(placement: .principal) {
                                     GlassEffectContainer(spacing: 8) {
-                                        HStack(spacing: 12) {
-                                            macModeControls(
-                                                labelWidth: max(44, (geometry.size.width - 92) / 2))
-                                        }
+                                        macShuffleControl(
+                                            labelWidth: max(44, (geometry.size.width - 92) / 2))
                                     }
-                                    .frame(width: max(0, geometry.size.width - 32), height: 36)
+                                    .frame(
+                                        width: max(0, (geometry.size.width - 44) / 2), height: 36
+                                    )
+                                    .padding(.vertical, 8)
+                                }
+                                .sharedBackgroundVisibility(.hidden)
+                                ToolbarItem(placement: .principal) {
+                                    GlassEffectContainer(spacing: 8) {
+                                        macRepeatControl(
+                                            labelWidth: max(44, (geometry.size.width - 92) / 2))
+                                    }
+                                    .frame(
+                                        width: max(0, (geometry.size.width - 44) / 2), height: 36
+                                    )
                                     .padding(.vertical, 8)
                                 }
                                 .sharedBackgroundVisibility(.hidden)
@@ -997,37 +1009,43 @@ private struct FoundationQueueView: View {
     }
 
     #if os(macOS)
-        /// Native toolbar toggles own their glass, sizing and selected-state contrast.
-        private func macModeControls(labelWidth: CGFloat) -> some View {
-            Group {
-                Toggle(
-                    isOn: Binding(
-                        get: { player.shuffleEnabled },
-                        set: { player.setShuffle($0) }
-                    )
-                ) {
-                    Label("Shuffle", systemImage: "shuffle")
-                        .frame(width: labelWidth, height: 22)
-                }
-                .accessibilityLabel("Shuffle")
-                .accessibilityValue(player.shuffleEnabled ? "On" : "Off")
-                Toggle(
-                    isOn: Binding(
-                        get: { player.repeatMode != .off },
-                        set: { _ in
-                            let next: FoundationPlayer.RepeatMode =
-                                player.repeatMode == .off
-                                ? .all : player.repeatMode == .all ? .one : .off
-                            player.setRepeat(next)
-                        }
-                    )
-                ) {
-                    Label("Repeat", systemImage: player.repeatMode == .one ? "repeat.1" : "repeat")
-                        .frame(width: labelWidth, height: 22)
-                }
-                .accessibilityLabel("Repeat")
-                .accessibilityValue(player.repeatMode.rawValue.capitalized)
+        /// Keep one control per native toolbar item rather than a shared two-toggle view.
+        private func macShuffleControl(labelWidth: CGFloat) -> some View {
+            Toggle(
+                isOn: Binding(
+                    get: { player.shuffleEnabled },
+                    set: { player.setShuffle($0) }
+                )
+            ) {
+                Label("Shuffle", systemImage: "shuffle")
+                    .frame(width: labelWidth, height: 22)
             }
+            .accessibilityLabel("Shuffle")
+            .accessibilityValue(player.shuffleEnabled ? "On" : "Off")
+            .toggleStyle(.button)
+            .buttonStyle(.glass)
+            .buttonBorderShape(.capsule)
+            .labelStyle(.iconOnly)
+            .controlSize(.regular)
+        }
+
+        private func macRepeatControl(labelWidth: CGFloat) -> some View {
+            Toggle(
+                isOn: Binding(
+                    get: { player.repeatMode != .off },
+                    set: { _ in
+                        let next: FoundationPlayer.RepeatMode =
+                            player.repeatMode == .off
+                            ? .all : player.repeatMode == .all ? .one : .off
+                        player.setRepeat(next)
+                    }
+                )
+            ) {
+                Label("Repeat", systemImage: player.repeatMode == .one ? "repeat.1" : "repeat")
+                    .frame(width: labelWidth, height: 22)
+            }
+            .accessibilityLabel("Repeat")
+            .accessibilityValue(player.repeatMode.rawValue.capitalized)
             .toggleStyle(.button)
             .buttonStyle(.glass)
             .buttonBorderShape(.capsule)
