@@ -263,6 +263,11 @@ struct FoundationHomeView<Profile: View>: View {
                     openedItem: $openedItem
                 ) { try await library.recentlyPlayed(startIndex: $0) }
             }
+            #if os(iOS)
+                // Report the bounded upper block's intrinsic height to the lazy parent.
+                // The optional card still contributes no height when it is absent.
+                .fixedSize(horizontal: false, vertical: true)
+            #endif
             // A bounded mixed collection preview; the heading opens complete Favorites.
             FoundationHomeShelf(
                 title: "Favorites", model: favorites, library: library, player: player,
