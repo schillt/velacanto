@@ -1038,9 +1038,13 @@ final class FoundationRemoteContinuationTests: XCTestCase {
     func testMissingQueueNeverBecomesOneTrackTransfer() throws {
         var row = CrossClientFixtures.row()
         row.removeValue(forKey: "NowPlayingQueue")
-        XCTAssertThrowsError(try CrossClientFixtures.offer(row))
+        XCTAssertThrowsError(try CrossClientFixtures.offer(row)) { error in
+            XCTAssertEqual(error as? FoundationHandoffError, .queueUnavailable)
+        }
         row["NowPlayingQueue"] = []
-        XCTAssertThrowsError(try CrossClientFixtures.offer(row))
+        XCTAssertThrowsError(try CrossClientFixtures.offer(row)) { error in
+            XCTAssertEqual(error as? FoundationHandoffError, .queueUnavailable)
+        }
     }
     func testDuplicateOrMissingSourceOccurrenceRejectsWholeQueue() throws {
         var row = CrossClientFixtures.row()
@@ -1048,15 +1052,21 @@ final class FoundationRemoteContinuationTests: XCTestCase {
             ["Id": CrossClientFixtures.first, "PlaylistItemId": "same"],
             ["Id": CrossClientFixtures.current, "PlaylistItemId": "same"],
         ]
-        XCTAssertThrowsError(try CrossClientFixtures.offer(row))
+        XCTAssertThrowsError(try CrossClientFixtures.offer(row)) { error in
+            XCTAssertEqual(error as? FoundationHandoffError, .invalid)
+        }
         row = CrossClientFixtures.row()
         row["PlaylistItemId"] = "absent"
-        XCTAssertThrowsError(try CrossClientFixtures.offer(row))
+        XCTAssertThrowsError(try CrossClientFixtures.offer(row)) { error in
+            XCTAssertEqual(error as? FoundationHandoffError, .queueUnavailable)
+        }
     }
     func testCurrentItemMustMatchSelectedQueueOccurrence() throws {
         var row = CrossClientFixtures.row()
         row["NowPlayingItem"] = CrossClientFixtures.media(CrossClientFixtures.first)
-        XCTAssertThrowsError(try CrossClientFixtures.offer(row))
+        XCTAssertThrowsError(try CrossClientFixtures.offer(row)) { error in
+            XCTAssertEqual(error as? FoundationHandoffError, .queueUnavailable)
+        }
     }
     func testStrictPrimaryOwnerAndOwnDeviceIsolation() throws {
         for user in ["", "00000000000000000000000000000009"] {
@@ -1448,6 +1458,41 @@ final class FoundationRemoteContinuationControllerTests: XCTestCase {
         await fulfillment(of: [ready], timeout: 5)
         token.cancel()
     }
+    func testV12EmptyOrStaleSourceQueueExplainsFailureWithoutMovingPlayback() async throws {
+        let queues: [[[String: String]]] = [
+            [], [["Id": CrossClientFixtures.first, "PlaylistItemId": "stale-occurrence"]],
+        ]
+        for queue in queues {
+            var row = CrossClientFixtures.row()
+            row["NowPlayingQueue"] = queue
+            let transport = CrossClientTransport(customSource: try CrossClientFixtures.data([row]))
+            let (controller, player, library) = make(transport)
+            defer {
+                controller.invalidate()
+                player.stop()
+            }
+            let original = player.persistedQueue
+            let ready = expectation(description: "unusable current queue explanation")
+            let token = controller.$notice.compactMap { $0 }.prefix(1).sink { _ in ready.fulfill() }
+            controller.prepareRemoteContinuation(
+                try CrossClientFixtures.activity(row), library: library)
+            await fulfillment(of: [ready], timeout: 5)
+            token.cancel()
+            XCTAssertEqual(
+                controller.notice,
+                "This player hasn’t shared a usable current queue. Playback hasn’t moved.")
+            XCTAssertNil(controller.pending)
+            XCTAssertEqual(player.persistedQueue, original)
+            XCTAssertNil(player.nativePlayer.currentItem)
+            let stops = await transport.stopCount
+            let requests = await transport.requests
+            XCTAssertEqual(stops, 0)
+            XCTAssertEqual(requests.count, 1)
+            XCTAssertEqual(requests.first?.httpMethod, "GET")
+            XCTAssertEqual(requests.first?.url?.path, "/jellyfin/Sessions")
+        }
+    }
+
     func testPreparationAndCancelDoNotReplaceQueueResolveAudioOrStopSource() async throws {
         let transport = CrossClientTransport()
         let (controller, player, library) = make(transport)

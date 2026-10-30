@@ -516,12 +516,17 @@ final class FoundationHandoffController: NSObject, ObservableObject, NSUserActiv
         guard remoteTransfer === transfer else { return }
         let hadApplied = transfer.generation != nil
         retireRemote()
-        notice =
-            hadApplied
-            ? "Playback could not continue from that player. The original player was not stopped."
-            : ((error as? FoundationHandoffError) == .tooLarge
-                ? FoundationHandoffError.tooLarge.errorDescription
-                : "The reported queue is unavailable or changed. No incomplete queue was applied.")
+        if hadApplied {
+            notice =
+                "Playback could not continue from that player. The original player was not stopped."
+        } else if let preparationError = error as? FoundationHandoffError,
+            preparationError == .tooLarge || preparationError == .queueUnavailable
+        {
+            notice = preparationError.errorDescription
+        } else {
+            notice =
+                "The reported queue is unavailable or changed. No incomplete queue was applied."
+        }
     }
 
     private func retireRemote() {

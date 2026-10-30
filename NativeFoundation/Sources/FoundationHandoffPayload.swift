@@ -2,7 +2,7 @@ import Foundation
 
 enum FoundationHandoffError: Error, LocalizedError, Equatable {
     case unsupported, invalid, expired, differentAccount, tooLarge, unavailable, changed
-    case interrupted, positionUnavailable
+    case interrupted, positionUnavailable, queueUnavailable
 
     var errorDescription: String? {
         switch self {
@@ -12,6 +12,8 @@ enum FoundationHandoffError: Error, LocalizedError, Equatable {
         case .differentAccount: "Sign in to the matching music account before continuing."
         case .tooLarge: "This queue is too large to transfer safely. No partial queue was applied."
         case .unavailable: "The other device or this music is unavailable."
+        case .queueUnavailable:
+            "This player hasn’t shared a usable current queue. Playback hasn’t moved."
         case .changed: "The activity changed. Your current playback was kept."
         case .interrupted: "The Handoff transfer was interrupted. Your current playback was kept."
         case .positionUnavailable: "The playback position could not be restored."

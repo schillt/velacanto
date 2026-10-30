@@ -768,7 +768,7 @@ struct FoundationRemoteContinuationOffer: Sendable {
                 FoundationRemotePreparationDiagnostic.missingSourceQueue.record(
                     queueCount: session.nowPlayingQueue?.count ?? -1)
             #endif
-            throw FoundationHandoffError.unavailable
+            throw FoundationHandoffError.queueUnavailable
         }
         guard source.count <= FoundationHandoffPayload.maximumEntries else {
             throw FoundationHandoffError.tooLarge
@@ -802,6 +802,9 @@ struct FoundationRemoteContinuationOffer: Sendable {
                     currentMatches: queue.first(where: { $0.sourceID == selected })?.itemID
                         == currentID)
             #endif
+            if Set(queue.map(\.sourceID)).count == queue.count {
+                throw FoundationHandoffError.queueUnavailable
+            }
             throw FoundationHandoffError.invalid
         }
         let repeatMode: FoundationHandoffPayload.RepeatMode
