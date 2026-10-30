@@ -1,5 +1,6 @@
 import Foundation
 import ImageIO
+import QuartzCore
 import SwiftUI
 import XCTest
 
@@ -1833,13 +1834,26 @@ final class FoundationDownloadsTests: XCTestCase {
             XCTAssertEqual(
                 state.completed[state.phase], true,
                 "Initial artwork phase \(state.phase) not completed; observed \(state.completed)")
+            let frameBoundary = HostedArtworkFrameBoundary()
+            defer { frameBoundary.invalidate() }
+            func awaitAppliedFrame(_ phase: UUID) async throws {
+                // The task's synchronous defer acknowledges application, not presentation.
+                // Do not feed another task identity into the same SwiftUI render frame.
+                #if os(macOS)
+                    frameBoundary.arm(phase, view: try XCTUnwrap(window.contentView))
+                #else
+                    frameBoundary.arm(phase)
+                #endif
+                try await waitUntil { frameBoundary.completed == phase }
+                XCTAssertEqual(frameBoundary.completed, phase, "Artwork phase must cross a display frame")
+            }
+            try await awaitAppliedFrame(state.phase)
             let initial = state.images.count
             for (index, active) in [false, true, false, true].enumerated() {
                 // Observe the actual artwork task epoch, not a SwiftUI body callback or image count.
                 // A late canceled task carries its old phase and cannot acknowledge this boundary.
                 let phase = UUID()
-                state.phase = phase
-                state.active = active
+                state.selection = .init(phase: phase, active: active)
                 try await waitUntil { state.completed[phase] == active }
                 XCTAssertEqual(
                     state.completed[phase], active,
@@ -1851,6 +1865,11 @@ final class FoundationDownloadsTests: XCTestCase {
                     state.images.dropFirst(initial).allSatisfy { $0 == expected },
                     "No nil or newly decoded retained cover may replace the equivalent cached image"
                 )
+                try await awaitAppliedFrame(phase)
+                XCTAssertEqual(state.image, expected, "The applied frame keeps the installed cover")
+                XCTAssertTrue(
+                    state.images.dropFirst(initial).allSatisfy { $0 == expected },
+                    "The display boundary must not publish a nil or newly decoded retained cover")
             }
         }
 
@@ -2955,11 +2974,56 @@ private actor DownloadProgressReporter {
 #if DEBUG
     @MainActor
     private final class HostedArtworkVisibilityState: ObservableObject {
-        @Published var active = true
-        @Published var phase = UUID()
+        struct Selection {
+            let phase: UUID
+            let active: Bool
+        }
+        @Published var selection = Selection(phase: UUID(), active: true)
+        var active: Bool { selection.active }
+        var phase: UUID { selection.phase }
         var image: Image?
         var images: [Image?] = []
         var completed: [UUID: Bool] = [:]
+    }
+
+    /// One-shot display-clock acknowledgement, armed only after an artwork task completes.
+    /// It does not drive the artwork or change the test's existing bounded wait deadline.
+    @MainActor
+    private final class HostedArtworkFrameBoundary: NSObject {
+        private var link: CADisplayLink?
+        private var armedAt: CFTimeInterval = 0
+        private var phase: UUID?
+        private(set) var completed: UUID?
+
+        #if os(macOS)
+            func arm(_ phase: UUID, view: NSView) {
+                invalidate()
+                self.phase = phase
+                armedAt = CACurrentMediaTime()
+                link = view.displayLink(target: self, selector: #selector(frame(_:)))
+                link?.add(to: .main, forMode: .common)
+            }
+        #else
+            func arm(_ phase: UUID) {
+                invalidate()
+                self.phase = phase
+                armedAt = CACurrentMediaTime()
+                link = CADisplayLink(target: self, selector: #selector(frame(_:)))
+                link?.add(to: .main, forMode: .common)
+            }
+        #endif
+
+        @objc private func frame(_ sender: CADisplayLink) {
+            // A callback already in flight when armed may describe the previous frame.
+            guard sender.timestamp > armedAt else { return }
+            completed = phase
+            invalidate()
+        }
+
+        func invalidate() {
+            link?.invalidate()
+            link = nil
+        }
     }
 
     @MainActor
