@@ -565,6 +565,8 @@ protocol FoundationLibrary: Sendable {
     func primaryGenreSongs(ids: [String]) async throws -> [FoundationItem]
     func primaryGenreCollections(ids: [String], kind: FoundationItem.Kind) async throws
         -> [FoundationItem]
+    func primaryGenreCanonicalNames(ids: [String], kind: FoundationItem.Kind) async throws
+        -> [FoundationItemReference]
     func albums(genreID: String, startIndex: Int) async throws -> FoundationPage
     func setFavorite(for item: FoundationItem, isFavorite: Bool) async throws
     func playbackURL(for item: FoundationItem) async throws -> URL
@@ -733,6 +735,11 @@ extension FoundationLibrary {
     }
     func primaryGenreCollections(ids: [String], kind: FoundationItem.Kind) async throws
         -> [FoundationItem]
+    {
+        throw FoundationLibraryError.unavailable
+    }
+    func primaryGenreCanonicalNames(ids: [String], kind: FoundationItem.Kind) async throws
+        -> [FoundationItemReference]
     {
         throw FoundationLibraryError.unavailable
     }
@@ -2027,11 +2034,43 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
     }
 
     /// One visible page resolves only IDs proven by the canonical song census.
-    /// Album-artist containers are shared across libraries; their membership proof is the
-    /// selected-library song relationship, not an unsupported artist-child ParentId query.
     func primaryGenreCollections(ids: [String], kind: FoundationItem.Kind) async throws
         -> [FoundationItem]
     {
+        let entries = try await primaryGenreCollectionEntries(
+            ids: ids, kind: kind, namesOnly: false)
+        let mapped = try mappedItems(entries, kinds: [kind])
+        guard Set(mapped.map(\.id)) == Set(ids), Set(mapped.map(\.id)).count == mapped.count else {
+            throw FoundationLibraryError.unavailable
+        }
+        let byID = Dictionary(uniqueKeysWithValues: mapped.map { ($0.id, $0) })
+        return ids.compactMap { byID[$0] }
+    }
+
+    /// Only conflicting relationships from the same census need authoritative container Names.
+    func primaryGenreCanonicalNames(ids: [String], kind: FoundationItem.Kind) async throws
+        -> [FoundationItemReference]
+    {
+        let entries = try await primaryGenreCollectionEntries(ids: ids, kind: kind, namesOnly: true)
+        let source = try FoundationCatalogSource.jellyfin(scope: catalogAccountIdentity)
+        let names = try entries.map { entry -> FoundationItemReference in
+            guard entry.type == Self.itemType(kind), let id = entry.id, Self.validID(id),
+                let name = entry.name, !name.isEmpty, name.utf8.count <= 512,
+                !name.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains)
+            else { throw FoundationLibraryError.invalidResponse }
+            return .init(id: id, title: name, catalogSource: source)
+        }
+        guard Set(names.map(\.id)) == Set(ids), Set(names.map(\.id)).count == names.count else {
+            throw FoundationLibraryError.invalidResponse
+        }
+        return names
+    }
+
+    /// Album ParentId and user ownership remain scoped. Artists are shared containers whose
+    /// selected-library relationship is already proven by the complete song census.
+    private func primaryGenreCollectionEntries(
+        ids: [String], kind: FoundationItem.Kind, namesOnly: Bool
+    ) async throws -> [BaseItemDto] {
         guard catalogAvailable else { throw FoundationLibraryError.unavailable }
         guard [.album, .artist].contains(kind), (1...50).contains(ids.count),
             ids.allSatisfy(Self.validID), Set(ids).count == ids.count
@@ -2044,10 +2083,10 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
         parameters.ids = ids
         parameters.startIndex = 0
         parameters.limit = ids.count
-        parameters.enableImages = true
+        parameters.enableImages = !namesOnly
         parameters.imageTypeLimit = 1
         parameters.enableImageTypes = [.primary]
-        parameters.enableUserData = true
+        parameters.enableUserData = !namesOnly
         parameters.enableTotalRecordCount = true
         let result: BaseItemDtoQueryResult = try await FoundationRequestIntent.$isPlayback
             .withValue(false) {
@@ -2058,12 +2097,7 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
         guard let entries = result.items, result.startIndex == 0,
             result.totalRecordCount == ids.count, entries.count == ids.count
         else { throw FoundationLibraryError.unavailable }
-        let mapped = try mappedItems(entries, kinds: [kind])
-        guard Set(mapped.map(\.id)) == Set(ids), Set(mapped.map(\.id)).count == mapped.count else {
-            throw FoundationLibraryError.unavailable
-        }
-        let byID = Dictionary(uniqueKeysWithValues: mapped.map { ($0.id, $0) })
-        return ids.compactMap { byID[$0] }
+        return entries
     }
 
     /// The app-owned complete metadata census; ordinary browsing never calls this operation.

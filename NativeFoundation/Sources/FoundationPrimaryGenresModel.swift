@@ -219,6 +219,31 @@ final class FoundationPrimaryGenresModel: ObservableObject {
                 let snapshot = try await index.finish(generation: generation)
                 try Task.checkCancellation()
                 guard self.operationID == owner, self.scope == scope else { return }
+                // Resolve only observed ambiguous container Names, once per unique identity.
+                // <= floor(songCount/2) per kind, in batches50: <=1000 total at50k songs.
+                // The separate original song-page budget remains unchanged.
+                var nameBatches = 0
+                let maximumNameBatches = 2 * ((snapshot.orderedSongIDs.count / 2 + 49) / 50)
+                for kind in [FoundationItem.Kind.album, .artist] {
+                    while true {
+                        try Task.checkCancellation()
+                        guard self.operationID == owner, self.scope == scope else { return }
+                        let ids = try await content.conflictBatch(kind: kind)
+                        try Task.checkCancellation()
+                        guard self.operationID == owner, self.scope == scope else { return }
+                        if ids.isEmpty { break }
+                        guard nameBatches < maximumNameBatches else {
+                            throw FoundationPrimaryGenreIndex.Failure.resourceLimit
+                        }
+                        nameBatches += 1
+                        let names = try await library.primaryGenreCanonicalNames(
+                            ids: ids, kind: kind)
+                        try Task.checkCancellation()
+                        guard self.operationID == owner, self.scope == scope else { return }
+                        try await content.resolveConflicts(
+                            ids: ids, kind: kind, names: names, source: scope.source)
+                    }
+                }
                 let canonicalDescriptors = descriptors.values.map { item in
                     var canonical = item
                     canonical.primaryGenreCensusID = snapshot.censusID

@@ -612,6 +612,8 @@ struct FoundationPrimaryGenreContentIndex: Equatable, Codable, Sendable {
         private var albums: [String: String] = [:]
         private var artists: [String: String] = [:]
         private var bytes = 0
+        private var conflictingAlbums: Set<String> = []
+        private var conflictingArtists: Set<String> = []
         private var complete = true
         #if DEBUG
             private(set) var issueCounts: [FoundationPrimaryGenreContentIssue: Int] = [:]
@@ -646,7 +648,16 @@ struct FoundationPrimaryGenreContentIndex: Equatable, Codable, Sendable {
                     guard let reference else { continue }
                     let old = isAlbum ? albums[reference.id] : artists[reference.id]
                     if let old, old != reference.title {
-                        note(isAlbum ? .conflictingAlbumName : .conflictingArtistName)
+                        let inserted =
+                            isAlbum
+                            ? conflictingAlbums.insert(reference.id).inserted
+                            : conflictingArtists.insert(reference.id).inserted
+                        if inserted { bytes += reference.id.utf8.count + 8 }
+                        #if DEBUG
+                            let issue: FoundationPrimaryGenreContentIssue =
+                                isAlbum ? .conflictingAlbumName : .conflictingArtistName
+                            issueCounts[issue] = min(500_000, (issueCounts[issue] ?? 0) + 1)
+                        #endif
                     }
                     if old == nil {
                         bytes += reference.id.utf8.count + reference.title.utf8.count
@@ -677,8 +688,55 @@ struct FoundationPrimaryGenreContentIndex: Equatable, Codable, Sendable {
             }
         }
 
+        /// Each conflict needs two distinct song references, so at most floor(songCount/2)
+        /// IDs per kind. No lookup phase is introduced for clean metadata or other invalid facts.
+        func conflictBatch(kind: FoundationItem.Kind) throws -> [String] {
+            guard complete, !exceededBudget else { return [] }
+            let pending = kind == .album ? conflictingAlbums : conflictingArtists
+            guard [.album, .artist].contains(kind), pending.count <= tracks.count / 2 else {
+                throw FoundationPrimaryGenreIndex.Failure.invalidPage
+            }
+            return Array(pending.prefix(50))
+        }
+
+        mutating func resolveConflicts(
+            ids: [String], kind: FoundationItem.Kind, names: [FoundationItemReference],
+            source: FoundationCatalogSource
+        ) throws {
+            guard [.album, .artist].contains(kind), (1...50).contains(ids.count),
+                ids.count == Set(ids).count, names.count == ids.count,
+                Set(names.map(\.id)) == Set(ids), Set(names.map(\.id)).count == names.count
+            else { throw FoundationLibraryError.invalidResponse }
+            guard Set(ids).isSubset(of: kind == .album ? conflictingAlbums : conflictingArtists),
+                names.allSatisfy({
+                    $0.catalogSource == source && FoundationPrimaryGenreContentIndex.validID($0.id)
+                        && FoundationPrimaryGenreContentIndex.validText($0.title)
+                })
+            else { throw FoundationLibraryError.invalidResponse }
+            let replacementBytes = names.reduce(0) { total, name in
+                let oldName = kind == .album ? albums[name.id] : artists[name.id]
+                return total + name.title.utf8.count - (oldName?.utf8.count ?? 0)
+                    - name.id.utf8.count - 8
+            }
+            guard
+                bytes + replacementBytes + 8 * 1_024 * 1_024
+                    <= FoundationPrimaryGenreContentWorker.maximumLogicalWorkspaceBytes
+            else { throw FoundationPrimaryGenreIndex.Failure.resourceLimit }
+            bytes += replacementBytes
+            for name in names {
+                if kind == .album {
+                    albums[name.id] = name.title
+                    conflictingAlbums.remove(name.id)
+                } else {
+                    artists[name.id] = name.title
+                    conflictingArtists.remove(name.id)
+                }
+            }
+        }
+
         mutating func finish(songIDs: Set<String>) -> FoundationPrimaryGenreContentIndex? {
-            guard complete, !exceededBudget else { return nil }
+            guard complete, !exceededBudget, conflictingAlbums.isEmpty, conflictingArtists.isEmpty
+            else { return nil }
             let result = FoundationPrimaryGenreContentIndex(
                 tracks: tracks, albums: albums, artists: artists)
             guard result.isValid(songIDs: songIDs) else {
@@ -1055,6 +1113,17 @@ actor FoundationPrimaryGenreContentWorker {
         guard !builder.exceededBudget else {
             throw FoundationPrimaryGenreIndex.Failure.resourceLimit
         }
+    }
+    func conflictBatch(kind: FoundationItem.Kind) throws -> [String] {
+        try Task.checkCancellation()
+        return try builder.conflictBatch(kind: kind)
+    }
+    func resolveConflicts(
+        ids: [String], kind: FoundationItem.Kind, names: [FoundationItemReference],
+        source: FoundationCatalogSource
+    ) throws {
+        try Task.checkCancellation()
+        try builder.resolveConflicts(ids: ids, kind: kind, names: names, source: source)
     }
     func finish(
         snapshot: FoundationPrimaryGenreIndex.Snapshot, descriptors: [FoundationItem],

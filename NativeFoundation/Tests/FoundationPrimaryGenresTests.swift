@@ -1382,6 +1382,228 @@ final class FoundationPrimaryGenresTests: XCTestCase {
         XCTAssertNil(model.preparationDiagnostic)
     }
 
+    private func canonicalConflictSongs() -> [[String: Any]] {
+        (0..<3).map { value in
+            [
+                "Id": Self.id(100 + value), "Name": ["C song", "A song", "B song"][value],
+                "Type": "Audio", "Genres": ["Genre"],
+                "GenreItems": [["Id": Self.id(1), "Name": "Genre"]],
+                "AlbumId": Self.id(value == 2 ? 11 : 10),
+                "Album": ["Z alias", "A alias", "M unchanged"][value],
+                "AlbumArtists": [
+                    [
+                        "Id": Self.id(value == 2 ? 21 : 20),
+                        "Name": ["Z alias", "A alias", "M unchanged"][value],
+                    ]
+                ],
+            ]
+        }
+    }
+
+    func testCanonicalConflictingNamesUseAuthoritativeNamesBeforeAllMediaPaging() async throws {
+        let requests = PrimaryGenreRequests()
+        let songs = canonicalConflictSongs()
+        let library = FoundationJellyfinLibrary(session: Self.session) { request in
+            await requests.append(request)
+            let query =
+                URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
+            let kind = query.first { $0.name == "includeItemTypes" }?.value
+            let rows: [[String: Any]]
+            if kind == "Audio" {
+                rows = songs
+            } else {
+                let id = kind == "MusicAlbum" ? Self.id(10) : Self.id(20)
+                rows = [["Id": id, "Name": "ZZ canonical", "Type": kind!]]
+            }
+            let data = try JSONSerialization.data(withJSONObject: [
+                "Items": rows, "StartIndex": 0, "TotalRecordCount": rows.count,
+            ])
+            return (
+                data,
+                HTTPURLResponse(
+                    url: request.url!, statusCode: 200, httpVersion: nil,
+                    headerFields: nil)!
+            )
+        }
+        let model = FoundationPrimaryGenresModel(
+            library: library.scoped(to: Self.id(88)), appVersion: "canonical")
+        model.start()
+        await model.buildCompletion?.value
+        let record = try XCTUnwrap(model.record)
+        let index = try XCTUnwrap(record.contentIndex)
+        let membership = record.songIDs(for: Self.id(1))
+        XCTAssertEqual(Set(membership), Set((100..<103).map(Self.id)))
+        XCTAssertEqual(
+            index.orderedIDs(membership: membership, kind: .track),
+            [Self.id(101), Self.id(102), Self.id(100)])
+        for kind in [FoundationItem.Kind.album, .artist] {
+            let ordered = index.orderedIDs(membership: membership, kind: kind)
+            let expected =
+                kind == .album ? [Self.id(11), Self.id(10)] : [Self.id(21), Self.id(20)]
+            XCTAssertEqual(Array(ordered.prefix(1)), Array(expected.prefix(1)))
+            XCTAssertEqual(Array(ordered.dropFirst(1)), Array(expected.dropFirst(1)))
+        }
+        let observed = await requests.requests
+        XCTAssertEqual(
+            observed.count, 3, "One original page and exactly one unique-ID batch per kind")
+        for request in observed.dropFirst() {
+            let query =
+                URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
+            XCTAssertEqual(query.first { $0.name == "enableImages" }?.value, "false")
+            XCTAssertEqual(query.first { $0.name == "enableUserData" }?.value, "false")
+            XCTAssertEqual(query.first { $0.name == "limit" }?.value, "1")
+            let isAlbum = query.first { $0.name == "includeItemTypes" }?.value == "MusicAlbum"
+            XCTAssertEqual(
+                query.first { $0.name == "parentId" }?.value,
+                isAlbum ? Self.id(88) : nil)
+        }
+    }
+
+    func testCanonicalNamesDoNotRequestAnythingWhenReferencesAgree() async throws {
+        let requests = PrimaryGenreRequests()
+        let songs = canonicalConflictSongs().prefix(1).map { $0 }
+        let data = try JSONSerialization.data(withJSONObject: [
+            "Items": songs, "StartIndex": 0, "TotalRecordCount": 1,
+        ])
+        let library = FoundationJellyfinLibrary(session: Self.session) { request in
+            await requests.append(request)
+            return (
+                data,
+                HTTPURLResponse(
+                    url: request.url!, statusCode: 200, httpVersion: nil,
+                    headerFields: nil)!
+            )
+        }
+        let model = FoundationPrimaryGenresModel(library: library)
+        model.start()
+        await model.buildCompletion?.value
+        XCTAssertNotNil(model.record)
+        let count = await requests.requests.count
+        XCTAssertEqual(count, 1)
+    }
+
+    func testCanonicalConflictBatchesDeduplicateAndValidateSourceMembershipAndNames() throws {
+        let scope = try XCTUnwrap(
+            FoundationJellyfinLibrary(session: Self.session).primaryGenreIndexScope)
+        var builder = FoundationPrimaryGenreContentIndex.Builder()
+        let songs: [FoundationPrimaryGenreMetadataPage.Song] = (0..<102).map { value in
+            .init(
+                id: Self.id(value + 1000), genres: [],
+                content: .init(
+                    title: "Song",
+                    album: .init(
+                        id: Self.id(value / 2 + 1),
+                        title: value % 2 == 0 ? "First" : "Other")))
+        }
+        builder.append(songs, source: scope.source)
+        let first = try builder.conflictBatch(kind: .album)
+        XCTAssertEqual(first.count, 50)
+        let names = first.map {
+            FoundationItemReference(id: $0, title: "Canonical", catalogSource: scope.source)
+        }
+        XCTAssertThrowsError(
+            try builder.resolveConflicts(
+                ids: first, kind: .album,
+                names: names.map { .init(id: $0.id, title: $0.title) }, source: scope.source))
+        XCTAssertThrowsError(
+            try builder.resolveConflicts(
+                ids: first, kind: .album,
+                names: names.map { .init(id: $0.id, title: "", catalogSource: scope.source) },
+                source: scope.source))
+        XCTAssertThrowsError(
+            try builder.resolveConflicts(
+                ids: first, kind: .artist,
+                names: names, source: scope.source))
+        try builder.resolveConflicts(ids: first, kind: .album, names: names, source: scope.source)
+        let last = try builder.conflictBatch(kind: .album)
+        XCTAssertEqual(last.count, 1)
+        XCTAssertTrue(Set(first).isDisjoint(with: last))
+        try builder.resolveConflicts(
+            ids: last, kind: .album,
+            names: last.map { .init(id: $0, title: "Canonical", catalogSource: scope.source) },
+            source: scope.source)
+        XCTAssertTrue(try builder.conflictBatch(kind: .album).isEmpty)
+        XCTAssertNotNil(builder.finish(songIDs: Set(songs.map(\.id))))
+    }
+
+    func testCanonicalNameProviderRejectsMissingRawNamesWrongTypeIDsAndResponseShape() async throws
+    {
+        let requested = Self.id(10)
+        let cases: [[String: Any]] = [
+            [
+                "Items": [["Id": requested, "Type": "MusicAlbum"]], "StartIndex": 0,
+                "TotalRecordCount": 1,
+            ],
+            [
+                "Items": [["Id": requested, "Name": "", "Type": "MusicAlbum"]], "StartIndex": 0,
+                "TotalRecordCount": 1,
+            ],
+            [
+                "Items": [["Id": requested, "Name": "Name", "Type": "MusicArtist"]],
+                "StartIndex": 0, "TotalRecordCount": 1,
+            ],
+            [
+                "Items": [["Id": Self.id(11), "Name": "Name", "Type": "MusicAlbum"]],
+                "StartIndex": 0, "TotalRecordCount": 1,
+            ],
+            [
+                "Items": [["Id": requested, "Name": "Name", "Type": "MusicAlbum"]], "StartIndex": 1,
+                "TotalRecordCount": 1,
+            ],
+        ]
+        for payload in cases {
+            let data = try JSONSerialization.data(withJSONObject: payload)
+            let library = FoundationJellyfinLibrary(session: Self.session) { request in
+                (
+                    data,
+                    HTTPURLResponse(
+                        url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+                )
+            }
+            do {
+                _ = try await library.primaryGenreCanonicalNames(ids: [requested], kind: .album)
+                XCTFail("Canonical ordering cannot use a guessed or mismatched Name")
+            } catch {}
+        }
+    }
+
+    func testCanonicalNameLookupCancellationCannotPublishOrContinueToArtistLookup() async throws {
+        let gate = PrimaryGenreGate()
+        let requests = PrimaryGenreRequests()
+        let songs = canonicalConflictSongs()
+        let library = FoundationJellyfinLibrary(session: Self.session) { request in
+            await requests.append(request)
+            let query =
+                URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
+            let kind = query.first { $0.name == "includeItemTypes" }?.value
+            let rows: [[String: Any]]
+            if kind == "Audio" {
+                rows = songs
+            } else {
+                await gate.wait()
+                rows = [["Id": Self.id(10), "Name": "Canonical", "Type": "MusicAlbum"]]
+            }
+            let data = try JSONSerialization.data(withJSONObject: [
+                "Items": rows, "StartIndex": 0, "TotalRecordCount": rows.count,
+            ])
+            return (
+                data,
+                HTTPURLResponse(
+                    url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            )
+        }
+        let model = FoundationPrimaryGenresModel(library: library)
+        model.start()
+        let completion = model.buildCompletion
+        await gate.started()
+        model.bind(library.scoped(to: Self.id(99)))
+        await gate.release()
+        await completion?.value
+        XCTAssertNil(model.record)
+        let count = await requests.requests.count
+        XCTAssertEqual(count, 2, "Retired account/library generation cannot issue the artist batch")
+    }
+
     func testPackedGenreIdentitiesPreserveExactUUIDSpellingAndRejectCorruptFrames() throws {
         let ids = [
             "abcdefab12345678901234567890abcd", "ABCDEFAB12345678901234567890ABCD",
