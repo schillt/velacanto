@@ -12,6 +12,107 @@ final class FoundationCatalogPageCacheTests: XCTestCase {
         FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     }
 
+    func testHistoryShelfDispatchFinishesWithoutTimerAndRefreshesOnlyOnDemand() async {
+        let directory = root()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cache = FoundationCatalogPageCache(scope: "history-events", root: directory)
+        var date = Date()
+        let model = FoundationBrowseModel(now: { date })
+        model.configureCache(cache, key: "home-history")
+        var reads = 0
+        let loader: (Int) async throws -> FoundationPage = { offset in
+            XCTAssertEqual(offset, 0)
+            reads += 1
+            return .init(items: [self.album], nextStartIndex: nil)
+        }
+        // Await the actual shelf dispatch. A recurring visible refresh would not return.
+        await FoundationHomeShelfRefresh.history.load(
+            model: model, allowsNetwork: true, using: loader)
+        XCTAssertFalse(model.isLoading)
+        XCTAssertEqual(reads, 1)
+        date = date.addingTimeInterval(3_600)
+        XCTAssertEqual(reads, 1, "Advancing the clock cannot create another history read")
+        XCTAssertEqual(model.items, [album])
+        model.request(.refresh)  // Existing Home pull-to-refresh demand.
+        await FoundationHomeShelfRefresh.history.load(
+            model: model, allowsNetwork: true, using: loader)
+        XCTAssertEqual(reads, 2, "One explicit refresh performs one bounded page read")
+        await FoundationHomeShelfRefresh.history.load(
+            model: model, allowsNetwork: true, using: loader)
+        XCTAssertEqual(reads, 2, "Fresh visible reentry does not add duplicate work")
+        date = date.addingTimeInterval(61)
+        await FoundationHomeShelfRefresh.history.load(
+            model: model, allowsNetwork: true, using: loader)
+        XCTAssertEqual(
+            reads, 3, "A later foreground/visible reactivation may refresh a stale page once")
+    }
+
+    func testHistoryShelfDispatchPreservesOfflineCacheAndPendingConnectivityRetry() async {
+        let directory = root()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cache = FoundationCatalogPageCache(scope: "history-offline", root: directory)
+        await cache.write(.init(items: [album], nextStartIndex: nil), key: "home-history")
+        let model = FoundationBrowseModel()
+        model.configureCache(cache, key: "home-history")
+        model.request(.refresh)
+        var reads = 0
+        let loader: (Int) async throws -> FoundationPage = { _ in
+            reads += 1
+            return .init(items: [self.album], nextStartIndex: nil)
+        }
+        await FoundationHomeShelfRefresh.history.load(
+            model: model, allowsNetwork: false, using: loader)
+        XCTAssertEqual(reads, 0)
+        XCTAssertEqual(model.items, [album])
+        await FoundationHomeShelfRefresh.history.load(
+            model: model, allowsNetwork: true, using: loader)
+        await FoundationHomeShelfRefresh.history.load(
+            model: model, allowsNetwork: true, using: loader)
+        XCTAssertEqual(
+            reads, 1, "Existing connectivity activation consumes the pending refresh only once")
+        XCTAssertEqual(model.items, [album])
+    }
+
+    func testHistoryShelfDispatchDropsCancelledOldAccountResponseBeforeReactivation() async {
+        let directory = root()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let oldCache = FoundationCatalogPageCache(scope: "history-account-a", root: directory)
+        let newCache = FoundationCatalogPageCache(scope: "history-account-b", root: directory)
+        let model = FoundationBrowseModel()
+        model.configureCache(oldCache, key: "home-history")
+        let started = expectation(description: "history read held")
+        var release: CheckedContinuation<FoundationPage, Never>?
+        let old = Task {
+            await FoundationHomeShelfRefresh.history.load(model: model, allowsNetwork: true) { _ in
+                await withCheckedContinuation { continuation in
+                    release = continuation
+                    started.fulfill()
+                }
+            }
+        }
+        await fulfillment(of: [started], timeout: 2)
+        old.cancel()
+        model.configureCache(newCache, key: "home-history")
+        release?.resume(returning: .init(items: [album], nextStartIndex: nil))
+        await old.value
+        XCTAssertTrue(model.items.isEmpty)
+        let oldRecord = await oldCache.read("home-history")
+        let newRecord = await newCache.read("home-history")
+        XCTAssertNil(oldRecord)
+        XCTAssertNil(newRecord)
+        let replacement = FoundationItem(
+            id: "new-account", title: "Other", subtitle: "", kind: .track, duration: 1)
+        var reads = 0
+        await FoundationHomeShelfRefresh.history.load(model: model, allowsNetwork: true) { _ in
+            reads += 1
+            return .init(items: [replacement], nextStartIndex: nil)
+        }
+        XCTAssertEqual(reads, 1)
+        XCTAssertEqual(model.items, [replacement])
+        let persisted = await newCache.read("home-history")
+        XCTAssertEqual(persisted?.page.items, [replacement])
+    }
+
     func testLastContentRefreshUsesSuccessfulAccountScopedRecords() async {
         let directory = root()
         defer { try? FileManager.default.removeItem(at: directory) }

@@ -259,6 +259,7 @@ struct FoundationHomeView<Profile: View>: View {
                 FoundationHomeShelf(
                     title: "Recently Played", model: recentTracks, library: library, player: player,
                     isActive: isActive, refreshRevision: refreshRevision, showsTracks: true,
+                    refreshPolicy: .history,
                     openedItem: $openedItem
                 ) { try await library.recentlyPlayed(startIndex: $0) }
             }
@@ -808,6 +809,26 @@ private struct FoundationHomeGenreShelf: View {
     }
 }
 
+/// The history shelf runs only for existing lifecycle/user demand, never a visible timer.
+/// Other shelves keep their existing cache refresh behavior and ownership.
+enum FoundationHomeShelfRefresh {
+    case history, catalog
+
+    @MainActor
+    func load(
+        model: FoundationBrowseModel, allowsNetwork: Bool,
+        using loader: (Int) async throws -> FoundationPage
+    ) async {
+        switch self {
+        case .history:
+            await model.loadPending(
+                allowsNetwork: allowsNetwork, waitForInitialLoad: true, using: loader)
+        case .catalog:
+            await model.refreshVisible(allowsNetwork: allowsNetwork, using: loader)
+        }
+    }
+}
+
 private struct FoundationHomeShelf: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var refreshOnActivation = true
@@ -820,6 +841,7 @@ private struct FoundationHomeShelf: View {
     let isActive: Bool
     var refreshRevision = 0
     var showsTracks = false
+    var refreshPolicy: FoundationHomeShelfRefresh = .catalog
     var isFavorites = false
     @Binding var openedItem: FoundationItem?
     let loader: (Int) async throws -> FoundationPage
@@ -1006,14 +1028,15 @@ private struct FoundationHomeShelf: View {
                     guard isActive, isVisible, !Task.isCancelled else {
                         return
                     }
-                    await model.refreshVisible(
-                        allowsNetwork: !connectivity.localOnly, using: loader)
+                    await refreshPolicy.load(
+                        model: model, allowsNetwork: !connectivity.localOnly, using: loader)
                 }
             #else
                 guard isActive, isVisible, !Task.isCancelled else {
                     return
                 }
-                await model.refreshVisible(allowsNetwork: !connectivity.localOnly, using: loader)
+                await refreshPolicy.load(
+                    model: model, allowsNetwork: !connectivity.localOnly, using: loader)
             #endif
         }
     }
