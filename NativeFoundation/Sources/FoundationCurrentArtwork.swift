@@ -208,8 +208,9 @@ final class FoundationCurrentArtwork: ObservableObject {
         // with alpha; do not flatten it onto a theme-dependent matte or lose its color space.
         let type = opaque ? UTType.jpeg : UTType.png
         let data = NSMutableData()
-        guard let destination = CGImageDestinationCreateWithData(
-            data, type.identifier as CFString, 1, nil)
+        guard
+            let destination = CGImageDestinationCreateWithData(
+                data, type.identifier as CFString, 1, nil)
         else { return nil }
         CGImageDestinationAddImage(
             destination, thumbnail.image,

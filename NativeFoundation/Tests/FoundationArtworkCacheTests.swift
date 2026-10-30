@@ -603,7 +603,8 @@ final class FoundationArtworkCacheTests: XCTestCase {
         let root = root()
         defer { try? FileManager.default.removeItem(at: root) }
         let clock = ArtworkCacheClock()
-        let cache = FoundationArtworkCache(scope: "encoded-working-set", root: root, now: { clock.read() })
+        let cache = FoundationArtworkCache(
+            scope: "encoded-working-set", root: root, now: { clock.read() })
         let other = FoundationArtworkCache(scope: "another-account", root: root)
         addTeardownBlock {
             _ = await cache.invalidate(removeDisk: true)
@@ -623,7 +624,8 @@ final class FoundationArtworkCacheTests: XCTestCase {
             let loaded = try await cache.result(
                 for: album, pixels: 640, allowsNetwork: true, load: { _, _ in data })
             let full = try XCTUnwrap(loaded)
-            XCTAssertEqual(full.data, data, "Requested/full representation retains original encoded bytes")
+            XCTAssertEqual(
+                full.data, data, "Requested/full representation retains original encoded bytes")
             XCTAssertEqual(full.image.width, 640)
             let usage = await cache.usage()
             XCTAssertLessThanOrEqual(usage.memory, 16 * 1_024 * 1_024)
@@ -631,23 +633,29 @@ final class FoundationArtworkCacheTests: XCTestCase {
         XCTAssertEqual(Set(originalBytes).count, 96, "The fixture includes distinct encoded covers")
         // No actor call, disk read, asynchronous revalidation, or GET is permitted to satisfy
         // these first-body lookups: this is the same synchronous API used by recreated cards.
-        let missing = albums.indices.filter { cache.immediateResult(for: albums[$0], pixels: 640) == nil }
+        let missing = albums.indices.filter {
+            cache.immediateResult(for: albums[$0], pixels: 640) == nil
+        }
         XCTAssertEqual(missing, [], "Loaded covers must have an immediate full or compact fallback")
         if let oldest = cache.immediateResult(for: albums[0], pixels: 640) {
-            XCTAssertEqual(oldest.image.width, 160, "Older full upgrades give way to compact fallbacks")
+            XCTAssertEqual(
+                oldest.image.width, 160, "Older full upgrades give way to compact fallbacks")
             XCTAssertLessThan(oldest.data.count, 128 * 1_024)
         }
         for album in albums { XCTAssertNil(other.immediateResult(for: album, pixels: 640)) }
-        XCTAssertNil(cache.immediateResult(for: item("encoded-cover-0", tag: "changed"), pixels: 640))
+        XCTAssertNil(
+            cache.immediateResult(for: item("encoded-cover-0", tag: "changed"), pixels: 640))
         await cache.flushPersistence()
-        let records = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil)?
+        let records =
+            FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil)?
             .allObjects.compactMap { $0 as? URL }.filter { $0.pathExtension == "art" } ?? []
         XCTAssertEqual(records.count, 96)
         XCTAssertTrue(records.allSatisfy { $0.lastPathComponent.hasSuffix("-640.art") })
         // A fresh memory-empty owner verifies representative persisted originals independently
         // of compact data. Generated previews never become new disk records.
         _ = await cache.invalidate(removeDisk: false)
-        let restored = FoundationArtworkCache(scope: "encoded-working-set", root: root, now: { clock.read() })
+        let restored = FoundationArtworkCache(
+            scope: "encoded-working-set", root: root, now: { clock.read() })
         for index in [0, 47, 95] {
             let full = try await restored.result(
                 for: albums[index], pixels: 640, allowsNetwork: false,
@@ -685,23 +693,26 @@ final class FoundationArtworkCacheTests: XCTestCase {
     }
 
     func testCompactRepresentationPreservesTransparentArtworkWithoutMatting() throws {
-        let context = try XCTUnwrap(CGContext(
-            data: nil, width: 640, height: 320, bitsPerComponent: 8, bytesPerRow: 640 * 4,
-            space: CGColorSpace(name: CGColorSpace.sRGB)!,
-            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        let context = try XCTUnwrap(
+            CGContext(
+                data: nil, width: 640, height: 320, bitsPerComponent: 8, bytesPerRow: 640 * 4,
+                space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
         context.clear(CGRect(x: 0, y: 0, width: 640, height: 320))
         context.setFillColor(CGColor(red: 0.8, green: 0.2, blue: 0.1, alpha: 0.5))
         context.fill(CGRect(x: 160, y: 80, width: 320, height: 160))
         let data = NSMutableData()
-        let destination = try XCTUnwrap(CGImageDestinationCreateWithData(
-            data, UTType.png.identifier as CFString, 1, nil))
+        let destination = try XCTUnwrap(
+            CGImageDestinationCreateWithData(
+                data, UTType.png.identifier as CFString, 1, nil))
         CGImageDestinationAddImage(destination, try XCTUnwrap(context.makeImage()), nil)
         XCTAssertTrue(CGImageDestinationFinalize(destination))
         let full = try XCTUnwrap(FoundationCurrentArtwork.decode(data as Data))
         let compact = try XCTUnwrap(FoundationCurrentArtwork.compactRepresentation(of: full))
         let source = try XCTUnwrap(CGImageSourceCreateWithData(compact.data as CFData, nil))
         XCTAssertEqual(CGImageSourceGetType(source) as String?, UTType.png.identifier)
-        let properties = try XCTUnwrap(CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any])
+        let properties = try XCTUnwrap(
+            CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any])
         XCTAssertEqual(properties[kCGImagePropertyHasAlpha] as? Bool, true)
         let decoded = try XCTUnwrap(FoundationCurrentArtwork.decode(compact.data))
         XCTAssertEqual(decoded.image.width, 160)
@@ -709,10 +720,11 @@ final class FoundationArtworkCacheTests: XCTestCase {
         // Sample after the encoded round-trip, in a known sRGB/premultiplied layout.
         var rgba = [UInt8](repeating: 0, count: 160 * 80 * 4)
         try rgba.withUnsafeMutableBytes { bytes in
-            let sample = try XCTUnwrap(CGContext(
-                data: bytes.baseAddress, width: 160, height: 80, bitsPerComponent: 8,
-                bytesPerRow: 160 * 4, space: CGColorSpace(name: CGColorSpace.sRGB)!,
-                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+            let sample = try XCTUnwrap(
+                CGContext(
+                    data: bytes.baseAddress, width: 160, height: 80, bitsPerComponent: 8,
+                    bytesPerRow: 160 * 4, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
             sample.draw(decoded.image, in: CGRect(x: 0, y: 0, width: 160, height: 80))
         }
         XCTAssertEqual(rgba[3], 0, "Transparent corner must not acquire a matte")
@@ -726,7 +738,7 @@ final class FoundationArtworkCacheTests: XCTestCase {
 
     private func noisyCoverBackground() throws -> CGImage {
         // Fixed xorshift stream: reproducible, high-frequency RGB detail without fixture files.
-        var seed: UInt32 = 0x6a09e667
+        var seed: UInt32 = 0x6a09_e667
         var rgba = [UInt8](repeating: 255, count: 640 * 640 * 4)
         for pixel in 0..<(640 * 640) {
             for channel in 0..<3 {
@@ -737,25 +749,29 @@ final class FoundationArtworkCacheTests: XCTestCase {
             }
         }
         let provider = try XCTUnwrap(CGDataProvider(data: Data(rgba) as CFData))
-        return try XCTUnwrap(CGImage(
-            width: 640, height: 640, bitsPerComponent: 8, bitsPerPixel: 32,
-            bytesPerRow: 640 * 4, space: CGColorSpace(name: CGColorSpace.sRGB)!,
-            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue),
-            provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent))
+        return try XCTUnwrap(
+            CGImage(
+                width: 640, height: 640, bitsPerComponent: 8, bitsPerPixel: 32,
+                bytesPerRow: 640 * 4, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue),
+                provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent))
     }
 
     private func noisyCover(background: CGImage, index: Int) throws -> Data {
-        let context = try XCTUnwrap(CGContext(
-            data: nil, width: 640, height: 640, bitsPerComponent: 8, bytesPerRow: 640 * 4,
-            space: CGColorSpace(name: CGColorSpace.sRGB)!,
-            bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue))
+        let context = try XCTUnwrap(
+            CGContext(
+                data: nil, width: 640, height: 640, bitsPerComponent: 8, bytesPerRow: 640 * 4,
+                space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue))
         context.draw(background, in: CGRect(x: 0, y: 0, width: 640, height: 640))
         context.setFillColor(CGColor(red: CGFloat(index) / 96, green: 0.3, blue: 0.8, alpha: 1))
         context.fill(CGRect(x: 0, y: 0, width: 640, height: 4))
         let data = NSMutableData()
-        let destination = try XCTUnwrap(CGImageDestinationCreateWithData(
-            data, UTType.jpeg.identifier as CFString, 1, nil))
-        CGImageDestinationAddImage(destination, try XCTUnwrap(context.makeImage()),
+        let destination = try XCTUnwrap(
+            CGImageDestinationCreateWithData(
+                data, UTType.jpeg.identifier as CFString, 1, nil))
+        CGImageDestinationAddImage(
+            destination, try XCTUnwrap(context.makeImage()),
             [kCGImageDestinationLossyCompressionQuality: 0.88] as CFDictionary)
         XCTAssertTrue(CGImageDestinationFinalize(destination))
         return data as Data
