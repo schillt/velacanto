@@ -9,7 +9,9 @@ final class FoundationHomeGenreFeedsTests: XCTestCase {
         census: UUID = UUID(), ids: [String] = ["one", "two"]
     ) throws -> FoundationHomeGenreFeeds.Selection {
         .init(
-            scope: .init(source: try .jellyfin(scope: account), libraryID: library),
+            scope: .init(
+                source: try .jellyfin(scope: FoundationArtworkCache.digest(account)),
+                libraryID: library),
             censusID: census, genreIDs: ids)
     }
 
