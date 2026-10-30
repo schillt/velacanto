@@ -43,6 +43,7 @@ struct FoundationHomeView<Profile: View>: View {
     @ObservedObject var recentTracks: FoundationBrowseModel
     @ObservedObject var favorites: FoundationBrowseModel
     @ObservedObject var recentAlbums: FoundationBrowseModel
+    @ObservedObject var genreFeeds: FoundationHomeGenreFeeds
     let isActive: Bool
     var hasQueue = false
     var accountLibrary: (any FoundationLibrary)? = nil
@@ -94,6 +95,7 @@ struct FoundationHomeView<Profile: View>: View {
                 favorites.request(.refresh)
                 recentAlbums.request(.refresh)
                 refreshRevision += 1
+                genreFeeds.requestRefresh()
             }
             .onChange(of: connectivity.successfulRetryRevision) { _, _ in
                 guard isActive else { return }
@@ -101,6 +103,10 @@ struct FoundationHomeView<Profile: View>: View {
                 favorites.request(.refresh)
                 recentAlbums.request(.refresh)
                 refreshRevision += 1
+                genreFeeds.requestRefresh()
+            }
+            .onChange(of: library.primaryGenreIndexScope, initial: true) { _, scope in
+                genreFeeds.bind(scope)
             }
             .foundationHeader("Home", profile: profile)
             .navigationDestination(isPresented: $showingGenreIndex) {
@@ -167,6 +173,7 @@ struct FoundationHomeView<Profile: View>: View {
             favorites.request(.refresh)
             recentAlbums.request(.refresh)
             refreshRevision += 1
+            genreFeeds.requestRefresh()
         }
         .swipeActionsContainer()
         .accessibilityIdentifier("foundation-home-scroll")
@@ -280,19 +287,30 @@ struct FoundationHomeView<Profile: View>: View {
                 connectivity.localOnly
                 ? Set(primaryGenres.items(localOnly: true).map(\.id)) : nil
             let genres = record.prominentGenres(eligibleIDs: eligible)
+            let selection = FoundationHomeGenreFeeds.Selection(
+                scope: record.snapshot.scope, censusID: record.snapshot.censusID,
+                genreIDs: genres.map(\.id))
             // A new census retires the group; each sibling keeps its canonical genre identity.
             LazyVStack(alignment: .leading, spacing: 28) {
                 ForEach(genres, id: \.genreIdentity) { genre in
-                    FoundationHomeGenreShelf(
-                        genre: genre, record: record, library: library, player: player,
-                        isActive: isActive, refreshRevision: refreshRevision,
-                        openedItem: $openedItem
-                    )
+                    if let feed = genreFeeds.feed(for: genre.id, selection: selection) {
+                        FoundationHomeGenreShelf(
+                            genre: genre, record: record, library: library, player: player,
+                            isActive: isActive, refreshRevision: genreFeeds.refreshRevision,
+                            openedItem: $openedItem, feed: feed, songs: feed.model)
+                    } else {
+                        FoundationLoadingPlaceholder(layout: .albumShelf)
+                    }
                 }
                 if connectivity.localOnly, let error = primaryGenres.offlineErrorMessage {
                     Text(error).foregroundStyle(.secondary)
                 }
-            }.id(record.snapshot.censusID)
+            }
+            .id(record.snapshot.censusID)
+            .task(id: selection) {
+                guard !Task.isCancelled else { return }
+                genreFeeds.reconcile(selection)
+            }
         } else if !connectivity.localOnly {
             VStack(alignment: .leading, spacing: 12) {
                 Text("Primary Genres").font(.title2.bold())
@@ -676,12 +694,12 @@ private struct FoundationHomeGenreShelf: View {
     let library: any FoundationLibrary
     let player: FoundationPlayer
     let isActive: Bool
-    let refreshRevision: Int
+    let refreshRevision: UInt64
     @Binding var openedItem: FoundationItem?
-    @StateObject private var songs = FoundationBrowseModel()
+    let feed: FoundationHomeGenreFeeds.Feed
+    @ObservedObject var songs: FoundationBrowseModel
     @State private var isVisible = false
     @State private var retryRevision = 0
-    @State private var consumedRefreshRevision = 0
 
     private var previewLimit: Int {
         #if os(macOS)
@@ -760,10 +778,7 @@ private struct FoundationHomeGenreShelf: View {
                 ? "\(refreshRevision):\(retryRevision):\(connectivity.localOnly)" : nil
         ) {
             guard isActive, isVisible, !Task.isCancelled, !connectivity.localOnly else { return }
-            if refreshRevision != consumedRefreshRevision {
-                songs.request(.refresh)
-                consumedRefreshRevision = refreshRevision
-            }
+            feed.consumeRefresh(refreshRevision)
             #if DEBUG
                 await FoundationTrace.withPage(origin: .home, page: .shelf) {
                     await songs.refreshVisible(allowsNetwork: true, using: loadSongs)

@@ -115,6 +115,7 @@ struct FoundationLibraryView: View {
     @StateObject private var recentAlbums: FoundationBrowseModel
     @StateObject private var mostPlayedAlbums = FoundationBrowseModel()
     @StateObject private var homeHistory: FoundationBrowseModel
+    @StateObject private var homeGenreFeeds = FoundationHomeGenreFeeds()
     @StateObject private var homeFavorites: FoundationBrowseModel
     @State private var searchQuery = ""
     @State private var searchActivation = 0
@@ -625,7 +626,7 @@ struct FoundationLibraryView: View {
             FoundationHomeView(
                 profile: profileButton(isActive: catalogIsActive(.home)), library: library,
                 player: player, recentTracks: homeHistory,
-                favorites: homeFavorites, recentAlbums: recentAlbums,
+                favorites: homeFavorites, recentAlbums: recentAlbums, genreFeeds: homeGenreFeeds,
                 isActive: catalogIsActive(.home), hasQueue: !displayedQueue.isEmpty,
                 accountLibrary: accountLibrary
             )
