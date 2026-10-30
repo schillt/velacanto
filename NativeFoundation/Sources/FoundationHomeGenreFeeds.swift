@@ -32,11 +32,10 @@ final class FoundationHomeGenreFeeds: ObservableObject {
         }
     }
 
-    let objectWillChange = ObservableObjectPublisher()
     private var boundScope: FoundationPrimaryGenreIndex.Scope?
     private var selection: Selection?
     private var feeds: [String: Feed] = [:]
-    private(set) var refreshRevision: UInt64 = 0
+    @Published private(set) var refreshRevision: UInt64 = 0
     var count: Int { feeds.count }
 
     isolated deinit {
@@ -74,7 +73,6 @@ final class FoundationHomeGenreFeeds: ObservableObject {
 
     /// Changes intent only. Existing visible row tasks still own all loading and cancellation.
     func requestRefresh() {
-        objectWillChange.send()
         refreshRevision &+= 1
     }
 
