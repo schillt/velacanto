@@ -520,7 +520,7 @@ actor FoundationArtworkCache {
             result.data.count + result.image.bytesPerRow * result.image.height <= maximumMemoryBytes
         else { return nil }
         if max(result.image.width, result.image.height) <= 160 { return result }
-        return FoundationCurrentArtwork.decode(result.data, maximumPixels: 160)
+        return FoundationCurrentArtwork.compactRepresentation(of: result)
     }
 
     private func remember(

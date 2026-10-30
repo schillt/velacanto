@@ -3,6 +3,7 @@ import Foundation
 import ImageIO
 import NowPlaying
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// One account-owned result serves the current player and system artwork requests.
 @MainActor
@@ -191,6 +192,34 @@ final class FoundationCurrentArtwork: ObservableObject {
         return Result(
             id: id, data: data, image: image,
             tint: FoundationCatalogArtwork.sampledColor(for: image) ?? Color(white: 0.12))
+    }
+
+    /// Memory-only fallback representation, made on the cache's existing decode workers.
+    /// Decoding a thumbnail alone retains the original encoded payload in Result.data; encode
+    /// the thumbnail itself so a small cover does not keep a full-cover payload in the budget.
+    /// Full/requested results and their persisted bytes never pass through this conversion.
+    nonisolated static func compactRepresentation(of result: Result) -> Result? {
+        guard !Task.isCancelled,
+            let thumbnail = decode(result.data, id: result.id, maximumPixels: 160)
+        else { return nil }
+        let alpha = thumbnail.image.alphaInfo
+        let opaque = alpha == .none || alpha == .noneSkipFirst || alpha == .noneSkipLast
+        // JPEG keeps photographic previews compact. PNG preserves transparency for artwork
+        // with alpha; do not flatten it onto a theme-dependent matte or lose its color space.
+        let type = opaque ? UTType.jpeg : UTType.png
+        let data = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(
+            data, type.identifier as CFString, 1, nil)
+        else { return nil }
+        CGImageDestinationAddImage(
+            destination, thumbnail.image,
+            (opaque ? [kCGImageDestinationLossyCompressionQuality: 0.82] : [:]) as CFDictionary)
+        guard CGImageDestinationFinalize(destination), !Task.isCancelled,
+            data.length > 0, data.length <= 128 * 1_024
+        else { return nil }
+        // Decode from the new small payload too: the retained CGImage must not depend on
+        // an ImageIO source backed by the original full-cover encoded buffer.
+        return decode(data as Data, id: result.id, maximumPixels: 160)
     }
 
     func result(for item: FoundationItem) -> Result? {

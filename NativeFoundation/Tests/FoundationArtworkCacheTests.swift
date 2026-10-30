@@ -666,6 +666,64 @@ final class FoundationArtworkCacheTests: XCTestCase {
         XCTAssertEqual(retired.disk, 0)
     }
 
+    func testCompactRepresentationEncodesThumbnailInsteadOfRetainingFullJPEG() throws {
+        let data = try noisyCover(background: noisyCoverBackground(), index: 7)
+        let full = try XCTUnwrap(FoundationCurrentArtwork.decode(data))
+        let compact = try XCTUnwrap(FoundationCurrentArtwork.compactRepresentation(of: full))
+        XCTAssertEqual(full.data, data)
+        XCTAssertEqual(full.image.width, 640)
+        XCTAssertEqual(compact.id, full.id)
+        XCTAssertEqual(compact.image.width, 160)
+        XCTAssertLessThan(compact.data.count, 128 * 1_024)
+        XCTAssertLessThan(compact.data.count, full.data.count / 4)
+        let source = try XCTUnwrap(CGImageSourceCreateWithData(compact.data as CFData, nil))
+        XCTAssertEqual(CGImageSourceGetType(source) as String?, UTType.jpeg.identifier)
+        let encoded = try XCTUnwrap(FoundationCurrentArtwork.decode(compact.data))
+        XCTAssertEqual(encoded.image.width, 160)
+        XCTAssertEqual(encoded.image.height, 160)
+        XCTAssertNotNil(encoded.image.colorSpace)
+    }
+
+    func testCompactRepresentationPreservesTransparentArtworkWithoutMatting() throws {
+        let context = try XCTUnwrap(CGContext(
+            data: nil, width: 640, height: 320, bitsPerComponent: 8, bytesPerRow: 640 * 4,
+            space: CGColorSpace(name: CGColorSpace.sRGB)!,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        context.clear(CGRect(x: 0, y: 0, width: 640, height: 320))
+        context.setFillColor(CGColor(red: 0.8, green: 0.2, blue: 0.1, alpha: 0.5))
+        context.fill(CGRect(x: 160, y: 80, width: 320, height: 160))
+        let data = NSMutableData()
+        let destination = try XCTUnwrap(CGImageDestinationCreateWithData(
+            data, UTType.png.identifier as CFString, 1, nil))
+        CGImageDestinationAddImage(destination, try XCTUnwrap(context.makeImage()), nil)
+        XCTAssertTrue(CGImageDestinationFinalize(destination))
+        let full = try XCTUnwrap(FoundationCurrentArtwork.decode(data as Data))
+        let compact = try XCTUnwrap(FoundationCurrentArtwork.compactRepresentation(of: full))
+        let source = try XCTUnwrap(CGImageSourceCreateWithData(compact.data as CFData, nil))
+        XCTAssertEqual(CGImageSourceGetType(source) as String?, UTType.png.identifier)
+        let properties = try XCTUnwrap(CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any])
+        XCTAssertEqual(properties[kCGImagePropertyHasAlpha] as? Bool, true)
+        let decoded = try XCTUnwrap(FoundationCurrentArtwork.decode(compact.data))
+        XCTAssertEqual(decoded.image.width, 160)
+        XCTAssertEqual(decoded.image.height, 80)
+        // Sample after the encoded round-trip, in a known sRGB/premultiplied layout.
+        var rgba = [UInt8](repeating: 0, count: 160 * 80 * 4)
+        try rgba.withUnsafeMutableBytes { bytes in
+            let sample = try XCTUnwrap(CGContext(
+                data: bytes.baseAddress, width: 160, height: 80, bitsPerComponent: 8,
+                bytesPerRow: 160 * 4, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+            sample.draw(decoded.image, in: CGRect(x: 0, y: 0, width: 160, height: 80))
+        }
+        XCTAssertEqual(rgba[3], 0, "Transparent corner must not acquire a matte")
+        let center = (40 * 160 + 80) * 4
+        XCTAssertEqual(Double(rgba[center + 3]), 128, accuracy: 2)
+        XCTAssertEqual(Double(rgba[center]), 102, accuracy: 3)
+        XCTAssertEqual(Double(rgba[center + 1]), 26, accuracy: 3)
+        XCTAssertEqual(Double(rgba[center + 2]), 13, accuracy: 3)
+        XCTAssertEqual(full.data, data as Data, "Only the fallback representation is converted")
+    }
+
     private func noisyCoverBackground() throws -> CGImage {
         // Fixed xorshift stream: reproducible, high-frequency RGB detail without fixture files.
         var seed: UInt32 = 0x6a09e667
