@@ -1845,7 +1845,8 @@ final class FoundationDownloadsTests: XCTestCase {
                     frameBoundary.arm(phase)
                 #endif
                 try await waitUntil { frameBoundary.completed == phase }
-                XCTAssertEqual(frameBoundary.completed, phase, "Artwork phase must cross a display frame")
+                XCTAssertEqual(
+                    frameBoundary.completed, phase, "Artwork phase must cross a display frame")
             }
             try await awaitAppliedFrame(state.phase)
             let initial = state.images.count
