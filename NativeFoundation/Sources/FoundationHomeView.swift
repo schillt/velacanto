@@ -296,9 +296,10 @@ struct FoundationHomeView<Profile: View>: View {
             let selection = FoundationHomeGenreFeeds.Selection(
                 scope: record.snapshot.scope, censusID: record.snapshot.censusID,
                 genreIDs: genres.map(\.id))
-            // A new census retires the group; each sibling keeps its canonical genre identity.
-            LazyVStack(alignment: .leading, spacing: 28) {
-                ForEach(genres, id: \.genreIdentity) { genre in
+            // Each shelf is a direct child of Home's one vertical lazy layout. The canonical
+            // genreIdentity includes source, census and genre, not a shared container identity.
+            ForEach(genres, id: \.genreIdentity) { genre in
+                Group {
                     if let feed = genreFeeds.feed(for: genre.id, selection: selection) {
                         FoundationHomeGenreShelf(
                             genre: genre, record: record, library: library, player: player,
@@ -308,14 +309,20 @@ struct FoundationHomeView<Profile: View>: View {
                         FoundationLoadingPlaceholder(layout: .albumShelf)
                     }
                 }
-                if connectivity.localOnly, let error = primaryGenres.offlineErrorMessage {
-                    Text(error).foregroundStyle(.secondary)
+                .task(id: selection) {
+                    guard !Task.isCancelled,
+                        let current = primaryGenres.completedRecord(
+                            libraryScope: library.primaryGenreIndexScope),
+                        current.snapshot.scope == selection.scope,
+                        current.snapshot.censusID == selection.censusID
+                    else { return }
+                    // Metadata-only and idempotent. Actual provider demand still belongs to
+                    // each visible shelf; flattening must not eagerly load all five feeds.
+                    genreFeeds.reconcile(selection)
                 }
             }
-            .id(record.snapshot.censusID)
-            .task(id: selection) {
-                guard !Task.isCancelled else { return }
-                genreFeeds.reconcile(selection)
+            if connectivity.localOnly, let error = primaryGenres.offlineErrorMessage {
+                Text(error).foregroundStyle(.secondary)
             }
         } else if !connectivity.localOnly {
             VStack(alignment: .leading, spacing: 12) {
