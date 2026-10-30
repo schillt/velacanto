@@ -828,7 +828,7 @@ private struct FoundationQueueView: View {
                         }
                         .toolbar {
                             if isPresented {
-                                // Each native toolbar item owns one toggle's accessibility name.
+                                // Keep one toggle per native toolbar item to separate their semantic labels.
                                 ToolbarItem(placement: .principal) {
                                     GlassEffectContainer(spacing: 8) {
                                         macShuffleControl(
