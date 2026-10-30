@@ -37,6 +37,7 @@ struct FoundationRemoteListeningActivity: Identifiable, Equatable, Sendable {
     let deviceKey: String
     let deviceLabel: String
     let checkedInAt: Date
+    let observedAt: Date
     let item: FoundationItem
     let albumTitle: String
     let elapsed: Double?
@@ -49,12 +50,13 @@ struct FoundationRemoteListeningActivity: Identifiable, Equatable, Sendable {
         id: String, deviceKey: String, deviceLabel: String, checkedInAt: Date,
         item: FoundationItem, albumTitle: String, elapsed: Double?,
         sessionID: String = "", client: String = "Velacanto Native", remoteDeviceID: String? = nil,
-        receiverScope: String? = nil
+        receiverScope: String? = nil, observedAt: Date? = nil
     ) {
         self.id = id
         self.deviceKey = deviceKey
         self.deviceLabel = deviceLabel
         self.checkedInAt = checkedInAt
+        self.observedAt = observedAt ?? checkedInAt
         self.item = item
         self.albumTitle = albumTitle
         self.elapsed = elapsed
@@ -73,10 +75,14 @@ struct FoundationRemoteListeningActivity: Identifiable, Equatable, Sendable {
     /// Display-only estimate between playing reports. Continuation still uses the source snapshot.
     func presentationProgress(at date: Date) -> FoundationListeningProgress {
         guard let elapsed, elapsed.isFinite, elapsed >= 0 else { return progress }
-        let age = date.timeIntervalSince(checkedInAt)
-        // Match the decoder's tolerated future skew; never extrapolate beyond freshness.
-        guard age.isFinite, age >= -5 else { return progress }
-        let estimate = elapsed + min(90, max(0, age))
+        // V12 already advances PositionTicks server-side. Its check-in is freshness, not a clock anchor.
+        let reportAgeAtObservation = observedAt.timeIntervalSince(checkedInAt)
+        let age = date.timeIntervalSince(observedAt)
+        guard reportAgeAtObservation.isFinite, (-5...90).contains(reportAgeAtObservation),
+            age.isFinite, age >= -5
+        else { return progress }
+        let remainingFreshness = 90 - reportAgeAtObservation
+        let estimate = elapsed + min(remainingFreshness, max(0, age))
         let bounded: Double
         if let duration = item.duration, duration.isFinite, duration > 0 {
             bounded = min(duration, estimate)
@@ -131,7 +137,7 @@ struct FoundationRemoteListeningActivity: Identifiable, Equatable, Sendable {
                 client: text(session.client) ?? "Unknown player", remoteDeviceID: device,
                 receiverScope: catalogSource.map {
                     FoundationMusicLibraryStore.digest($0.identity + "\0" + ownDeviceID)
-                })
+                }, observedAt: now)
         }
         var seen: Set<String> = []
         return Array(
