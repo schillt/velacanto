@@ -1402,22 +1402,28 @@ final class FoundationPrimaryGenresTests: XCTestCase {
 
     func testCanonicalConflictingNamesUseAuthoritativeNamesBeforeAllMediaPaging() async throws {
         let requests = PrimaryGenreRequests()
-        let songs = canonicalConflictSongs()
+        let songData = try JSONSerialization.data(withJSONObject: [
+            "Items": canonicalConflictSongs(), "StartIndex": 0, "TotalRecordCount": 3,
+        ])
+        let albumData = try JSONSerialization.data(withJSONObject: [
+            "Items": [["Id": Self.id(10), "Name": "ZZ canonical", "Type": "MusicAlbum"]],
+            "StartIndex": 0, "TotalRecordCount": 1,
+        ])
+        let artistData = try JSONSerialization.data(withJSONObject: [
+            "Items": [["Id": Self.id(20), "Name": "ZZ canonical", "Type": "MusicArtist"]],
+            "StartIndex": 0, "TotalRecordCount": 1,
+        ])
         let library = FoundationJellyfinLibrary(session: Self.session) { request in
             await requests.append(request)
             let query =
                 URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
             let kind = query.first { $0.name == "includeItemTypes" }?.value
-            let rows: [[String: Any]]
+            let data: Data
             if kind == "Audio" {
-                rows = songs
+                data = songData
             } else {
-                let id = kind == "MusicAlbum" ? Self.id(10) : Self.id(20)
-                rows = [["Id": id, "Name": "ZZ canonical", "Type": kind!]]
+                data = kind == "MusicAlbum" ? albumData : artistData
             }
-            let data = try JSONSerialization.data(withJSONObject: [
-                "Items": rows, "StartIndex": 0, "TotalRecordCount": rows.count,
-            ])
             return (
                 data,
                 HTTPURLResponse(
@@ -1570,22 +1576,25 @@ final class FoundationPrimaryGenresTests: XCTestCase {
     func testCanonicalNameLookupCancellationCannotPublishOrContinueToArtistLookup() async throws {
         let gate = PrimaryGenreGate()
         let requests = PrimaryGenreRequests()
-        let songs = canonicalConflictSongs()
+        let songData = try JSONSerialization.data(withJSONObject: [
+            "Items": canonicalConflictSongs(), "StartIndex": 0, "TotalRecordCount": 3,
+        ])
+        let albumData = try JSONSerialization.data(withJSONObject: [
+            "Items": [["Id": Self.id(10), "Name": "ZZ canonical", "Type": "MusicAlbum"]],
+            "StartIndex": 0, "TotalRecordCount": 1,
+        ])
         let library = FoundationJellyfinLibrary(session: Self.session) { request in
             await requests.append(request)
             let query =
                 URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
             let kind = query.first { $0.name == "includeItemTypes" }?.value
-            let rows: [[String: Any]]
+            let data: Data
             if kind == "Audio" {
-                rows = songs
+                data = songData
             } else {
                 await gate.wait()
-                rows = [["Id": Self.id(10), "Name": "Canonical", "Type": "MusicAlbum"]]
+                data = albumData
             }
-            let data = try JSONSerialization.data(withJSONObject: [
-                "Items": rows, "StartIndex": 0, "TotalRecordCount": rows.count,
-            ])
             return (
                 data,
                 HTTPURLResponse(
