@@ -699,7 +699,11 @@ final class FoundationArtworkCacheTests: XCTestCase {
                 space: CGColorSpace(name: CGColorSpace.sRGB)!,
                 bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
         context.clear(CGRect(x: 0, y: 0, width: 640, height: 320))
-        context.setFillColor(CGColor(red: 0.8, green: 0.2, blue: 0.1, alpha: 0.5))
+        context.setFillColor(
+            try XCTUnwrap(
+                CGColor(
+                    colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!,
+                    components: [0.8, 0.2, 0.1, 0.5])))
         context.fill(CGRect(x: 160, y: 80, width: 320, height: 160))
         let data = NSMutableData()
         let destination = try XCTUnwrap(
@@ -708,6 +712,14 @@ final class FoundationArtworkCacheTests: XCTestCase {
         CGImageDestinationAddImage(destination, try XCTUnwrap(context.makeImage()), nil)
         XCTAssertTrue(CGImageDestinationFinalize(destination))
         let full = try XCTUnwrap(FoundationCurrentArtwork.decode(data as Data))
+        // Verify the source fixture independently before the compact implementation runs.
+        // These are hardcoded premultiplied sRGB expectations, not values learned from it.
+        let original = try normalizedArtworkSamples(full.image)
+        XCTAssertEqual(original.cornerAlpha, 0, "Source corner must be transparent")
+        XCTAssertEqual(Double(original.center[3]), 128, accuracy: 2)
+        XCTAssertEqual(Double(original.center[0]), 102, accuracy: 3)
+        XCTAssertEqual(Double(original.center[1]), 26, accuracy: 3)
+        XCTAssertEqual(Double(original.center[2]), 13, accuracy: 3)
         let compact = try XCTUnwrap(FoundationCurrentArtwork.compactRepresentation(of: full))
         let source = try XCTUnwrap(CGImageSourceCreateWithData(compact.data as CFData, nil))
         XCTAssertEqual(CGImageSourceGetType(source) as String?, UTType.png.identifier)
@@ -717,23 +729,33 @@ final class FoundationArtworkCacheTests: XCTestCase {
         let decoded = try XCTUnwrap(FoundationCurrentArtwork.decode(compact.data))
         XCTAssertEqual(decoded.image.width, 160)
         XCTAssertEqual(decoded.image.height, 80)
-        // Sample after the encoded round-trip, in a known sRGB/premultiplied layout.
-        var rgba = [UInt8](repeating: 0, count: 160 * 80 * 4)
+        // Sample after the encoded round-trip against the same independent expectations.
+        let preview = try normalizedArtworkSamples(decoded.image)
+        XCTAssertEqual(preview.cornerAlpha, 0, "Transparent corner must not acquire a matte")
+        XCTAssertEqual(Double(preview.center[3]), 128, accuracy: 2)
+        XCTAssertEqual(Double(preview.center[0]), 102, accuracy: 3)
+        XCTAssertEqual(Double(preview.center[1]), 26, accuracy: 3)
+        XCTAssertEqual(Double(preview.center[2]), 13, accuracy: 3)
+        XCTAssertEqual(full.data, data as Data, "Only the fallback representation is converted")
+    }
+
+    /// Normalize at native dimensions: full-source verification does not use compact decode.
+    private func normalizedArtworkSamples(_ image: CGImage) throws
+        -> (cornerAlpha: UInt8, center: [UInt8])
+    {
+        let width = image.width
+        let height = image.height
+        var rgba = [UInt8](repeating: 0, count: width * height * 4)
         try rgba.withUnsafeMutableBytes { bytes in
             let sample = try XCTUnwrap(
                 CGContext(
-                    data: bytes.baseAddress, width: 160, height: 80, bitsPerComponent: 8,
-                    bytesPerRow: 160 * 4, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                    data: bytes.baseAddress, width: width, height: height, bitsPerComponent: 8,
+                    bytesPerRow: width * 4, space: CGColorSpace(name: CGColorSpace.sRGB)!,
                     bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
-            sample.draw(decoded.image, in: CGRect(x: 0, y: 0, width: 160, height: 80))
+            sample.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
         }
-        XCTAssertEqual(rgba[3], 0, "Transparent corner must not acquire a matte")
-        let center = (40 * 160 + 80) * 4
-        XCTAssertEqual(Double(rgba[center + 3]), 128, accuracy: 2)
-        XCTAssertEqual(Double(rgba[center]), 102, accuracy: 3)
-        XCTAssertEqual(Double(rgba[center + 1]), 26, accuracy: 3)
-        XCTAssertEqual(Double(rgba[center + 2]), 13, accuracy: 3)
-        XCTAssertEqual(full.data, data as Data, "Only the fallback representation is converted")
+        let center = ((height / 2) * width + width / 2) * 4
+        return (rgba[3], Array(rgba[center..<(center + 4)]))
     }
 
     private func noisyCoverBackground() throws -> CGImage {
