@@ -327,13 +327,31 @@ final class FoundationHandoffController: NSObject, ObservableObject, NSUserActiv
         notice = nil
         remoteTask = Task { [weak self, weak transfer] in
             guard let transfer else { return }
+            #if DEBUG
+                var diagnosticStage = FoundationRemotePreparationDiagnostic.preparingProvider
+                var diagnosticQueueCount = -1
+                var diagnosticMetadataCount = -1
+                defer {
+                    diagnosticStage.record(
+                        queueCount: diagnosticQueueCount, metadataCount: diagnosticMetadataCount,
+                        completed: diagnosticStage == .confirmationPrepared)
+                }
+            #endif
             do {
                 guard transfer.allowsNetworking() else { throw FoundationHandoffError.unavailable }
                 let offer = try await library.prepareRemoteContinuation(activity)
                 try Task.checkCancellation()
                 guard let self, self.remoteIsCurrent(transfer) else { return }
                 guard transfer.allowsNetworking() else { throw FoundationHandoffError.unavailable }
+                #if DEBUG
+                    diagnosticStage = .encodingPayload
+                    diagnosticQueueCount = offer.queue.count
+                    diagnosticMetadataCount = offer.items.count
+                #endif
                 let payload = try offer.payload(scope: context.scope, id: transfer.id)
+                #if DEBUG
+                    diagnosticStage = .selectingOccurrence
+                #endif
                 guard let selected = offer.entries.first(where: { $0.id == offer.selected }) else {
                     throw FoundationHandoffError.invalid
                 }
@@ -343,6 +361,9 @@ final class FoundationHandoffController: NSObject, ObservableObject, NSUserActiv
                     context: context.id, intent: transfer.intent, remoteOffer: offer)
                 transfer.prepared()
                 self.remoteTask = nil
+                #if DEBUG
+                    diagnosticStage = .confirmationPrepared
+                #endif
             } catch {
                 guard !Task.isCancelled, let self, self.remoteTransfer === transfer else { return }
                 self.failRemote(transfer, error: error)

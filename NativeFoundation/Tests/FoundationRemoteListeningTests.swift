@@ -963,6 +963,78 @@ final class FoundationRemoteContinuationTests: XCTestCase {
             [CrossClientFixtures.first, CrossClientFixtures.current, CrossClientFixtures.first])
     }
 
+    func testDiscoveryEligibleReportStillNeedsCurrentOccurrenceAndRepeatForTransfer() throws {
+        var missingOccurrence = CrossClientFixtures.row()
+        missingOccurrence.removeValue(forKey: "PlaylistItemId")
+        var missingRepeat = CrossClientFixtures.row()
+        var state = try XCTUnwrap(missingRepeat["PlayState"] as? [String: Any])
+        state.removeValue(forKey: "RepeatMode")
+        missingRepeat["PlayState"] = state
+        for row in [missingOccurrence, missingRepeat] {
+            XCTAssertEqual(
+                try CrossClientFixtures.activity(row).item.id, CrossClientFixtures.current)
+            XCTAssertThrowsError(try CrossClientFixtures.offer(row)) { error in
+                XCTAssertEqual(error as? FoundationHandoffError, .unavailable)
+            }
+        }
+    }
+
+    func testDuplicateFullItemMetadataRejectsRatherThanCollapsingReportedOccurrences() throws {
+        var row = CrossClientFixtures.row()
+        row["NowPlayingQueueFullItems"] = [
+            CrossClientFixtures.media(CrossClientFixtures.current),
+            CrossClientFixtures.media(CrossClientFixtures.first),
+            CrossClientFixtures.media(CrossClientFixtures.first),
+        ]
+        XCTAssertEqual(try CrossClientFixtures.activity(row).item.id, CrossClientFixtures.current)
+        XCTAssertThrowsError(try CrossClientFixtures.offer(row)) { error in
+            XCTAssertEqual(error as? FoundationHandoffError, .invalid)
+        }
+    }
+
+    func testAuthorizationRejectsWrongPageCountsAndSameCountWrongIDsWithoutControl() async throws {
+        let validRows = [
+            CrossClientFixtures.media(CrossClientFixtures.first),
+            CrossClientFixtures.media(CrossClientFixtures.current),
+        ]
+        let responses: [[String: Any]] = [
+            ["Items": validRows, "StartIndex": 1, "TotalRecordCount": 2],
+            ["Items": validRows, "StartIndex": 0, "TotalRecordCount": 3],
+            ["Items": validRows, "TotalRecordCount": 2],
+            ["Items": [validRows[0], validRows[0]], "StartIndex": 0, "TotalRecordCount": 2],
+            [
+                "Items": [
+                    validRows[0], CrossClientFixtures.media(String(repeating: "9", count: 32)),
+                ],
+                "StartIndex": 0, "TotalRecordCount": 2,
+            ],
+        ]
+        let sourceData = try CrossClientFixtures.data([CrossClientFixtures.row()])
+        let activity = try CrossClientFixtures.activity(CrossClientFixtures.row())
+        for response in responses {
+            let metadataData = try JSONSerialization.data(withJSONObject: response)
+            let recorder = RemoteListeningRequestRecorder()
+            let library = FoundationJellyfinLibrary(
+                session: CrossClientFixtures.session,
+                load: { request in
+                    await recorder.append(request)
+                    let data =
+                        request.url?.path.hasSuffix("/Items") == true ? metadataData : sourceData
+                    return (data, CrossClientFixtures.response(request))
+                })
+            do {
+                _ = try await library.prepareRemoteContinuation(activity)
+                XCTFail(
+                    "Invalid authorization response must not prepare a partial or retargeted queue")
+            } catch {
+                XCTAssertEqual(error as? FoundationHandoffError, .unavailable)
+            }
+            let requests = await recorder.requests
+            XCTAssertEqual(requests.count, 2)
+            XCTAssertTrue(requests.allSatisfy { $0.httpMethod == "GET" })
+        }
+    }
+
     func testMissingQueueNeverBecomesOneTrackTransfer() throws {
         var row = CrossClientFixtures.row()
         row.removeValue(forKey: "NowPlayingQueue")

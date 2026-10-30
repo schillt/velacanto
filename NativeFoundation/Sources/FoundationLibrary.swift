@@ -972,17 +972,39 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
             !activity.usesNativeHandoff, !activity.sessionID.isEmpty,
             FoundationRemoteListeningActivity.remoteDeviceID(activity.remoteDeviceID) != nil
         else {
+            #if DEBUG
+                FoundationRemotePreparationDiagnostic.receiverScopeRejected.record()
+            #endif
             throw FoundationHandoffError.unavailable
         }
         return try await FoundationRequestIntent.$isPlayback.withValue(false) {
             try await FoundationRemoteListeningDeadline.run {
+                #if DEBUG
+                    var diagnosticStage = FoundationRemotePreparationDiagnostic.readingSessions
+                    var diagnosticQueueCount = -1
+                    var diagnosticMetadataCount = -1
+                    defer {
+                        diagnosticStage.record(
+                            queueCount: diagnosticQueueCount,
+                            metadataCount: diagnosticMetadataCount,
+                            completed: diagnosticStage == .providerPrepared)
+                    }
+                #endif
                 let data = try await remoteContinuationData()
+                #if DEBUG
+                    diagnosticStage = .decodingOffer
+                #endif
                 let source = try FoundationCatalogSource.jellyfin(scope: catalogAccountIdentity)
                 var offer = try FoundationRemoteContinuationOffer.decode(
                     data, sessionID: activity.sessionID,
                     userID: session.userID, ownDeviceID: session.deviceID,
                     scope: listeningActivityScope,
                     catalogSource: source, now: Date())
+                #if DEBUG
+                    diagnosticStage = .matchingActivity
+                    diagnosticQueueCount = offer.queue.count
+                    diagnosticMetadataCount = offer.items.count
+                #endif
                 guard offer.activityID == activity.id, offer.client == activity.client,
                     offer.deviceID == activity.remoteDeviceID,
                     offer.queue.first(where: { $0.sourceID == offer.sourceOccurrence })?.itemID
@@ -991,11 +1013,21 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
                     throw FoundationHandoffError.changed
                 }
                 // FullItems is display metadata, not a user-authorization bypass.
+                #if DEBUG
+                    diagnosticStage = .authorizingQueue
+                #endif
                 let verified = try await authorizedRemoteQueueItems(
                     offer,
                     remainingBytes: FoundationHandoffPayload.maximumBytes - data.count)
+                #if DEBUG
+                    diagnosticStage = .resolvingMetadata
+                    diagnosticMetadataCount = verified.items.count
+                #endif
                 offer = try offer.resolving(verified.items, authoritative: true)
                 guard offer.missingItemIDs.isEmpty else { throw FoundationHandoffError.unavailable }
+                #if DEBUG
+                    diagnosticStage = .providerPrepared
+                #endif
                 return offer
             }
         }
@@ -1083,10 +1115,19 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
             guard let rows = result.items, result.startIndex == 0,
                 result.totalRecordCount == requested.count, rows.count == requested.count
             else {
+                #if DEBUG
+                    FoundationRemotePreparationDiagnostic.recordAuthorizationShape(
+                        requestedCount: requested.count, startIndex: result.startIndex,
+                        totalCount: result.totalRecordCount, rowsCount: result.items?.count)
+                #endif
                 throw FoundationHandoffError.unavailable
             }
             let canonicalRows = try rows.map { row in
                 guard let id = FoundationRemoteListeningActivity.catalogID(row.id) else {
+                    #if DEBUG
+                        FoundationRemotePreparationDiagnostic.invalidAuthorizationItemID.record(
+                            queueCount: requested.count, metadataCount: rows.count)
+                    #endif
                     throw FoundationHandoffError.unavailable
                 }
                 var row = row
@@ -1101,6 +1142,13 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
             guard Set(mapped.map(\.id)) == Set(requested),
                 Set(mapped.map(\.id)).count == mapped.count
             else {
+                #if DEBUG
+                    let unique = Set(mapped.map(\.id))
+                    FoundationRemotePreparationDiagnostic.recordAuthorizationIDs(
+                        requestedCount: requested.count, mappedCount: mapped.count,
+                        uniqueCount: unique.count,
+                        matchedCount: unique.intersection(Set(requested)).count)
+                #endif
                 throw FoundationHandoffError.unavailable
             }
             resultItems += mapped

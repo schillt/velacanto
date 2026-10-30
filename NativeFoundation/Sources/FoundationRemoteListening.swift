@@ -495,6 +495,71 @@ struct FoundationHandoffListeningGuide: View {
     }
 }
 
+#if DEBUG
+    /// Explicit preparation only. Fixed categories/counts, never source or account identifiers.
+    enum FoundationRemotePreparationDiagnostic: String {
+        case receiverScopeRejected
+        case readingSessions
+        case decodingOffer
+        case matchingActivity
+        case authorizingQueue
+        case resolvingMetadata
+        case providerPrepared
+        case preparingProvider
+        case encodingPayload
+        case selectingOccurrence
+        case confirmationPrepared
+        case sourceSessionMismatch
+        case sourcePrerequisites
+        case missingCurrentOccurrence
+        case sourceExpired
+        case missingSourceQueue
+        case invalidQueueItem
+        case invalidQueueOccurrence
+        case duplicateQueueOccurrence
+        case currentOccurrenceMismatch
+        case missingRepeat
+        case unsupportedRepeat
+        case invalidFullItem
+        case duplicateFullItem
+        case invalidAuthorizationItemID
+        case authorizationShape
+        case authorizationIDs
+
+        static func recordAuthorizationShape(
+            requestedCount: Int, startIndex: Int?, totalCount: Int?, rowsCount: Int?
+        ) {
+            FoundationJournal.shared.record(
+                "remote-preparation reason=\(Self.authorizationShape.rawValue) requestedCount=\(requestedCount)"
+                    + " startIndex=\(startIndex ?? -1) totalCount=\(totalCount ?? -1)"
+                    + " rowsCount=\(rowsCount ?? -1) hasStartIndex=\(startIndex != nil)"
+                    + " hasTotalCount=\(totalCount != nil) hasRows=\(rowsCount != nil)")
+        }
+
+        static func recordAuthorizationIDs(
+            requestedCount: Int, mappedCount: Int, uniqueCount: Int, matchedCount: Int
+        ) {
+            FoundationJournal.shared.record(
+                "remote-preparation reason=\(Self.authorizationIDs.rawValue) requestedCount=\(requestedCount)"
+                    + " mappedCount=\(mappedCount) uniqueCount=\(uniqueCount) matchedCount=\(matchedCount)"
+            )
+        }
+
+        func recordQueueIdentity(queueCount: Int, uniqueOccurrences: Bool, currentMatches: Bool) {
+            FoundationJournal.shared.record(
+                "remote-preparation reason=\(rawValue) queueCount=\(queueCount)"
+                    + " uniqueOccurrences=\(uniqueOccurrences) currentMatches=\(currentMatches)")
+        }
+
+        func record(queueCount: Int = -1, metadataCount: Int = -1, completed: Bool = false) {
+            let outcome = completed ? "prepared" : Task.isCancelled ? "cancelled" : "incomplete"
+            FoundationJournal.shared.record(
+                "remote-preparation stage=\(rawValue) outcome=\(outcome)"
+                    + " queueCount=\(queueCount) metadataCount=\(metadataCount)")
+        }
+    }
+#endif
+
 /// A complete, memory-only source-reported queue. No delivery locations or source credentials.
 /// Server RPC has no compare-and-stop precondition: source completion is explicitly best effort.
 struct FoundationRemoteContinuationOffer: Sendable {
@@ -619,7 +684,27 @@ struct FoundationRemoteContinuationOffer: Sendable {
             let selected = Activity.occurrenceID(session.playlistItemID),
             let position = Activity.seconds(session.playState?.positionTicks), position.isFinite,
             position <= Double(Int64.max / 600) - 1
-        else { throw FoundationHandoffError.unavailable }
+        else {
+            #if DEBUG
+                let reason: FoundationRemotePreparationDiagnostic
+                if matches.count != 1 {
+                    reason = .sourceSessionMismatch
+                } else if Activity.occurrenceID(matches.first?.playlistItemID) == nil {
+                    reason = .missingCurrentOccurrence
+                } else {
+                    reason = .sourcePrerequisites
+                }
+                let candidate = matches.first
+                FoundationJournal.shared.record(
+                    "remote-preparation reason=\(reason.rawValue) matchesCount=\(matches.count)"
+                        + " hasCurrentOccurrence=\(Activity.occurrenceID(candidate?.playlistItemID) != nil)"
+                        + " hasQueue=\(candidate?.nowPlayingQueue != nil)"
+                        + " hasRepeat=\(candidate?.playState?.repeatMode != nil)"
+                        + " active=\(candidate?.isActive == true) playing=\(candidate?.playState?.isPaused == false)"
+                )
+            #endif
+            throw FoundationHandoffError.unavailable
+        }
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         var checkIn = session.lastPlaybackCheckIn.flatMap { formatter.date(from: $0) }
@@ -628,9 +713,16 @@ struct FoundationRemoteContinuationOffer: Sendable {
             checkIn = session.lastPlaybackCheckIn.flatMap { formatter.date(from: $0) }
         }
         guard let checkIn, (-5...90).contains(now.timeIntervalSince(checkIn)) else {
+            #if DEBUG
+                FoundationRemotePreparationDiagnostic.sourceExpired.record()
+            #endif
             throw FoundationHandoffError.expired
         }
         guard let source = session.nowPlayingQueue, !source.isEmpty else {
+            #if DEBUG
+                FoundationRemotePreparationDiagnostic.missingSourceQueue.record(
+                    queueCount: session.nowPlayingQueue?.count ?? -1)
+            #endif
             throw FoundationHandoffError.unavailable
         }
         guard source.count <= FoundationHandoffPayload.maximumEntries else {
@@ -640,6 +732,12 @@ struct FoundationRemoteContinuationOffer: Sendable {
             guard let id = Activity.catalogID(row.id),
                 let occurrence = Activity.occurrenceID(row.playlistItemID)
             else {
+                #if DEBUG
+                    let reason: FoundationRemotePreparationDiagnostic =
+                        Activity.catalogID(row.id) == nil
+                        ? .invalidQueueItem : .invalidQueueOccurrence
+                    reason.record(queueCount: source.count)
+                #endif
                 throw FoundationHandoffError.invalid
             }
             return .init(
@@ -649,6 +747,16 @@ struct FoundationRemoteContinuationOffer: Sendable {
         guard Set(queue.map(\.sourceID)).count == queue.count,
             queue.first(where: { $0.sourceID == selected })?.itemID == currentID
         else {
+            #if DEBUG
+                let reason: FoundationRemotePreparationDiagnostic =
+                    Set(queue.map(\.sourceID)).count != queue.count
+                    ? .duplicateQueueOccurrence : .currentOccurrenceMismatch
+                reason.recordQueueIdentity(
+                    queueCount: queue.count,
+                    uniqueOccurrences: Set(queue.map(\.sourceID)).count == queue.count,
+                    currentMatches: queue.first(where: { $0.sourceID == selected })?.itemID
+                        == currentID)
+            #endif
             throw FoundationHandoffError.invalid
         }
         let repeatMode: FoundationHandoffPayload.RepeatMode
@@ -656,7 +764,13 @@ struct FoundationRemoteContinuationOffer: Sendable {
         case "RepeatNone": repeatMode = .off
         case "RepeatAll": repeatMode = .all
         case "RepeatOne": repeatMode = .one
-        default: throw FoundationHandoffError.unavailable
+        default:
+            #if DEBUG
+                let reason: FoundationRemotePreparationDiagnostic =
+                    session.playState?.repeatMode == nil ? .missingRepeat : .unsupportedRepeat
+                reason.record(queueCount: queue.count)
+            #endif
+            throw FoundationHandoffError.unavailable
         }
         var items: [String: FoundationItem] = [:]
         let wanted = Set(queue.map(\.itemID))
@@ -664,6 +778,15 @@ struct FoundationRemoteContinuationOffer: Sendable {
             guard media.type == "Audio", let id = Activity.catalogID(media.id),
                 wanted.contains(id), items[id] == nil
             else {
+                #if DEBUG
+                    let id = Activity.catalogID(media.id)
+                    let duplicate = id.map { items[$0] != nil } ?? false
+                    let reason: FoundationRemotePreparationDiagnostic =
+                        duplicate ? .duplicateFullItem : .invalidFullItem
+                    reason.record(
+                        queueCount: queue.count,
+                        metadataCount: session.nowPlayingQueueFullItems?.count ?? -1)
+                #endif
                 throw FoundationHandoffError.invalid
             }
             items[id] = Activity.canonicalItem(media, catalogSource: catalogSource)
