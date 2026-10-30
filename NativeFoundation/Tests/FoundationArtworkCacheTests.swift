@@ -595,6 +595,114 @@ final class FoundationArtworkCacheTests: XCTestCase {
         _ = await other.invalidate(removeDisk: true)
     }
 
+    /// Ninety-six distinct identities approximate five twelve-card genre shelves plus other
+    /// Home shelves. Pixel noise models encoded weight, not private artwork or visual fidelity.
+    func testRealisticEncodedWorkingSetKeepsNinetySixImmediateCoversAndOriginalFullBytes()
+        async throws
+    {
+        let root = root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let clock = ArtworkCacheClock()
+        let cache = FoundationArtworkCache(scope: "encoded-working-set", root: root, now: { clock.read() })
+        let other = FoundationArtworkCache(scope: "another-account", root: root)
+        addTeardownBlock {
+            _ = await cache.invalidate(removeDisk: true)
+            _ = await other.invalidate(removeDisk: true)
+        }
+        let background = try noisyCoverBackground()
+        let albums = (0..<96).map { item("encoded-cover-\($0)") }
+        var originalBytes: [Data] = []
+        for (index, album) in albums.enumerated() {
+            let data = try noisyCover(background: background, index: index)
+            // Actual Mac record-size proxy: median283KB, p90380KB, max458KB.
+            // Assert meaningful fixture weight so an encoder change cannot silently turn this
+            // back into the tiny solid-image fixture which missed the production pressure.
+            XCTAssertGreaterThan(data.count, 200_000)
+            XCTAssertLessThan(data.count, 500_000)
+            originalBytes.append(data)
+            let loaded = try await cache.result(
+                for: album, pixels: 640, allowsNetwork: true, load: { _, _ in data })
+            let full = try XCTUnwrap(loaded)
+            XCTAssertEqual(full.data, data, "Requested/full representation retains original encoded bytes")
+            XCTAssertEqual(full.image.width, 640)
+            let usage = await cache.usage()
+            XCTAssertLessThanOrEqual(usage.memory, 16 * 1_024 * 1_024)
+        }
+        XCTAssertEqual(Set(originalBytes).count, 96, "The fixture includes distinct encoded covers")
+        // No actor call, disk read, asynchronous revalidation, or GET is permitted to satisfy
+        // these first-body lookups: this is the same synchronous API used by recreated cards.
+        let missing = albums.indices.filter { cache.immediateResult(for: albums[$0], pixels: 640) == nil }
+        XCTAssertEqual(missing, [], "Loaded covers must have an immediate full or compact fallback")
+        if let oldest = cache.immediateResult(for: albums[0], pixels: 640) {
+            XCTAssertEqual(oldest.image.width, 160, "Older full upgrades give way to compact fallbacks")
+            XCTAssertLessThan(oldest.data.count, 128 * 1_024)
+        }
+        for album in albums { XCTAssertNil(other.immediateResult(for: album, pixels: 640)) }
+        XCTAssertNil(cache.immediateResult(for: item("encoded-cover-0", tag: "changed"), pixels: 640))
+        await cache.flushPersistence()
+        let records = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil)?
+            .allObjects.compactMap { $0 as? URL }.filter { $0.pathExtension == "art" } ?? []
+        XCTAssertEqual(records.count, 96)
+        XCTAssertTrue(records.allSatisfy { $0.lastPathComponent.hasSuffix("-640.art") })
+        // A fresh memory-empty owner verifies representative persisted originals independently
+        // of compact data. Generated previews never become new disk records.
+        _ = await cache.invalidate(removeDisk: false)
+        let restored = FoundationArtworkCache(scope: "encoded-working-set", root: root, now: { clock.read() })
+        for index in [0, 47, 95] {
+            let full = try await restored.result(
+                for: albums[index], pixels: 640, allowsNetwork: false,
+                load: { _, _ in
+                    XCTFail("Persisted original recovery must never issue a GET")
+                    return nil
+                })
+            XCTAssertEqual(full?.data, originalBytes[index])
+            XCTAssertEqual(full?.image.width, 640)
+        }
+        clock.advance(30 * 86_400 + 1)
+        for album in albums { XCTAssertNil(restored.immediateResult(for: album, pixels: 640)) }
+        _ = await restored.invalidate(removeDisk: true)
+        let retired = await restored.usage()
+        XCTAssertEqual(retired.memory, 0)
+        XCTAssertEqual(retired.disk, 0)
+    }
+
+    private func noisyCoverBackground() throws -> CGImage {
+        // Fixed xorshift stream: reproducible, high-frequency RGB detail without fixture files.
+        var seed: UInt32 = 0x6a09e667
+        var rgba = [UInt8](repeating: 255, count: 640 * 640 * 4)
+        for pixel in 0..<(640 * 640) {
+            for channel in 0..<3 {
+                seed ^= seed << 13
+                seed ^= seed >> 17
+                seed ^= seed << 5
+                rgba[pixel * 4 + channel] = UInt8(truncatingIfNeeded: seed)
+            }
+        }
+        let provider = try XCTUnwrap(CGDataProvider(data: Data(rgba) as CFData))
+        return try XCTUnwrap(CGImage(
+            width: 640, height: 640, bitsPerComponent: 8, bitsPerPixel: 32,
+            bytesPerRow: 640 * 4, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue),
+            provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent))
+    }
+
+    private func noisyCover(background: CGImage, index: Int) throws -> Data {
+        let context = try XCTUnwrap(CGContext(
+            data: nil, width: 640, height: 640, bitsPerComponent: 8, bytesPerRow: 640 * 4,
+            space: CGColorSpace(name: CGColorSpace.sRGB)!,
+            bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue))
+        context.draw(background, in: CGRect(x: 0, y: 0, width: 640, height: 640))
+        context.setFillColor(CGColor(red: CGFloat(index) / 96, green: 0.3, blue: 0.8, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: 640, height: 4))
+        let data = NSMutableData()
+        let destination = try XCTUnwrap(CGImageDestinationCreateWithData(
+            data, UTType.jpeg.identifier as CFString, 1, nil))
+        CGImageDestinationAddImage(destination, try XCTUnwrap(context.makeImage()),
+            [kCGImageDestinationLossyCompressionQuality: 0.88] as CFDictionary)
+        XCTAssertTrue(CGImageDestinationFinalize(destination))
+        return data as Data
+    }
+
     func testUpgradeLRURemainsIndependentOfCompactPreviewRetention() async throws {
         let root = root()
         defer { try? FileManager.default.removeItem(at: root) }
