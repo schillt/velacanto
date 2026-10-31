@@ -594,6 +594,121 @@ final class FoundationDownloadsTests: XCTestCase {
         manager.invalidate()
     }
 
+    func testNativeProtectionStrengthensOnlyExplicitNoneWithSameCompletedProof() throws {
+        let f = try NativeProtectionFixture()
+        defer { f.remove() }
+        let saved = f.package.bookmark
+        f.classes[f.root.path] = "NSFileProtectionNone"
+        try f.strengthen()
+        XCTAssertEqual(f.writes, [f.root.path, f.leaf.path])
+        XCTAssertEqual(
+            f.classes[f.leaf.path], "NSFileProtectionCompleteUntilFirstUserAuthentication")
+        XCTAssertEqual(f.package.bookmark, saved)
+        XCTAssertEqual(try Data(contentsOf: f.leaf), Data([1, 2, 3]))
+        XCTAssertGreaterThan(f.resolutions, 2)
+    }
+
+    func testNativeProtectionPreservesCompleteAndClassCWithoutSetter() throws {
+        for protection in [
+            "NSFileProtectionComplete", "NSFileProtectionCompleteUntilFirstUserAuthentication",
+        ] {
+            let f = try NativeProtectionFixture()
+            defer { f.remove() }
+            f.classes[f.leaf.path] = protection
+            // Directory B is preserved; regular-file policy is not extended to directories.
+            f.classes[f.root.path] = "NSFileProtectionCompleteUnlessOpen"
+            try f.strengthen()
+            XCTAssertTrue(f.writes.isEmpty)
+            XCTAssertEqual(f.classes[f.leaf.path], protection)
+            XCTAssertEqual(f.classes[f.root.path], "NSFileProtectionCompleteUnlessOpen")
+        }
+    }
+
+    func testNativeProtectionNeverDowngradesOtherRegularClasses() throws {
+        for protection in [
+            "NSFileProtectionCompleteUnlessOpen", "NSFileProtectionCompleteWhenUserInactive",
+            "unrecognized", "missing",
+        ] {
+            let f = try NativeProtectionFixture()
+            defer { f.remove() }
+            f.classes[f.leaf.path] = protection == "missing" ? nil : protection
+            XCTAssertThrowsError(try f.strengthen()) {
+                XCTAssertEqual($0 as? FoundationDownloadError, .nativeProtection)
+            }
+            XCTAssertTrue(f.writes.isEmpty)
+        }
+    }
+
+    func testNativeProtectionRejectsSymlinkAndReplacementBeforeOutsideWrite() throws {
+        let f = try NativeProtectionFixture()
+        defer { f.remove() }
+        try FileManager.default.removeItem(at: f.leaf)
+        try FileManager.default.createSymbolicLink(at: f.leaf, withDestinationURL: f.outside)
+        XCTAssertThrowsError(try f.strengthen())
+        XCTAssertTrue(f.writes.isEmpty)
+        XCTAssertEqual(try Data(contentsOf: f.outside), Data([9]))
+        try FileManager.default.removeItem(at: f.leaf)
+        try Data([1, 2, 3]).write(to: f.leaf)
+        f.replaceBeforeWrite = true
+        XCTAssertThrowsError(try f.strengthen())
+        XCTAssertTrue(f.writes.isEmpty)
+    }
+
+    func testNativeProtectionRejectsIgnoredSetterAndPartialFailure() throws {
+        for mode in [NativeProtectionFixture.Failure.ignored, .throwAfterWrite, .generation] {
+            let f = try NativeProtectionFixture()
+            defer { f.remove() }
+            f.failure = mode
+            let saved = f.package.bookmark
+            XCTAssertThrowsError(try f.strengthen())
+            XCTAssertEqual(f.writes.count, 1)
+            XCTAssertEqual(f.package.bookmark, saved)
+            XCTAssertEqual(try Data(contentsOf: f.leaf), Data([1, 2, 3]))
+        }
+    }
+
+    func testNativeProtectionCancellationAfterPartialMutationCannotReturnSuccess() async throws {
+        let f = try NativeProtectionFixture()
+        defer { f.remove() }
+        f.failure = .cancel
+        let operation = Task { try f.strengthen() }
+        do {
+            try await operation.value
+            XCTFail("Cancelled metadata pass succeeded")
+        } catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertEqual(f.writes.count, 1)
+        XCTAssertEqual(
+            f.classes[f.leaf.path], "NSFileProtectionCompleteUntilFirstUserAuthentication")
+    }
+
+    func testNativeProtectionPartialFailureNeverPublishesManagerReady() async throws {
+        let f = try NativeProtectionFixture()
+        defer { f.remove() }
+        f.failure = .ignored
+        let track = item("protection-failure")
+        let storageRoot = try root()
+        let scope = "protection-failure"
+        let manager = FoundationDownloads(
+            scope: scope, library: DownloadsLibrary(tracks: [track]), root: storageRoot,
+            monitorConnectivity: false, requestedQuality: { .aac192 },
+            systemManagedDownloads: { true },
+            nativeTransfer: { _, _, _, _ in
+                try f.strengthen()
+                XCTFail("Ignored protection setter returned success")
+                return .init(name: "never-ready.movpkg", bytes: 1, digest: "")
+            })
+        defer { manager.invalidate() }
+        manager.updateConnectivity(isAllowed: true)
+        manager.download(track)
+        try await waitUntil { manager.owners.first?.state == .failed }
+        XCTAssertEqual(f.writes.count, 1)
+        XCTAssertFalse(manager.isReady(track))
+        let saved = try FoundationDownloadStorage.load(
+            directory: FoundationDownloadStorage.directory(scope: scope, root: storageRoot))
+        XCTAssertNil(saved.files[track.id])
+        XCTAssertEqual(saved.owners.first?.paused, true)
+    }
+
     private func firstCompletionFixture() throws -> (
         store: FoundationNativeAllocationStore, proof: NativeFirstCompletionProof,
         delegate: FoundationNativeDownloadDelegate, session: URLSession, task: URLSessionTask
@@ -5002,3 +5117,71 @@ private actor DownloadProgressReporter {
     }
 
 #endif
+
+/// Real bounded fixture traversal with injected platform protection metadata. No native cache.
+nonisolated private final class NativeProtectionFixture: @unchecked Sendable {
+    enum Failure: Equatable { case ignored, throwAfterWrite, generation, cancel }
+    let container: URL
+    let root: URL
+    let leaf: URL
+    let outside: URL
+    let package: FoundationNativeDownloadPackage
+    var classes: [String: String] = [:]
+    var writes: [String] = []
+    var resolutions = 0
+    var replaceBeforeWrite = false
+    var failure: Failure?
+    private var leafReads = 0
+    private var changed = false
+
+    init() throws {
+        container = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        root = container.appendingPathComponent("allocation", isDirectory: true)
+        leaf = root.appendingPathComponent("synthetic")
+        outside = container.appendingPathComponent("outside")
+        package = FoundationNativeDownloadPackage(
+            nativeURL: root, bookmark: Data("immutable-completed-proof".utf8),
+            sessionIdentifier: "synthetic", namespaceBookmark: Data("immutable-parent".utf8))
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try Data([1, 2, 3]).write(to: leaf)
+        try Data([9]).write(to: outside)
+        classes[root.path] = "NSFileProtectionCompleteUntilFirstUserAuthentication"
+        classes[leaf.path] = "NSFileProtectionNone"
+    }
+    func remove() { try? FileManager.default.removeItem(at: container) }
+    func strengthen() throws {
+        try FoundationNativeDownloadTransport.strengthenAllocationProtection(
+            package,
+            resolve: { package in
+                self.resolutions += 1
+                return package.bookmark == self.package.bookmark ? self.root : nil
+            },
+            resources: { url in
+                let attrs = try FileManager.default.attributesOfItem(atPath: url.path)
+                let type = attrs[.type] as? FileAttributeType
+                if url.path == self.leaf.path { self.leafReads += 1 }
+                let replacement =
+                    self.replaceBeforeWrite && self.leafReads > 1 && url.path == self.leaf.path
+                return [
+                    .fileResourceIdentifierKey: (url.path + (replacement ? "-replaced" : ""))
+                        as NSString,
+                    .volumeIdentifierKey: "synthetic-volume" as NSString,
+                    .generationIdentifierKey: NSNumber(
+                        value: self.changed && url.path == self.leaf.path ? 2 : 1),
+                    .isDirectoryKey: type == .typeDirectory,
+                    .isRegularFileKey: type == .typeRegular,
+                    .isSymbolicLinkKey: type == .typeSymbolicLink,
+                ]
+            },
+            protection: { self.classes[$0.path] },
+            setProtection: { url in
+                self.writes.append(url.path)
+                if self.failure != .ignored {
+                    self.classes[url.path] = "NSFileProtectionCompleteUntilFirstUserAuthentication"
+                }
+                if self.failure == .throwAfterWrite { throw CocoaError(.fileWriteUnknown) }
+                if self.failure == .generation { self.changed = true }
+                if self.failure == .cancel { withUnsafeCurrentTask { $0?.cancel() } }
+            })
+    }
+}

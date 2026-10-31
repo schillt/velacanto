@@ -291,7 +291,7 @@ final class FoundationDownloadDelegate: NSObject, URLSessionDownloadDelegate, @u
     ) {}
 }
 
-/// Native HLS remains a distinct transport. It never moves or edits package contents,
+/// Native HLS remains a distinct transport. It never moves or rewrites package payload/layout,
 /// substitutes an Original file, or hands an unowned location to AVFoundation.
 nonisolated enum FoundationNativeDownloadTransport {
     #if DEBUG
@@ -468,10 +468,12 @@ nonisolated enum FoundationNativeDownloadTransport {
                     throw FoundationDownloadError.incomplete
                 }
                 // Verify all regular payload files and allocated bytes; root metadata alone
-                // is insufficient. Do not lower protection or recursively rewrite OS data.
+                // is insufficient. Only documented security metadata may be strengthened;
+                // never lower protection or rewrite package payload/layout.
                 #if DEBUG
                     stage = "protection"
                 #endif
+                try strengthenAllocationProtection(package)
                 let bytes = try protectedAllocationBytes(owned)
                 #if DEBUG
                     stage = "rendition"
@@ -731,6 +733,147 @@ nonisolated enum FoundationNativeDownloadTransport {
             }
         #endif
         return retired
+    }
+
+    /// Security metadata only. The immutable completed proof is never refreshed.
+    static func strengthenAllocationProtection(
+        _ package: FoundationNativeDownloadPackage,
+        resolve: (FoundationNativeDownloadPackage) -> URL? = { $0.resolveOwnedURL() },
+        resources: (URL) throws -> [URLResourceKey: Any] = { url in
+            let fresh = NSURL(fileURLWithPath: url.path)
+            fresh.removeAllCachedResourceValues()
+            return try fresh.resourceValues(
+                forKeys: FoundationManagedPackageMetadata.keys
+                    + [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey])
+        },
+        protection: (URL) throws -> String? = { url in
+            try FileManager.default.attributesOfItem(atPath: url.path)[.protectionKey] as? String
+        },
+        setProtection: (URL) throws -> Void = { url in
+            #if os(iOS)
+                try (url as NSURL).setResourceValue(
+                    URLFileProtection.completeUntilFirstUserAuthentication,
+                    forKey: .fileProtectionKey)
+            #else
+                throw FoundationDownloadError.nativeProtection
+            #endif
+        }
+    ) throws {
+        do {
+            typealias Metadata = FoundationManagedPackageMetadata
+            try Task.checkCancellation()
+            guard let root = resolve(package), Metadata.plain(root) else {
+                throw FoundationDownloadError.nativeProtection
+            }
+            let initial = try resources(root)
+            func directory(_ data: [URLResourceKey: Any]) -> Bool {
+                data[.isDirectoryKey] as? Bool == true && data[.isSymbolicLinkKey] as? Bool == false
+            }
+            func same(_ a: [URLResourceKey: Any], _ b: [URLResourceKey: Any]) -> Bool {
+                let result = Metadata.comparison(a, b)
+                return result.file == .equal && result.volume == .equal
+                    && result.generation == .equal
+            }
+            guard directory(initial) else { throw FoundationDownloadError.nativeProtection }
+            let failure = FoundationNativeDownloadEnumerationFailure()
+            guard
+                let enumerator = FileManager.default.enumerator(
+                    at: root, includingPropertiesForKeys: nil, options: [],
+                    errorHandler: { _, _ in
+                        failure.record()
+                        return false
+                    })
+            else { throw FoundationDownloadError.nativeProtection }
+            var visited = 0
+            var directories = [root: initial]
+            func ancestorsMatch(_ url: URL) throws -> Bool {
+                var ancestor = url == root ? root : url.deletingLastPathComponent()
+                for _ in 0...url.pathComponents.count {
+                    guard let saved = directories[ancestor] else { return false }
+                    let fresh = try resources(ancestor)
+                    guard directory(fresh), same(saved, fresh) else { return false }
+                    if ancestor == root { return true }
+                    ancestor = ancestor.deletingLastPathComponent()
+                }
+                return false
+            }
+            func strengthen(_ url: URL, isRoot: Bool = false) throws {
+                try Task.checkCancellation()
+                guard Metadata.plain(url), isRoot || Metadata.contained(url, in: root),
+                    !url.pathComponents.contains(".."), resolve(package) == root
+                else { throw FoundationDownloadError.nativeProtection }
+                let before = try resources(url)
+                guard before[.isSymbolicLinkKey] as? Bool == false,
+                    directory(before) || before[.isRegularFileKey] as? Bool == true,
+                    same(initial, try resources(root)), try ancestorsMatch(url)
+                else { throw FoundationDownloadError.nativeProtection }
+                let kind = ProtectionClass(protection: try protection(url))
+                switch kind {
+                case .none:
+                    // Only explicit Class D may be strengthened. B/inactive/unknown are
+                    // not ordered below C and must never be converted to C.
+                    try Task.checkCancellation()
+                    guard same(before, try resources(url)), try ancestorsMatch(url),
+                        resolve(package) == root
+                    else {
+                        throw FoundationDownloadError.nativeProtection
+                    }
+                    try setProtection(url)
+                    let readback = ProtectionClass(protection: try protection(url))
+                    guard readback == .untilFirstAuthentication else {
+                        throw FoundationDownloadError.nativeProtection
+                    }
+                case .complete, .untilFirstAuthentication: break
+                default:
+                    if !directory(before) {
+                        #if DEBUG
+                            if diagnosticEnabled {
+                                FoundationJournal.shared.record(
+                                    "download.native stage=protection.class outcome=unsupported class=\(kind.rawValue)"
+                                )
+                            }
+                        #endif
+                        throw FoundationDownloadError.nativeProtection
+                    }
+                }
+                try Task.checkCancellation()
+                guard same(before, try resources(url)), same(initial, try resources(root)),
+                    try ancestorsMatch(url), resolve(package) == root
+                else { throw FoundationDownloadError.nativeProtection }
+                if directory(before) { directories[url] = before }
+            }
+            try strengthen(root, isRoot: true)
+            for case let entry as URL in enumerator {
+                visited += 1
+                guard visited <= 100_000 else { throw FoundationDownloadError.nativeProtection }
+                try strengthen(entry.absoluteURL)
+            }
+            guard !failure.failed, same(initial, try resources(root)), resolve(package) == root
+            else {
+                throw FoundationDownloadError.nativeProtection
+            }
+            try Task.checkCancellation()
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            throw FoundationDownloadError.nativeProtection
+        }
+    }
+
+    enum ProtectionClass: String {
+        case none, complete, untilFirstAuthentication, unlessOpen, whenInactive, unavailable, other
+        init(protection: String?) {
+            switch protection {
+            case "NSFileProtectionNone": self = .none
+            case "NSFileProtectionComplete": self = .complete
+            case "NSFileProtectionCompleteUntilFirstUserAuthentication":
+                self = .untilFirstAuthentication
+            case "NSFileProtectionCompleteUnlessOpen": self = .unlessOpen
+            case "NSFileProtectionCompleteWhenUserInactive": self = .whenInactive
+            case nil: self = .unavailable
+            default: self = .other
+            }
+        }
     }
 
     static func protectedAllocationBytes(_ root: URL) throws -> Int64 {
