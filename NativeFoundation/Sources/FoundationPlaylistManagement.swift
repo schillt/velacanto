@@ -2,6 +2,10 @@ import ImageIO
 import SwiftUI
 import UniformTypeIdentifiers
 
+#if os(macOS)
+    import AppKit
+#endif
+
 enum FoundationPlaylistSheet: String, Identifiable {
     case manage, addSongs, reorderSongs
     var id: String { rawValue }
@@ -70,6 +74,7 @@ struct FoundationPlaylistEditor: View {
     @EnvironmentObject private var connectivity: FoundationConnectivity
     @EnvironmentObject private var downloads: FoundationDownloads
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.foundationReduceMotion) private var reduceMotion
     let playlist: FoundationItem
     var onDeleted: () -> Void = {}
     var onRenamed: (String) -> Void = { _ in }
@@ -162,7 +167,7 @@ struct FoundationPlaylistEditor: View {
                         #if os(macOS)
                             Button("Close", systemImage: "xmark") {
                                 if dirty { confirmDiscard = true } else { dismiss() }
-                            }.disabled(operation.isPending)
+                            }.disabled(operation.isPending).buttonStyle(.bordered)
                         #else
                             if dirty {
                                 Button("Discard", systemImage: "xmark") { confirmDiscard = true }
@@ -173,7 +178,11 @@ struct FoundationPlaylistEditor: View {
                     ToolbarItem(placement: .confirmationAction) {
                         Button("Save", systemImage: "checkmark") { saveDetails() }
                             .disabled(!canEditDetails || operation.isPending || !dirty)
-                            .buttonStyle(.glassProminent)
+                            #if os(macOS)
+                                .buttonStyle(.borderedProminent)
+                            #else
+                                .buttonStyle(.glassProminent)
+                            #endif
                     }
                     #if os(iOS)
                         ToolbarItem(placement: .primaryAction) { playlistOptions }
@@ -212,6 +221,9 @@ struct FoundationPlaylistEditor: View {
                 #endif
         }
         .modifier(FoundationPlaylistSheetSize())
+        #if os(macOS)
+            .background { FoundationPlaylistSheetActivation().frame(width: 0, height: 0) }
+        #endif
         .presentationBackground(.ultraThinMaterial)
         .interactiveDismissDisabled(dirty || operation.isPending)
         #if os(iOS)
@@ -311,8 +323,49 @@ struct FoundationPlaylistEditor: View {
     @ViewBuilder private var managerContents: some View {
         detailsSection
         if showingCovers { coverSection }
-        if addingSongs { addSection }
+        addMusicDisclosure
+        if addingSongs { addSection.transition(.opacity) }
         songsSection
+    }
+
+    private var addMusicDisclosure: some View {
+        Section {
+            Button {
+                withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.2)) {
+                    if addingSongs {
+                        addingSongs = false
+                        addSearchFocused = false
+                    } else {
+                        addCollection = nil
+                        addQuery = ""
+                        addModel.clearRetainedData()
+                        addAlbums.clearRetainedData()
+                        addArtists.clearRetainedData()
+                        addRevision = 0
+                        addingSongs = true
+                    }
+
+                }
+            } label: {
+                HStack {
+                    Label("Add Songs", systemImage: "plus.circle")
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .rotationEffect(.degrees(addingSongs ? 90 : 0))
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, minHeight: 36, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Add Songs")
+            .accessibilityValue(addingSongs ? "Expanded" : "Collapsed")
+            .accessibilityHint(
+                addingSongs ? "Hide music search" : "Search songs, albums and artists"
+            )
+            .accessibilityIdentifier("playlist-manager-add-disclosure")
+            .disabled(!editable || operation.isPending)
+        }
     }
 
     @ViewBuilder private var managerSurface: some View {
@@ -331,7 +384,7 @@ struct FoundationPlaylistEditor: View {
                 HStack {
                     Spacer()
                     playlistOptions
-                        .buttonStyle(.glass)
+                        .buttonStyle(.bordered)
                         .menuIndicator(.hidden)
                         .accessibilityLabel("Playlist Options")
                 }
@@ -500,21 +553,7 @@ struct FoundationPlaylistEditor: View {
             HStack {
                 Label("\(entries.count) Songs", systemImage: "music.note.list")
                 Spacer()
-                Button(addingSongs ? "Hide Search" : "Add Songs", systemImage: "plus") {
-                    if addingSongs {
-                        addingSongs = false
-                        addSearchFocused = false
-                    } else {
-                        addCollection = nil
-                        addQuery = ""
-                        addModel.clearRetainedData()
-                        addAlbums.clearRetainedData()
-                        addArtists.clearRetainedData()
-                        addRevision = 0
-                        addingSongs = true
-                    }
-                }
-                .buttonStyle(.borderless).disabled(!editable || operation.isPending)
+
             }
         } footer: {
             if permissions?.canEdit == false {
@@ -562,7 +601,12 @@ struct FoundationPlaylistEditor: View {
                 Button("Add \(addedSelection.count) Songs", systemImage: "plus.circle.fill") {
                     addSongs()
                 }
-                .buttonStyle(.glassProminent).disabled(addedSelection.isEmpty)
+                #if os(macOS)
+                    .buttonStyle(.borderedProminent)
+                #else
+                    .buttonStyle(.glassProminent)
+                #endif
+                .disabled(addedSelection.isEmpty)
             } header: {
                 Label("Add Music", systemImage: "magnifyingglass")
             }
@@ -1355,3 +1399,36 @@ struct FoundationPlaylistCreate: View {
         }
     }
 }
+
+#if os(macOS)
+    /// A user-opened editor must own keyboard input, even when the app was opened in the background.
+    private struct FoundationPlaylistSheetActivation: NSViewRepresentable {
+        func makeNSView(context: Context) -> FoundationPlaylistSheetActivationView {
+            FoundationPlaylistSheetActivationView()
+        }
+
+        func updateNSView(_ view: FoundationPlaylistSheetActivationView, context: Context) {}
+    }
+
+    private final class FoundationPlaylistSheetActivationView: NSView {
+        private weak var activatedWindow: NSWindow?
+
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            guard let window, activatedWindow !== window else { return }
+            // Wait for native sheet attachment, not a timer or a render-driven focus request.
+            DispatchQueue.main.async { [weak self, weak window] in
+                guard let self, let window, self.window === window,
+                    self.activatedWindow !== window,
+                    let parent = window.sheetParent, parent.attachedSheet === window
+                else { return }
+                self.activatedWindow = window
+                NSApp.activate()
+                window.makeKeyAndOrderFront(nil)
+                // Preserve the text field or other responder selected by the user/SwiftUI.
+            }
+        }
+    }
+#endif
