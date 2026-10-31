@@ -776,12 +776,17 @@ nonisolated enum FoundationNativeDownloadTransport {
         do {
             typealias Metadata = FoundationManagedPackageMetadata
             try Task.checkCancellation()
-            guard let root = resolve(package), Metadata.plain(root) else {
+            guard let resolvedRoot = resolve(package), Metadata.plain(resolvedRoot) else {
                 throw FoundationDownloadError.nativeProtection
             }
             #if DEBUG
                 diagnosticStage = .metadata
             #endif
+            let original = try resources(resolvedRoot)
+            // Canonicalization chooses an address, never authority. Before using it,
+            // bind BOTH addresses to the same already-proved resource, then repeat.
+            let root = Metadata.canonical(resolvedRoot)
+            guard Metadata.plain(root) else { throw FoundationDownloadError.nativeProtection }
             let initial = try resources(root)
             #if DEBUG
                 diagnosticStage = .validation
@@ -794,7 +799,23 @@ nonisolated enum FoundationNativeDownloadTransport {
                 return result.file == .equal && result.volume == .equal
                     && result.generation == .equal
             }
-            guard directory(initial) else { throw FoundationDownloadError.nativeProtection }
+            let originalRepeat = try resources(resolvedRoot)
+            let addressedRepeat = try resources(root)
+            guard
+                [original, initial, originalRepeat, addressedRepeat].allSatisfy({
+                    directory($0) && same(original, $0)
+                })
+            else { throw FoundationDownloadError.nativeProtection }
+            func authorityMatches() throws -> Bool {
+                guard let current = resolve(package), Metadata.plain(current) else { return false }
+                let first = try resources(current)
+                let addressed = try resources(root)
+                let repeatCurrent = try resources(current)
+                let repeatAddressed = try resources(root)
+                return [first, addressed, repeatCurrent, repeatAddressed].allSatisfy {
+                    directory($0) && same(initial, $0)
+                }
+            }
             let failure = FoundationNativeDownloadEnumerationFailure()
             guard
                 let enumerator = FileManager.default.enumerator(
@@ -805,11 +826,12 @@ nonisolated enum FoundationNativeDownloadTransport {
                     })
             else { throw FoundationDownloadError.nativeProtection }
             var visited = 0
-            var directories = [root: initial]
+            var directories = [root.pathComponents: initial]
             func ancestorsMatch(_ url: URL) throws -> Bool {
-                var ancestor = url == root ? root : url.deletingLastPathComponent()
+                var ancestor =
+                    Metadata.equalPath(url, root) ? root : url.deletingLastPathComponent()
                 for _ in 0...url.pathComponents.count {
-                    guard let saved = directories[ancestor] else { return false }
+                    guard let saved = directories[ancestor.pathComponents] else { return false }
                     #if DEBUG
                         diagnosticStage = .metadata
                     #endif
@@ -818,7 +840,7 @@ nonisolated enum FoundationNativeDownloadTransport {
                         diagnosticStage = .validation
                     #endif
                     guard directory(fresh), same(saved, fresh) else { return false }
-                    if ancestor == root { return true }
+                    if Metadata.equalPath(ancestor, root) { return true }
                     ancestor = ancestor.deletingLastPathComponent()
                 }
                 return false
@@ -836,7 +858,7 @@ nonisolated enum FoundationNativeDownloadTransport {
                     diagnosticStage = .ownership
                 #endif
                 guard Metadata.plain(url), isRoot || Metadata.contained(url, in: root),
-                    !url.pathComponents.contains(".."), resolve(package) == root
+                    !url.pathComponents.contains(".."), try authorityMatches()
                 else { throw FoundationDownloadError.nativeProtection }
                 guard try ancestorsMatch(url) else {
                     throw FoundationDownloadError.nativeProtection
@@ -866,7 +888,7 @@ nonisolated enum FoundationNativeDownloadTransport {
                     // not ordered below C and must never be converted to C.
                     try Task.checkCancellation()
                     guard same(before, try resources(url)), try ancestorsMatch(url),
-                        resolve(package) == root
+                        try authorityMatches()
                     else {
                         throw FoundationDownloadError.nativeProtection
                     }
@@ -909,9 +931,9 @@ nonisolated enum FoundationNativeDownloadTransport {
                     diagnosticStage = .validation
                 #endif
                 guard same(before, try resources(url)), same(initial, try resources(root)),
-                    try ancestorsMatch(url), resolve(package) == root
+                    try ancestorsMatch(url), try authorityMatches()
                 else { throw FoundationDownloadError.nativeProtection }
-                if directory(before) { directories[url] = before }
+                if directory(before) { directories[url.pathComponents] = before }
             }
             try strengthen(root, isRoot: true)
             for case let entry as URL in enumerator {
@@ -922,7 +944,7 @@ nonisolated enum FoundationNativeDownloadTransport {
             #if DEBUG
                 diagnosticStage = .finalProof
             #endif
-            guard !failure.failed, same(initial, try resources(root)), resolve(package) == root
+            guard !failure.failed, same(initial, try resources(root)), try authorityMatches()
             else {
                 throw FoundationDownloadError.nativeProtection
             }

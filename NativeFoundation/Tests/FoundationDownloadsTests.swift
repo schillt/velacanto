@@ -598,11 +598,11 @@ final class FoundationDownloadsTests: XCTestCase {
         let f = try NativeProtectionFixture()
         defer { f.remove() }
         let saved = f.package.bookmark
-        f.classes[f.root.path] = "NSFileProtectionNone"
+        f.classes[f.rootIdentity] = "NSFileProtectionNone"
         try f.strengthen()
-        XCTAssertEqual(f.writes, [f.root.path, f.leaf.path])
+        XCTAssertEqual(f.writes, [f.rootIdentity, f.leafIdentity])
         XCTAssertEqual(
-            f.classes[f.leaf.path], "NSFileProtectionCompleteUntilFirstUserAuthentication")
+            f.classes[f.leafIdentity], "NSFileProtectionCompleteUntilFirstUserAuthentication")
         XCTAssertEqual(f.package.bookmark, saved)
         XCTAssertEqual(try Data(contentsOf: f.leaf), Data([1, 2, 3]))
         XCTAssertGreaterThan(f.resolutions, 2)
@@ -614,13 +614,13 @@ final class FoundationDownloadsTests: XCTestCase {
         ] {
             let f = try NativeProtectionFixture()
             defer { f.remove() }
-            f.classes[f.leaf.path] = protection
+            f.classes[f.leafIdentity] = protection
             // Directory B is preserved; regular-file policy is not extended to directories.
-            f.classes[f.root.path] = "NSFileProtectionCompleteUnlessOpen"
+            f.classes[f.rootIdentity] = "NSFileProtectionCompleteUnlessOpen"
             try f.strengthen()
             XCTAssertTrue(f.writes.isEmpty)
-            XCTAssertEqual(f.classes[f.leaf.path], protection)
-            XCTAssertEqual(f.classes[f.root.path], "NSFileProtectionCompleteUnlessOpen")
+            XCTAssertEqual(f.classes[f.leafIdentity], protection)
+            XCTAssertEqual(f.classes[f.rootIdentity], "NSFileProtectionCompleteUnlessOpen")
         }
     }
 
@@ -631,7 +631,7 @@ final class FoundationDownloadsTests: XCTestCase {
         ] {
             let f = try NativeProtectionFixture()
             defer { f.remove() }
-            f.classes[f.leaf.path] = protection == "missing" ? nil : protection
+            f.classes[f.leafIdentity] = protection == "missing" ? nil : protection
             XCTAssertThrowsError(try f.strengthen()) {
                 XCTAssertEqual($0 as? FoundationDownloadError, .nativeProtection)
             }
@@ -678,7 +678,7 @@ final class FoundationDownloadsTests: XCTestCase {
         } catch { XCTAssertTrue(error is CancellationError) }
         XCTAssertEqual(f.writes.count, 1)
         XCTAssertEqual(
-            f.classes[f.leaf.path], "NSFileProtectionCompleteUntilFirstUserAuthentication")
+            f.classes[f.leafIdentity], "NSFileProtectionCompleteUntilFirstUserAuthentication")
     }
 
     func testNativeProtectionRechecksChangedClassWithUnchangedResourceIdentity() throws {
@@ -697,7 +697,7 @@ final class FoundationDownloadsTests: XCTestCase {
                 try f.strengthen()
             }
             XCTAssertTrue(f.writes.isEmpty)
-            XCTAssertEqual(f.classes[f.leaf.path], changed)
+            XCTAssertEqual(f.classes[f.leafIdentity], changed)
             XCTAssertEqual(f.leafReads, changed == "NSFileProtectionCompleteUnlessOpen" ? 2 : 3)
         }
     }
@@ -708,8 +708,8 @@ final class FoundationDownloadsTests: XCTestCase {
         let proof = f.package.bookmark
         f.failure = .completeReadback
         try f.strengthen()
-        XCTAssertEqual(f.writes, [f.leaf.path])
-        XCTAssertEqual(f.classes[f.leaf.path], "NSFileProtectionComplete")
+        XCTAssertEqual(f.writes, [f.leafIdentity])
+        XCTAssertEqual(f.classes[f.leafIdentity], "NSFileProtectionComplete")
         XCTAssertEqual(f.package.bookmark, proof)
     }
 
@@ -719,6 +719,33 @@ final class FoundationDownloadsTests: XCTestCase {
         f.replaceRootAtResolution = 4  // The first descendant's proof gate.
         XCTAssertThrowsError(try f.strengthen())
         XCTAssertEqual(f.resolutions, 4)
+        XCTAssertEqual(f.leafReads, 0)
+        XCTAssertTrue(f.writes.isEmpty)
+    }
+
+    func testNativeProtectionTraversesRawAliasOnlyAfterSameResourceBinding() throws {
+        let f = try NativeProtectionFixture(aliased: true)
+        defer { f.remove() }
+        XCTAssertNotEqual(f.root.path, f.rootIdentity)
+        let proof = f.package.bookmark
+        try f.strengthen()
+        XCTAssertEqual(f.writes, [f.leafIdentity])
+        XCTAssertEqual(
+            f.classes[f.leafIdentity], "NSFileProtectionCompleteUntilFirstUserAuthentication")
+        // Retain the raw authority, not the traversal address.
+        XCTAssertEqual(f.package.nativeURL, f.root)
+        XCTAssertEqual(f.package.bookmark, proof)
+        XCTAssertGreaterThan(f.leafReads, 0)
+    }
+
+    func testNativeProtectionRejectsCanonicalAddressIdentityMismatchBeforeTargetRead() throws {
+        let f = try NativeProtectionFixture(aliased: true)
+        defer { f.remove() }
+        XCTAssertNotEqual(f.root.path, f.rootIdentity)
+        f.mismatchCanonicalRoot = true
+        XCTAssertThrowsError(try f.strengthen()) {
+            XCTAssertEqual($0 as? FoundationDownloadError, .nativeProtection)
+        }
         XCTAssertEqual(f.leafReads, 0)
         XCTAssertTrue(f.writes.isEmpty)
     }
@@ -5173,24 +5200,34 @@ nonisolated private final class NativeProtectionFixture: @unchecked Sendable {
     var resolutions = 0
     var replaceBeforeWrite = false
     var failure: Failure?
+    var rootIdentity: String { FoundationManagedPackageMetadata.canonical(root).path }
+    var leafIdentity: String { FoundationManagedPackageMetadata.canonical(leaf).path }
+    var mismatchCanonicalRoot = false
     var classAtMutationGate: String?
     var replaceRootAtResolution: Int?
     private(set) var leafReads = 0
     private var changed = false
 
-    init() throws {
+    init(aliased: Bool = false) throws {
         container = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        root = container.appendingPathComponent("allocation", isDirectory: true)
+        let parent =
+            aliased ? container.appendingPathComponent("alias", isDirectory: true) : container
+        root = parent.appendingPathComponent("allocation", isDirectory: true)
         leaf = root.appendingPathComponent("synthetic")
         outside = container.appendingPathComponent("outside")
         package = FoundationNativeDownloadPackage(
             nativeURL: root, bookmark: Data("immutable-completed-proof".utf8),
             sessionIdentifier: "synthetic", namespaceBookmark: Data("immutable-parent".utf8))
+        if aliased {
+            let actual = container.appendingPathComponent("real", isDirectory: true)
+            try FileManager.default.createDirectory(at: actual, withIntermediateDirectories: true)
+            try FileManager.default.createSymbolicLink(at: parent, withDestinationURL: actual)
+        }
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         try Data([1, 2, 3]).write(to: leaf)
         try Data([9]).write(to: outside)
-        classes[root.path] = "NSFileProtectionCompleteUntilFirstUserAuthentication"
-        classes[leaf.path] = "NSFileProtectionNone"
+        classes[rootIdentity] = "NSFileProtectionCompleteUntilFirstUserAuthentication"
+        classes[leafIdentity] = "NSFileProtectionNone"
     }
     func remove() { try? FileManager.default.removeItem(at: container) }
     func strengthen() throws {
@@ -5201,37 +5238,41 @@ nonisolated private final class NativeProtectionFixture: @unchecked Sendable {
                 return package.bookmark == self.package.bookmark ? self.root : nil
             },
             resources: { url in
+                let identity = FoundationManagedPackageMetadata.canonical(url).path
                 let attrs = try FileManager.default.attributesOfItem(atPath: url.path)
                 let type = attrs[.type] as? FileAttributeType
-                if url.path == self.leaf.path {
+                if identity == self.leafIdentity {
                     self.leafReads += 1
                     if self.leafReads == 2, let changed = self.classAtMutationGate {
-                        self.classes[url.path] = changed
+                        self.classes[identity] = changed
                     }
                 }
                 let replacement =
-                    (self.replaceBeforeWrite && self.leafReads > 1 && url.path == self.leaf.path)
+                    (self.replaceBeforeWrite && self.leafReads > 1 && identity == self.leafIdentity)
                     || (self.replaceRootAtResolution.map { self.resolutions >= $0 } == true
-                        && url.path == self.root.path)
-                return [
-                    .fileResourceIdentifierKey: (url.path + (replacement ? "-replaced" : ""))
-                        as NSString,
-                    .volumeIdentifierKey: "synthetic-volume" as NSString,
-                    .generationIdentifierKey: NSNumber(
-                        value: self.changed && url.path == self.leaf.path ? 2 : 1),
-                    .isDirectoryKey: type == .typeDirectory,
-                    .isRegularFileKey: type == .typeRegular,
-                    .isSymbolicLinkKey: type == .typeSymbolicLink,
-                ]
+                        && identity == self.rootIdentity)
+                    || (self.mismatchCanonicalRoot && url.path == self.rootIdentity)
+                // Use actual resource/volume identity for both raw and canonical aliases.
+                // Only the deliberate replacement and generation-failure seams alter it.
+                var values = try FoundationManagedPackageMetadata.resources(url)
+                if replacement { values[.fileResourceIdentifierKey] = "replacement" as NSString }
+                values[.generationIdentifierKey] = NSNumber(
+                    value: self.changed && identity == self.leafIdentity ? 2 : 1)
+                values[.isDirectoryKey] = type == .typeDirectory
+                values[.isRegularFileKey] = type == .typeRegular
+                values[.isSymbolicLinkKey] = type == .typeSymbolicLink
+                return values
             },
-            protection: { self.classes[$0.path] },
+            protection: { self.classes[FoundationManagedPackageMetadata.canonical($0).path] },
             setProtection: { url in
                 self.writes.append(url.path)
                 if self.failure != .ignored {
-                    self.classes[url.path] = "NSFileProtectionCompleteUntilFirstUserAuthentication"
+                    self.classes[FoundationManagedPackageMetadata.canonical(url).path] =
+                        "NSFileProtectionCompleteUntilFirstUserAuthentication"
                 }
                 if self.failure == .completeReadback {
-                    self.classes[url.path] = "NSFileProtectionComplete"
+                    self.classes[FoundationManagedPackageMetadata.canonical(url).path] =
+                        "NSFileProtectionComplete"
                 }
                 if self.failure == .throwAfterWrite { throw CocoaError(.fileWriteUnknown) }
                 if self.failure == .generation { self.changed = true }
