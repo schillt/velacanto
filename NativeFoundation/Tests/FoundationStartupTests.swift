@@ -10,6 +10,69 @@ import XCTest
 
 @MainActor
 final class FoundationStartupTests: XCTestCase {
+    func testAppModelRetainsInjectedPlaybackPreferencesDuringReadiness() async throws {
+        let suite = "StartupPlaybackPreferences-" + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(
+            FoundationStreamingQuality.aac128.rawValue,
+            forKey: FoundationPlaybackPreferences.streamingCellularQualityKey)
+        let preferences = FoundationPlaybackPreferences(defaults: defaults)
+        var preparations = 0
+        var restorations = 0
+        let model = FoundationAppModel(
+            prepareCaches: {
+                preparations += 1
+                return true
+            },
+            restoreAccount: { _ in restorations += 1 }, credentialDefaults: defaults,
+            playbackPreferences: preferences)
+        let readiness = await model.ensureReady()
+        XCTAssertEqual(readiness, .signedOut)
+        XCTAssertTrue(model.playbackPreferences === preferences)
+        XCTAssertEqual(preparations, 1)
+        XCTAssertEqual(restorations, 1)
+        XCTAssertEqual(model.playbackPreferences.streamingCellularQuality, .aac128)
+        model.playbackPreferences.setStreamingCellularQuality(.aac192)
+        XCTAssertEqual(
+            defaults.string(
+                forKey:
+                    FoundationPlaybackPreferences.streamingCellularQualityKey), "aac192")
+    }
+
+    #if DEBUG
+        func testTestingRuntimeUsesDisposablePreferencesAndDoesNotRestoreAnAccount() async throws {
+            guard ProcessInfo.processInfo.arguments.contains("-foundationTesting") else {
+                XCTFail("This isolated bootstrap check requires the existing test-host argument")
+                return
+            }
+            let suite = "StartupTestingRuntime-" + UUID().uuidString
+            let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+            defer { defaults.removePersistentDomain(forName: suite) }
+            defaults.set("aac192", forKey: FoundationPlaybackPreferences.streamingQualityKey)
+            defaults.set("data-protection-ready", forKey: FoundationAppModel.credentialBackendKey)
+            let model = FoundationAppRuntime.makeTestingModel(defaults: defaults)
+            XCTAssertEqual(model.playbackPreferences.streamingWiFiQuality, .aac192)
+            XCTAssertEqual(model.playbackPreferences.streamingCellularQuality, .aac192)
+            XCTAssertEqual(
+                defaults.string(
+                    forKey:
+                        FoundationPlaybackPreferences.streamingWiFiQualityKey), "aac192")
+            #if os(macOS)
+                XCTAssertFalse(model.awaitsCredentialUpgrade)
+                defaults.removeObject(forKey: FoundationAppModel.credentialBackendKey)
+                XCTAssertTrue(model.awaitsCredentialUpgrade)
+            #endif
+            let readiness = await model.ensureReady()
+            XCTAssertEqual(readiness, .unavailable)
+            XCTAssertTrue(model.isPreparingCaches)
+            XCTAssertFalse(model.cachesReady)
+            XCTAssertNil(model.library)
+            XCTAssertNil(model.player)
+            XCTAssertNil(model.downloads)
+            XCTAssertNil(model.librarySelection)
+        }
+    #endif
     #if os(iOS)
         func testPhoneRoutingDoesNotRecycleExistingDelegateConfiguration() {
             let existing = UISceneConfiguration(name: nil, sessionRole: .windowApplication)

@@ -71,13 +71,23 @@ struct VelacantoFoundationApp: App {
                 } else {
                     FoundationRootView(model: model)
                         .environment(\.foundationLocalLibrary, localLibrary)
-                        .task { await localLibrary.restore().value }
+                        .task {
+                            #if DEBUG
+                                guard !FoundationAppRuntime.isTesting else { return }
+                            #endif
+                            await localLibrary.restore().value
+                        }
                         .frame(minWidth: 320, minHeight: 480)
                 }
             #else
                 FoundationRootView(model: model)
                     .environment(\.foundationLocalLibrary, localLibrary)
-                    .task { await localLibrary.restore().value }
+                    .task {
+                        #if DEBUG
+                            guard !FoundationAppRuntime.isTesting else { return }
+                        #endif
+                        await localLibrary.restore().value
+                    }
                     #if os(macOS)
                         .frame(minWidth: 1080, minHeight: 640)
                     #else
@@ -104,7 +114,27 @@ struct VelacantoFoundationApp: App {
 /// Every application entry point uses this owner; readiness never creates a second player.
 @MainActor
 enum FoundationAppRuntime {
-    static let model = FoundationAppModel()
+    static let model: FoundationAppModel = {
+        #if DEBUG
+            if isTesting {
+                let defaults = UserDefaults(suiteName: "FoundationTesting." + UUID().uuidString)!
+                return makeTestingModel(defaults: defaults)
+            }
+        #endif
+        return FoundationAppModel()
+    }()
+
+    #if DEBUG
+        static var isTesting: Bool {
+            ProcessInfo.processInfo.arguments.contains("-foundationTesting")
+        }
+
+        static func makeTestingModel(defaults: UserDefaults) -> FoundationAppModel {
+            FoundationAppModel(
+                credentialDefaults: defaults,
+                playbackPreferences: FoundationPlaybackPreferences(defaults: defaults))
+        }
+    #endif
 }
 
 enum FoundationCredentialUpgradeError: Error {
@@ -218,8 +248,10 @@ final class FoundationAppModel: ObservableObject {
         credentialOperations: FoundationCredentials.Operations = .system,
         accountRetention: FoundationAccountRetention? = nil,
         credentialDefaults: UserDefaults = .standard,
-        publishAccount: ((FoundationSession, String) -> Void)? = nil
+        publishAccount: ((FoundationSession, String) -> Void)? = nil,
+        playbackPreferences: FoundationPlaybackPreferences? = nil
     ) {
+        self.playbackPreferences = playbackPreferences ?? FoundationPlaybackPreferences()
         self.prepareCaches =
             prepareCaches ?? {
                 await FoundationDisposableCachePolicy.shared.prepare(
@@ -245,7 +277,7 @@ final class FoundationAppModel: ObservableObject {
         @Published var profileName = ""
         @Published var profileImage: Image?
     #endif
-    let playbackPreferences = FoundationPlaybackPreferences()
+    let playbackPreferences: FoundationPlaybackPreferences
     private var policySubscriptions: Set<AnyCancellable> = []
     private var currentRetainedArtworkIdentity: String?
     private var currentArtworkLocalOnly = false

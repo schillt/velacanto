@@ -360,6 +360,183 @@ final class FoundationDownloadQualityTests: XCTestCase {
             duration: 180)
     }
 
+    private var nativeMetadata: String {
+        """
+        {"Id":"00000000000000000000000000000001","Type":"Audio","CanDownload":true,
+         "RunTimeTicks":1800000000,"MediaSources":[{
+          "Id":"00000000000000000000000000000003","Protocol":"File","RunTimeTicks":1800000000,
+          "MediaStreams":[{"Type":"Audio","Codec":"opus","Index":0}]}]}
+        """
+    }
+
+    private func nativeProposal(_ quality: FoundationDownloadQuality = .aac320) async throws
+        -> FoundationNativeDownloadProposal
+    {
+        let converted = try await proposalLibrary(metadata: nativeMetadata)
+            .convertedDownloadProposal(
+                for: proposalTrack, quality: quality)
+        var relative = URLComponents()
+        relative.path = "/Audio/\(proposalTrack.id)/master.m3u8"
+        relative.queryItems = try converted.plan.nativeQueryItems(deviceID: "fixture-device")
+        var request = converted.request
+        var tokenFree = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!
+        tokenFree.path = tokenFree.path.replacingOccurrences(
+            of: "/stream.m4a", with: "/master.m3u8")
+        tokenFree.queryItems = relative.queryItems
+        request.url = tokenFree.url
+        let native = try FoundationJellyfinLibrary.hlsURL(
+            relative.string!, itemID: proposalTrack.id, sourceID: converted.plan.sourceID,
+            serverSession: converted.plan.sessionID.uuidString, base: base,
+            token: "fixture-token", deviceID: "fixture-device")
+        return .init(
+            request: request, authenticatedMasterURL: native, expectedToken: "fixture-token",
+            expectedDeviceID: "fixture-device", cleanupRequest: converted.cleanupRequest,
+            plan: converted.plan, title: "Fixture", artwork: nil)
+    }
+
+    #if DEBUG
+        func testNativeDiagnosticErrorsExposeOnlyRecognizedScalarCodes() {
+            let secret = "https://private.invalid/Audio/private?ApiKey=private-token"
+            let nested = NSError(domain: NSOSStatusErrorDomain, code: -123456)
+            let underlying = NSError(
+                domain: "AVFoundationErrorDomain", code: -11800,
+                userInfo: [
+                    NSUnderlyingErrorKey: nested, NSLocalizedDescriptionKey: secret,
+                    NSURLErrorFailingURLErrorKey: URL(string: secret)!,
+                ])
+            let error = NSError(
+                domain: NSURLErrorDomain, code: -1005,
+                userInfo: [NSUnderlyingErrorKey: underlying, NSLocalizedDescriptionKey: secret])
+            let fields = FoundationNativeDownloadErrorFields.scalars(error)
+            XCTAssertEqual(
+                fields,
+                "domain=URL code=-1005 underlyingDomain=AVFoundation underlyingCode=-11800")
+            XCTAssertFalse(fields.contains("private"))
+            XCTAssertFalse(fields.contains("-123456"))
+            let unknown = NSError(
+                domain: secret, code: 987654,
+                userInfo: [NSUnderlyingErrorKey: NSError(domain: secret, code: 654321)])
+            XCTAssertEqual(
+                FoundationNativeDownloadErrorFields.scalars(unknown),
+                "domain=other code=0 underlyingDomain=other underlyingCode=0")
+            XCTAssertEqual(
+                FoundationNativeDownloadErrorFields.scalars(nested),
+                "domain=OSStatus code=-123456 underlyingDomain=other underlyingCode=0")
+        }
+    #endif
+
+    func testNativeHLSUsesTokenFreeModernPreflightAndExactLocalMediaAuthentication() async throws {
+        for quality in [FoundationDownloadQuality.aac320, .aac192, .aac128] {
+            let proposal = try await nativeProposal(quality)
+            XCTAssertNil(proposal.request.value(forHTTPHeaderField: "X-Emby-Token"))
+            XCTAssertTrue(
+                proposal.request.value(forHTTPHeaderField: "Authorization")?.hasPrefix(
+                    "MediaBrowser ") == true)
+            XCTAssertTrue(
+                proposal.request.value(forHTTPHeaderField: "Authorization")?.contains(
+                    "Token=\"fixture-token\"") == true)
+            XCTAssertFalse(proposal.request.url!.absoluteString.contains("fixture-token"))
+            let native = try proposal.validatedNativeMasterURL()
+            let components = try XCTUnwrap(
+                URLComponents(url: native, resolvingAgainstBaseURL: false))
+            XCTAssertEqual(components.path, "/jellyfin/Audio/\(proposalTrack.id)/master.m3u8")
+            XCTAssertEqual(
+                components.queryItems?.filter { $0.name == "ApiKey" },
+                [.init(name: "ApiKey", value: "fixture-token")])
+            XCTAssertEqual(
+                components.queryItems?.filter { $0.name != "ApiKey" },
+                try proposal.plan.nativeQueryItems(deviceID: "fixture-device"))
+            // Preflight trusts only token-free same-origin references. The credential
+            // URL is locally generated for the native task, never taken from a playlist.
+            XCTAssertNoThrow(
+                try FoundationNativeDownloadTransport.safeResource(
+                    "main.m3u8?SegmentContainer=mp4", relativeTo: proposal.request.url!))
+            for reference in [
+                "main.m3u8?ApiKey=fixture-token", "https://foreign.invalid/main.m3u8",
+            ] {
+                XCTAssertThrowsError(
+                    try FoundationNativeDownloadTransport.safeResource(
+                        reference, relativeTo: proposal.request.url!))
+            }
+        }
+    }
+
+    func testNativeMediaAuthenticationRejectsOriginPathCredentialAndPlanDrift() async throws {
+        let proposal = try await nativeProposal()
+        func modified(_ change: (inout URLComponents) -> Void) throws -> URL {
+            var components = try XCTUnwrap(
+                URLComponents(
+                    url: proposal.authenticatedMasterURL, resolvingAgainstBaseURL: false))
+            change(&components)
+            return try XCTUnwrap(components.url)
+        }
+        func validate(_ url: URL, request: URLRequest? = nil) throws {
+            let changed = FoundationNativeDownloadProposal(
+                request: request ?? proposal.request, authenticatedMasterURL: url,
+                expectedToken: proposal.expectedToken, expectedDeviceID: proposal.expectedDeviceID,
+                cleanupRequest: proposal.cleanupRequest, plan: proposal.plan, title: "Fixture",
+                artwork: nil)
+            _ = try changed.validatedNativeMasterURL()
+        }
+        let invalid = try [
+            modified { $0.host = "foreign.invalid" },
+            modified { $0.scheme = "http" },
+            modified { $0.percentEncodedPath = "/Audio/other/master.m3u8" },
+            modified { $0.queryItems?.append(.init(name: "ApiKey", value: "fixture-token")) },
+            modified { $0.queryItems?.append(.init(name: "api_key", value: "fixture-token")) },
+            modified { $0.queryItems?.append(.init(name: "Authorization", value: "untrusted")) },
+            modified {
+                $0.queryItems = $0.queryItems?.map {
+                    $0.name == "ApiKey" ? .init(name: "ApiKey", value: "other") : $0
+                }
+            },
+            modified { $0.queryItems = $0.queryItems?.filter { $0.name != "ApiKey" } },
+        ]
+        for url in invalid { XCTAssertThrowsError(try validate(url)) }
+        var legacy = proposal.request
+        legacy.setValue(nil, forHTTPHeaderField: "Authorization")
+        legacy.setValue("fixture-token", forHTTPHeaderField: "X-Emby-Token")
+        XCTAssertThrowsError(try validate(proposal.authenticatedMasterURL, request: legacy))
+        var wrongHeader = proposal.request
+        wrongHeader.setValue("MediaBrowser Token=\"other\"", forHTTPHeaderField: "Authorization")
+        XCTAssertThrowsError(try validate(proposal.authenticatedMasterURL, request: wrongHeader))
+        var credentialed = proposal.request
+        var source = try XCTUnwrap(
+            URLComponents(url: credentialed.url!, resolvingAgainstBaseURL: false))
+        source.queryItems?.append(.init(name: "ApiKey", value: "server-supplied"))
+        credentialed.url = source.url
+        XCTAssertThrowsError(try validate(proposal.authenticatedMasterURL, request: credentialed))
+        // Even matching drift in both URLs cannot change the authorized conversion plan.
+        for key in ["AudioBitRate", "PlaySessionId", "MediaSourceId", "DeviceId"] {
+            let changed = try modified { components in
+                components.queryItems = components.queryItems?.map {
+                    $0.name == key ? .init(name: key, value: "changed") : $0
+                }
+            }
+            var request = proposal.request
+            var clean = try XCTUnwrap(URLComponents(url: changed, resolvingAgainstBaseURL: false))
+            clean.queryItems?.removeAll { $0.name == "ApiKey" }
+            request.url = clean.url
+            XCTAssertThrowsError(try validate(changed, request: request))
+        }
+    }
+
+    #if os(iOS)
+        func testActualNativeProposalRetainsConvertedModernHeaderAndProxyBase() async throws {
+            let proposal = try await proposalLibrary(metadata: nativeMetadata)
+                .nativeDownloadProposal(
+                    for: proposalTrack, quality: .aac320, allowsCellular: false)
+            XCTAssertNil(proposal.request.value(forHTTPHeaderField: "X-Emby-Token"))
+            XCTAssertTrue(
+                proposal.request.value(forHTTPHeaderField: "Authorization")?.contains(
+                    "Token=\"fixture-token\"") == true)
+            XCTAssertFalse(proposal.request.url!.absoluteString.contains("fixture-token"))
+            XCTAssertEqual(try proposal.validatedNativeMasterURL(), proposal.authenticatedMasterURL)
+            XCTAssertEqual(
+                proposal.request.url?.path, "/jellyfin/Audio/\(proposalTrack.id)/master.m3u8")
+        }
+    #endif
+
     private func convertedFixture() throws -> (root: URL, temporary: URL, destination: URL) {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

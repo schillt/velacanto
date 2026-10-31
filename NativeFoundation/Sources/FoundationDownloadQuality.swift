@@ -102,6 +102,15 @@ nonisolated struct FoundationDownloadConversionPlan: Sendable {
         ]
     }
 
+    func nativeQueryItems(deviceID: String) throws -> [URLQueryItem] {
+        try queryItems(deviceID: deviceID) + [
+            URLQueryItem(name: "Container", value: "mp4"),
+            URLQueryItem(name: "SegmentContainer", value: "mp4"),
+            URLQueryItem(name: "Context", value: "Static"),
+            URLQueryItem(name: "SegmentLength", value: "6"),
+        ]
+    }
+
     /// Exact path and complete query contract. Unknown keys, credentials, missing keys,
     /// duplicate keys (including casing aliases) and changed identities all fail closed.
     func accepts(_ request: URLRequest, base: URL, itemID: String, deviceID: String) -> Bool {
@@ -175,8 +184,44 @@ nonisolated struct FoundationDownloadConversionPlan: Sendable {
 /// Account-authorized, transient native request. No request/header enters persisted metadata.
 nonisolated struct FoundationNativeDownloadProposal: Sendable {
     let request: URLRequest
+    /// Transient authenticated media boundary, using the existing Jellyfin HLS route.
+    /// Neither this URL nor its credential is part of the app's persisted receipt/manifest.
+    /// AVFoundation's private background-session storage is a separate OS boundary.
+    let authenticatedMasterURL: URL
+    let expectedToken: String
+    let expectedDeviceID: String
     let cleanupRequest: URLRequest
     let plan: FoundationDownloadConversionPlan
     let title: String
     let artwork: Data?
+
+    func validatedNativeMasterURL() throws -> URL {
+        let credentialKeys = ["api_key", "apikey", "token", "access_token", "authorization"]
+        guard plan.quality.aacBitrate != nil, request.httpMethod == "GET",
+            request.httpBody == nil, request.httpBodyStream == nil,
+            request.value(forHTTPHeaderField: "Authorization")?.hasPrefix("MediaBrowser ") == true,
+            request.value(forHTTPHeaderField: "Authorization")?.contains(
+                "Token=\"\(expectedToken)\"") == true,
+            request.value(forHTTPHeaderField: "X-Emby-Token") == nil,
+            !expectedToken.isEmpty,
+            expectedToken.rangeOfCharacter(from: .controlCharacters) == nil,
+            let source = request.url,
+            let a = URLComponents(url: source, resolvingAgainstBaseURL: false),
+            let b = URLComponents(url: authenticatedMasterURL, resolvingAgainstBaseURL: false),
+            a.scheme == "https", b.scheme == a.scheme, a.host != nil, b.host == a.host,
+            a.port == b.port, a.percentEncodedPath == b.percentEncodedPath,
+            a.user == nil, a.password == nil, a.fragment == nil,
+            b.user == nil, b.password == nil, b.fragment == nil,
+            a.percentEncodedPath.hasSuffix("/master.m3u8"),
+            !(a.queryItems ?? []).contains(where: { credentialKeys.contains($0.name.lowercased()) }
+            ),
+            a.queryItems == (try? plan.nativeQueryItems(deviceID: expectedDeviceID))
+        else { throw FoundationDownloadError.response }
+        let nativeQuery = b.queryItems ?? []
+        let keys = nativeQuery.filter { credentialKeys.contains($0.name.lowercased()) }
+        guard keys.count == 1, keys[0].name == "ApiKey", keys[0].value == expectedToken,
+            nativeQuery.filter({ $0.name != "ApiKey" }) == (a.queryItems ?? [])
+        else { throw FoundationDownloadError.response }
+        return authenticatedMasterURL
+    }
 }

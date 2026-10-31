@@ -2338,26 +2338,29 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
                 url: converted.request.url!, resolvingAgainstBaseURL: false)!
             components.path = components.path.replacingOccurrences(
                 of: "/stream.m4a", with: "/master.m3u8")
-            components.queryItems =
-                try converted.plan.queryItems(deviceID: session.deviceID) + [
-                    URLQueryItem(name: "Container", value: "mp4"),
-                    URLQueryItem(name: "SegmentContainer", value: "mp4"),
-                    URLQueryItem(name: "Context", value: "Static"),
-                    URLQueryItem(name: "SegmentLength", value: "6"),
-                ]
+            components.queryItems = try converted.plan.nativeQueryItems(deviceID: session.deviceID)
             guard let url = components.url else { throw FoundationDownloadError.response }
-            var request = URLRequest(url: url)
-            request.httpMethod = "GET"
-            // A documented nonreserved session header, not AVURLAssetHTTPHeaderFieldsKey
-            // or credential-bearing playlist URLs. Nested propagation needs real acceptance.
-            request.setValue(session.accessToken, forHTTPHeaderField: "X-Emby-Token")
-            request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
+            // Preflight uses the SAME modern MediaBrowser Authorization as the verified
+            // converted proposal; legacy X-Emby-Token is disabled by default in v12.
+            var request = converted.request
+            request.url = url
+            var route = URLComponents()
+            route.path = "/Audio/\(item.id)/master.m3u8"
+            route.queryItems = components.queryItems
+            let authenticatedMaster = try Self.hlsURL(
+                route.string ?? "", itemID: item.id, sourceID: converted.plan.sourceID,
+                serverSession: converted.plan.sessionID.uuidString,
+                base: session.serverURL, token: session.accessToken, deviceID: session.deviceID)
             let artwork = try? await downloadArtwork(
                 for: item.catalogArtworkItem, size: 640, allowsCellular: allowsCellular)
             try Task.checkCancellation()
-            return FoundationNativeDownloadProposal(
-                request: request, cleanupRequest: converted.cleanupRequest,
+            let proposal = FoundationNativeDownloadProposal(
+                request: request, authenticatedMasterURL: authenticatedMaster,
+                expectedToken: session.accessToken, expectedDeviceID: session.deviceID,
+                cleanupRequest: converted.cleanupRequest,
                 plan: converted.plan, title: item.title, artwork: artwork)
+            _ = try proposal.validatedNativeMasterURL()
+            return proposal
         #endif
     }
 
