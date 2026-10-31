@@ -205,9 +205,7 @@ struct FoundationPlaylistEditor: View {
                     #endif
                 }
                 .modifier(FoundationPlaylistFeedback(operation: operation))
-                .confirmationDialog(
-                    "Save playlist changes?", isPresented: $confirmSave, titleVisibility: .visible
-                ) {
+                .alert("Save playlist changes?", isPresented: $confirmSave) {
                     Button("Save Changes", systemImage: "checkmark") { saveDetails() }
                     Button("Keep Editing", role: .cancel) {}
                 } message: {
