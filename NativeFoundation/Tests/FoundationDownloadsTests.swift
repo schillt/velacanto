@@ -778,6 +778,33 @@ final class FoundationDownloadsTests: XCTestCase {
         XCTAssertEqual(saved.owners.first?.paused, true)
     }
 
+    func testIncompleteNativeHLSValidationCannotPublishReady() async throws {
+        let track = item("incomplete-native-rendition")
+        let storageRoot = try root()
+        let scope = "native-rendition-failure"
+        let manager = FoundationDownloads(
+            scope: scope, library: DownloadsLibrary(tracks: [track]), root: storageRoot,
+            monitorConnectivity: false, requestedQuality: { .aac320 },
+            systemManagedDownloads: { true },
+            nativeTransfer: { proposal, _, _, _ in
+                _ = try await FoundationConvertedDownload.inspectNativePackage(
+                    storageRoot, plan: proposal.plan,
+                    load: { _ in .init(completeOffline: false, duration: 1, variants: []) })
+                XCTFail("Incomplete HLS validation returned success")
+                return .init(name: "never-ready.movpkg", bytes: 1, digest: "")
+            })
+        defer { manager.invalidate() }
+        manager.updateConnectivity(isAllowed: true)
+        manager.download(track)
+        try await waitUntil { manager.owners.first?.state == .failed }
+        XCTAssertFalse(manager.isReady(track))
+        let saved = try FoundationDownloadStorage.load(
+            directory: FoundationDownloadStorage.directory(scope: scope, root: storageRoot))
+        XCTAssertNil(saved.files[track.id])
+        XCTAssertEqual(saved.owners.first?.requestedQuality, .aac320)
+        XCTAssertEqual(saved.owners.first?.paused, true)
+    }
+
     private func firstCompletionFixture() throws -> (
         store: FoundationNativeAllocationStore, proof: NativeFirstCompletionProof,
         delegate: FoundationNativeDownloadDelegate, session: URLSession, task: URLSessionTask

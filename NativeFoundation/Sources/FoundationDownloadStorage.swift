@@ -76,6 +76,8 @@ nonisolated struct FoundationDownloadManifest: Codable, Sendable {
         // Nil means a historical/original file. Requested quality belongs to the owner.
         var convertedRendition: FoundationConvertedDownloadRendition? = nil
         var nativePackage: FoundationNativeDownloadPackage? = nil
+        // Native HLS records declaration/intent, never fabricated file-reader measurements.
+        var nativeRendition: FoundationNativeDownloadRendition? = nil
     }
     struct Artwork: Codable, Sendable {
         let item: FoundationStoredDownloadItem

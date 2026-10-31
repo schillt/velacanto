@@ -10,6 +10,15 @@ nonisolated struct FoundationConvertedDownloadRendition: Codable, Equatable, Sen
     let duration: Double
 }
 
+/// Native HLS verification records requested intent and declared codec metadata.
+/// It never claims file-reader sample rate/channels or a measured encoded bitrate.
+nonisolated struct FoundationNativeDownloadRendition: Codable, Equatable, Sendable {
+    let requestedQuality: FoundationDownloadQuality
+    let declaredAudioCodec: String
+    let container: String
+    let duration: Double
+}
+
 nonisolated struct FoundationVerifiedConvertedDownload: Sendable {
     let bytes: Int64
     let digest: String
@@ -235,9 +244,35 @@ nonisolated enum FoundationConvertedDownload {
         }
     }
 
-    static func inspectNativePackage(_ url: URL, plan: FoundationDownloadConversionPlan)
-        async throws -> FoundationConvertedDownloadRendition
-    {
+    struct NativeVariant: Sendable {
+        let declaredAudioFormats: [UInt32]
+        let declaresVideo: Bool
+    }
+    struct NativePackageSnapshot: Sendable {
+        let completeOffline: Bool
+        let duration: Double
+        let variants: [NativeVariant]
+    }
+    typealias NativePackageLoad = @Sendable (AVURLAsset) async throws -> NativePackageSnapshot
+
+    /// A completed native task plus the caller's finite-VOD/owned/protected allocation
+    /// is validated through HLS APIs, not the unrelated file-only packet reader.
+    static func inspectNativePackage(
+        _ url: URL, plan: FoundationDownloadConversionPlan,
+        load: NativePackageLoad = { asset in
+            let complete = asset.assetCache?.isPlayableOffline == true
+            let duration = try await asset.load(.duration).seconds
+            let variants = try await asset.load(.variants)
+            return NativePackageSnapshot(
+                completeOffline: complete, duration: duration,
+                variants: variants.prefix(2).map { variant in
+                    NativeVariant(
+                        declaredAudioFormats: variant.audioAttributes?.formatIDs.map(\.uint32Value)
+                            ?? [],
+                        declaresVideo: variant.videoAttributes != nil)
+                })
+        }
+    ) async throws -> FoundationNativeDownloadRendition {
         let asset = AVURLAsset(
             url: url,
             options: [
@@ -248,10 +283,58 @@ nonisolated enum FoundationConvertedDownload {
                 AVURLAssetAllowsExpensiveNetworkAccessKey: false,
                 AVURLAssetAllowsConstrainedNetworkAccessKey: false,
             ])
-        let rendition = try await inspectCompressedAsset(asset, plan: plan)
-        return .init(
-            container: "hls-fmp4", codec: rendition.codec, sampleRate: rendition.sampleRate,
-            channels: rendition.channels, duration: rendition.duration)
+        #if DEBUG
+            enum Stage: String { case snapshot, intent, cache, duration, variant, codec }
+            var stage = Stage.snapshot
+            var variantCount = -1
+            var complete = false
+        #endif
+        do {
+            try Task.checkCancellation()
+            let snapshot = try await load(asset)
+            #if DEBUG
+                stage = .intent
+                variantCount = min(2, snapshot.variants.count)
+                complete = snapshot.completeOffline
+            #endif
+            guard plan.quality.aacBitrate != nil else { throw FoundationDownloadError.incomplete }
+            #if DEBUG
+                stage = .cache
+            #endif
+            guard snapshot.completeOffline else { throw FoundationDownloadError.incomplete }
+            #if DEBUG
+                stage = .duration
+            #endif
+            let tolerance = min(1, max(0.1, plan.duration * 0.001))
+            guard snapshot.duration.isFinite, abs(snapshot.duration - plan.duration) <= tolerance
+            else { throw FoundationDownloadError.incomplete }
+            #if DEBUG
+                stage = .variant
+            #endif
+            guard snapshot.variants.count == 1, let variant = snapshot.variants.first,
+                !variant.declaresVideo
+            else { throw FoundationDownloadError.incomplete }
+            #if DEBUG
+                stage = .codec
+            #endif
+            guard variant.declaredAudioFormats == [kAudioFormatMPEG4AAC] else {
+                throw FoundationDownloadError.incomplete
+            }
+            try Task.checkCancellation()
+            return .init(
+                requestedQuality: plan.quality, declaredAudioCodec: "aac", container: "hls",
+                duration: snapshot.duration)
+        } catch {
+            #if DEBUG
+                if ProcessInfo.processInfo.arguments.contains("-diagnosticNativeDownload") {
+                    FoundationJournal.shared.record(
+                        "download.native stage=rendition.native substage=\(stage.rawValue) outcome=failed completeOffline=\(complete ? 1 : 0) variants=\(variantCount) "
+                            + FoundationNativeDownloadErrorFields.scalars(error))
+                }
+            #endif
+            if Task.isCancelled || error is CancellationError { throw CancellationError() }
+            throw FoundationDownloadError.incomplete
+        }
     }
 
     private static func inspectCompressedAsset(

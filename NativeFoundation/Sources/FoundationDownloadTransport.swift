@@ -467,6 +467,13 @@ nonisolated enum FoundationNativeDownloadTransport {
                 guard duration.isFinite, abs(duration - proposal.plan.duration) <= tolerance else {
                     throw FoundationDownloadError.incomplete
                 }
+                #if DEBUG
+                    stage = "rendition"
+                #endif
+                let rendition = try await FoundationConvertedDownload.inspectNativePackage(
+                    owned, plan: proposal.plan)
+                // Public HLS metadata loading precedes the final security pass, so any
+                // OS metadata created during validation is covered by the same leaf audit.
                 // Verify all regular payload files and allocated bytes; root metadata alone
                 // is insufficient. Only documented security metadata may be strengthened;
                 // never lower protection or rewrite package payload/layout.
@@ -475,11 +482,6 @@ nonisolated enum FoundationNativeDownloadTransport {
                 #endif
                 try strengthenAllocationProtection(package)
                 let bytes = try protectedAllocationBytes(owned)
-                #if DEBUG
-                    stage = "rendition"
-                #endif
-                let rendition = try await FoundationConvertedDownload.inspectNativePackage(
-                    owned, plan: proposal.plan)
                 try Task.checkCancellation()
                 #if DEBUG
                     stage = "conversionCleanup"
@@ -494,7 +496,7 @@ nonisolated enum FoundationNativeDownloadTransport {
                 #endif
                 return .init(
                     name: UUID().uuidString + ".movpkg", bytes: bytes, digest: "",
-                    convertedRendition: rendition, nativePackage: package)
+                    nativePackage: package, nativeRendition: rendition)
             } catch {
                 task.cancel()
                 // No raw AV/HTTP error, header, URL or server response reaches product diagnostics.

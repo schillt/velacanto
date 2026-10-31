@@ -899,6 +899,104 @@ final class FoundationDownloadQualityTests: XCTestCase {
         } catch { XCTAssertEqual(error as? FoundationDownloadError, .incomplete) }
     }
 
+    func testNativeHLSValidationRecordsRequestedQualityAndDeclarationWithoutFileMeasurements()
+        async throws
+    {
+        let fixture = try convertedFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        for quality in [FoundationDownloadQuality.aac128, .aac192, .aac320] {
+            let plan = try FoundationDownloadConversionPlan(
+                quality: quality, duration: 1, sourceID: "fixture-source", audioStreamIndex: 0)
+            let rendition = try await FoundationConvertedDownload.inspectNativePackage(
+                fixture.root, plan: plan,
+                load: { asset in
+                    XCTAssertEqual(asset.url, fixture.root)
+                    return .init(
+                        completeOffline: true, duration: 1,
+                        variants: [
+                            .init(
+                                declaredAudioFormats: [kAudioFormatMPEG4AAC], declaresVideo: false)
+                        ])
+                })
+            XCTAssertEqual(rendition.requestedQuality, quality)
+            XCTAssertEqual(rendition.declaredAudioCodec, "aac")
+            XCTAssertEqual(rendition.container, "hls")
+            let file = FoundationDownloadManifest.File(
+                name: "synthetic.movpkg", bytes: 1, digest: "",
+                nativePackage: .init(
+                    nativeURL: fixture.root, bookmark: Data([1]), sessionIdentifier: "synthetic"),
+                nativeRendition: rendition)
+            let encoded = try JSONEncoder().encode(file)
+            let decoded = try JSONDecoder().decode(
+                FoundationDownloadManifest.File.self, from: encoded)
+            XCTAssertEqual(decoded.nativeRendition, rendition)
+            XCTAssertNil(decoded.convertedRendition)
+            let json = String(decoding: encoded, as: UTF8.self)
+            XCTAssertFalse(json.contains("sampleRate"))
+            XCTAssertFalse(json.contains("channels"))
+            let legacy = FoundationDownloadManifest.File(
+                name: "legacy.flac", bytes: 1, digest: "legacy")
+            XCTAssertNil(
+                try JSONDecoder().decode(
+                    FoundationDownloadManifest.File.self, from: JSONEncoder().encode(legacy)
+                ).nativeRendition)
+        }
+    }
+
+    func testNativeHLSValidationRejectsIncompleteOrAmbiguousDeclaredRendition() async throws {
+        let fixture = try convertedFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        typealias Snapshot = FoundationConvertedDownload.NativePackageSnapshot
+        typealias Variant = FoundationConvertedDownload.NativeVariant
+        let audio = Variant(declaredAudioFormats: [kAudioFormatMPEG4AAC], declaresVideo: false)
+        let plan = try FoundationDownloadConversionPlan(
+            quality: .aac320, duration: 1, sourceID: "fixture-source", audioStreamIndex: 0)
+        let invalid: [Snapshot] = [
+            .init(completeOffline: false, duration: 1, variants: [audio]),
+            .init(completeOffline: true, duration: 2, variants: [audio]),
+            .init(completeOffline: true, duration: .nan, variants: [audio]),
+            .init(completeOffline: true, duration: 1, variants: []),
+            .init(completeOffline: true, duration: 1, variants: [audio, audio]),
+            .init(
+                completeOffline: true, duration: 1,
+                variants: [.init(declaredAudioFormats: [kAudioFormatMPEG4AAC], declaresVideo: true)]
+            ),
+            .init(
+                completeOffline: true, duration: 1,
+                variants: [
+                    .init(declaredAudioFormats: [kAudioFormatMPEGLayer3], declaresVideo: false)
+                ]),
+            .init(
+                completeOffline: true, duration: 1,
+                variants: [.init(declaredAudioFormats: [], declaresVideo: false)]),
+        ]
+        for snapshot in invalid {
+            do {
+                _ = try await FoundationConvertedDownload.inspectNativePackage(
+                    fixture.root, plan: plan, load: { _ in snapshot })
+                XCTFail("Invalid native evidence was accepted")
+            } catch { XCTAssertEqual(error as? FoundationDownloadError, .incomplete) }
+        }
+    }
+
+    func testNativeHLSValidationPreservesCancellationAndFailsClosedOnMetadataError() async throws {
+        let fixture = try convertedFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let plan = try FoundationDownloadConversionPlan(
+            quality: .aac192, duration: 1, sourceID: "fixture-source", audioStreamIndex: 0)
+        do {
+            _ = try await FoundationConvertedDownload.inspectNativePackage(
+                fixture.root, plan: plan, load: { _ in throw CancellationError() })
+            XCTFail("Cancellation returned verified metadata")
+        } catch { XCTAssertTrue(error is CancellationError) }
+        do {
+            _ = try await FoundationConvertedDownload.inspectNativePackage(
+                fixture.root, plan: plan,
+                load: { _ in throw NSError(domain: AVFoundationErrorDomain, code: -11800) })
+            XCTFail("Unavailable native metadata was accepted")
+        } catch { XCTAssertEqual(error as? FoundationDownloadError, .incomplete) }
+    }
+
     func testFreshAuthorizedProposalIsHeaderAuthenticatedAndDoesNotStartTransfer() async throws {
         let proposal = try await proposalLibrary().convertedDownloadProposal(
             for: proposalTrack, quality: .aac128)
