@@ -107,6 +107,8 @@ struct FoundationPlaylistEditor: View {
     @State private var updatedPlaylist: FoundationItem?
     @State private var addingSongs = false
     @State private var addQuery = ""
+    @State private var addResultKind: FoundationItem.Kind = .track
+    @State private var addVisibleCount = 12
     @State private var addRevision = 0
     @State private var addedSelection: [FoundationItem] = []
     @StateObject private var addModel = FoundationBrowseModel()
@@ -161,7 +163,9 @@ struct FoundationPlaylistEditor: View {
     var body: some View {
         NavigationStack {
             managerSurface
-                .navigationTitle("Manage Playlist")
+                #if os(iOS)
+                    .navigationTitle("Manage Playlist")
+                #endif
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) {
                         #if os(macOS)
@@ -223,6 +227,7 @@ struct FoundationPlaylistEditor: View {
         .modifier(FoundationPlaylistSheetSize())
         #if os(macOS)
             .background { FoundationPlaylistSheetActivation().frame(width: 0, height: 0) }
+            .sheet(isPresented: $addingSongs) { macAddMusicSheet }
         #endif
         .presentationBackground(.ultraThinMaterial)
         .interactiveDismissDisabled(dirty || operation.isPending)
@@ -258,16 +263,18 @@ struct FoundationPlaylistEditor: View {
             }
         }
         .onChange(of: entries.map(\.mutationID)) { _, ids in selection.formIntersection(ids) }
+        .onChange(of: addResultKind) { _, _ in addVisibleCount = 12 }
         .onChange(of: addQuery) { _, _ in
             addCollection = nil
             addModel.clearRetainedData()
             addAlbums.clearRetainedData()
             addArtists.clearRetainedData()
             addRevision = 0
+            addVisibleCount = 12
         }
         .task(
             id:
-                "\(library.catalogScopeID)-\(addingSongs)-\(addQuery)-\(addCollection?.sharedArtworkIdentity ?? "search")-\(addRevision)-\(connectivity.localOnly)"
+                "\(library.catalogScopeID)-\(addResultKind)-\(addingSongs)-\(addQuery)-\(addCollection?.sharedArtworkIdentity ?? "search")-\(addRevision)-\(connectivity.localOnly)"
         ) {
             guard addingSongs, !connectivity.localOnly else { return }
             if addCollection == nil, addSearchTerm.isEmpty { addSearchFocused = true }
@@ -287,21 +294,31 @@ struct FoundationPlaylistEditor: View {
                         return try await library.tracks(artistID: collection.id, startIndex: offset)
                     }
                 } else {
-                    // Three explicit typed result groups; one bounded page per group.
-                    await addModel.loadPending {
-                        try await library.search(
-                            query: term, kind: .track, startIndex: $0, limit: 12)
-                    }
-                    try Task.checkCancellation()
-                    await addAlbums.loadPending {
-                        try await library.search(
-                            query: term, kind: .album, startIndex: $0, limit: 12)
-                    }
-                    try Task.checkCancellation()
-                    await addArtists.loadPending {
-                        try await library.search(
-                            query: term, kind: .artist, startIndex: $0, limit: 12)
-                    }
+                    #if os(macOS)
+                        let model =
+                            addResultKind == .track
+                            ? addModel : addResultKind == .album ? addAlbums : addArtists
+                        await model.loadPending {
+                            try await library.search(
+                                query: term, kind: addResultKind, startIndex: $0, limit: 12)
+                        }
+                    #else
+                        // Three explicit typed result groups; one bounded page per group.
+                        await addModel.loadPending {
+                            try await library.search(
+                                query: term, kind: .track, startIndex: $0, limit: 12)
+                        }
+                        try Task.checkCancellation()
+                        await addAlbums.loadPending {
+                            try await library.search(
+                                query: term, kind: .album, startIndex: $0, limit: 12)
+                        }
+                        try Task.checkCancellation()
+                        await addArtists.loadPending {
+                            try await library.search(
+                                query: term, kind: .artist, startIndex: $0, limit: 12)
+                        }
+                    #endif
                 }
             } catch {}
         }
@@ -309,22 +326,70 @@ struct FoundationPlaylistEditor: View {
 
     private var playlistOptions: some View {
         Menu("Playlist Options", systemImage: "ellipsis") {
-            Button("Delete Playlist", systemImage: "trash", role: .destructive) {
-                confirmDelete = true
-            }
-            .disabled(
-                !loaded || connectivity.localOnly || permissions?.canDelete != true
-                    || operation.isPending)
+            deletePlaylistButton
         }
         .labelStyle(.iconOnly)
         .accessibilityIdentifier("playlist-manager-options")
     }
 
+    private var deletePlaylistButton: some View {
+        Button("Delete Playlist", systemImage: "trash", role: .destructive) {
+            confirmDelete = true
+        }
+        .disabled(
+            !loaded || connectivity.localOnly || permissions?.canDelete != true
+                || operation.isPending
+        )
+        .accessibilityIdentifier("playlist-manager-delete")
+    }
+
+    #if os(macOS)
+        private var macAddMusicSheet: some View {
+            VStack(alignment: .leading, spacing: 16) {
+                HStack {
+                    Label("Add Music", systemImage: "magnifyingglass").font(.title2.bold())
+                    Spacer()
+                    Button("Close", systemImage: "xmark") { addingSongs = false }
+                        .disabled(operation.isPending)
+                }
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 16) { addSection }
+                }
+                if operation.isPending {
+                    HStack {
+                        ProgressView().controlSize(.small)
+                        Text("Updating playlist…")
+                        Spacer()
+                        Button("Cancel Request") { operation.cancel() }
+                    }
+                } else if !operation.succeeded, let message = operation.message {
+                    HStack {
+                        Text(message).foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Retry", systemImage: "arrow.clockwise") {
+                            operation.run { try await refresh() }
+                        }.disabled(connectivity.localOnly)
+                    }
+                } else if !addSummary.isEmpty {
+                    Text(addSummary).foregroundStyle(.secondary)
+                }
+            }
+            .padding(24)
+            .frame(minWidth: 500, idealWidth: 560, minHeight: 440, idealHeight: 560)
+            .background { FoundationPlaylistSheetActivation().frame(width: 0, height: 0) }
+            .presentationBackground(.ultraThinMaterial)
+            .interactiveDismissDisabled(operation.isPending)
+            .onDisappear { addSearchFocused = false }
+        }
+    #endif
+
     @ViewBuilder private var managerContents: some View {
         detailsSection
         if showingCovers { coverSection }
         addMusicDisclosure
-        if addingSongs { addSection.transition(.opacity) }
+        #if os(iOS)
+            if addingSongs { addSection.transition(.opacity) }
+        #endif
         songsSection
     }
 
@@ -342,6 +407,7 @@ struct FoundationPlaylistEditor: View {
                         addAlbums.clearRetainedData()
                         addArtists.clearRetainedData()
                         addRevision = 0
+                        addVisibleCount = 12
                         addingSongs = true
                     }
 
@@ -351,7 +417,9 @@ struct FoundationPlaylistEditor: View {
                     Label("Add Songs", systemImage: "plus.circle")
                     Spacer()
                     Image(systemName: "chevron.right")
-                        .rotationEffect(.degrees(addingSongs ? 90 : 0))
+                        #if os(iOS)
+                            .rotationEffect(.degrees(addingSongs ? 90 : 0))
+                        #endif
                         .foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity, minHeight: 36, alignment: .leading)
@@ -359,10 +427,14 @@ struct FoundationPlaylistEditor: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Add Songs")
-            .accessibilityValue(addingSongs ? "Expanded" : "Collapsed")
-            .accessibilityHint(
-                addingSongs ? "Hide music search" : "Search songs, albums and artists"
-            )
+            #if os(iOS)
+                .accessibilityValue(addingSongs ? "Expanded" : "Collapsed")
+                .accessibilityHint(
+                    addingSongs ? "Hide music search" : "Search songs, albums and artists"
+                )
+            #else
+                .accessibilityHint("Open music search")
+            #endif
             .accessibilityIdentifier("playlist-manager-add-disclosure")
             .disabled(!editable || operation.isPending)
         }
@@ -382,11 +454,12 @@ struct FoundationPlaylistEditor: View {
             .swipeActionsContainer()
             .safeAreaInset(edge: .top, spacing: 0) {
                 HStack {
+                    Text("Manage Playlist").font(.headline)
                     Spacer()
-                    playlistOptions
+                    deletePlaylistButton
+                        .labelStyle(.iconOnly)
                         .buttonStyle(.bordered)
-                        .menuIndicator(.hidden)
-                        .accessibilityLabel("Playlist Options")
+                        .accessibilityLabel("Delete Playlist")
                 }
                 .padding(.horizontal, 24).padding(.vertical, 8)
             }
@@ -593,6 +666,13 @@ struct FoundationPlaylistEditor: View {
                     TextField("Search songs, albums and artists", text: $addQuery)
                         .focused($addSearchFocused)
                         .accessibilityIdentifier("playlist-manager-add-search")
+                    #if os(macOS)
+                        Picker("Search", selection: $addResultKind) {
+                            Text("Songs").tag(FoundationItem.Kind.track)
+                            Text("Albums").tag(FoundationItem.Kind.album)
+                            Text("Artists").tag(FoundationItem.Kind.artist)
+                        }.pickerStyle(.segmented)
+                    #endif
                     if addSearchTerm.isEmpty {
                         Text("Search your library, then choose songs or open an album or artist.")
                             .font(.subheadline).foregroundStyle(.secondary)
@@ -613,12 +693,18 @@ struct FoundationPlaylistEditor: View {
             if let collection = addCollection {
                 addResults(addModel, title: "Songs in \(collection.title)")
             } else if !addSearchTerm.isEmpty {
-                addResults(addModel, title: "Songs")
-                addResults(addAlbums, title: "Albums")
-                addResults(addArtists, title: "Artists")
-                if [addModel, addAlbums, addArtists].allSatisfy({
-                    $0.loaded && $0.items.isEmpty && $0.errorMessage == nil
-                }) {
+                #if os(macOS)
+                    addResults(
+                        addResultKind == .track
+                            ? addModel : addResultKind == .album ? addAlbums : addArtists,
+                        title: addResultKind == .track
+                            ? "Songs" : addResultKind == .album ? "Albums" : "Artists")
+                #else
+                    addResults(addModel, title: "Songs")
+                    addResults(addAlbums, title: "Albums")
+                    addResults(addArtists, title: "Artists")
+                #endif
+                if addSearchHasNoResults {
                     Section { ContentUnavailableView.search(text: addSearchTerm) }
                 }
             }
@@ -626,11 +712,23 @@ struct FoundationPlaylistEditor: View {
         .disabled(!editable || operation.isPending)
     }
 
+    private var addSearchHasNoResults: Bool {
+        #if os(macOS)
+            let models = [
+                addResultKind == .track
+                    ? addModel : addResultKind == .album ? addAlbums : addArtists
+            ]
+        #else
+            let models = [addModel, addAlbums, addArtists]
+        #endif
+        return models.allSatisfy { $0.loaded && $0.items.isEmpty && $0.errorMessage == nil }
+    }
+
     @ViewBuilder private func addResults(_ model: FoundationBrowseModel, title: String) -> some View
     {
         if !model.items.isEmpty || model.isLoading || model.errorMessage != nil {
             Section {
-                ForEach(model.items) { item in
+                ForEach(visibleAddItems(model)) { item in
                     Button {
                         if item.kind == .track {
                             if addedSelection.contains(where: { $0.id == item.id }) {
@@ -664,10 +762,16 @@ struct FoundationPlaylistEditor: View {
                         addRevision += 1
                     }
                 }
-                if model.nextStartIndex != nil {
+                if visibleAddItems(model).count < model.items.count || model.nextStartIndex != nil {
                     Button("More \(title)", systemImage: "ellipsis") {
-                        model.request(.more)
-                        addRevision += 1
+                        let hasHiddenItems = visibleAddItems(model).count < model.items.count
+                        #if os(macOS)
+                            addVisibleCount += 12
+                        #endif
+                        if !hasHiddenItems, model.nextStartIndex != nil {
+                            model.request(.more)
+                            addRevision += 1
+                        }
                     }.disabled(model.isLoading)
                 }
             } header: {
@@ -678,7 +782,16 @@ struct FoundationPlaylistEditor: View {
         }
     }
 
+    private func visibleAddItems(_ model: FoundationBrowseModel) -> [FoundationItem] {
+        #if os(macOS)
+            Array(model.items.prefix(addVisibleCount))
+        #else
+            model.items
+        #endif
+    }
+
     private func browseAddCollection(_ item: FoundationItem?) {
+        addVisibleCount = 12
         addCollection = item
         addModel.clearRetainedData()
         addRevision = 0
