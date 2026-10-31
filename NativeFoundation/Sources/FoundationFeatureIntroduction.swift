@@ -121,16 +121,21 @@ struct FoundationFeatureIntroductionView: View {
     var body: some View {
         VStack(spacing: 0) {
             #if os(iOS)
-                TabView(selection: $step) {
-                    ForEach(Array(features.enumerated()), id: \.element.id) { index, feature in
-                        featurePage(feature).tag(index)
+                if totalSteps > 0 {
+                    TabView(selection: $step) {
+                        ForEach(Array(features.enumerated()), id: \.element.id) { index, feature in
+                            featurePage(feature).tag(index)
+                        }
+                        if showsPinChoice, let sync {
+                            FoundationIntroductionPinStep(sync: sync) { madePinDecision = true }
+                                .tag(features.count)
+                        }
                     }
-                    if showsPinChoice, let sync {
-                        FoundationIntroductionPinStep(sync: sync) { madePinDecision = true }
-                            .tag(features.count)
-                    }
+                    .tabViewStyle(.page(indexDisplayMode: .never))
+                } else {
+                    ContentUnavailableView("You’re up to date", systemImage: "checkmark.circle")
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
-                .tabViewStyle(.page(indexDisplayMode: .never))
             #else
                 Group {
                     if isPinStep, let sync {
