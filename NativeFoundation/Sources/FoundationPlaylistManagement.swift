@@ -155,84 +155,70 @@ struct FoundationPlaylistEditor: View {
 
     var body: some View {
         NavigationStack {
-            List(selection: $selection) {
-                detailsSection
-                if showingCovers { coverSection }
-                if addingSongs { addSection }
-                songsSection
-            }
-            .reorderContainer(
-                for: FoundationPlaylistReorderRow.self, isEnabled: canMove, move: reorder
-            )
-            .swipeActionsContainer()
-            .scrollContentBackground(.hidden)
-            #if os(macOS)
-                .listStyle(.inset)
-            #else
-                .listStyle(.insetGrouped)
-            #endif
-            .navigationTitle("Manage Playlist")
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    #if os(macOS)
-                        Button("Close", systemImage: "xmark") {
-                            if dirty { confirmDiscard = true } else { dismiss() }
-                        }.disabled(operation.isPending)
-                    #else
-                        if dirty {
-                            Button("Discard", systemImage: "xmark") { confirmDiscard = true }
-                                .disabled(operation.isPending)
-                        }
-                    #endif
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Save", systemImage: "checkmark") { saveDetails() }
-                        .disabled(!canEditDetails || operation.isPending || !dirty)
-                        .buttonStyle(.glassProminent)
-                }
-                ToolbarItem(placement: .primaryAction) {
-                    Menu("Playlist Options", systemImage: "ellipsis") {
-                        Button("Delete Playlist", systemImage: "trash", role: .destructive) {
-                            confirmDelete = true
-                        }
-                        .disabled(
-                            !loaded || connectivity.localOnly || permissions?.canDelete != true
-                                || operation.isPending)
+            managerSurface
+                .navigationTitle("Manage Playlist")
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        #if os(macOS)
+                            Button("Close", systemImage: "xmark") {
+                                if dirty { confirmDiscard = true } else { dismiss() }
+                            }.disabled(operation.isPending)
+                        #else
+                            if dirty {
+                                Button("Discard", systemImage: "xmark") { confirmDiscard = true }
+                                    .disabled(operation.isPending)
+                            }
+                        #endif
                     }
-                    .labelStyle(.iconOnly)
-                    .accessibilityIdentifier("playlist-manager-options")
-                }
-            }
-            .safeAreaInset(edge: .bottom, spacing: 0) { managementFooter }
-            .modifier(FoundationPlaylistFeedback(operation: operation))
-            .confirmationDialog(
-                "Delete this playlist from Jellyfin?", isPresented: $confirmDelete,
-                titleVisibility: .visible
-            ) {
-                Button("Delete Playlist", role: .destructive) {
-                    operation.run {
-                        guard !connectivity.localOnly else { throw CancellationError() }
-                        try await FoundationPlaylistMutation.delete(
-                            id: playlist.id, library: library)
-                        try Task.checkCancellation()
-                        downloads.reconcilePlaylists()
-                        changes.catalogDidChange()
-                        dismiss()
-                        onDeleted()
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Save", systemImage: "checkmark") { saveDetails() }
+                            .disabled(!canEditDetails || operation.isPending || !dirty)
+                            .buttonStyle(.glassProminent)
+                    }
+                    ToolbarItem(placement: .primaryAction) {
+                        Menu("Playlist Options", systemImage: "ellipsis") {
+                            Button("Delete Playlist", systemImage: "trash", role: .destructive) {
+                                confirmDelete = true
+                            }
+                            .disabled(
+                                !loaded || connectivity.localOnly || permissions?.canDelete != true
+                                    || operation.isPending)
+                        }
+                        .labelStyle(.iconOnly)
+                        .accessibilityIdentifier("playlist-manager-options")
                     }
                 }
-            } message: {
-                Text("The songs will stay in your Jellyfin library.")
-            }
-            .confirmationDialog(
-                "Discard unsaved changes?", isPresented: $confirmDiscard, titleVisibility: .visible
-            ) {
-                Button("Discard Changes", role: .destructive) { dismiss() }
-                Button("Keep Editing", role: .cancel) {}
-            }
-            #if os(macOS)
-                .onDeleteCommand { if editable { remove(selectedEntries) } }
-            #endif
+                .safeAreaInset(edge: .bottom, spacing: 0) { managementFooter }
+                .modifier(FoundationPlaylistFeedback(operation: operation))
+                .confirmationDialog(
+                    "Delete this playlist from Jellyfin?", isPresented: $confirmDelete,
+                    titleVisibility: .visible
+                ) {
+                    Button("Delete Playlist", role: .destructive) {
+                        operation.run {
+                            guard !connectivity.localOnly else { throw CancellationError() }
+                            try await FoundationPlaylistMutation.delete(
+                                id: playlist.id, library: library)
+                            try Task.checkCancellation()
+                            downloads.reconcilePlaylists()
+                            changes.catalogDidChange()
+                            dismiss()
+                            onDeleted()
+                        }
+                    }
+                } message: {
+                    Text("The songs will stay in your Jellyfin library.")
+                }
+                .confirmationDialog(
+                    "Discard unsaved changes?", isPresented: $confirmDiscard,
+                    titleVisibility: .visible
+                ) {
+                    Button("Discard Changes", role: .destructive) { dismiss() }
+                    Button("Keep Editing", role: .cancel) {}
+                }
+                #if os(macOS)
+                    .onDeleteCommand { if editable { remove(selectedEntries) } }
+                #endif
         }
         .modifier(FoundationPlaylistSheetSize())
         .presentationBackground(.ultraThinMaterial)
@@ -316,6 +302,38 @@ struct FoundationPlaylistEditor: View {
                 }
             } catch {}
         }
+    }
+
+    @ViewBuilder private var managerContents: some View {
+        detailsSection
+        if showingCovers { coverSection }
+        if addingSongs { addSection }
+        songsSection
+    }
+
+    @ViewBuilder private var managerSurface: some View {
+        #if os(macOS)
+            // Keep the OS27 reorder interaction on the same scroll-host path as Queue.
+            // A heterogeneous selection List uses NSOutlineView's separate drag bridge.
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 20) {
+                    managerContents
+                }
+                .padding(24)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .swipeActionsContainer()
+        #else
+            List(selection: $selection) {
+                managerContents
+            }
+            .reorderContainer(
+                for: FoundationPlaylistReorderRow.self, isEnabled: canMove, move: reorder
+            )
+            .swipeActionsContainer()
+            .scrollContentBackground(.hidden)
+            .listStyle(.insetGrouped)
+        #endif
     }
 
     private var detailsSection: some View {
@@ -411,12 +429,36 @@ struct FoundationPlaylistEditor: View {
             TextField("Find in Playlist", text: $query)
             ForEach(rows) { row in
                 HStack(spacing: 10) {
+                    #if os(macOS)
+                        Button {
+                            if selection.contains(row.entry.mutationID) {
+                                selection.remove(row.entry.mutationID)
+                            } else {
+                                selection.insert(row.entry.mutationID)
+                            }
+                        } label: {
+                            Image(
+                                systemName: selection.contains(row.entry.mutationID)
+                                    ? "checkmark.circle.fill" : "circle"
+                            )
+                            .foregroundStyle(.tint)
+                            .frame(minWidth: 28, minHeight: 44)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Select \(row.entry.item.title)")
+                        .accessibilityValue(
+                            selection.contains(row.entry.mutationID) ? "Selected" : "Not selected"
+                        )
+                        .disabled(!editable || operation.isPending)
+                    #endif
                     FoundationPlaylistMusicRow(item: row.entry.item, library: library)
                     Image(systemName: "line.3.horizontal").foregroundStyle(.secondary)
                         .opacity(canMove ? 1 : 0.35)
                         .accessibilityLabel("Reorder \(row.entry.item.title)")
                 }
-                .tag(row.entry.mutationID)
+                #if os(iOS)
+                    .tag(row.entry.mutationID)
+                #endif
                 .accessibilityIdentifier("playlist-reorder-\(row.id)")
                 .contextMenu {
                     Button("Remove from Playlist", systemImage: "minus.circle", role: .destructive)
@@ -472,6 +514,13 @@ struct FoundationPlaylistEditor: View {
             }
         }
         .accessibilityIdentifier("playlist-management-songs")
+        #if os(macOS)
+            // Only occurrence rows participate; cover/search/detail sections have no
+            // reorder registration and cannot replace this container's collection.
+            .reorderContainer(
+                for: FoundationPlaylistReorderRow.self, isEnabled: canMove, move: reorder
+            )
+        #endif
     }
 
     @ViewBuilder private var addSection: some View {
