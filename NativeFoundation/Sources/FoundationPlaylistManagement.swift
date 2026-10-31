@@ -236,6 +236,10 @@ struct FoundationPlaylistEditor: View {
                 .opacity(phoneKeyboardVisible ? 0 : 1)
                 .allowsHitTesting(!phoneKeyboardVisible)
                 .accessibilityHidden(phoneKeyboardVisible)
+                .transaction { transaction in
+                    transaction.animation = nil
+                    transaction.disablesAnimations = true
+                }
             }
             .overlay(alignment: .bottomTrailing) {
                 if phoneKeyboardVisible && !addingSongs { phoneKeyboardDismissButton }
@@ -272,15 +276,12 @@ struct FoundationPlaylistEditor: View {
                 else { return }
                 let frame =
                     notification.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect
-                phoneKeyboardVisible = (frame?.height ?? 0) > 0
+                setPhoneKeyboardVisible((frame?.height ?? 0) > 0)
             }
             .onReceive(
-                NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)
+                NotificationCenter.default.publisher(for: UIResponder.keyboardDidHideNotification)
             ) { _ in
-                phoneKeyboardVisible = false
-            }
-            .onChange(of: addingSongs) { _, shown in
-                if !shown { phoneKeyboardVisible = false }
+                setPhoneKeyboardVisible(false)
             }
         #endif
         .onDisappear { operation.cancel() }
@@ -863,6 +864,12 @@ struct FoundationPlaylistEditor: View {
     }
 
     #if os(iOS)
+        private func setPhoneKeyboardVisible(_ visible: Bool) {
+            var transaction = Transaction(animation: nil)
+            transaction.disablesAnimations = true
+            withTransaction(transaction) { phoneKeyboardVisible = visible }
+        }
+
         private var phoneKeyboardDismissButton: some View {
             Button {
                 // An explicit user action follows UIKit's existing responder chain.
