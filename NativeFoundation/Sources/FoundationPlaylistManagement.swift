@@ -520,70 +520,71 @@ struct FoundationPlaylistEditor: View {
 
     @ViewBuilder private var detailsSection: some View {
         Section {
-            HStack(alignment: .top, spacing: 20) {
-                Button {
-                    if !showingCovers {
-                        coverOpeningID = UUID()
-                        covers = FoundationPlaylistCoverPreset.choices(
-                            palettes: [cachedArtwork?.tint ?? .teal]).map { preset in
-                                if let frozen = selectedCover ?? savedCover, frozen.id == preset.id
-                                {
-                                    return frozen
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .top, spacing: 20) {
+                    Button {
+                        if !showingCovers {
+                            coverOpeningID = UUID()
+                            covers = FoundationPlaylistCoverPreset.choices(
+                                palettes: [cachedArtwork?.tint ?? .teal]).map { preset in
+                                    if let frozen = selectedCover ?? savedCover,
+                                        frozen.id == preset.id
+                                    {
+                                        return frozen
+                                    }
+                                    return preset
                                 }
-                                return preset
-                            }
-                    }
-                    showingCovers.toggle()
-                } label: {
-                    ZStack(alignment: .bottomTrailing) {
-                        Group {
-                            if let cover = selectedCover ?? savedCover {
-                                FoundationPlaylistCoverArtwork(preset: cover, playlistTitle: name)
-                            } else if let image = cachedArtwork?.image {
-                                Image(decorative: image, scale: 1).resizable().scaledToFill()
-                            } else {
-                                Rectangle().fill(.quaternary).overlay {
-                                    Image(systemName: "music.note.list").font(.largeTitle)
-                                }
-                            }
                         }
-                        .frame(width: 104, height: 104).clipShape(.rect(cornerRadius: 16))
-                        #if os(macOS)
-                            if hoveringCover || showingCovers {
+                        showingCovers.toggle()
+                    } label: {
+                        ZStack(alignment: .bottomTrailing) {
+                            Group {
+                                if let cover = selectedCover ?? savedCover {
+                                    FoundationPlaylistCoverArtwork(
+                                        preset: cover, playlistTitle: name)
+                                } else if let image = cachedArtwork?.image {
+                                    Image(decorative: image, scale: 1).resizable().scaledToFill()
+                                } else {
+                                    Rectangle().fill(.quaternary).overlay {
+                                        Image(systemName: "music.note.list").font(.largeTitle)
+                                    }
+                                }
+                            }
+                            .frame(width: 104, height: 104).clipShape(.rect(cornerRadius: 16))
+                            #if os(macOS)
+                                if hoveringCover || showingCovers {
+                                    Image(systemName: "pencil").padding(9).background(
+                                        .regularMaterial, in: .circle
+                                    ).padding(6)
+                                }
+                            #else
                                 Image(systemName: "pencil").padding(9).background(
                                     .regularMaterial, in: .circle
                                 ).padding(6)
-                            }
-                        #else
-                            Image(systemName: "pencil").padding(9).background(
-                                .regularMaterial, in: .circle
-                            ).padding(6)
-                        #endif
+                            #endif
+                        }
                     }
-                }
-                .buttonStyle(.plain)
-                .onHover { hoveringCover = $0 }
-                .accessibilityLabel("Edit playlist artwork")
-                .accessibilityHint("Choose a cover; artwork changes only when you save.")
-                .disabled(!canEditDetails || !canEditCover || operation.isPending)
-                .popover(
-                    isPresented: $showingCovers, attachmentAnchor: .rect(.bounds),
-                    arrowEdge: .bottom
-                ) {
-                    coverChoicesPopover
-                        .presentationCompactAdaptation(.popover)
-                }
-                VStack(alignment: .leading, spacing: 12) {
-                    TextField("Playlist name", text: $name).font(.title2.weight(.semibold))
-                    TextField("Description", text: $overview, axis: .vertical)
-                        .lineLimit(3...6).font(.body).disabled(!canEditOverview)
-                    if !canEditOverview || !canEditCover {
-                        Text("Your server permissions limit description or artwork editing.")
-                            .font(.caption).foregroundStyle(.secondary)
+                    .buttonStyle(.plain)
+                    .onHover { hoveringCover = $0 }
+                    .accessibilityLabel("Edit playlist artwork")
+                    .accessibilityHint(
+                        "Show or hide cover choices. Artwork changes only when you save."
+                    )
+                    .accessibilityValue(showingCovers ? "Expanded" : "Collapsed")
+                    .disabled(!canEditDetails || !canEditCover || operation.isPending)
+                    VStack(alignment: .leading, spacing: 12) {
+                        TextField("Playlist name", text: $name).font(.title2.weight(.semibold))
+                        TextField("Description", text: $overview, axis: .vertical)
+                            .lineLimit(3...6).font(.body).disabled(!canEditOverview)
+                        if !canEditOverview || !canEditCover {
+                            Text("Your server permissions limit description or artwork editing.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
                     }
-                }
-                .disabled(!canEditDetails || operation.isPending)
-            }.padding(.vertical, 12)
+                    .disabled(!canEditDetails || operation.isPending)
+                }.padding(.vertical, 12)
+                if showingCovers { coverChoicesCarousel }
+            }
         }
     }
 
@@ -639,16 +640,12 @@ struct FoundationPlaylistEditor: View {
         }
     }
 
-    private var coverChoicesPopover: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Playlist Artwork").font(.headline)
-            LazyVGrid(
-                columns: Array(repeating: GridItem(.fixed(80), spacing: 8), count: 3), spacing: 8
-            ) {
+    private var coverChoicesCarousel: some View {
+        ScrollView(.horizontal) {
+            HStack(spacing: 12) {
                 ForEach(covers) { preset in
                     Button {
                         selectedCover = preset
-                        showingCovers = false
                     } label: {
                         FoundationPlaylistCoverArtwork(preset: preset, playlistTitle: name)
                             .frame(width: 80, height: 80)
@@ -663,9 +660,10 @@ struct FoundationPlaylistEditor: View {
                     .accessibilityLabel(preset.title)
                 }
             }
+            .padding(.vertical, 4)
         }
-        .padding(16)
-        .frame(width: 288)
+        .scrollIndicators(.hidden)
+        .frame(height: 88)
         .disabled(!canEditDetails || !canEditCover || operation.isPending)
     }
 
