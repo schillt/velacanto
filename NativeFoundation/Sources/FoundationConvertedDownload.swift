@@ -267,8 +267,7 @@ nonisolated enum FoundationConvertedDownload {
                 completeOffline: complete, duration: duration,
                 variants: variants.prefix(2).map { variant in
                     NativeVariant(
-                        declaredAudioFormats: variant.audioAttributes?.formatIDs.map(\.uint32Value)
-                            ?? [],
+                        declaredAudioFormats: variant.audioAttributes?.formatIDs ?? [],
                         declaresVideo: variant.videoAttributes != nil)
                 })
         }
