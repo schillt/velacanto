@@ -594,6 +594,207 @@ final class FoundationDownloadsTests: XCTestCase {
         manager.invalidate()
     }
 
+    private func creationFixture() throws -> (FoundationNativeAllocationStore, URL) {
+        let directory = try root()
+        try FoundationDownloadStorage.prepare(directory)
+        let store = FoundationNativeAllocationStore(
+            directory: directory,
+            sessionIdentifier: "dev.novoluxor.velacanto.offline." + directory.lastPathComponent
+                + "." + UUID().uuidString,
+            trackID: "synthetic-track")
+        try store.reserve()
+        return (store, directory)
+    }
+
+    func testFactoryQueuedAllocationRunsOnlyAfterExactBindingContinuationAndResuming() async throws
+    {
+        let (store, directory) = try creationFixture()
+        try store.beginCreating()
+        let delegate = FoundationNativeDownloadDelegate(
+            progress: { _, _ in }, store: store,
+            backgroundEventsFinished: { _ in })
+        let session = URLSession(configuration: .ephemeral)
+        defer {
+            delegate.activateDelegateQueue()
+            session.invalidateAndCancel()
+        }
+        let target = directory.appendingPathComponent("synthetic.movpkg", isDirectory: true)
+        try FileManager.default.createDirectory(at: target, withIntermediateDirectories: false)
+        let observation = NativeDownloadVerificationFixture()
+        let task = try delegate.makeTask {
+            let task = session.dataTask(with: URL(string: "https://example.invalid/never-started")!)
+            task.cancel()
+            // Simulate the OS enqueueing its location callback inside task creation.
+            delegate.delegateQueue.addOperation {
+                do {
+                    let before = try store.load()
+                    XCTAssertEqual(before.taskIdentifier, task.taskIdentifier)
+                    XCTAssertEqual(before.phase, .resuming)
+                    try store.capture(
+                        target, taskIdentifier: task.taskIdentifier,
+                        snapshot: { _ in Data("pinned synthetic identity".utf8) },
+                        prove: { _ in true }, namespaceProof: { _ in true })
+                    observation.recordVerification()
+                } catch { XCTFail("Gated allocation did not retain strict binding") }
+                // Fatal final delivery exercises the attached real run continuation.
+                delegate.urlSession(session, didBecomeInvalidWithError: URLError(.unknown))
+            }
+            return task
+        }
+        XCTAssertTrue(delegate.delegateQueue.isSuspended)
+        XCTAssertEqual(observation.verifications, 0)
+        XCTAssertEqual(try store.load().phase, .creating)
+        do {
+            _ = try await delegate.run(task)
+            XCTFail("Synthetic failure succeeded")
+        } catch { XCTAssertEqual(error as? FoundationDownloadError, .cleanup) }
+        XCTAssertFalse(delegate.delegateQueue.isSuspended)
+        XCTAssertEqual(observation.verifications, 1)
+        let receipt = try store.load()
+        XCTAssertEqual(receipt.phase, .allocated)
+        XCTAssertEqual(receipt.nativeURL, target)
+        XCTAssertNotNil(receipt.package)
+        XCTAssertNil(receipt.retired)
+        XCTAssertThrowsError(try store.beginResuming(taskIdentifier: task.taskIdentifier))
+        XCTAssertEqual(try store.load().package?.bookmark, receipt.package?.bookmark)
+        XCTAssertEqual(task.countOfBytesSent, 0)
+    }
+
+    func testCreatingPhaseSurvivesFactoryCrashAndCannotBeRetiredOrReset() throws {
+        let (store, directory) = try creationFixture()
+        try store.beginCreating()
+        let before = try Data(contentsOf: store.receiptURL)
+        let relaunched = FoundationNativeAllocationStore(
+            directory: directory, sessionIdentifier: store.sessionIdentifier)
+        XCTAssertEqual(try relaunched.load().phase, .creating)
+        XCTAssertEqual(try relaunched.load().taskIdentifier, 0)
+        XCTAssertThrowsError(try relaunched.retire())
+        XCTAssertThrowsError(try relaunched.reserve())
+        XCTAssertThrowsError(
+            try relaunched.capture(
+                directory.appendingPathComponent("foreign.movpkg"), taskIdentifier: 99))
+        XCTAssertEqual(try Data(contentsOf: store.receiptURL), before)
+    }
+
+    func testBindingWriteFailureCancelsFactoryTaskAndReleasesQueuedEventsWithoutAdoptingID()
+        async throws
+    {
+        let (store, directory) = try creationFixture()
+        try store.beginCreating()
+        let before = try Data(contentsOf: store.receiptURL)
+        let delegate = FoundationNativeDownloadDelegate(
+            progress: { _, _ in }, store: store,
+            backgroundEventsFinished: { _ in })
+        let session = URLSession(configuration: .ephemeral)
+        let observation = NativeDownloadVerificationFixture()
+        defer {
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o700], ofItemAtPath: directory.path)
+            delegate.activateDelegateQueue()
+            session.invalidateAndCancel()
+        }
+        let task = session.dataTask(with: URL(string: "https://example.invalid/never-started")!)
+        XCTAssertThrowsError(
+            try delegate.makeTask {
+                delegate.delegateQueue.addOperation { observation.finish() }
+                // The existing protected receipt stays readable; its replacement write fails.
+                try? FileManager.default.setAttributes(
+                    [.posixPermissions: 0o500], ofItemAtPath: directory.path)
+                return task
+            })
+        try await waitUntil { observation.finished }
+        XCTAssertFalse(delegate.delegateQueue.isSuspended)
+        XCTAssertTrue(task.state == .canceling || task.state == .completed)
+        XCTAssertEqual(task.countOfBytesSent, 0)
+        XCTAssertEqual(try Data(contentsOf: store.receiptURL), before)
+        XCTAssertEqual(try store.load().taskIdentifier, 0)
+        XCTAssertThrowsError(try store.retire())
+    }
+
+    func testFactoryBindingRejectsForeignCallbackAndNeverOverwritesCapturedAuthority() throws {
+        let (store, directory) = try creationFixture()
+        try store.beginCreating()
+        let delegate = FoundationNativeDownloadDelegate(
+            progress: { _, _ in }, store: store,
+            backgroundEventsFinished: { _ in })
+        let session = URLSession(configuration: .ephemeral)
+        defer {
+            delegate.activateDelegateQueue()
+            session.invalidateAndCancel()
+        }
+        let task = try delegate.makeTask {
+            let task = session.dataTask(with: URL(string: "https://example.invalid/never-started")!)
+            task.cancel()
+            return task
+        }
+        let target = directory.appendingPathComponent("synthetic.movpkg", isDirectory: true)
+        try FileManager.default.createDirectory(at: target, withIntermediateDirectories: false)
+        XCTAssertThrowsError(try store.capture(target, taskIdentifier: task.taskIdentifier + 1))
+        XCTAssertEqual(try store.load().phase, .creating)
+        try store.capture(
+            target, taskIdentifier: task.taskIdentifier,
+            snapshot: { _ in Data("unchanged pinned identity".utf8) },
+            prove: { _ in true }, namespaceProof: { _ in true })
+        let before = try Data(contentsOf: store.receiptURL)
+        XCTAssertThrowsError(try store.bindCreatedTask(taskIdentifier: task.taskIdentifier))
+        XCTAssertThrowsError(try store.reserve(taskIdentifier: task.taskIdentifier))
+        XCTAssertThrowsError(try store.beginResuming(taskIdentifier: task.taskIdentifier))
+        XCTAssertThrowsError(
+            try store.capture(
+                directory.appendingPathComponent("different.movpkg"),
+                taskIdentifier: task.taskIdentifier))
+        XCTAssertEqual(try Data(contentsOf: store.receiptURL), before)
+        try store.retire(resolve: { _ in .available(target) })
+        let retired = try Data(contentsOf: store.receiptURL)
+        XCTAssertThrowsError(try store.capture(target, taskIdentifier: task.taskIdentifier))
+        XCTAssertEqual(try Data(contentsOf: store.receiptURL), retired)
+    }
+
+    func testLegacyReservedIncludingRetiredRemainsUnknownButTerminalProofStillRetires() throws {
+        for retired in [false, true] {
+            let (store, _) = try creationFixture()
+            var json = try XCTUnwrap(
+                JSONSerialization.jsonObject(with: Data(contentsOf: store.receiptURL))
+                    as? [String: Any])
+            json.removeValue(forKey: "creationVersion")
+            json["retired"] = retired
+            let legacy = try JSONSerialization.data(withJSONObject: json)
+            try legacy.write(to: store.receiptURL)
+            XCTAssertNil(try store.load().creationVersion)
+            XCTAssertThrowsError(try store.retire())
+            XCTAssertThrowsError(try store.reserve())
+            XCTAssertThrowsError(try store.beginCreating())
+            XCTAssertEqual(try Data(contentsOf: store.receiptURL), legacy)
+        }
+        let (terminal, _) = try creationFixture()
+        try terminal.reserve(taskIdentifier: 7)
+        try terminal.recordTerminalNoAllocation(taskIdentifier: 7)
+        var json = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(contentsOf: terminal.receiptURL))
+                as? [String: Any])
+        json.removeValue(forKey: "creationVersion")
+        try JSONSerialization.data(withJSONObject: json).write(to: terminal.receiptURL)
+        XCTAssertNoThrow(try terminal.retire())
+        XCTAssertEqual(try terminal.load().retired, true)
+    }
+
+    #if DEBUG
+        func testBindingFailureDiagnosticEmitsOnlyFixedFlagsAndPhase() throws {
+            let input = URL(string: "file:///private/tmp/synthetic-secret.movpkg")!
+            let flags = FoundationNativeDownloadErrorFields.Binding(
+                taskZero: true, taskMatches: false, urlPresent: false, urlMatches: false,
+                retired: false, phase: .creating)
+            let event = FoundationNativeDownloadErrorFields.capture(
+                stage: .binding, location: input, binding: flags)
+            XCTAssertEqual(
+                event,
+                "download.native stage=allocation.capture substage=binding outcome=failed fileURL=1 basePresent=0 plain=1 taskZero=1 taskMatches=0 urlPresent=0 urlMatches=0 retired=0 phase=creating"
+            )
+            XCTAssertFalse(event.contains("secret"))
+            XCTAssertFalse(event.contains("file:"))
+        }
+    #endif
+
     func testActualNativeDelegateCancellationBeforeAllocationSurvivesRelaunchAndClearsAccount()
         async throws
     {
@@ -606,10 +807,18 @@ final class FoundationDownloadsTests: XCTestCase {
             + UUID().uuidString
         let store = FoundationNativeAllocationStore(
             directory: directory, sessionIdentifier: identifier, trackID: "track")
+        try store.reserve()
+        try store.beginCreating()
         let delegate = FoundationNativeDownloadDelegate(progress: { _, _ in }, store: store)
-        let session = URLSession(configuration: .ephemeral, delegate: delegate, delegateQueue: nil)
-        defer { session.invalidateAndCancel() }
-        let task = session.dataTask(with: URL(string: "https://example.invalid/must-never-resume")!)
+        let session = URLSession(
+            configuration: .ephemeral, delegate: delegate, delegateQueue: delegate.delegateQueue)
+        defer {
+            delegate.activateDelegateQueue()
+            session.invalidateAndCancel()
+        }
+        let task = try delegate.makeTask {
+            session.dataTask(with: URL(string: "https://example.invalid/must-never-resume")!)
+        }
         let gate = DownloadGate()
         let observation = NativeDownloadVerificationFixture()
         let operation = Task {
@@ -758,9 +967,12 @@ final class FoundationDownloadsTests: XCTestCase {
                     })
                 // A pre-cancelled task cannot issue network requests. The test drives
                 // the actual delegate's run continuation and fatal callback directly.
+                try store.reserve()
+                try store.beginCreating()
                 let session = URLSession(configuration: .ephemeral)
-                let task = session.dataTask(
-                    with: URL(string: "https://example.invalid/never-started")!)
+                let task = try delegate.makeTask {
+                    session.dataTask(with: URL(string: "https://example.invalid/never-started")!)
+                }
                 task.cancel()
                 defer {
                     session.invalidateAndCancel()

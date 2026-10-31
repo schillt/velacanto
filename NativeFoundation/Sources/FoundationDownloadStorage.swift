@@ -734,12 +734,15 @@ nonisolated struct FoundationNativeAllocationStore: Sendable {
         var trackID: String? = nil
         var nativeURL: URL?
         enum Phase: String, Codable, Sendable {
-            case reserved, resuming, allocated, terminalNoAllocation
+            case reserved, creating, resuming, allocated, terminalNoAllocation
         }
         var phase: Phase? = nil
         var namespaceBookmark: Data?
         var package: FoundationNativeDownloadPackage?
         var retired: Bool? = nil
+        // Only this lifecycle writes creating BEFORE the OS session/task factory.
+        // Missing on older receipts: reserved could already have issued a factory.
+        var creationVersion: Int? = nil
     }
     let directory: URL
     let sessionIdentifier: String
@@ -751,8 +754,8 @@ nonisolated struct FoundationNativeAllocationStore: Sendable {
         return directory.appendingPathComponent("native-receipt-" + key + ".json")
     }
 
-    /// Persisted before task creation/resume. A reserved receipt proves this code has
-    /// not issued resume; resuming is written BEFORE resume and is unknown after loss.
+    /// New reservations precede every native asset factory. Legacy reservations do not prove
+    /// allocation absence: older versions could create a task before durable binding.
     func reserve(taskIdentifier: Int = 0) throws {
         guard validSession, taskIdentifier >= 0 else { throw FoundationDownloadError.cleanup }
         var receipt: Receipt
@@ -760,7 +763,8 @@ nonisolated struct FoundationNativeAllocationStore: Sendable {
         let found = receiptURL.path.withCString { lstat($0, &status) }
         if found == 0 {
             receipt = try load()
-            guard receipt.phase == .reserved, receipt.retired != true,
+            guard receipt.phase == .reserved, receipt.creationVersion == 1,
+                receipt.retired != true,
                 receipt.taskIdentifier == 0 || receipt.taskIdentifier == taskIdentifier
             else {
                 throw FoundationDownloadError.cleanup
@@ -768,19 +772,47 @@ nonisolated struct FoundationNativeAllocationStore: Sendable {
             receipt = Receipt(
                 scope: scope, sessionIdentifier: sessionIdentifier,
                 taskIdentifier: taskIdentifier, trackID: trackID ?? receipt.trackID, nativeURL: nil,
-                phase: .reserved)
+                phase: .reserved, creationVersion: 1)
         } else {
             guard errno == ENOENT else { throw FoundationDownloadError.cleanup }
             receipt = Receipt(
                 scope: scope, sessionIdentifier: sessionIdentifier,
-                taskIdentifier: taskIdentifier, trackID: trackID, nativeURL: nil, phase: .reserved)
+                taskIdentifier: taskIdentifier, trackID: trackID, nativeURL: nil, phase: .reserved,
+                creationVersion: 1)
         }
+        try write(receipt)
+    }
+
+    /// Durable unknown authority MUST precede creation of the OS session/task.
+    func beginCreating() throws {
+        var receipt = try load()
+        guard receipt.phase == .reserved, receipt.creationVersion == 1,
+            receipt.taskIdentifier == 0, receipt.nativeURL == nil, receipt.package == nil,
+            receipt.retired != true
+        else { throw FoundationDownloadError.cleanup }
+        receipt.phase = .creating
+        try write(receipt)
+    }
+
+    /// Adopt only the task returned by our own factory while delegate delivery is gated.
+    /// Callback IDs never establish this binding, and existing captured state is never reset.
+    func bindCreatedTask(taskIdentifier: Int) throws {
+        var receipt = try load()
+        guard receipt.phase == .creating, receipt.creationVersion == 1,
+            receipt.taskIdentifier == 0, taskIdentifier > 0,
+            receipt.nativeURL == nil, receipt.package == nil, receipt.retired != true
+        else { throw FoundationDownloadError.cleanup }
+        receipt = Receipt(
+            scope: receipt.scope, sessionIdentifier: receipt.sessionIdentifier,
+            taskIdentifier: taskIdentifier, trackID: receipt.trackID, nativeURL: nil,
+            phase: .creating, creationVersion: 1)
         try write(receipt)
     }
 
     func beginResuming(taskIdentifier: Int) throws {
         var receipt = try load()
-        guard receipt.phase == .reserved, receipt.taskIdentifier == taskIdentifier,
+        guard receipt.phase == .reserved || receipt.phase == .creating,
+            receipt.creationVersion == 1, receipt.taskIdentifier == taskIdentifier,
             taskIdentifier > 0, receipt.retired != true
         else { throw FoundationDownloadError.cleanup }
         receipt.phase = .resuming
@@ -793,7 +825,7 @@ nonisolated struct FoundationNativeAllocationStore: Sendable {
         var receipt = try load()
         guard receipt.taskIdentifier == taskIdentifier, receipt.nativeURL == nil,
             receipt.package == nil, receipt.retired != true,
-            receipt.phase == .reserved || receipt.phase == .resuming
+            receipt.phase == .reserved || receipt.phase == .creating || receipt.phase == .resuming
         else {
             throw FoundationDownloadError.cleanup
         }
@@ -818,6 +850,7 @@ nonisolated struct FoundationNativeAllocationStore: Sendable {
             var stage = FoundationNativeDownloadErrorFields.CaptureStage.initialURL
             var writing: FoundationNativeDownloadErrorFields.PersistenceStage?
             var writeError: Error?
+            var binding: FoundationNativeDownloadErrorFields.Binding?
         #endif
         do {
             #if DEBUG
@@ -837,13 +870,21 @@ nonisolated struct FoundationNativeAllocationStore: Sendable {
             #if DEBUG
                 stage = .existingReceipt
             #endif
+            var creationVersion: Int?
             var status = stat()
             let existing = receiptURL.path.withCString { lstat($0, &status) }
             guard existing == 0 || errno == ENOENT else { throw FoundationDownloadError.cleanup }
             if existing == 0 {
                 let existing = try load()
+                creationVersion = existing.creationVersion
                 #if DEBUG
                     stage = .binding
+                    binding = .init(
+                        taskZero: existing.taskIdentifier == 0,
+                        taskMatches: existing.taskIdentifier == taskIdentifier,
+                        urlPresent: existing.nativeURL != nil,
+                        urlMatches: existing.nativeURL == location,
+                        retired: existing.retired == true, phase: existing.phase)
                 #endif
                 guard existing.taskIdentifier == taskIdentifier,
                     existing.nativeURL == nil || existing.nativeURL == location
@@ -858,7 +899,7 @@ nonisolated struct FoundationNativeAllocationStore: Sendable {
             var receipt = Receipt(
                 scope: scope, sessionIdentifier: sessionIdentifier,
                 taskIdentifier: taskIdentifier, trackID: trackID, nativeURL: location,
-                phase: .allocated
+                phase: .allocated, creationVersion: creationVersion
             )
             #if DEBUG
                 stage = .allocatedWrite
@@ -915,7 +956,8 @@ nonisolated struct FoundationNativeAllocationStore: Sendable {
                     FoundationJournal.shared.record(
                         FoundationNativeDownloadErrorFields.capture(
                             stage: stage, location: location,
-                            writeError: writeError ?? (writing != nil ? error : nil)))
+                            writeError: writeError ?? (writing != nil ? error : nil),
+                            binding: stage == .binding ? binding : nil))
                 }
             #endif
             throw error
@@ -940,12 +982,16 @@ nonisolated struct FoundationNativeAllocationStore: Sendable {
         guard receipt.scope == scope, receipt.sessionIdentifier == sessionIdentifier,
             receipt.taskIdentifier >= 0,
             receipt.nativeURL.map(FoundationManagedPackageMetadata.plain)
-                ?? ([Receipt.Phase.reserved, .resuming, .terminalNoAllocation].contains(
+                ?? ([Receipt.Phase.reserved, .creating, .resuming, .terminalNoAllocation].contains(
                     receipt.phase ?? .allocated)),
             receipt.package == nil
                 || (receipt.package?.sessionIdentifier == sessionIdentifier
                     && receipt.package?.nativeURL == receipt.nativeURL)
         else { throw FoundationDownloadError.cleanup }
+        if receipt.phase == .creating {
+            guard receipt.creationVersion == 1, receipt.nativeURL == nil, receipt.package == nil
+            else { throw FoundationDownloadError.cleanup }
+        }
         if receipt.phase == .resuming || receipt.phase == .terminalNoAllocation {
             guard receipt.taskIdentifier > 0, receipt.nativeURL == nil, receipt.package == nil
             else {
@@ -1039,15 +1085,21 @@ nonisolated struct FoundationNativeAllocationStore: Sendable {
         remove: (URL) throws -> Void = { try FileManager.default.removeItem(at: $0) }
     ) throws {
         var receipt = try load()
-        if receipt.retired == true { return }
         if receipt.nativeURL == nil {
-            guard receipt.phase == .reserved || receipt.phase == .terminalNoAllocation else {
+            // Check the proof before trusting a legacy tombstone. An older reserved
+            // receipt (even retired) may have issued a factory without recording it.
+            guard
+                (receipt.phase == .reserved && receipt.creationVersion == 1)
+                    || receipt.phase == .terminalNoAllocation
+            else {
                 throw FoundationDownloadError.cleanup
             }
+            if receipt.retired == true { return }
             receipt.retired = true
             try write(receipt)
             return
         }
+        if receipt.retired == true { return }
         guard let nativeURL = receipt.nativeURL else { throw FoundationDownloadError.cleanup }
         let package =
             receipt.package

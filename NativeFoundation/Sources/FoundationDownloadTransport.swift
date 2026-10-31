@@ -371,6 +371,10 @@ nonisolated enum FoundationNativeDownloadTransport {
             }
             let sessionIdentifier = store.sessionIdentifier
             let worker = FoundationNativeDownloadDelegate(progress: progress, store: store)
+            // The delegate queue exists and is gated before either OS factory. A
+            // crash after this durable phase can never be mistaken for no allocation.
+            defer { worker.activateDelegateQueue() }
+            do { try store.beginCreating() } catch { throw FoundationDownloadError.cleanup }
             let configuration = URLSessionConfiguration.background(
                 withIdentifier: sessionIdentifier)
             configuration.allowsCellularAccess = allowsCellular
@@ -382,8 +386,11 @@ nonisolated enum FoundationNativeDownloadTransport {
             configuration.httpAdditionalHeaders = ["Accept-Encoding": "identity"]
             let session = AVAssetDownloadURLSession(
                 configuration: configuration, assetDownloadDelegate: worker,
-                delegateQueue: nil)
-            defer { session.finishTasksAndInvalidate() }
+                delegateQueue: worker.delegateQueue)
+            defer {
+                worker.activateDelegateQueue()
+                session.finishTasksAndInvalidate()
+            }
             // Use the existing official authenticated HLS master boundary. Do not put
             // reserved Authorization headers in configuration or private AVAsset options.
             // The OS may retain this credential URL in private task/package metadata.
@@ -392,7 +399,20 @@ nonisolated enum FoundationNativeDownloadTransport {
             if let data = proposal.artwork, FoundationCurrentArtwork.decode(data) != nil {
                 download.artworkData = data
             }
-            let task = session.makeAssetDownloadTask(downloadConfiguration: download)
+            let task: AVAssetDownloadTask
+            do {
+                task = try worker.makeTask {
+                    session.makeAssetDownloadTask(downloadConfiguration: download)
+                }
+            } catch {
+                // Creation/binding uncertainty remains cleanup even if the independent
+                // scoped server conversion cleanup fails. Pending authority must survive.
+                do {
+                    try await closeConversion(
+                        proposal.cleanupRequest, allowsCellular: allowsCellular)
+                } catch {}
+                throw FoundationDownloadError.cleanup
+            }
             var acquired: FoundationNativeDownloadPackage?
             #if DEBUG
                 var stage = "allocation"
@@ -692,7 +712,7 @@ nonisolated enum FoundationNativeDownloadTransport {
                 let configuration = URLSessionConfiguration.background(withIdentifier: identifier)
                 let session = AVAssetDownloadURLSession(
                     configuration: configuration,
-                    assetDownloadDelegate: worker, delegateQueue: nil)
+                    assetDownloadDelegate: worker, delegateQueue: worker.delegateQueue)
                 do {
                     try await worker.retire(session)
                     retired.insert(identifier)
@@ -820,6 +840,8 @@ nonisolated final class FoundationNativeDownloadDelegate: FoundationNativeDownlo
     private let progress: FoundationDownloadTransport.Progress
     private let store: FoundationNativeAllocationStore
     private let backgroundEventsFinished: @Sendable (String) -> Void
+    let delegateQueue: OperationQueue
+    private var boundTask: URLSessionTask?
 
     init(
         progress: @escaping FoundationDownloadTransport.Progress,
@@ -833,6 +855,40 @@ nonisolated final class FoundationNativeDownloadDelegate: FoundationNativeDownlo
         self.progress = progress
         self.store = store
         self.backgroundEventsFinished = backgroundEventsFinished
+        let queue = OperationQueue()
+        queue.maxConcurrentOperationCount = 1
+        queue.isSuspended = true
+        self.delegateQueue = queue
+    }
+
+    func activateDelegateQueue() { delegateQueue.isSuspended = false }
+
+    /// The factory returns the sole task whose ID may become this delegate's binding.
+    /// No delegate event may run before binding and continuation/resume preparation.
+    func makeTask<T: URLSessionTask>(_ factory: () -> T) throws -> T {
+        var made: T?
+        do {
+            guard delegateQueue.isSuspended, !failedSession else {
+                throw FoundationDownloadError.cleanup
+            }
+            let receipt = try store.load()
+            guard receipt.phase == .creating, receipt.creationVersion == 1,
+                receipt.taskIdentifier == 0, receipt.nativeURL == nil,
+                receipt.package == nil, receipt.retired != true
+            else { throw FoundationDownloadError.cleanup }
+            let task = factory()
+            made = task
+            try store.bindCreatedTask(taskIdentifier: task.taskIdentifier)
+            lock.withLock {
+                boundTask = task
+                liveTaskIdentifier = task.taskIdentifier
+            }
+            return task
+        } catch {
+            made?.cancel()
+            activateDelegateQueue()
+            throw FoundationDownloadError.cleanup
+        }
     }
 
     func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
@@ -841,6 +897,8 @@ nonisolated final class FoundationNativeDownloadDelegate: FoundationNativeDownlo
 
     func retire(_ session: URLSession) async throws {
         try await withCheckedThrowingContinuation { continuation in
+            // Cold reconnection must attach retirement before delivering its events.
+            defer { activateDelegateQueue() }
             let invalidated = lock.withLock { () -> Bool? in
                 if let invalidationFailed { return invalidationFailed }
                 retirement = continuation
@@ -893,13 +951,17 @@ nonisolated final class FoundationNativeDownloadDelegate: FoundationNativeDownlo
     }
 
     func run(_ task: URLSessionTask) async throws -> URL {
-        guard !failedSession else { throw FoundationDownloadError.cleanup }
-        // Bind a suspended task durably before cancellation handling can reach it.
-        // This is the same path for native acquisition and native-free delegate tests.
-        try store.reserve(taskIdentifier: task.taskIdentifier)
-        lock.withLock { liveTaskIdentifier = task.taskIdentifier }
+        guard !failedSession, lock.withLock({ boundTask === task }) else {
+            // Cancel only the task returned by our factory, never adopt the argument.
+            lock.withLock { boundTask }?.cancel()
+            activateDelegateQueue()
+            throw FoundationDownloadError.cleanup
+        }
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
+                // This scope does not await delegate delivery. Every setup, cancel,
+                // write-failure and early-result exit releases the queue before waiting.
+                defer { activateDelegateQueue() }
                 let state = lock.withLock { () -> (Result<URL, Error>?, Bool) in
                     if let result = terminalResult { return (result, cancelled) }
                     self.continuation = continuation
@@ -1076,16 +1138,30 @@ nonisolated final class FoundationNativeDownloadDelegate: FoundationNativeDownlo
             case namespace, parentBookmark, packageBookmark, ownershipProof, packageWrite
         }
 
+        struct Binding {
+            let taskZero: Bool
+            let taskMatches: Bool
+            let urlPresent: Bool
+            let urlMatches: Bool
+            let retired: Bool
+            let phase: FoundationNativeAllocationStore.Receipt.Phase?
+            var fields: String {
+                "taskZero=\(taskZero ? 1 : 0) taskMatches=\(taskMatches ? 1 : 0) urlPresent=\(urlPresent ? 1 : 0) urlMatches=\(urlMatches ? 1 : 0) retired=\(retired ? 1 : 0) phase=\(phase?.rawValue ?? "missing")"
+            }
+        }
+
         enum PersistenceStage: String {
             case allocatedWrite, parentBookmark, packageWrite, beginResuming
         }
 
-        static func capture(stage: CaptureStage, location: URL, writeError: Error? = nil) -> String
-        {
+        static func capture(
+            stage: CaptureStage, location: URL, writeError: Error? = nil, binding: Binding? = nil
+        ) -> String {
             // Project booleans only. Never interpolate the URL or any component text.
             let shape =
                 "download.native stage=allocation.capture substage=\(stage.rawValue) outcome=failed fileURL=\(location.isFileURL ? 1 : 0) basePresent=\(location.baseURL != nil ? 1 : 0) plain=\(FoundationManagedPackageMetadata.plain(location) ? 1 : 0)"
-            return writeError.map { shape + " " + scalars($0) } ?? shape
+            let fields = binding.map { shape + " " + $0.fields } ?? shape
+            return writeError.map { fields + " " + scalars($0) } ?? fields
         }
 
         static func persistence(stage: PersistenceStage, error: Error) -> String {
