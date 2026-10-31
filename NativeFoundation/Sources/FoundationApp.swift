@@ -1100,11 +1100,37 @@ final class FoundationAppModel: ObservableObject {
 struct FoundationRootView: View {
     @ObservedObject var model: FoundationAppModel
     @Environment(\.scenePhase) private var scenePhase
+    @ObservedObject private var introductionHistory = FoundationIntroductionHistory.shared
+    @State private var introductionBlocked = false
+
+    private var accountAlertRequested: Bool {
+        model.credentialError != nil || model.signOutNotice != nil
+    }
+
+    private var automaticIntroductionAllowed: Bool {
+        #if DEBUG
+            !FoundationAppRuntime.isTesting
+        #else
+            true
+        #endif
+    }
+
+    private var readyForAutomaticIntroduction: Bool {
+        automaticIntroductionAllowed && !model.isPreparingCaches && model.cachesReady
+            && !model.requiresSignIn && !model.isCleaningDownloads
+            && model.library != nil && model.player != nil && model.actions != nil
+            && model.primaryGenres != nil && model.currentArtwork != nil
+            && model.downloads != nil && model.connectivity != nil
+    }
 
     var accountAlertPresented: Binding<Bool> {
         Binding(
-            get: { model.credentialError != nil || model.signOutNotice != nil },
-            set: { if !$0 { model.dismissAccountAlertAfterUpdate() } }
+            get: { accountAlertRequested && !introductionHistory.automaticPresentationActive },
+            set: {
+                if !$0 && !introductionHistory.automaticPresentationActive {
+                    model.dismissAccountAlertAfterUpdate()
+                }
+            }
         )
     }
 
@@ -1148,9 +1174,21 @@ struct FoundationRootView: View {
                 FoundationSignInView(model: model)
             }
         }
+        .onPreferenceChange(FoundationIntroductionBlockerPreferenceKey.self) {
+            introductionBlocked = $0
+        }
+        .modifier(
+            FoundationAutomaticIntroductionPresentation(
+                isReady: readyForAutomaticIntroduction, hasOtherPresentation: introductionBlocked,
+                hasAccountAlert: accountAlertRequested,
+                catalogScope: model.library?.catalogScopeID ?? "", sync: model.actions?.pinSync,
+                preferences: model.playbackPreferences, controller: model.handoff)
+        )
         .modifier(
             FoundationHandoffPresentation(
-                controller: model.handoff, accountAlert: accountAlertPresented.wrappedValue)
+                controller: model.handoff,
+                accountAlert:
+                    accountAlertRequested || introductionHistory.automaticPresentationActive)
         )
         .environment(\.foundationHandoff, model.handoff)
         .task(id: scenePhase) {

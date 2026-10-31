@@ -549,6 +549,7 @@ private struct FoundationContinueListening: View {
             showingGuide = false
             inlineInstructionsForID = nil
         }
+        .preference(key: FoundationIntroductionBlockerPreferenceKey.self, value: showingGuide)
         .sheet(isPresented: $showingGuide) {
             FoundationHandoffListeningGuide(
                 instruction: instruction, suppressed: $guideSuppressed,

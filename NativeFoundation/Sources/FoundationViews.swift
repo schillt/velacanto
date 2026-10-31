@@ -247,6 +247,9 @@ struct FoundationLibraryView: View {
         .sheet(isPresented: $showingLocalLibrary) {
             if let localLibrary { FoundationLocalLibraryView(model: localLibrary) }
         }
+        .transformPreference(FoundationIntroductionBlockerPreferenceKey.self) {
+            $0 = $0 || blocksAutomaticIntroduction
+        }
         .onPreferenceChange(FoundationOfflineSurfacePreferenceKey.self) { offlineSurface = $0 }
         .onReceive(player.$queue.removeDuplicates()) { displayedQueue = $0 }
         .onReceive(player.$selectedEntryID.removeDuplicates()) { selection in
@@ -411,6 +414,17 @@ struct FoundationLibraryView: View {
             }
         #endif
 
+    }
+
+    private var blocksAutomaticIntroduction: Bool {
+        let shared =
+            showingLocalLibrary || showingPlayer || showingSettings
+            || playlistSource != nil || openedItem != nil || unavailableGenrePin
+        #if os(macOS)
+            return shared || macLibrarySheet != nil
+        #else
+            return shared || managedPlaylist != nil
+        #endif
     }
 
     private func playerDidDismiss() {

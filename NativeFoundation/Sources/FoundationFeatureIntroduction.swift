@@ -59,7 +59,10 @@ private struct FoundationIntroductionOfferContent: View {
 
     var body: some View {
         Group {
-            if history.needsOffer(hasPendingPinChoice: hasPendingPinChoice) {
+            if !history.needsAutomaticPresentation(
+                for: FoundationIntroductionHistory.marketingVersion),
+                history.needsOffer(hasPendingPinChoice: hasPendingPinChoice)
+            {
                 Button {
                     showingIntroduction = true
                 } label: {
@@ -99,6 +102,8 @@ private struct FoundationIntroductionOfferContent: View {
 struct FoundationFeatureIntroductionView: View {
     var sync: FoundationPinSync? = nil
     var replay = false
+    var showsAllFeatures = false
+    var onFinish: (() -> Void)? = nil
     @ObservedObject private var history = FoundationIntroductionHistory.shared
     @Environment(\.dismiss) private var dismiss
     @State private var features: [FoundationIntroductionFeature] = []
@@ -161,13 +166,15 @@ struct FoundationFeatureIntroductionView: View {
         }
         .navigationTitle("What’s New")
         #if os(macOS)
-            .frame(minWidth: 480, idealWidth: 620, minHeight: 560, idealHeight: 680)
+            .frame(minWidth: 480, idealWidth: 560, minHeight: 520, idealHeight: 620)
         #endif
         .accessibilityIdentifier("feature-introduction-walkthrough")
         .onAppear {
             guard !started else { return }
             started = true
-            features = replay ? FoundationIntroductionFeature.current : history.pending()
+            features =
+                replay || showsAllFeatures
+                ? FoundationIntroductionFeature.current : history.pending()
             if let sync {
                 if replay {
                     showsPinChoice = sync.available
@@ -241,7 +248,7 @@ struct FoundationFeatureIntroductionView: View {
         // visible Not Now action declines; toggle changes are explicit consent.
         if declinePin { sync?.respondToOptInPrompt(owner: promptOwner, enable: false) }
         history.acknowledge(features.map(\.id))
-        dismiss()
+        if let onFinish { onFinish() } else { dismiss() }
     }
 }
 
@@ -802,5 +809,130 @@ private struct FoundationUserGuideArticle: View {
             .frame(maxWidth: .infinity)
         }
         .navigationTitle(topic.title)
+    }
+}
+
+/// Library-owned sheets report upward so first-launch content never stacks over them.
+struct FoundationIntroductionBlockerPreferenceKey: PreferenceKey {
+    static let defaultValue = false
+    static func reduce(value: inout Bool, nextValue: () -> Bool) { value = value || nextValue() }
+}
+
+/// One foreground root owns the automatic release presentation. No feature toggle
+/// or version acknowledgement changes until the user makes an explicit choice.
+struct FoundationAutomaticIntroductionPresentation: ViewModifier {
+    let isReady: Bool
+    let hasOtherPresentation: Bool
+    let hasAccountAlert: Bool
+    let catalogScope: String
+    let sync: FoundationPinSync?
+    let preferences: FoundationPlaybackPreferences
+    @ObservedObject var controller: FoundationHandoffController
+    @ObservedObject private var history = FoundationIntroductionHistory.shared
+    @Environment(\.scenePhase) private var scenePhase
+    #if os(macOS)
+        @Environment(\.controlActiveState) private var controlActiveState
+    #endif
+    @State private var owner = UUID()
+    @State private var presented = false
+    @State private var closing = false
+    @State private var presentedScope = ""
+
+    private var version: String? { FoundationIntroductionHistory.marketingVersion }
+    private var foreground: Bool {
+        #if os(macOS)
+            scenePhase == .active && controlActiveState == .key
+        #else
+            scenePhase == .active
+        #endif
+    }
+    private var eligibility: FoundationAutomaticIntroductionEligibility {
+        .init(
+            isReady: isReady, isForeground: foreground,
+            hasOtherPresentation: hasOtherPresentation, hasAccountAlert: hasAccountAlert,
+            hasHandoff: controller.pending != nil || controller.notice != nil)
+    }
+    private var presentationKey: String {
+        "\(version ?? ""):\(catalogScope):\(eligibility.canPresent):\(foreground):\(isReady):"
+            + "\(hasAccountAlert):\(history.acknowledgedVersion ?? ""):\(closing):"
+            + "\(history.automaticPresentationOwner?.uuidString ?? "")"
+    }
+
+    func body(content: Content) -> some View {
+        ZStack {
+            // Keep the existing library subtree mounted. Its bounded startup,
+            // genre preparation and cache owners continue behind the presentation.
+            content
+                .disabled(presented).accessibilityHidden(presented)
+                #if os(macOS)
+                    .blur(radius: presented ? 10 : 0)
+                #endif
+            #if os(iOS)
+                if presented {
+                    introduction
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background { Rectangle().fill(.background).ignoresSafeArea() }
+                        .accessibilityElement(children: .contain)
+                        .zIndex(100)
+                        .onDisappear { presentationEnded() }
+                }
+            #endif
+        }
+        #if os(macOS)
+            .sheet(isPresented: $presented, onDismiss: presentationEnded) {
+                introduction.interactiveDismissDisabled()
+            }
+        #endif
+        .task(id: presentationKey) {
+            if presented {
+                if !isReady || hasAccountAlert || catalogScope != presentedScope {
+                    closeWithoutAcknowledgement()
+                }
+                return
+            }
+            guard !closing, eligibility.canPresent, let version,
+                history.needsAutomaticPresentation(for: version)
+            else { return }
+            // Optional iCloud readiness must not delay the version introduction.
+            // If not ready, the existing Home offer retains the pending pin choice.
+            guard !Task.isCancelled, eligibility.canPresent,
+                history.claimAutomaticPresentation(version: version, owner: owner)
+            else { return }
+            presentedScope = catalogScope
+            #if os(iOS)
+                UIApplication.shared.sendAction(
+                    #selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+            #endif
+            presented = true
+        }
+        .onDisappear {
+            if !presented { history.releaseAutomaticPresentation(owner: owner) }
+        }
+    }
+
+    private var introduction: some View {
+        NavigationStack {
+            FoundationFeatureIntroductionView(
+                sync: sync, showsAllFeatures: true,
+                onFinish: {
+                    if let version {
+                        history.acknowledgeAutomaticPresentation(version: version, owner: owner)
+                    }
+                    closeWithoutAcknowledgement()
+                })
+        }
+        .environmentObject(preferences)
+        .accessibilityIdentifier("automatic-whats-new")
+    }
+
+    private func closeWithoutAcknowledgement() {
+        guard presented else { return }
+        closing = true
+        presented = false
+    }
+
+    private func presentationEnded() {
+        history.releaseAutomaticPresentation(owner: owner)
+        closing = false
     }
 }

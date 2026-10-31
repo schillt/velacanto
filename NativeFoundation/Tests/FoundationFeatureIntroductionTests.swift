@@ -129,6 +129,91 @@ final class FoundationFeatureIntroductionTests: XCTestCase {
         XCTAssertTrue(FoundationIntroductionHistory(defaults: defaults).pending().isEmpty)
     }
 
+    func testAutomaticFirstVersionClaimDoesNotAcknowledgeAppearance() {
+        let defaults = defaults()
+        let history = FoundationIntroductionHistory(defaults: defaults)
+        XCTAssertTrue(history.needsAutomaticPresentation(for: "0.6.0"))
+        XCTAssertFalse(history.needsAutomaticPresentation(for: nil))
+        XCTAssertFalse(history.needsAutomaticPresentation(for: ""))
+        XCTAssertTrue(history.claimAutomaticPresentation(version: "0.6.0", owner: UUID()))
+        XCTAssertNil(defaults.string(forKey: FoundationIntroductionHistory.versionKey))
+        XCTAssertEqual(history.pending(), FoundationIntroductionFeature.current)
+    }
+
+    func testExplicitVersionCompletionSurvivesRelaunchAndIgnoresBuildChanges() {
+        let defaults = defaults()
+        let history = FoundationIntroductionHistory(defaults: defaults)
+        let owner = UUID()
+        XCTAssertTrue(history.claimAutomaticPresentation(version: "0.6.0", owner: owner))
+        history.acknowledgeAutomaticPresentation(version: "0.6.0", owner: owner)
+        history.releaseAutomaticPresentation(owner: owner)
+        defaults.set("999", forKey: "SyntheticBuild")
+        let restored = FoundationIntroductionHistory(defaults: defaults)
+        XCTAssertFalse(restored.needsAutomaticPresentation(for: "0.6.0"))
+        XCTAssertTrue(restored.needsAutomaticPresentation(for: "0.6.1"))
+    }
+
+    func testVersionUpgradeStillOffersWhenEveryFeatureIDWasSeen() {
+        let history = FoundationIntroductionHistory(defaults: defaults())
+        history.acknowledge(FoundationIntroductionFeature.current.map(\.id))
+        XCTAssertTrue(history.pending().isEmpty)
+        XCTAssertTrue(history.needsAutomaticPresentation(for: "0.6.0"))
+        XCTAssertTrue(history.claimAutomaticPresentation(version: "0.6.0", owner: UUID()))
+    }
+
+    func testDismissalReleasesVersionClaimWithoutAcknowledgement() {
+        let defaults = defaults()
+        let history = FoundationIntroductionHistory(defaults: defaults)
+        let first = UUID()
+        XCTAssertTrue(history.claimAutomaticPresentation(version: "0.6.0", owner: first))
+        history.releaseAutomaticPresentation(owner: first)
+        XCTAssertTrue(history.needsAutomaticPresentation(for: "0.6.0"))
+        XCTAssertNil(defaults.string(forKey: FoundationIntroductionHistory.versionKey))
+        XCTAssertTrue(history.claimAutomaticPresentation(version: "0.6.0", owner: UUID()))
+    }
+
+    func testOnlyOneWindowCanClaimOrAcknowledgeAutomaticPresentation() {
+        let history = FoundationIntroductionHistory(defaults: defaults())
+        let first = UUID()
+        let second = UUID()
+        XCTAssertTrue(history.claimAutomaticPresentation(version: "0.6.0", owner: first))
+        XCTAssertFalse(history.claimAutomaticPresentation(version: "0.6.0", owner: second))
+        history.acknowledgeAutomaticPresentation(version: "0.6.0", owner: second)
+        history.releaseAutomaticPresentation(owner: second)
+        XCTAssertEqual(history.automaticPresentationOwner, first)
+        XCTAssertTrue(history.needsAutomaticPresentation(for: "0.6.0"))
+        history.acknowledgeAutomaticPresentation(version: "0.7.0", owner: first)
+        XCTAssertTrue(history.needsAutomaticPresentation(for: "0.6.0"))
+        history.acknowledgeAutomaticPresentation(version: "0.6.0", owner: first)
+        XCTAssertFalse(history.needsAutomaticPresentation(for: "0.6.0"))
+    }
+
+    func testAutomaticPresentationWaitsForReadyForegroundAndNoConflictingModal() {
+        XCTAssertTrue(
+            FoundationAutomaticIntroductionEligibility(
+                isReady: true, isForeground: true, hasOtherPresentation: false,
+                hasAccountAlert: false, hasHandoff: false
+            ).canPresent)
+        let blocked: [FoundationAutomaticIntroductionEligibility] = [
+            .init(
+                isReady: false, isForeground: true, hasOtherPresentation: false,
+                hasAccountAlert: false, hasHandoff: false),
+            .init(
+                isReady: true, isForeground: false, hasOtherPresentation: false,
+                hasAccountAlert: false, hasHandoff: false),
+            .init(
+                isReady: true, isForeground: true, hasOtherPresentation: true,
+                hasAccountAlert: false, hasHandoff: false),
+            .init(
+                isReady: true, isForeground: true, hasOtherPresentation: false,
+                hasAccountAlert: true, hasHandoff: false),
+            .init(
+                isReady: true, isForeground: true, hasOtherPresentation: false,
+                hasAccountAlert: false, hasHandoff: true),
+        ]
+        XCTAssertTrue(blocked.allSatisfy { !$0.canPresent })
+    }
+
     #if os(iOS)
         func testStorageWalkthroughExplicitActionsRequireAACWithoutSubstitutingOriginal() {
             let defaults = defaults()
