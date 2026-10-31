@@ -619,7 +619,7 @@ private struct FoundationHandoffFocusCue: ViewModifier {
         }
     }
 
-    private var pointerSymbol: String {
+    nonisolated private var pointerSymbol: String {
         #if os(macOS)
             "cursorarrow.click"
         #else
