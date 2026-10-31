@@ -66,6 +66,16 @@ struct FoundationRemoteListeningActivity: Identifiable, Equatable, Sendable {
         self.receiverScope = receiverScope
     }
 
+    /// Display deduplication only. Keep the original local clock anchor when the
+    /// server repeats the same report; continuation authorization uses full offers.
+    func hasSameReportedState(as other: Self) -> Bool {
+        id == other.id && deviceKey == other.deviceKey && deviceLabel == other.deviceLabel
+            && checkedInAt == other.checkedInAt && item == other.item
+            && albumTitle == other.albumTitle && elapsed == other.elapsed
+            && sessionID == other.sessionID && client == other.client
+            && remoteDeviceID == other.remoteDeviceID && receiverScope == other.receiverScope
+    }
+
     var usesNativeHandoff: Bool { client == "Velacanto Native" }
 
     var progress: FoundationListeningProgress {
@@ -436,7 +446,7 @@ final class FoundationRemoteListeningModel: ObservableObject {
     /// Scene transitions and ordinary refreshes are not authoritative playback changes.
     func suspend() {
         generation = UUID()
-        unavailable = false
+        if unavailable { unavailable = false }
     }
 
     func cancel() {
@@ -474,6 +484,74 @@ final class FoundationRemoteListeningModel: ObservableObject {
         }
     }
 
+    /// The foreground Home task owns this lifetime. Late callbacks from retired
+    /// accounts/scenes are rejected without clearing the last verified snapshot.
+    func observe(
+        reconcile: (@Sendable () async throws -> [FoundationRemoteListeningActivity])? = nil,
+        sleep: @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
+        using subscribe:
+            @Sendable (
+                @escaping @Sendable ([FoundationRemoteListeningActivity]) async -> Void
+            ) async throws -> Void
+    ) async {
+        guard !Task.isCancelled else { return }
+        let expected = generation
+        for attempt in 0...2 {
+            do {
+                try Task.checkCancellation()
+                guard generation == expected else { return }
+                if attempt > 0, let reconcile {
+                    let result = try await reconcile()
+                    try Task.checkCancellation()
+                    receive(result, generation: expected)
+                }
+                try await subscribe { [weak self] result in
+                    await self?.receive(result, generation: expected)
+                }
+                return
+            } catch {
+                guard generation == expected, !Task.isCancelled else { return }
+                let retryable: Bool
+                if let error = error as? URLError {
+                    switch error.code {
+                    case .networkConnectionLost, .cannotConnectToHost, .cannotFindHost,
+                        .dnsLookupFailed, .timedOut, .notConnectedToInternet:
+                        retryable = true
+                    default: retryable = false
+                    }
+                } else {
+                    retryable = false
+                }
+                if retryable, attempt < 2 {
+                    do {
+                        try await sleep(.seconds(attempt + 1))
+                        try Task.checkCancellation()
+                    } catch { return }
+                    continue
+                }
+                let failed = !(error is CancellationError)
+                if unavailable != failed { unavailable = failed }
+                return
+            }
+        }
+    }
+
+    private func receive(_ result: [FoundationRemoteListeningActivity], generation expected: UUID) {
+        guard generation == expected, !Task.isCancelled else { return }
+        if unavailable { unavailable = false }
+        publish(result)
+    }
+
+    private func publish(_ result: [FoundationRemoteListeningActivity]) {
+        let stable = result.map { candidate in
+            activities.first(where: { $0.hasSameReportedState(as: candidate) }) ?? candidate
+        }
+        if stable != activities {
+            snapshotRevision = UUID()
+            activities = stable
+        }
+    }
+
     func refresh(
         using load: @Sendable () async throws -> [FoundationRemoteListeningActivity]
     ) async {
@@ -484,11 +562,11 @@ final class FoundationRemoteListeningModel: ObservableObject {
             let result = try await load()
             try Task.checkCancellation()
             guard generation == expected else { return }
-            snapshotRevision = UUID()
-            activities = result
+            publish(result)
         } catch {
             guard generation == expected, !Task.isCancelled else { return }
-            unavailable = !(error is CancellationError)
+            let failed = !(error is CancellationError)
+            if unavailable != failed { unavailable = failed }
         }
     }
 }
@@ -608,6 +686,8 @@ struct FoundationHandoffListeningGuide: View {
 #endif
 
 enum FoundationRemoteContinuationSelection: String, Sendable {
+    /// Preparation policy only; offers always retain a concrete selection.
+    case automatic
     case fullQueue
     case currentSong
 }
@@ -731,6 +811,28 @@ struct FoundationRemoteContinuationOffer: Sendable {
         selection: FoundationRemoteContinuationSelection = .fullQueue,
         allowPaused: Bool = false
     ) throws -> Self {
+        if selection == .automatic {
+            // Validate the current source first. Fallback is confined to decoding
+            // this same snapshot, never a catch around networking or authorization.
+            let current = try decode(
+                data, sessionID: sessionID, userID: userID, ownDeviceID: ownDeviceID,
+                scope: scope, catalogSource: catalogSource, now: now,
+                selection: .currentSong, allowPaused: allowPaused)
+            do {
+                return try decode(
+                    data, sessionID: sessionID, userID: userID, ownDeviceID: ownDeviceID,
+                    scope: scope, catalogSource: catalogSource, now: now,
+                    selection: .fullQueue, allowPaused: allowPaused)
+            } catch let error as FoundationHandoffError {
+                switch error {
+                case .queueUnavailable, .invalid, .unavailable, .tooLarge:
+                    // A malformed, stale, unbounded or unsupported queue is not
+                    // partially copied. Only the independently verified song moves.
+                    return current
+                default: throw error
+                }
+            }
+        }
         typealias Activity = FoundationRemoteListeningActivity
         guard data.count <= FoundationHandoffPayload.maximumBytes,
             FoundationJellyfinLibrary.validID(sessionID),
@@ -788,7 +890,7 @@ struct FoundationRemoteContinuationOffer: Sendable {
             throw FoundationHandoffError.expired
         }
         if selection == .currentSong {
-            // Missing queue never means empty queue. This explicit action selects only
+            // Missing queue never means empty queue. This concrete selection keeps only
             // the current item; no other queue entries or source modes are inferred.
             let reported = Activity.occurrenceID(session.playlistItemID)
             guard session.playlistItemID == nil || session.playlistItemID == "" || reported != nil else {

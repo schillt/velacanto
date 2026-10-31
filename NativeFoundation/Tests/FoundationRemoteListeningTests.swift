@@ -282,6 +282,206 @@ final class FoundationRemoteListeningTests: XCTestCase {
     }
 
     @MainActor
+    func testSubscriptionPublishesChangedSnapshotsAndRejectsRetiredCallbacks() async {
+        let model = FoundationRemoteListeningModel()
+        await model.refresh { [Self.activity] }
+        let gate = RemoteListeningGate()
+        let updated = FoundationRemoteListeningActivity(
+            id: Self.activity.id, deviceKey: Self.activity.deviceKey, deviceLabel: "Mac",
+            checkedInAt: Self.now, item: Self.activity.item, albumTitle: "Album", elapsed: 110)
+        let task = Task {
+            await model.observe { receive in
+                await receive([updated])
+                await gate.wait()
+                await receive([])
+            }
+        }
+        await gate.waitForStart()
+        XCTAssertEqual(model.activities, [updated])
+        model.suspend()
+        await gate.release()
+        await task.value
+        XCTAssertEqual(
+            model.activities, [updated], "An old subscription cannot clear a newer context")
+    }
+
+    @MainActor
+    func testSubscriptionCancellationEndsLifetimeWithoutClearingSnapshot() async {
+        let model = FoundationRemoteListeningModel()
+        await model.refresh { [Self.activity] }
+        let started = RemoteListeningGate()
+        let closed = RemoteListeningSignal()
+        let task = Task {
+            await model.observe { receive in
+                await started.wait()
+                do { try await Task.sleep(for: .seconds(60)) } catch {}
+                await closed.signal()
+                await receive([])
+            }
+        }
+        await started.waitForStart()
+        task.cancel()
+        await started.release()
+        await task.value
+        let didClose = await closed.value
+        XCTAssertTrue(didClose)
+        XCTAssertEqual(model.activities, [Self.activity])
+        XCTAssertFalse(model.unavailable)
+    }
+
+    @MainActor
+    func testSubscriptionReconnectsOnceWithReconciliationAndCancellationStopsIt() async {
+        let model = FoundationRemoteListeningModel()
+        await model.refresh { [Self.activity] }
+        let gate = RemoteListeningGate()
+        let probe = RemoteListeningSubscriptionProbe()
+        let updated = FoundationRemoteListeningActivity(
+            id: Self.activity.id, deviceKey: Self.activity.deviceKey, deviceLabel: "Mac",
+            checkedInAt: Self.now, item: Self.activity.item, albumTitle: "Album", elapsed: 110)
+        let task = Task {
+            await model.observe(
+                reconcile: {
+                    await probe.reconcile()
+                    return [Self.activity]
+                },
+                sleep: { interval in await probe.record(interval) },
+                using: { receive in
+                    let attempt = await probe.begin()
+                    if attempt == 1 { throw URLError(.networkConnectionLost) }
+                    await receive([updated])
+                    await gate.wait()
+                    throw CancellationError()
+                })
+        }
+        await gate.waitForStart()
+        XCTAssertEqual(model.activities, [updated])
+        task.cancel()
+        await gate.release()
+        await task.value
+        let count = await probe.count
+        let reconciles = await probe.reconciles
+        let intervals = await probe.intervals
+        XCTAssertEqual(count, 2)
+        XCTAssertEqual(reconciles, 1)
+        XCTAssertEqual(intervals, [.seconds(1)])
+        XCTAssertEqual(model.activities, [updated])
+        XCTAssertFalse(model.unavailable)
+    }
+
+    @MainActor
+    func testSubscriptionReconnectIsBoundedAndNeverRetriesAuthInvalidDataOrCancellation() async {
+        let errors: [any Error] = [
+            URLError(.networkConnectionLost), FoundationLibraryError.authentication,
+            FoundationLibraryError.invalidResponse, CancellationError(),
+        ]
+        for error in errors {
+            let model = FoundationRemoteListeningModel()
+            let probe = RemoteListeningSubscriptionProbe()
+            await model.observe(
+                sleep: { interval in await probe.record(interval) },
+                using: { _ in
+                    _ = await probe.begin()
+                    throw error
+                })
+            let count = await probe.count
+            let intervals = await probe.intervals
+            if error is URLError {
+                XCTAssertEqual(count, 3)
+                XCTAssertEqual(intervals, [.seconds(1), .seconds(2)])
+            } else {
+                XCTAssertEqual(count, 1)
+                XCTAssertTrue(intervals.isEmpty)
+            }
+        }
+    }
+
+    @MainActor
+    func testSubscriptionFailureRetainsSnapshotUntilExpiry() async {
+        let model = FoundationRemoteListeningModel()
+        await model.refresh { [Self.activity] }
+        await model.observe { _ in throw FoundationLibraryError.unavailable }
+        XCTAssertTrue(model.unavailable)
+        XCTAssertEqual(model.activities, [Self.activity])
+        model.removeExpiredActivities(now: Self.now.addingTimeInterval(90))
+        XCTAssertTrue(model.activities.isEmpty)
+    }
+
+    func testSessionSubscriptionRequestPreservesBaseIdentityAndNeverUsesTokenQuery() throws {
+        let request = try FoundationJellyfinLibrary.remoteListeningSocketRequest(
+            session: Self.session, deviceName: .iPhone)
+        XCTAssertEqual(request.url?.scheme, "wss")
+        XCTAssertEqual(request.url?.path, "/jellyfin/socket")
+        let query = try XCTUnwrap(URLComponents(url: request.url!, resolvingAgainstBaseURL: false))
+        XCTAssertEqual(query.queryItems, [URLQueryItem(name: "deviceId", value: "own-device")])
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), Self.header(.iPhone))
+        XCTAssertFalse(request.url!.absoluteString.contains("fixture-token"))
+    }
+
+    func testSessionSubscriptionDecodesRawSnapshotsWithoutTreatingMalformedDataAsEmpty() throws {
+        let source = try FoundationCatalogSource.jellyfin(scope: String(repeating: "a", count: 64))
+        let data = try JSONSerialization.data(withJSONObject: [
+            "MessageType": "Sessions", "Data": [Self.row()],
+        ])
+        let update = try FoundationJellyfinLibrary.remoteListeningSocketUpdate(
+            data, session: Self.session, catalogSource: source, now: Self.now)
+        guard case .sessions(let activities) = update else { return XCTFail("Expected snapshot") }
+        XCTAssertEqual(activities.count, 1)
+        XCTAssertEqual(activities.first?.item.id, Self.itemID)
+        let empty = try JSONSerialization.data(withJSONObject: [
+            "MessageType": "Sessions", "Data": [],
+        ])
+        XCTAssertEqual(
+            try FoundationJellyfinLibrary.remoteListeningSocketUpdate(
+                empty, session: Self.session, catalogSource: source, now: Self.now), .sessions([]))
+        for value: [String: Any] in [
+            ["MessageType": "Sessions"], ["MessageType": "Sessions", "Data": "invalid"],
+        ] {
+            XCTAssertThrowsError(
+                try FoundationJellyfinLibrary.remoteListeningSocketUpdate(
+                    JSONSerialization.data(withJSONObject: value), session: Self.session,
+                    catalogSource: source, now: Self.now))
+        }
+        XCTAssertThrowsError(
+            try FoundationJellyfinLibrary.remoteListeningSocketUpdate(
+                Data(repeating: 0, count: 1_048_577), session: Self.session,
+                catalogSource: source, now: Self.now))
+        for (type, expected): (String, FoundationJellyfinLibrary.RemoteListeningSocketUpdate) in [
+            ("ForceKeepAlive", .keepAlive), ("Play", .ignored), ("KeepAlive", .ignored),
+        ] {
+            let data = try JSONSerialization.data(withJSONObject: ["MessageType": type])
+            XCTAssertEqual(
+                try FoundationJellyfinLibrary.remoteListeningSocketUpdate(
+                    data, session: Self.session, catalogSource: source, now: Self.now), expected)
+        }
+    }
+
+    @MainActor
+    func testRepeatedServerSnapshotDoesNotPublishOrResetProgressAnchor() async {
+        let model = FoundationRemoteListeningModel()
+        await model.refresh { [Self.activity] }
+        let revision = model.snapshotRevision
+        var publications = 0
+        let token = model.objectWillChange.sink { publications += 1 }
+        let repeated = FoundationRemoteListeningActivity(
+            id: Self.activity.id, deviceKey: Self.activity.deviceKey, deviceLabel: "Mac",
+            checkedInAt: Self.now, item: Self.activity.item, albumTitle: "Album", elapsed: 90,
+            observedAt: Self.now.addingTimeInterval(10))
+        await model.refresh { [repeated] }
+        XCTAssertEqual(publications, 0)
+        XCTAssertEqual(model.snapshotRevision, revision)
+        XCTAssertEqual(model.activities.first?.observedAt, Self.now)
+        let updated = FoundationRemoteListeningActivity(
+            id: Self.activity.id, deviceKey: Self.activity.deviceKey, deviceLabel: "Mac",
+            checkedInAt: Self.now.addingTimeInterval(10), item: Self.activity.item,
+            albumTitle: "Album", elapsed: 100, observedAt: Self.now.addingTimeInterval(10))
+        await model.refresh { [updated] }
+        XCTAssertGreaterThan(publications, 0)
+        XCTAssertNotEqual(model.snapshotRevision, revision)
+        XCTAssertEqual(model.activities, [updated])
+        token.cancel()
+    }
+
+    @MainActor
     func testRetiredContextNeverPublishesLateResponseOrError() async {
         let gate = RemoteListeningGate()
         let model = FoundationRemoteListeningModel()
@@ -663,6 +863,17 @@ private actor RemoteListeningRequestRecorder {
     private(set) var requests: [URLRequest] = []
     func append(_ request: URLRequest) { requests.append(request) }
 }
+private actor RemoteListeningSubscriptionProbe {
+    private(set) var count = 0
+    private(set) var reconciles = 0
+    private(set) var intervals: [Duration] = []
+    func begin() -> Int {
+        count += 1
+        return count
+    }
+    func reconcile() { reconciles += 1 }
+    func record(_ interval: Duration) { intervals.append(interval) }
+}
 private actor RemoteListeningSignal {
     private(set) var value = false
     func signal() { value = true }
@@ -799,6 +1010,124 @@ final class FoundationRemoteContinuationTests: XCTestCase {
             XCTAssertFalse(fields.contains("999"))
         }
     #endif
+
+    func testAutomaticContinuationPreservesCompleteReportedQueueAndDuplicateOccurrences() throws {
+        let offer = try CrossClientFixtures.offer(CrossClientFixtures.row(), selection: .automatic)
+        XCTAssertEqual(offer.selection, .fullQueue)
+        XCTAssertEqual(
+            offer.queue.map(\.itemID),
+            [
+                CrossClientFixtures.first, CrossClientFixtures.current, CrossClientFixtures.first,
+            ])
+        XCTAssertEqual(Set(offer.queue.map(\.sourceID)).count, 3)
+        XCTAssertEqual(offer.repeatMode, .all)
+    }
+
+    func testAutomaticContinuationUsesOnlyVerifiedCurrentSongForUnusableQueues() throws {
+        var missing = CrossClientFixtures.row()
+        missing.removeValue(forKey: "NowPlayingQueue")
+        var stale = CrossClientFixtures.row()
+        stale["NowPlayingQueue"] = [["Id": CrossClientFixtures.first, "PlaylistItemId": "old"]]
+        var malformed = CrossClientFixtures.row()
+        malformed["NowPlayingQueue"] = [["Id": CrossClientFixtures.first]]
+        var duplicate = CrossClientFixtures.row()
+        duplicate["NowPlayingQueue"] = [
+            ["Id": CrossClientFixtures.current, "PlaylistItemId": "playlistItem1"],
+            ["Id": CrossClientFixtures.first, "PlaylistItemId": "playlistItem1"],
+        ]
+        var noOccurrence = missing
+        noOccurrence.removeValue(forKey: "PlaylistItemId")
+        var noRepeat = CrossClientFixtures.row()
+        var state = try XCTUnwrap(noRepeat["PlayState"] as? [String: Any])
+        state.removeValue(forKey: "RepeatMode")
+        noRepeat["PlayState"] = state
+        for row in [missing, stale, malformed, duplicate, noOccurrence, noRepeat] {
+            let offer = try CrossClientFixtures.offer(row, selection: .automatic)
+            XCTAssertEqual(offer.selection, .currentSong)
+            XCTAssertEqual(offer.queue.map(\.itemID), [CrossClientFixtures.current])
+            XCTAssertEqual(offer.repeatMode, .off)
+            XCTAssertEqual(offer.activityID, try CrossClientFixtures.activity(row).id)
+        }
+    }
+
+    func testAutomaticContinuationNeverFallsBackFromInvalidCurrentSource() throws {
+        for key in [
+            "UserId", "DeviceId", "NowPlayingItem", "LastPlaybackCheckIn", "PlaylistItemId",
+        ] {
+            var row = CrossClientFixtures.row()
+            switch key {
+            case "UserId": row[key] = CrossClientFixtures.first
+            case "DeviceId": row[key] = CrossClientFixtures.session.deviceID
+            case "NowPlayingItem": row[key] = ["Id": "invalid", "Type": "Audio"]
+            case "LastPlaybackCheckIn":
+                row[key] = ISO8601DateFormatter().string(from: Date(timeIntervalSinceNow: -120))
+            default: row[key] = "invalid\noccurrence"
+            }
+            XCTAssertThrowsError(try CrossClientFixtures.offer(row, selection: .automatic), key)
+        }
+    }
+
+    func testAutomaticAdapterAuthorizesConcreteQueueOrCurrentSongWithoutChangingPolicy()
+        async throws
+    {
+        for songOnly in [false, true] {
+            let transport = CrossClientTransport(songOnly: songOnly)
+            let library = FoundationJellyfinLibrary(
+                session: CrossClientFixtures.session, load: { try await transport.load($0) })
+            let offer = try await library.prepareRemotePlayback(
+                CrossClientFixtures.activity(CrossClientFixtures.row()))
+            XCTAssertEqual(offer.selection, songOnly ? .currentSong : .fullQueue)
+            let authorized = try await library.authorizeRemoteContinuation(offer)
+            XCTAssertEqual(authorized.selection, offer.selection)
+            XCTAssertEqual(authorized.fingerprint, offer.fingerprint)
+            XCTAssertEqual(authorized.queue.count, songOnly ? 1 : 3)
+            let requests = await transport.requests
+            XCTAssertTrue(requests.allSatisfy { $0.httpMethod != "POST" })
+        }
+    }
+
+    func testAutomaticAdapterPropagatesNetworkAuthorizationAndCancellationFailures() async throws {
+        let activity = try CrossClientFixtures.activity(CrossClientFixtures.row())
+        let networkRequests = RemoteListeningRequestRecorder()
+        let network = FoundationJellyfinLibrary(
+            session: CrossClientFixtures.session,
+            load: { request in
+                await networkRequests.append(request)
+                throw URLError(.notConnectedToInternet)
+            })
+        do {
+            _ = try await network.prepareRemotePlayback(activity)
+            XCTFail("Network failure must not produce a song offer")
+        } catch {}
+        let networkCount = await networkRequests.requests.count
+        XCTAssertEqual(networkCount, 1)
+        let deniedRequests = RemoteListeningRequestRecorder()
+        let denied = FoundationJellyfinLibrary(
+            session: CrossClientFixtures.session,
+            load: { request in
+                await deniedRequests.append(request)
+                return (Data(), CrossClientFixtures.response(request, code: 401))
+            })
+        do {
+            _ = try await denied.prepareRemotePlayback(activity)
+            XCTFail("Authorization failure must not produce a song offer")
+        } catch {}
+        let deniedCount = await deniedRequests.requests.count
+        XCTAssertEqual(deniedCount, 1)
+        let cancelledRequests = RemoteListeningRequestRecorder()
+        let cancelled = FoundationJellyfinLibrary(
+            session: CrossClientFixtures.session,
+            load: { request in
+                await cancelledRequests.append(request)
+                throw CancellationError()
+            })
+        do {
+            _ = try await cancelled.prepareRemotePlayback(activity)
+            XCTFail("Cancellation must not produce a song offer")
+        } catch {}
+        let cancelledCount = await cancelledRequests.requests.count
+        XCTAssertEqual(cancelledCount, 1)
+    }
 
     func testExplicitSongSelectionNeverInfersMissingQueueOrCopiesSourceModes() throws {
         let queues: [[[String: String]]?] = [
@@ -1595,6 +1924,20 @@ final class FoundationRemoteContinuationControllerTests: XCTestCase {
         await fulfillment(of: [ready], timeout: 5)
         token.cancel()
     }
+    func testAutomaticControllerPreparesConcreteSongWhenQueueIsNotShared() async throws {
+        let transport = CrossClientTransport(songOnly: true)
+        let (controller, player, library) = make(transport)
+        defer {
+            controller.invalidate()
+            player.stop()
+        }
+        try await prepare(controller, library: library, selection: .automatic)
+        XCTAssertEqual(controller.pending?.remoteOffer?.selection, .currentSong)
+        XCTAssertEqual(controller.pending?.payload.session?.entries.count, 1)
+        let requests = await transport.requests
+        XCTAssertTrue(requests.allSatisfy { $0.httpMethod != "POST" })
+    }
+
     func testExplicitSongActualStartPausesOnceAndKeepsOneSongReceiverQueue() async throws {
         let transport = CrossClientTransport(confirmsStop: true, songOnly: true)
         let (controller, player, library) = make(transport)

@@ -335,7 +335,7 @@ final class FoundationHandoffController: NSObject, ObservableObject, NSUserActiv
     func prepareRemoteContinuation(
         _ activity: FoundationRemoteListeningActivity,
         library: any FoundationLibrary,
-        selection: FoundationRemoteContinuationSelection = .fullQueue,
+        selection: FoundationRemoteContinuationSelection = .automatic,
         allowsNetworking: @escaping @MainActor () -> Bool = { true },
         onStarted: @escaping @MainActor () -> Void = {},
         completion: @escaping @MainActor () -> Void = {}
@@ -368,12 +368,14 @@ final class FoundationHandoffController: NSObject, ObservableObject, NSUserActiv
             do {
                 guard transfer.allowsNetworking() else { throw FoundationHandoffError.unavailable }
                 let offer: FoundationRemoteContinuationOffer
-                if selection == .currentSong {
-                    offer = try await library.prepareRemoteCurrentSong(activity)
-                } else {
-                    offer = try await library.prepareRemoteContinuation(activity)
+                switch selection {
+                case .automatic: offer = try await library.prepareRemotePlayback(activity)
+                case .currentSong: offer = try await library.prepareRemoteCurrentSong(activity)
+                case .fullQueue: offer = try await library.prepareRemoteContinuation(activity)
                 }
-                guard offer.selection == selection else { throw FoundationHandoffError.invalid }
+                guard offer.selection != .automatic,
+                    selection == .automatic || offer.selection == selection
+                else { throw FoundationHandoffError.invalid }
                 try Task.checkCancellation()
                 guard let self, self.remoteIsCurrent(transfer) else { return }
                 guard transfer.allowsNetworking() else { throw FoundationHandoffError.unavailable }

@@ -461,6 +461,9 @@ private struct FoundationContinueListening: View {
     @EnvironmentObject private var connectivity: FoundationConnectivity
     @EnvironmentObject private var dismissals: FoundationContinueListeningDismissals
     @Environment(\.scenePhase) private var scenePhase
+    #if os(macOS)
+        @Environment(\.controlActiveState) private var controlActiveState
+    #endif
     @Environment(\.foundationHandoff) private var handoff
     let library: any FoundationLibrary
     let isActive: Bool
@@ -474,6 +477,14 @@ private struct FoundationContinueListening: View {
     private var active: Bool {
         isActive && scenePhase == .active && !connectivity.localOnly
             && !library.listeningActivityScope.isEmpty
+    }
+
+    private var discoveryActive: Bool {
+        #if os(macOS)
+            active && controlActiveState == .key
+        #else
+            active
+        #endif
     }
 
     private var selected: FoundationRemoteListeningActivity? {
@@ -502,9 +513,14 @@ private struct FoundationContinueListening: View {
         .task(id: taskIdentity) {
             guard !Task.isCancelled else { return }
             model.suspend()
-            guard active, !Task.isCancelled else { return }
+            guard discoveryActive, !Task.isCancelled else { return }
             model.removeExpiredActivities()
             await model.refresh { try await library.remoteListeningActivity() }
+            guard discoveryActive, !Task.isCancelled else { return }
+            await model.observe(reconcile: { try await library.remoteListeningActivity() }) {
+                receive in
+                try await library.observeRemoteListeningActivity(receive: receive)
+            }
         }
         .task(id: expiryIdentity) {
             guard active, !Task.isCancelled else { return }
@@ -546,12 +562,12 @@ private struct FoundationContinueListening: View {
     }
 
     private var taskIdentity: String {
-        "\(library.listeningActivityScope):\(active):\(refreshRevision):\(connectivity.successfulRetryRevision)"
+        "\(library.listeningActivityScope):\(discoveryActive):\(refreshRevision):\(connectivity.successfulRetryRevision)"
     }
 
     private func openInstructions(
         for activity: FoundationRemoteListeningActivity,
-        selection: FoundationRemoteContinuationSelection = .fullQueue
+        selection: FoundationRemoteContinuationSelection = .automatic
     ) {
         guard selected?.id == activity.id else { return }
         guard activity.usesNativeHandoff else {
@@ -561,7 +577,8 @@ private struct FoundationContinueListening: View {
             preparingRemoteID = activity.id
             let offeredScope = library.listeningActivityScope
             handoff.prepareRemoteContinuation(
-                activity, library: library, selection: selection, allowsNetworking: { !connectivity.localOnly },
+                activity, library: library, selection: selection,
+                allowsNetworking: { !connectivity.localOnly },
                 onStarted: {
                     // Retire only this known source card after actual receiving playback.
                     // An unrelated native Handoff source is never inferred or suppressed.
@@ -612,16 +629,6 @@ private struct FoundationContinueListening: View {
             VStack(alignment: .leading, spacing: 12) {
                 mediaButton(activity)
                     .accessibilityAction(named: "Dismiss") { dismiss(activity) }
-                if !activity.usesNativeHandoff {
-                    Button("Continue this song", systemImage: "play.fill") {
-                        openInstructions(for: activity, selection: .currentSong)
-                    }
-                    .disabled(preparingRemoteID != nil || handoff == nil || connectivity.localOnly)
-                    .accessibilityIdentifier("continue-listening-current-song")
-                    .accessibilityHint("Prepares only the current song and asks before replacing the queue here.")
-                    Text("The complete queue is available only when the other player shares it.")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
                 if inlineInstructionsForID == activity.id {
                     Text(instruction).font(.subheadline).foregroundStyle(.secondary)
                     Button("Handoff Help") { showingGuide = true }
@@ -673,7 +680,8 @@ private struct FoundationContinueListening: View {
         .accessibilityHint(
             activity.usesNativeHandoff
                 ? "Shows Handoff instructions. Does not start playback."
-                : "Prepares the complete reported queue for confirmation before starting here.")
+                : "Prepares this song and any usable reported queue for confirmation before starting here."
+        )
     }
 
     private func mediaDetails(_ activity: FoundationRemoteListeningActivity) -> some View {
@@ -700,7 +708,7 @@ private struct FoundationContinueListening: View {
             .background(.quaternary, in: Circle())
             .overlay {
                 if preparingRemoteID == activity.id {
-                    ProgressView().accessibilityLabel("Preparing reported queue")
+                    ProgressView().accessibilityLabel("Preparing playback")
                 }
             }
             .overlay {

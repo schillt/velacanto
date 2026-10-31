@@ -73,8 +73,7 @@ struct FoundationHandoffPresentation: ViewModifier {
             return controller.remoteNotice ? "Continue Listening" : "Handoff"
         }
         if let remote = pending.remoteOffer {
-            return remote.selection == .currentSong
-                ? "Continue this song here?" : "Continue listening from \(remote.client)?"
+            return "Continue listening from \(remote.client)?"
         }
         guard pending.payload.session?.wasPlaying == true else { return "Continue VelaCanto?" }
         let device = pending.payload.header.sourceDevice?.displayName ?? "your other device"
@@ -99,8 +98,8 @@ struct FoundationHandoffPresentation: ViewModifier {
             ) {
                 if controller.pending != nil {
                     Button(
-                        controller.pending?.remoteOffer?.selection == .currentSong
-                            ? "Continue This Song"
+                        controller.pending?.remoteOffer != nil
+                            ? "Continue Listening"
                             : controller.pending?.payload.session?.wasPlaying == true
                                 ? "Transfer Playback Here" : "Restore Queue Here"
                     ) { controller.acceptPending() }
@@ -111,9 +110,10 @@ struct FoundationHandoffPresentation: ViewModifier {
             } message: {
                 if let remote = controller.pending?.remoteOffer, remote.selection == .currentSong {
                     Text(
-                        "Play only this song here at its latest reported position? This replaces the queue here with one song, with shuffle and repeat off. The other player’s queue is not moved. After playback starts, VelaCanto will try once to pause that player; its other queued songs stay there. The player could change before the pause arrives."
+                        "Continue this song here at its latest reported position? This player hasn’t shared a usable complete queue, so the queue here will contain this song with shuffle and repeat off. After playback starts, VelaCanto will try once to pause that player; its other queued songs stay there. The player could change before the pause arrives."
                             + (remote.supportsRemoteControl && remote.canPauseCurrentSong
-                                ? "" : " Automatic pausing is unavailable for this source; pause it there if needed.")
+                                ? ""
+                                : " Automatic pausing is unavailable for this source; pause it there if needed.")
                     )
                 } else if let remote = controller.pending?.remoteOffer {
                     Text(

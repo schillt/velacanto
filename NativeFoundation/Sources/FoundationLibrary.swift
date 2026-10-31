@@ -477,7 +477,12 @@ actor FoundationArtistDetailMemo {
 protocol FoundationLibrary: Sendable {
     var listeningActivityScope: String { get }
     func remoteListeningActivity() async throws -> [FoundationRemoteListeningActivity]
+    func observeRemoteListeningActivity(
+        receive: @escaping @Sendable ([FoundationRemoteListeningActivity]) async -> Void
+    ) async throws
     func prepareRemoteContinuation(_ activity: FoundationRemoteListeningActivity) async throws
+        -> FoundationRemoteContinuationOffer
+    func prepareRemotePlayback(_ activity: FoundationRemoteListeningActivity) async throws
         -> FoundationRemoteContinuationOffer
     func prepareRemoteCurrentSong(_ activity: FoundationRemoteListeningActivity) async throws
         -> FoundationRemoteContinuationOffer
@@ -594,9 +599,15 @@ extension FoundationLibrary {
     var supportsOfflinePlaylistPreparation: Bool { false }
     var listeningActivityScope: String { "" }
     func remoteListeningActivity() async throws -> [FoundationRemoteListeningActivity] { [] }
+    func observeRemoteListeningActivity(
+        receive: @escaping @Sendable ([FoundationRemoteListeningActivity]) async -> Void
+    ) async throws {}
     func prepareRemoteContinuation(_ activity: FoundationRemoteListeningActivity) async throws
         -> FoundationRemoteContinuationOffer
     { throw FoundationHandoffError.unavailable }
+    func prepareRemotePlayback(_ activity: FoundationRemoteListeningActivity) async throws
+        -> FoundationRemoteContinuationOffer
+    { try await prepareRemoteContinuation(activity) }
     func prepareRemoteCurrentSong(_ activity: FoundationRemoteListeningActivity) async throws
         -> FoundationRemoteContinuationOffer
     { throw FoundationHandoffError.unavailable }
@@ -1005,12 +1016,154 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
         }
     }
 
+    /// A foreground Home subscription only. It uses the existing account identity
+    /// and redirect policy, without advertising capabilities or accepting controls.
+    func observeRemoteListeningActivity(
+        receive: @escaping @Sendable ([FoundationRemoteListeningActivity]) async -> Void
+    ) async throws {
+        try Task.checkCancellation()
+        let request = try Self.remoteListeningSocketRequest(
+            session: session, deviceName: deviceName)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.waitsForConnectivity = false
+        configuration.timeoutIntervalForRequest = 60
+        configuration.httpCookieStorage = nil
+        configuration.urlCredentialStorage = nil
+        let transport = URLSession(
+            configuration: configuration, delegate: RejectRedirects(), delegateQueue: nil)
+        let socket = transport.webSocketTask(with: request)
+        socket.maximumMessageSize = 1_048_576
+        defer {
+            socket.cancel(with: .goingAway, reason: nil)
+            transport.invalidateAndCancel()
+        }
+        let source = try FoundationCatalogSource.jellyfin(scope: catalogAccountIdentity)
+        let accountSession = session
+        let encoder = JSONEncoder()
+        let start = try encoder.encode(
+            InboundWebSocketMessage.sessionsStartMessage(
+                .init(data: "0,15000", messageType: .sessionsStart)))
+        let keepAlive = try encoder.encode(
+            InboundWebSocketMessage.inboundKeepAliveMessage(.init(messageType: .keepAlive)))
+        do {
+            try await withTaskCancellationHandler {
+                socket.resume()
+                try Task.checkCancellation()
+                try await socket.send(.data(start))
+                try await withThrowingTaskGroup(of: Void.self) { group in
+                    defer {
+                        socket.cancel(with: .goingAway, reason: nil)
+                        group.cancelAll()
+                    }
+                    group.addTask {
+                        while !Task.isCancelled {
+                            let frame = try await socket.receive()
+                            try Task.checkCancellation()
+                            let data: Data
+                            switch frame {
+                            case .data(let value): data = value
+                            case .string(let value):
+                                guard value.utf8.count <= 1_048_576 else {
+                                    throw FoundationLibraryError.invalidResponse
+                                }
+                                data = Data(value.utf8)
+                            @unknown default: throw FoundationLibraryError.invalidResponse
+                            }
+                            let update = try Self.remoteListeningSocketUpdate(
+                                data, session: accountSession, catalogSource: source, now: Date())
+                            switch update {
+                            case .sessions(let activities): await receive(activities)
+                            case .keepAlive: try await socket.send(.data(keepAlive))
+                            case .ignored: break
+                            }
+                        }
+                    }
+                    group.addTask {
+                        while !Task.isCancelled {
+                            try await Task.sleep(for: .seconds(20))
+                            try Task.checkCancellation()
+                            try await socket.send(.data(keepAlive))
+                        }
+                    }
+                    try await group.next()
+                }
+            } onCancel: {
+                // URLSessionWebSocketTask.receive does not honor Swift cancellation alone.
+                socket.cancel(with: .goingAway, reason: nil)
+                transport.invalidateAndCancel()
+            }
+        } catch {
+            if Task.isCancelled { throw CancellationError() }
+            if let response = socket.response as? HTTPURLResponse,
+                response.statusCode == 401 || response.statusCode == 403
+            {
+                throw FoundationLibraryError.authentication
+            }
+            throw error
+        }
+    }
+
+    static func remoteListeningSocketRequest(
+        session: FoundationSession, deviceName: FoundationClientDeviceName
+    ) throws -> URLRequest {
+        let safe = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+        guard !session.accessToken.isEmpty, !session.deviceID.isEmpty,
+            session.accessToken.unicodeScalars.allSatisfy({ safe.contains($0) }),
+            session.deviceID.unicodeScalars.allSatisfy({ safe.contains($0) }),
+            var components = URLComponents(
+                url: session.serverURL.appendingPathComponent("socket"),
+                resolvingAgainstBaseURL: false),
+            components.scheme == "https" || components.scheme == "http",
+            components.user == nil, components.password == nil
+        else { throw FoundationLibraryError.authentication }
+        components.scheme = components.scheme == "https" ? "wss" : "ws"
+        components.queryItems = [URLQueryItem(name: "deviceId", value: session.deviceID)]
+        components.fragment = nil
+        guard let url = components.url else { throw FoundationLibraryError.invalidResponse }
+        var request = URLRequest(url: url, timeoutInterval: 60)
+        request.setValue(
+            "MediaBrowser Client=\"Velacanto Native\", Device=\"\(deviceName.rawValue)\", DeviceId=\"\(session.deviceID)\", Version=\"1\", Token=\"\(session.accessToken)\"",
+            forHTTPHeaderField: "Authorization")
+        return request
+    }
+
+    enum RemoteListeningSocketUpdate: Equatable {
+        case sessions([FoundationRemoteListeningActivity])
+        case keepAlive, ignored
+    }
+
+    static func remoteListeningSocketUpdate(
+        _ data: Data, session: FoundationSession, catalogSource: FoundationCatalogSource,
+        now: Date
+    ) throws -> RemoteListeningSocketUpdate {
+        guard data.count <= 1_048_576,
+            let envelope = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let type = envelope["MessageType"] as? String
+        else { throw FoundationLibraryError.invalidResponse }
+        if type == "ForceKeepAlive" { return .keepAlive }
+        guard type == "Sessions" else { return .ignored }
+        guard let rows = envelope["Data"] as? [[String: Any]], rows.count <= 512 else {
+            throw FoundationLibraryError.invalidResponse
+        }
+        let raw = try JSONSerialization.data(withJSONObject: rows)
+        return .sessions(
+            try FoundationRemoteListeningActivity.decode(
+                raw, userID: session.userID, ownDeviceID: session.deviceID, now: now,
+                catalogSource: catalogSource))
+    }
+
     var supportsOfflinePlaylistPreparation: Bool { true }
     /// Explicit card action only; Home discovery never prepares media or sends controls.
     func prepareRemoteContinuation(_ activity: FoundationRemoteListeningActivity) async throws
         -> FoundationRemoteContinuationOffer
     {
         try await prepareRemoteContinuation(activity, selection: .fullQueue)
+    }
+
+    func prepareRemotePlayback(_ activity: FoundationRemoteListeningActivity) async throws
+        -> FoundationRemoteContinuationOffer
+    {
+        try await prepareRemoteContinuation(activity, selection: .automatic)
     }
 
     func prepareRemoteCurrentSong(_ activity: FoundationRemoteListeningActivity) async throws
