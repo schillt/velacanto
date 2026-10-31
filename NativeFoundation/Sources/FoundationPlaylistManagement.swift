@@ -822,7 +822,7 @@ struct FoundationPlaylistEditor: View {
                 #else
                     Label("Add Songs", systemImage: "plus")
                         .font(.headline)
-                        .frame(maxWidth: .infinity, minHeight: 40)
+                        .frame(maxWidth: .infinity)
                 #endif
             }
             #if os(macOS)
@@ -853,10 +853,11 @@ struct FoundationPlaylistEditor: View {
                     UIApplication.shared.sendAction(
                         #selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
                 } label: {
-                    Image(systemName: "keyboard.chevron.compact.down")
-                        .frame(width: 44, height: 44)
+                    Image(systemName: "chevron.down")
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.glass)
+                .buttonBorderShape(.circle)
+                .frame(width: 44, height: 44)
                 .accessibilityLabel("Hide Keyboard")
                 .accessibilityIdentifier("playlist-manager-hide-keyboard")
             }
