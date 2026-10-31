@@ -744,11 +744,13 @@ private enum CrossClientFixtures {
     static func source() throws -> FoundationCatalogSource {
         try .jellyfin(scope: FoundationJellyfinLibrary(session: session).catalogAccountIdentity)
     }
-    static func offer(_ row: [String: Any]) throws -> FoundationRemoteContinuationOffer {
+    static func offer(
+        _ row: [String: Any], selection: FoundationRemoteContinuationSelection = .fullQueue
+    ) throws -> FoundationRemoteContinuationOffer {
         try .decode(
             data([row]), sessionID: sourceSession, userID: owner, ownDeviceID: session.deviceID,
             scope: FoundationJellyfinLibrary(session: session).listeningActivityScope,
-            catalogSource: source(), now: Date())
+            catalogSource: source(), now: Date(), selection: selection)
     }
     static func activity(_ row: [String: Any]) throws -> FoundationRemoteListeningActivity {
         try XCTUnwrap(
@@ -763,6 +765,89 @@ private enum CrossClientFixtures {
 }
 
 final class FoundationRemoteContinuationTests: XCTestCase {
+    func testExplicitSongSelectionNeverInfersMissingQueueOrCopiesSourceModes() throws {
+        let queues: [[[String: String]]?] = [
+            nil, [], [["Id": CrossClientFixtures.first, "PlaylistItemId": "stale"]],
+        ]
+        for reportedQueue in queues {
+            var row = CrossClientFixtures.row()
+            row["NowPlayingQueue"] = reportedQueue
+            row.removeValue(forKey: "NowPlayingQueueFullItems")
+            let song = try CrossClientFixtures.offer(row, selection: .currentSong)
+            XCTAssertEqual(song.queue.map(\.itemID), [CrossClientFixtures.current])
+            XCTAssertEqual(song.reportedOccurrence, "playlistItem1")
+            XCTAssertEqual(song.repeatMode, .off)
+            XCTAssertEqual(song.selection, .currentSong)
+            XCTAssertEqual(song.activityID, try CrossClientFixtures.activity(row).id)
+            let payload = try song.payload(scope: String(repeating: "a", count: 64), id: UUID())
+            XCTAssertEqual(payload.session?.entries.count, 1)
+            XCTAssertEqual(payload.session?.shuffle, false)
+            XCTAssertThrowsError(try CrossClientFixtures.offer(row))
+        }
+        let full = try CrossClientFixtures.offer(CrossClientFixtures.row())
+        let song = try CrossClientFixtures.offer(CrossClientFixtures.row(), selection: .currentSong)
+        XCTAssertThrowsError(try song.matching(full))
+        XCTAssertThrowsError(try full.matching(song))
+    }
+
+    func testSongWithoutReportedOccurrenceStartsButCannotAutomaticallyPauseSource() throws {
+        var row = CrossClientFixtures.row()
+        row.removeValue(forKey: "PlaylistItemId")
+        row.removeValue(forKey: "NowPlayingQueue")
+        let song = try CrossClientFixtures.offer(row, selection: .currentSong)
+        XCTAssertEqual(song.queue.count, 1)
+        XCTAssertFalse(song.canPauseCurrentSong)
+        XCTAssertEqual(song.activityID, try CrossClientFixtures.activity(row).id)
+        XCTAssertThrowsError(try CrossClientFixtures.offer(row))
+    }
+
+    func testSongMatchingRejectsSourceIdentityOccurrenceAndMediaChanges() throws {
+        var row = CrossClientFixtures.row()
+        var state = try XCTUnwrap(row["PlayState"] as? [String: Any])
+        state["MediaSourceId"] = "source-version-one"
+        row["PlayState"] = state
+        let expected = try CrossClientFixtures.offer(row, selection: .currentSong)
+        for key in ["DeviceId", "Client", "PlaylistItemId"] {
+            var changed = row
+            changed[key] = "different"
+            XCTAssertThrowsError(try CrossClientFixtures.offer(changed, selection: .currentSong).matching(expected))
+        }
+        var changed = row
+        state["MediaSourceId"] = "source-version-two"
+        changed["PlayState"] = state
+        XCTAssertThrowsError(try CrossClientFixtures.offer(changed, selection: .currentSong).matching(expected))
+        changed = row
+        changed["UserId"] = CrossClientFixtures.first
+        XCTAssertThrowsError(try CrossClientFixtures.offer(changed, selection: .currentSong))
+        changed = row
+        changed["LastPlaybackCheckIn"] = ISO8601DateFormatter().string(from: Date(timeIntervalSinceNow: -120))
+        XCTAssertThrowsError(try CrossClientFixtures.offer(changed, selection: .currentSong))
+    }
+
+    func testSongAdapterHydratesOnlyCurrentItemAndDispatchesPauseNotStop() async throws {
+        let transport = CrossClientTransport(confirmsStop: true, songOnly: true)
+        let library = FoundationJellyfinLibrary(
+            session: CrossClientFixtures.session, load: { try await transport.load($0) })
+        let offer = try await library.prepareRemoteCurrentSong(
+            CrossClientFixtures.activity(CrossClientFixtures.row()))
+        let authorized = try await library.authorizeRemoteContinuation(offer)
+        let fresh = try await library.refreshRemoteContinuation(authorized)
+        XCTAssertEqual(fresh.selection, .currentSong)
+        XCTAssertEqual(fresh.queue.count, 1)
+        try await library.stopRemoteContinuation(fresh)
+        let confirmed = try await library.confirmRemoteContinuationStopped(fresh)
+        XCTAssertTrue(confirmed)
+        let requests = await transport.requests
+        let metadata = requests.filter { $0.url?.path.hasSuffix("/Items") == true }
+        XCTAssertEqual(metadata.count, 2)
+        for request in metadata {
+            let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
+            XCTAssertEqual(query.filter { $0.name == "ids" }.compactMap(\.value), [CrossClientFixtures.current])
+            XCTAssertEqual(query.first(where: { $0.name == "userId" })?.value, CrossClientFixtures.owner)
+        }
+        XCTAssertEqual(requests.filter { $0.httpMethod == "POST" }.map { $0.url?.lastPathComponent }, ["Pause"])
+    }
+
     func testOpaqueRemoteDeviceByteBoundariesApplyToDiscoveryAndQueuePreparation() throws {
         for device in [
             String(repeating: "a", count: 128), String(repeating: "b", count: 129),
@@ -1325,6 +1410,7 @@ private actor CrossClientTransport {
     private(set) var readCount = 0
     private(set) var metadataCount = 0
     nonisolated let stopObserved = XCTestExpectation(description: "one Stop observed")
+    let songOnly: Bool
     let fullItems: Bool
     let missingMetadata: Bool
     let changedAtRead: Int?
@@ -1344,8 +1430,9 @@ private actor CrossClientTransport {
         holdRead: Int? = nil,
         readGate: CrossClientResourceGate? = nil, customSource: Data? = nil,
         largeMetadata: Bool = false, metadataGate: CrossClientResourceGate? = nil,
-        metadataVariants: Bool = false
+        metadataVariants: Bool = false, songOnly: Bool = false
     ) {
+        self.songOnly = songOnly
         self.fullItems = fullItems
         self.missingMetadata = missingMetadata
         self.changedAtRead = changedAtRead
@@ -1401,7 +1488,20 @@ private actor CrossClientTransport {
         var row = CrossClientFixtures.row(
             position: Int64(read) * 10_000_000,
             changed: changedAtRead == read, fullItems: fullItems, control: supportsControl)
-        if confirmsStop && stopCount > 0 { row.removeValue(forKey: "NowPlayingItem") }
+        if songOnly {
+            row.removeValue(forKey: "NowPlayingQueue")
+            row.removeValue(forKey: "NowPlayingQueueFullItems")
+            if changedAtRead == read { row["PlaylistItemId"] = "new-source-occurrence" }
+        }
+        if confirmsStop && stopCount > 0 {
+            if songOnly {
+                var state = row["PlayState"] as! [String: Any]
+                state["IsPaused"] = true
+                row["PlayState"] = state
+            } else {
+                row.removeValue(forKey: "NowPlayingItem")
+            }
+        }
         return (try CrossClientFixtures.data([row]), CrossClientFixtures.response(request))
     }
 }
@@ -1415,11 +1515,12 @@ final class FoundationRemoteContinuationControllerTests: XCTestCase {
     private let scope = String(repeating: "a", count: 64)
     private func make(
         _ transport: CrossClientTransport, resourceGate: CrossClientResourceGate? = nil,
-        activationGate: CrossClientResourceGate? = nil
+        activationGate: CrossClientResourceGate? = nil, failResolution: Bool = false
     ) -> (FoundationHandoffController, FoundationPlayer, FoundationJellyfinLibrary) {
         let player = FoundationPlayer(
             resolve: { _ in
                 if let resourceGate { await resourceGate.wait() }
+                if failResolution { throw FoundationHandoffError.unavailable }
                 guard let url = try FoundationTestTones.resolve(FoundationTestTones.items[0]) else {
                     throw FoundationHandoffError.unavailable
                 }
@@ -1441,13 +1542,14 @@ final class FoundationRemoteContinuationControllerTests: XCTestCase {
     private func prepare(
         _ controller: FoundationHandoffController, library: FoundationJellyfinLibrary,
         onStarted: @escaping @MainActor () -> Void = {},
-        allowsNetworking: @escaping @MainActor () -> Bool = { true }
+        allowsNetworking: @escaping @MainActor () -> Bool = { true },
+        selection: FoundationRemoteContinuationSelection = .fullQueue
     ) async throws {
         let ready = expectation(description: "source queue confirmation")
         let token = controller.$pending.compactMap { $0 }.prefix(1).sink { _ in ready.fulfill() }
         controller.prepareRemoteContinuation(
             try CrossClientFixtures.activity(CrossClientFixtures.row()), library: library,
-            allowsNetworking: allowsNetworking, onStarted: onStarted)
+            selection: selection, allowsNetworking: allowsNetworking, onStarted: onStarted)
         await fulfillment(of: [ready], timeout: 5)
         token.cancel()
         XCTAssertNotNil(controller.pending?.remoteOffer)
@@ -1458,6 +1560,104 @@ final class FoundationRemoteContinuationControllerTests: XCTestCase {
         await fulfillment(of: [ready], timeout: 5)
         token.cancel()
     }
+    func testExplicitSongActualStartPausesOnceAndKeepsOneSongReceiverQueue() async throws {
+        let transport = CrossClientTransport(confirmsStop: true, songOnly: true)
+        let (controller, player, library) = make(transport)
+        defer { controller.invalidate(); player.stop() }
+        await transport.observeStop {
+            await MainActor.run {
+                XCTAssertEqual(player.nativePlayer.timeControlStatus, .playing)
+                XCTAssertTrue(player.isNativeContinuationPlaying(
+                    generation: player.continuationGeneration, occurrence: player.selectedEntryID!))
+                XCTAssertEqual(player.nativePlayer.currentTime().seconds, 3, accuracy: 0.75)
+            }
+        }
+        try await prepare(controller, library: library, selection: .currentSong)
+        XCTAssertEqual(controller.pending?.remoteOffer?.selection, .currentSong)
+        controller.acceptPending()
+        controller.acceptPending()
+        await fulfillment(of: [transport.stopObserved], timeout: 8)
+        XCTAssertEqual(player.persistedQueue.map(\.item.id), [CrossClientFixtures.current])
+        XCTAssertFalse(player.shuffleEnabled)
+        XCTAssertEqual(player.repeatMode, .off)
+        let requests = await transport.requests
+        XCTAssertEqual(requests.filter { $0.httpMethod == "POST" }.map { $0.url?.lastPathComponent }, ["Pause"])
+    }
+
+    func testSongNativeResourceFailureSendsNoSourcePause() async throws {
+        let transport = CrossClientTransport(songOnly: true)
+        let (controller, player, library) = make(transport, failResolution: true)
+        defer { controller.invalidate(); player.stop() }
+        try await prepare(controller, library: library, selection: .currentSong)
+        controller.acceptPending()
+        await notice(controller)
+        let commands = await transport.stopCount
+        XCTAssertEqual(commands, 0)
+    }
+
+    func testUnsupportedSongPauseStillAllowsReceiverStartWithHonestNotice() async throws {
+        let transport = CrossClientTransport(supportsControl: false, songOnly: true)
+        let (controller, player, library) = make(transport)
+        defer { controller.invalidate(); player.stop() }
+        try await prepare(controller, library: library, selection: .currentSong)
+        controller.acceptPending()
+        await notice(controller)
+        XCTAssertEqual(player.persistedQueue.map(\.item.id), [CrossClientFixtures.current])
+        let commands = await transport.stopCount
+        XCTAssertEqual(commands, 0)
+        XCTAssertTrue(controller.notice?.contains("pausing") == true)
+    }
+
+    func testExplicitSongCancellationDoesNotReplaceQueueOrPause() async throws {
+        let transport = CrossClientTransport(songOnly: true)
+        let (controller, player, library) = make(transport)
+        defer { controller.invalidate(); player.stop() }
+        let original = player.persistedQueue
+        try await prepare(controller, library: library, selection: .currentSong)
+        controller.dismissPending()
+        XCTAssertEqual(player.persistedQueue, original)
+        let commands = await transport.stopCount
+        XCTAssertEqual(commands, 0)
+    }
+
+    func testSongReceiverFailureBeforeStartCannotPauseSource() async throws {
+        let transport = CrossClientTransport(changedAtRead: 2, songOnly: true)
+        let (controller, player, library) = make(transport)
+        defer { controller.invalidate(); player.stop() }
+        let original = player.persistedQueue
+        try await prepare(controller, library: library, selection: .currentSong)
+        controller.acceptPending()
+        await notice(controller)
+        XCTAssertEqual(player.persistedQueue, original)
+        let commands = await transport.stopCount
+        XCTAssertEqual(commands, 0)
+    }
+
+    func testChangedSongAfterReceiverStartNeverPausesNewSource() async throws {
+        let transport = CrossClientTransport(changedAtRead: 4, songOnly: true)
+        let (controller, player, library) = make(transport)
+        defer { controller.invalidate(); player.stop() }
+        try await prepare(controller, library: library, selection: .currentSong)
+        controller.acceptPending()
+        await notice(controller)
+        let commands = await transport.stopCount
+        XCTAssertEqual(commands, 0)
+        XCTAssertTrue(controller.notice?.contains("pausing") == true)
+    }
+
+    func testFailedSongPauseDoesNotRetryOrClaimSourceStopped() async throws {
+        let transport = CrossClientTransport(failStop: true, songOnly: true)
+        let (controller, player, library) = make(transport)
+        defer { controller.invalidate(); player.stop() }
+        try await prepare(controller, library: library, selection: .currentSong)
+        controller.acceptPending()
+        await notice(controller)
+        let requests = await transport.requests
+        XCTAssertEqual(requests.filter { $0.httpMethod == "POST" }.map { $0.url?.lastPathComponent }, ["Pause"])
+        XCTAssertTrue(controller.notice?.contains("pausing") == true)
+        XCTAssertEqual(player.persistedQueue.count, 1)
+    }
+
     func testV12EmptyOrStaleSourceQueueExplainsFailureWithoutMovingPlayback() async throws {
         let queues: [[[String: String]]] = [
             [], [["Id": CrossClientFixtures.first, "PlaylistItemId": "stale-occurrence"]],

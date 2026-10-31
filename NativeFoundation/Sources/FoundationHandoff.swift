@@ -308,6 +308,7 @@ final class FoundationHandoffController: NSObject, ObservableObject, NSUserActiv
     func prepareRemoteContinuation(
         _ activity: FoundationRemoteListeningActivity,
         library: any FoundationLibrary,
+        selection: FoundationRemoteContinuationSelection = .fullQueue,
         allowsNetworking: @escaping @MainActor () -> Bool = { true },
         onStarted: @escaping @MainActor () -> Void = {},
         completion: @escaping @MainActor () -> Void = {}
@@ -339,7 +340,13 @@ final class FoundationHandoffController: NSObject, ObservableObject, NSUserActiv
             #endif
             do {
                 guard transfer.allowsNetworking() else { throw FoundationHandoffError.unavailable }
-                let offer = try await library.prepareRemoteContinuation(activity)
+                let offer: FoundationRemoteContinuationOffer
+                if selection == .currentSong {
+                    offer = try await library.prepareRemoteCurrentSong(activity)
+                } else {
+                    offer = try await library.prepareRemoteContinuation(activity)
+                }
+                guard offer.selection == selection else { throw FoundationHandoffError.invalid }
                 try Task.checkCancellation()
                 guard let self, self.remoteIsCurrent(transfer) else { return }
                 guard transfer.allowsNetworking() else { throw FoundationHandoffError.unavailable }
@@ -491,9 +498,11 @@ final class FoundationHandoffController: NSObject, ObservableObject, NSUserActiv
                 else { throw FoundationHandoffError.unavailable }
                 guard transfer.allowsNetworking() else { throw FoundationHandoffError.unavailable }
                 _ = try fresh.matching(expected)
-                guard fresh.supportsRemoteControl else { throw FoundationHandoffError.unavailable }
+                guard fresh.supportsRemoteControl,
+                    fresh.selection == .fullQueue || fresh.canPauseCurrentSong
+                else { throw FoundationHandoffError.unavailable }
                 // Owner accepted best effort: the server has no atomic expected-occurrence
-                // Stop. This single command follows actual receiving native playback.
+                // Stop/Pause. This single command follows actual receiving native playback.
                 try await transfer.library.stopRemoteContinuation(fresh)
                 try Task.checkCancellation()
                 guard self.remoteIsCurrent(transfer) else { return }
@@ -506,8 +515,9 @@ final class FoundationHandoffController: NSObject, ObservableObject, NSUserActiv
             guard !Task.isCancelled, let self, self.remoteIsCurrent(transfer) else { return }
             self.retireRemote()
             if !confirmed {
-                self.notice =
-                    "Playback started here, but the original player may still be playing. Stop it there if needed."
+                self.notice = expected.selection == .currentSong
+                    ? "This song started here, but pausing the original player was not confirmed. Pause it there if needed; its other queued songs stay there."
+                    : "Playback started here, but the original player may still be playing. Stop it there if needed."
             }
         }
     }

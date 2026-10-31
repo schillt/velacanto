@@ -314,11 +314,13 @@ struct FoundationRemoteListeningActivity: Identifiable, Equatable, Sendable {
             let positionTicks: Int64?
             let repeatMode: String?
             let playbackOrder: String?
+            let mediaSourceID: String?
             enum CodingKeys: String, CodingKey {
                 case isPaused = "IsPaused"
                 case positionTicks = "PositionTicks"
                 case repeatMode = "RepeatMode"
                 case playbackOrder = "PlaybackOrder"
+                case mediaSourceID = "MediaSourceId"
             }
         }
     }
@@ -605,7 +607,12 @@ struct FoundationHandoffListeningGuide: View {
     }
 #endif
 
-/// A complete, memory-only source-reported queue. No delivery locations or source credentials.
+enum FoundationRemoteContinuationSelection: String, Sendable {
+    case fullQueue
+    case currentSong
+}
+
+/// A memory-only, explicitly selected continuation. No delivery locations or source credentials.
 /// Server RPC has no compare-and-stop precondition: source completion is explicitly best effort.
 struct FoundationRemoteContinuationOffer: Sendable {
     struct Occurrence: Equatable, Sendable {
@@ -624,6 +631,13 @@ struct FoundationRemoteContinuationOffer: Sendable {
     let checkedInAt: Date
     let supportsRemoteControl: Bool
     let items: [String: FoundationItem]
+    var selection: FoundationRemoteContinuationSelection = .fullQueue
+    var reportedOccurrence: String? = nil
+    var sourceMediaID: String? = nil
+
+    /// Without an observable source occurrence, playback may continue here but an
+    /// automatic source mutation cannot prove that the original occurrence remains.
+    var canPauseCurrentSong: Bool { selection == .currentSong && reportedOccurrence != nil }
 
     var activityID: String {
         guard let current = queue.first(where: { $0.sourceID == sourceOccurrence }),
@@ -632,16 +646,19 @@ struct FoundationRemoteContinuationOffer: Sendable {
         return FoundationMusicLibraryStore.digest(
             [
                 account, sessionID, deviceID.lowercased(),
-                current.itemID, sourceOccurrence,
+                current.itemID, selection == .currentSong ? (reportedOccurrence ?? "") : sourceOccurrence,
             ].joined(separator: "\0"))
     }
 
     var fingerprint: String {
-        let parts =
+        var parts =
             [
                 scope, sessionID, deviceID.lowercased(), client, sourceOccurrence,
                 repeatMode.rawValue,
             ] + queue.flatMap { [$0.itemID, $0.sourceID] }
+        if selection == .currentSong {
+            parts += [selection.rawValue, sourceMediaID ?? "", reportedOccurrence ?? ""]
+        }
         let framed = parts.map { "\($0.utf8.count):\($0)" }.joined()
         return FoundationMusicLibraryStore.digest(framed)
     }
@@ -663,11 +680,15 @@ struct FoundationRemoteContinuationOffer: Sendable {
             }
             if authoritative || metadata[item.id] == nil { metadata[item.id] = item }
         }
-        return Self(
+        var resolved = Self(
             scope: scope, sessionID: sessionID, deviceID: deviceID, client: client,
             sourceOccurrence: sourceOccurrence, queue: queue, repeatMode: repeatMode,
             position: position, checkedInAt: checkedInAt,
             supportsRemoteControl: supportsRemoteControl, items: metadata)
+        resolved.selection = selection
+        resolved.reportedOccurrence = reportedOccurrence
+        resolved.sourceMediaID = sourceMediaID
+        return resolved
     }
     private static func occurrenceID(_ value: String, scope: String, sessionID: String) -> UUID {
         let hash = FoundationMusicLibraryStore.digest(scope + "\0" + sessionID + "\0" + value)
@@ -706,7 +727,9 @@ struct FoundationRemoteContinuationOffer: Sendable {
 
     static func decode(
         _ data: Data, sessionID: String, userID: String,
-        ownDeviceID: String, scope: String, catalogSource: FoundationCatalogSource, now: Date
+        ownDeviceID: String, scope: String, catalogSource: FoundationCatalogSource, now: Date,
+        selection: FoundationRemoteContinuationSelection = .fullQueue,
+        allowPaused: Bool = false
     ) throws -> Self {
         typealias Activity = FoundationRemoteListeningActivity
         guard data.count <= FoundationHandoffPayload.maximumBytes,
@@ -723,10 +746,11 @@ struct FoundationRemoteContinuationOffer: Sendable {
             Activity.canonicalUserID(session.userID) == owner,
             let device = Activity.remoteDeviceID(session.deviceID),
             device.caseInsensitiveCompare(ownDeviceID) != .orderedSame,
-            session.isActive == true, session.playState?.isPaused == false,
+            session.isActive == true,
+            session.playState?.isPaused == false || (allowPaused && session.playState?.isPaused == true),
             let current = session.nowPlayingItem, current.type == "Audio",
             let currentID = Activity.catalogID(current.id),
-            let selected = Activity.occurrenceID(session.playlistItemID),
+            (selection == .currentSong || Activity.occurrenceID(session.playlistItemID) != nil),
             let position = Activity.seconds(session.playState?.positionTicks), position.isFinite,
             position <= Double(Int64.max / 600) - 1
         else {
@@ -762,6 +786,36 @@ struct FoundationRemoteContinuationOffer: Sendable {
                 FoundationRemotePreparationDiagnostic.sourceExpired.record()
             #endif
             throw FoundationHandoffError.expired
+        }
+        if selection == .currentSong {
+            // Missing queue never means empty queue. This explicit action selects only
+            // the current item; no other queue entries or source modes are inferred.
+            let reported = Activity.occurrenceID(session.playlistItemID)
+            guard session.playlistItemID == nil || session.playlistItemID == "" || reported != nil else {
+                throw FoundationHandoffError.invalid
+            }
+            let selected = reported ?? "song-" + currentID
+            let queue = [Occurrence(
+                itemID: currentID, sourceID: selected,
+                localID: Self.occurrenceID(selected, scope: scope, sessionID: sessionID))]
+            var offer = Self(
+                scope: scope, sessionID: sessionID, deviceID: device,
+                client: Activity.text(session.client) ?? "Unknown player",
+                sourceOccurrence: selected, queue: queue, repeatMode: .off,
+                position: position, checkedInAt: checkIn,
+                supportsRemoteControl: session.supportsRemoteControl == true,
+                items: [currentID: Activity.canonicalItem(current, catalogSource: catalogSource)])
+            offer.selection = .currentSong
+            offer.reportedOccurrence = reported
+            let mediaID = session.playState?.mediaSourceID
+            offer.sourceMediaID = Activity.remoteDeviceID(mediaID)
+            guard mediaID == nil || mediaID == "" || offer.sourceMediaID != nil else {
+                throw FoundationHandoffError.invalid
+            }
+            return offer
+        }
+        guard let selected = Activity.occurrenceID(session.playlistItemID) else {
+            throw FoundationHandoffError.unavailable
         }
         guard let source = session.nowPlayingQueue, !source.isEmpty else {
             #if DEBUG
@@ -845,6 +899,21 @@ struct FoundationRemoteContinuationOffer: Sendable {
             client: Activity.text(session.client) ?? "Unknown player", sourceOccurrence: selected,
             queue: queue, repeatMode: repeatMode, position: position, checkedInAt: checkIn,
             supportsRemoteControl: session.supportsRemoteControl == true, items: items)
+    }
+
+    static func paused(
+        _ data: Data, expected: Self, userID: String, ownDeviceID: String,
+        catalogSource: FoundationCatalogSource, now: Date
+    ) throws -> Bool {
+        guard expected.canPauseCurrentSong else { return false }
+        let fresh = try decode(
+            data, sessionID: expected.sessionID, userID: userID, ownDeviceID: ownDeviceID,
+            scope: expected.scope, catalogSource: catalogSource, now: now,
+            selection: .currentSong, allowPaused: true)
+        _ = try fresh.matching(expected)
+        let sessions = try JSONDecoder().decode(
+            [FoundationRemoteListeningActivity.ActivitySession].self, from: data)
+        return sessions.first(where: { $0.id == expected.sessionID })?.playState?.isPaused == true
     }
 
     /// One confirmation read; absence/ambiguity is not reported as a verified stop.

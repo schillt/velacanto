@@ -479,6 +479,8 @@ protocol FoundationLibrary: Sendable {
     func remoteListeningActivity() async throws -> [FoundationRemoteListeningActivity]
     func prepareRemoteContinuation(_ activity: FoundationRemoteListeningActivity) async throws
         -> FoundationRemoteContinuationOffer
+    func prepareRemoteCurrentSong(_ activity: FoundationRemoteListeningActivity) async throws
+        -> FoundationRemoteContinuationOffer
     func authorizeRemoteContinuation(_ expected: FoundationRemoteContinuationOffer) async throws
         -> FoundationRemoteContinuationOffer
     func refreshRemoteContinuation(_ expected: FoundationRemoteContinuationOffer) async throws
@@ -588,6 +590,9 @@ extension FoundationLibrary {
     var listeningActivityScope: String { "" }
     func remoteListeningActivity() async throws -> [FoundationRemoteListeningActivity] { [] }
     func prepareRemoteContinuation(_ activity: FoundationRemoteListeningActivity) async throws
+        -> FoundationRemoteContinuationOffer
+    { throw FoundationHandoffError.unavailable }
+    func prepareRemoteCurrentSong(_ activity: FoundationRemoteListeningActivity) async throws
         -> FoundationRemoteContinuationOffer
     { throw FoundationHandoffError.unavailable }
     func authorizeRemoteContinuation(_ expected: FoundationRemoteContinuationOffer) async throws
@@ -985,6 +990,19 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
     func prepareRemoteContinuation(_ activity: FoundationRemoteListeningActivity) async throws
         -> FoundationRemoteContinuationOffer
     {
+        try await prepareRemoteContinuation(activity, selection: .fullQueue)
+    }
+
+    func prepareRemoteCurrentSong(_ activity: FoundationRemoteListeningActivity) async throws
+        -> FoundationRemoteContinuationOffer
+    {
+        try await prepareRemoteContinuation(activity, selection: .currentSong)
+    }
+
+    private func prepareRemoteContinuation(
+        _ activity: FoundationRemoteListeningActivity,
+        selection: FoundationRemoteContinuationSelection
+    ) async throws -> FoundationRemoteContinuationOffer {
         guard activity.receiverScope == listeningActivityScope,
             !activity.usesNativeHandoff, !activity.sessionID.isEmpty,
             FoundationRemoteListeningActivity.remoteDeviceID(activity.remoteDeviceID) != nil
@@ -1016,7 +1034,7 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
                     data, sessionID: activity.sessionID,
                     userID: session.userID, ownDeviceID: session.deviceID,
                     scope: listeningActivityScope,
-                    catalogSource: source, now: Date())
+                    catalogSource: source, now: Date(), selection: selection)
                 #if DEBUG
                     diagnosticStage = .matchingActivity
                     diagnosticQueueCount = offer.queue.count
@@ -1072,7 +1090,8 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
                     sessionID: expected.sessionID, userID: session.userID,
                     ownDeviceID: session.deviceID,
                     scope: listeningActivityScope,
-                    catalogSource: try .jellyfin(scope: catalogAccountIdentity), now: Date())
+                    catalogSource: try .jellyfin(scope: catalogAccountIdentity), now: Date(),
+                    selection: expected.selection)
                 return try fresh.matching(expected).resolving(verified.items, authoritative: true)
             }
         }
@@ -1186,7 +1205,8 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
                     sessionID: expected.sessionID, userID: session.userID,
                     ownDeviceID: session.deviceID,
                     scope: listeningActivityScope,
-                    catalogSource: try .jellyfin(scope: catalogAccountIdentity), now: Date())
+                    catalogSource: try .jellyfin(scope: catalogAccountIdentity), now: Date(),
+                    selection: expected.selection)
                 return try fresh.matching(expected).resolving(
                     expected.entries.map(\.item), authoritative: true)
             }
@@ -1195,6 +1215,7 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
 
     func stopRemoteContinuation(_ expected: FoundationRemoteContinuationOffer) async throws {
         guard expected.scope == listeningActivityScope, expected.supportsRemoteControl,
+            expected.selection == .fullQueue || expected.canPauseCurrentSong,
             Self.validID(expected.sessionID),
             FoundationRemoteListeningActivity.remoteDeviceID(expected.deviceID) != nil
         else { throw FoundationHandoffError.unavailable }
@@ -1202,7 +1223,9 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
             try await FoundationRemoteListeningDeadline.run {
                 // Exactly one best-effort command. No toggle, retries or source credentials.
                 _ = try await responseData(
-                    Paths.sendPlaystateCommand(sessionID: expected.sessionID, command: "Stop"),
+                    Paths.sendPlaystateCommand(
+                        sessionID: expected.sessionID,
+                        command: expected.selection == .currentSong ? "Pause" : "Stop"),
                     requestTimeout: 8)
             }
         }
@@ -1216,8 +1239,15 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
         }
         return try await FoundationRequestIntent.$isPlayback.withValue(false) {
             try await FoundationRemoteListeningDeadline.run {
-                try FoundationRemoteContinuationOffer.stopped(
-                    try await remoteContinuationData(), expected: expected, userID: session.userID)
+                let data = try await remoteContinuationData()
+                if expected.selection == .currentSong {
+                    return try FoundationRemoteContinuationOffer.paused(
+                        data, expected: expected, userID: session.userID,
+                        ownDeviceID: session.deviceID,
+                        catalogSource: try .jellyfin(scope: catalogAccountIdentity), now: Date())
+                }
+                return try FoundationRemoteContinuationOffer.stopped(
+                    data, expected: expected, userID: session.userID)
             }
         }
     }

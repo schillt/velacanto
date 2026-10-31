@@ -549,7 +549,10 @@ private struct FoundationContinueListening: View {
         "\(library.listeningActivityScope):\(active):\(refreshRevision):\(connectivity.successfulRetryRevision)"
     }
 
-    private func openInstructions(for activity: FoundationRemoteListeningActivity) {
+    private func openInstructions(
+        for activity: FoundationRemoteListeningActivity,
+        selection: FoundationRemoteContinuationSelection = .fullQueue
+    ) {
         guard selected?.id == activity.id else { return }
         guard activity.usesNativeHandoff else {
             guard activity.receiverScope == library.listeningActivityScope,
@@ -558,7 +561,7 @@ private struct FoundationContinueListening: View {
             preparingRemoteID = activity.id
             let offeredScope = library.listeningActivityScope
             handoff.prepareRemoteContinuation(
-                activity, library: library, allowsNetworking: { !connectivity.localOnly },
+                activity, library: library, selection: selection, allowsNetworking: { !connectivity.localOnly },
                 onStarted: {
                     // Retire only this known source card after actual receiving playback.
                     // An unrelated native Handoff source is never inferred or suppressed.
@@ -609,6 +612,16 @@ private struct FoundationContinueListening: View {
             VStack(alignment: .leading, spacing: 12) {
                 mediaButton(activity)
                     .accessibilityAction(named: "Dismiss") { dismiss(activity) }
+                if !activity.usesNativeHandoff {
+                    Button("Continue this song", systemImage: "play.fill") {
+                        openInstructions(for: activity, selection: .currentSong)
+                    }
+                    .disabled(preparingRemoteID != nil || handoff == nil || connectivity.localOnly)
+                    .accessibilityIdentifier("continue-listening-current-song")
+                    .accessibilityHint("Prepares only the current song and asks before replacing the queue here.")
+                    Text("The complete queue is available only when the other player shares it.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 if inlineInstructionsForID == activity.id {
                     Text(instruction).font(.subheadline).foregroundStyle(.secondary)
                     Button("Handoff Help") { showingGuide = true }
