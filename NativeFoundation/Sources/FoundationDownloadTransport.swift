@@ -410,7 +410,7 @@ nonisolated enum FoundationNativeDownloadTransport {
             }
             let task: AVAssetDownloadTask
             do {
-                task = try worker.makeTask {
+                task = try worker.makeTask(session: session) {
                     session.makeAssetDownloadTask(downloadConfiguration: download)
                 }
             } catch {
@@ -851,10 +851,23 @@ nonisolated final class FoundationNativeDownloadDelegate: FoundationNativeDownlo
     private let backgroundEventsFinished: @Sendable (String) -> Void
     let delegateQueue: OperationQueue
     private var boundTask: URLSessionTask?
+    private var ownedSession: URLSession?
+    private var completionClaimed = false
+    private let announceAllocation:
+        @Sendable (FoundationNativeAllocationStore, URL, Int) throws -> Void
+    private let sealAllocation: @Sendable (FoundationNativeAllocationStore, URL, Int) throws -> Void
 
     init(
         progress: @escaping FoundationDownloadTransport.Progress,
         store: FoundationNativeAllocationStore,
+        announceAllocation:
+            @escaping @Sendable (FoundationNativeAllocationStore, URL, Int) throws -> Void = {
+                try $0.announce($1, taskIdentifier: $2)
+            },
+        sealAllocation:
+            @escaping @Sendable (FoundationNativeAllocationStore, URL, Int) throws -> Void = {
+                try $0.sealAnnouncement($1, taskIdentifier: $2)
+            },
         backgroundEventsFinished: @escaping @Sendable (String) -> Void = { identifier in
             Task { @MainActor in
                 FoundationAppRuntime.model.finishBackgroundDownloadEvents(identifier)
@@ -864,6 +877,8 @@ nonisolated final class FoundationNativeDownloadDelegate: FoundationNativeDownlo
         self.progress = progress
         self.store = store
         self.backgroundEventsFinished = backgroundEventsFinished
+        self.announceAllocation = announceAllocation
+        self.sealAllocation = sealAllocation
         let queue = OperationQueue()
         queue.maxConcurrentOperationCount = 1
         queue.isSuspended = true
@@ -874,7 +889,7 @@ nonisolated final class FoundationNativeDownloadDelegate: FoundationNativeDownlo
 
     /// The factory returns the sole task whose ID may become this delegate's binding.
     /// No delegate event may run before binding and continuation/resume preparation.
-    func makeTask<T: URLSessionTask>(_ factory: () -> T) throws -> T {
+    func makeTask<T: URLSessionTask>(session: URLSession, _ factory: () -> T) throws -> T {
         var made: T?
         do {
             guard delegateQueue.isSuspended, !failedSession else {
@@ -885,6 +900,7 @@ nonisolated final class FoundationNativeDownloadDelegate: FoundationNativeDownlo
                 receipt.taskIdentifier == 0, receipt.nativeURL == nil,
                 receipt.package == nil, receipt.retired != true
             else { throw FoundationDownloadError.cleanup }
+            lock.withLock { ownedSession = session }
             let task = factory()
             made = task
             try store.bindCreatedTask(taskIdentifier: task.taskIdentifier)
@@ -910,6 +926,7 @@ nonisolated final class FoundationNativeDownloadDelegate: FoundationNativeDownlo
             defer { activateDelegateQueue() }
             let invalidated = lock.withLock { () -> Bool? in
                 if let invalidationFailed { return invalidationFailed }
+                ownedSession = session
                 retirement = continuation
                 return nil
             }
@@ -1047,28 +1064,42 @@ nonisolated final class FoundationNativeDownloadDelegate: FoundationNativeDownlo
         return absolute
     }
 
+    /// Announcement seam shared with native-free lifecycle tests. It never accesses
+    /// the destination resource; only the exact issued URL and owned parent are pinned.
+    func recordAnnouncement(_ location: URL, session: URLSession, task: URLSessionTask) throws {
+        let matched = lock.withLock { () -> Bool in
+            guard ownedSession === session, liveTaskIdentifier == task.taskIdentifier,
+                boundTask != nil, retirement == nil
+            else { return false }
+            observedAllocation = true
+            return true
+        }
+        guard matched else { throw FoundationDownloadError.cleanup }
+        let absolute: URL
+        do { absolute = try Self.validatedCallbackURL(location) } catch {
+            #if DEBUG
+                if FoundationNativeDownloadTransport.diagnosticEnabled {
+                    FoundationJournal.shared.record(
+                        FoundationNativeDownloadErrorFields.capture(
+                            stage: .initialURL, location: location))
+                }
+            #endif
+            throw error
+        }
+        try announceAllocation(store, absolute, task.taskIdentifier)
+        lock.withLock { self.location = absolute }
+    }
+
     func urlSession(
         _ session: URLSession, assetDownloadTask: AVAssetDownloadTask,
         willDownloadTo location: URL
     ) {
-        // Mark observation BEFORE any fallible persistence. A failed callback write
-        // cannot later be mistaken for proof that this task never allocated anything.
-        lock.withLock { observedAllocation = true }
-        do {
-            let absolute: URL
-            do { absolute = try Self.validatedCallbackURL(location) } catch {
-                #if DEBUG
-                    if FoundationNativeDownloadTransport.diagnosticEnabled {
-                        FoundationJournal.shared.record(
-                            FoundationNativeDownloadErrorFields.capture(
-                                stage: .initialURL, location: location))
-                    }
-                #endif
-                throw error
-            }
-            try store.capture(absolute, taskIdentifier: assetDownloadTask.taskIdentifier)
-            lock.withLock { self.location = absolute }
-        } catch {
+        guard
+            lock.withLock({
+                ownedSession === session && liveTaskIdentifier == assetDownloadTask.taskIdentifier
+            })
+        else { return }
+        do { try recordAnnouncement(location, session: session, task: assetDownloadTask) } catch {
             lock.withLock { cleanupFailed = true }
             assetDownloadTask.cancel()
         }
@@ -1084,6 +1115,14 @@ nonisolated final class FoundationNativeDownloadDelegate: FoundationNativeDownlo
                 )
             }
         #endif
+        // The public task ID is scoped to its one owned session. Do not require the
+        // callback's Swift task wrapper to be identical to our factory wrapper.
+        guard
+            lock.withLock({
+                ownedSession === session && liveTaskIdentifier == task.taskIdentifier
+                    && terminalResult == nil && !completionClaimed
+            })
+        else { return }
         // Do not let a duplicate/stale task callback manufacture terminal proof after
         // the session has already failed. The original authority stays untouched.
         if failedSession {
@@ -1116,8 +1155,24 @@ nonisolated final class FoundationNativeDownloadDelegate: FoundationNativeDownlo
             if error != nil || state.3 {
                 try store.retire()
                 complete(.failure(FoundationDownloadError.cancelled))
-            } else if let location = state.2 {
-                complete(.success(location))
+            } else if state.2 != nil {
+                var pending: CheckedContinuation<URL, Error>?
+                let sealed = try lock.withLock { () throws -> URL in
+                    guard ownedSession === session, liveTaskIdentifier == task.taskIdentifier,
+                        boundTask != nil, observedAllocation, !cancelled, !cleanupFailed,
+                        invalidationFailed != true, retirement == nil,
+                        terminalResult == nil, !completionClaimed, let location
+                    else { throw FoundationDownloadError.cleanup }
+                    completionClaimed = true
+                    // One synchronous proof/publication linearizes with cancellation.
+                    // No other task, cold owner or duplicate callback can create it.
+                    try sealAllocation(store, location, task.taskIdentifier)
+                    terminalResult = .success(location)
+                    pending = continuation
+                    continuation = nil
+                    return location
+                }
+                pending?.resume(returning: sealed)
             } else {
                 try store.retire()
                 complete(.failure(FoundationDownloadError.incomplete))
@@ -1144,7 +1199,8 @@ nonisolated final class FoundationNativeDownloadDelegate: FoundationNativeDownlo
 
         enum CaptureStage: String, CaseIterable {
             case initialURL, session, task, existingReceipt, binding, allocatedWrite
-            case namespace, parentBookmark, packageBookmark, ownershipProof, packageWrite
+            case namespace, parentBookmark, completionClaim, packageBookmark, ownershipProof,
+                packageWrite
         }
 
         struct Binding {

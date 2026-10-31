@@ -594,6 +594,203 @@ final class FoundationDownloadsTests: XCTestCase {
         manager.invalidate()
     }
 
+    private func firstCompletionFixture() throws -> (
+        store: FoundationNativeAllocationStore, proof: NativeFirstCompletionProof,
+        delegate: FoundationNativeDownloadDelegate, session: URLSession, task: URLSessionDataTask
+    ) {
+        let directory = try root()
+        try FoundationDownloadStorage.prepare(directory)
+        let store = FoundationNativeAllocationStore(
+            directory: directory,
+            sessionIdentifier: "dev.novoluxor.velacanto.offline." + directory.lastPathComponent
+                + "." + UUID().uuidString)
+        try store.reserve()
+        try store.beginCreating()
+        let proof = try NativeFirstCompletionProof(directory: directory)
+        let delegate = FoundationNativeDownloadDelegate(
+            progress: { _, _ in }, store: store,
+            announceAllocation: { try proof.announce($0, url: $1, task: $2) },
+            sealAllocation: { try proof.seal($0, url: $1, task: $2) },
+            backgroundEventsFinished: { _ in })
+        let session = URLSession(configuration: .ephemeral)
+        let task = try delegate.makeTask(session: session) {
+            let task = session.dataTask(with: URL(string: "https://example.invalid/never-started")!)
+            task.cancel()
+            return task
+        }
+        return (store, proof, delegate, session, task)
+    }
+
+    func testAnnouncementAllowsAbsentTargetAndFirstSuccessfulCompletionSealsOnce() async throws {
+        let f = try firstCompletionFixture()
+        defer {
+            f.delegate.activateDelegateQueue()
+            f.session.invalidateAndCancel()
+        }
+        let run = Task { try await f.delegate.run(f.task) }
+        try await waitUntil { (try? f.store.load().phase) == .resuming }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: f.proof.target.path))
+        try f.delegate.recordAnnouncement(f.proof.target, session: f.session, task: f.task)
+        try f.delegate.recordAnnouncement(f.proof.target, session: f.session, task: f.task)
+        XCTAssertEqual(f.proof.parentSnapshots, 1)
+        XCTAssertEqual(f.proof.targetReads, 0)
+        XCTAssertNil(try f.store.load().package)
+        let parentPin = try f.store.load().namespaceBookmark
+        try f.proof.materialize()  // Parent generation changes legitimately across child creation.
+        f.delegate.urlSession(f.session, task: f.task, didCompleteWithError: nil)
+        let result = try await run.value
+        XCTAssertEqual(result, f.proof.target)
+        let sealed = try f.store.completedPackage(taskIdentifier: f.task.taskIdentifier)
+        XCTAssertEqual(sealed.namespaceBookmark, parentPin)
+        XCTAssertEqual(f.proof.packageSnapshots, 1)
+        let receipt = try Data(contentsOf: f.store.receiptURL)
+        f.delegate.urlSession(f.session, task: f.task, didCompleteWithError: nil)
+        XCTAssertEqual(f.proof.packageSnapshots, 1)
+        XCTAssertEqual(try Data(contentsOf: f.store.receiptURL), receipt)
+        XCTAssertEqual(f.task.countOfBytesSent, 0)
+    }
+
+    func testFirstCompletionRejectsForeignSessionAndTaskBeforeTargetAccess() async throws {
+        let f = try firstCompletionFixture()
+        let foreignSession = URLSession(configuration: .ephemeral)
+        defer {
+            f.delegate.activateDelegateQueue()
+            f.session.invalidateAndCancel()
+            foreignSession.invalidateAndCancel()
+        }
+        let run = Task { try await f.delegate.run(f.task) }
+        try await waitUntil { (try? f.store.load().phase) == .resuming }
+        try f.delegate.recordAnnouncement(f.proof.target, session: f.session, task: f.task)
+        let foreignTask = f.session.dataTask(
+            with: URL(string: "https://example.invalid/never-started")!)
+        foreignTask.cancel()
+        f.delegate.urlSession(foreignSession, task: f.task, didCompleteWithError: nil)
+        f.delegate.urlSession(f.session, task: foreignTask, didCompleteWithError: nil)
+        XCTAssertEqual(f.proof.targetReads, 0)
+        XCTAssertNil(try f.store.load().completionAttempted)
+        try f.proof.materialize()
+        f.delegate.urlSession(f.session, task: f.task, didCompleteWithError: nil)
+        _ = try await run.value
+        XCTAssertEqual(f.proof.packageSnapshots, 1)
+    }
+
+    func testFirstCompletionRejectsNamespaceReplacementBeforeAnyTargetRead() async throws {
+        let f = try firstCompletionFixture()
+        defer {
+            f.delegate.activateDelegateQueue()
+            f.session.invalidateAndCancel()
+        }
+        let run = Task { try await f.delegate.run(f.task) }
+        try await waitUntil { (try? f.store.load().phase) == .resuming }
+        try f.delegate.recordAnnouncement(f.proof.target, session: f.session, task: f.task)
+        try f.proof.materialize()
+        f.proof.replaceParent()
+        f.delegate.urlSession(f.session, task: f.task, didCompleteWithError: nil)
+        do {
+            _ = try await run.value
+            XCTFail("Replacement parent sealed")
+        } catch { XCTAssertEqual(error as? FoundationDownloadError, .cleanup) }
+        XCTAssertEqual(f.proof.targetReads, 0)
+        XCTAssertEqual(f.proof.packageSnapshots, 0)
+        XCTAssertEqual(try f.store.load().completionAttempted, true)
+        XCTAssertNil(try f.store.load().package)
+        f.delegate.urlSession(f.session, task: f.task, didCompleteWithError: nil)
+        XCTAssertEqual(f.proof.targetReads, 0)
+    }
+
+    func testFailedFirstCompletionCannotResnapshotThroughDuplicateOrColdOwner() async throws {
+        let f = try firstCompletionFixture()
+        defer {
+            f.delegate.activateDelegateQueue()
+            f.session.invalidateAndCancel()
+        }
+        let run = Task { try await f.delegate.run(f.task) }
+        try await waitUntil { (try? f.store.load().phase) == .resuming }
+        try f.delegate.recordAnnouncement(f.proof.target, session: f.session, task: f.task)
+        try f.proof.materialize()
+        f.proof.failPackageSnapshot()
+        f.delegate.urlSession(f.session, task: f.task, didCompleteWithError: nil)
+        do {
+            _ = try await run.value
+            XCTFail("Failed bookmark sealed")
+        } catch { XCTAssertEqual(error as? FoundationDownloadError, .cleanup) }
+        let receipt = try Data(contentsOf: f.store.receiptURL)
+        let cold = FoundationNativeDownloadDelegate(
+            progress: { _, _ in }, store: f.store,
+            announceAllocation: { try f.proof.announce($0, url: $1, task: $2) },
+            sealAllocation: { try f.proof.seal($0, url: $1, task: $2) },
+            backgroundEventsFinished: { _ in })
+        defer { cold.activateDelegateQueue() }
+        f.delegate.urlSession(f.session, task: f.task, didCompleteWithError: nil)
+        cold.urlSession(f.session, task: f.task, didCompleteWithError: nil)
+        XCTAssertThrowsError(
+            try f.proof.seal(f.store, url: f.proof.target, task: f.task.taskIdentifier))
+        XCTAssertThrowsError(
+            try f.store.capture(f.proof.target, taskIdentifier: f.task.taskIdentifier))
+        XCTAssertEqual(f.proof.packageSnapshots, 1)
+        XCTAssertEqual(try Data(contentsOf: f.store.receiptURL), receipt)
+        XCTAssertNil(try f.store.load().package)
+    }
+
+    func testFirstCompletionRejectsResourceGenerationChangeWithoutPublishingOrRefreshing()
+        async throws
+    {
+        let f = try firstCompletionFixture()
+        defer {
+            f.delegate.activateDelegateQueue()
+            f.session.invalidateAndCancel()
+        }
+        let run = Task { try await f.delegate.run(f.task) }
+        try await waitUntil { (try? f.store.load().phase) == .resuming }
+        try f.delegate.recordAnnouncement(f.proof.target, session: f.session, task: f.task)
+        try f.proof.materialize()
+        f.proof.changeTargetDuringSnapshot()
+        f.delegate.urlSession(f.session, task: f.task, didCompleteWithError: nil)
+        do {
+            _ = try await run.value
+            XCTFail("Changing resource identity sealed")
+        } catch { XCTAssertEqual(error as? FoundationDownloadError, .cleanup) }
+        XCTAssertEqual(f.proof.packageSnapshots, 1)
+        XCTAssertNil(try f.store.load().package)
+        XCTAssertEqual(try f.store.load().completionAttempted, true)
+        let receipt = try Data(contentsOf: f.store.receiptURL)
+        f.delegate.urlSession(f.session, task: f.task, didCompleteWithError: nil)
+        XCTAssertEqual(f.proof.packageSnapshots, 1)
+        XCTAssertEqual(try Data(contentsOf: f.store.receiptURL), receipt)
+    }
+
+    func testCancelledFatalAndRetiredAcquisitionsCannotCreateFirstCompletionProof() async throws {
+        for mode in 0..<3 {
+            let f = try firstCompletionFixture()
+            defer {
+                f.delegate.activateDelegateQueue()
+                f.session.invalidateAndCancel()
+            }
+            let run = Task { try await f.delegate.run(f.task) }
+            try await waitUntil { (try? f.store.load().phase) == .resuming }
+            try f.delegate.recordAnnouncement(f.proof.target, session: f.session, task: f.task)
+            if mode == 0 { run.cancel() }
+            if mode == 1 {
+                f.delegate.urlSession(f.session, didBecomeInvalidWithError: URLError(.unknown))
+            }
+            if mode == 2 {
+                var receipt = try XCTUnwrap(
+                    JSONSerialization.jsonObject(with: Data(contentsOf: f.store.receiptURL))
+                        as? [String: Any])
+                receipt["retired"] = true
+                try JSONSerialization.data(withJSONObject: receipt).write(to: f.store.receiptURL)
+            }
+            f.delegate.urlSession(f.session, task: f.task, didCompleteWithError: nil)
+            do {
+                _ = try await run.value
+                XCTFail("Ineligible acquisition sealed")
+            } catch { XCTAssertEqual(error as? FoundationDownloadError, .cleanup) }
+            XCTAssertEqual(f.proof.targetReads, 0)
+            XCTAssertEqual(f.proof.packageSnapshots, 0)
+            XCTAssertNil(try f.store.load().package)
+        }
+    }
+
     private func creationFixture() throws -> (FoundationNativeAllocationStore, URL) {
         let directory = try root()
         try FoundationDownloadStorage.prepare(directory)
@@ -621,7 +818,7 @@ final class FoundationDownloadsTests: XCTestCase {
         let target = directory.appendingPathComponent("synthetic.movpkg", isDirectory: true)
         try FileManager.default.createDirectory(at: target, withIntermediateDirectories: false)
         let observation = NativeDownloadVerificationFixture()
-        let task = try delegate.makeTask {
+        let task = try delegate.makeTask(session: session) {
             let task = session.dataTask(with: URL(string: "https://example.invalid/never-started")!)
             task.cancel()
             // Simulate the OS enqueueing its location callback inside task creation.
@@ -695,7 +892,7 @@ final class FoundationDownloadsTests: XCTestCase {
         }
         let task = session.dataTask(with: URL(string: "https://example.invalid/never-started")!)
         XCTAssertThrowsError(
-            try delegate.makeTask {
+            try delegate.makeTask(session: session) {
                 delegate.delegateQueue.addOperation { observation.finish() }
                 // The existing protected receipt stays readable; its replacement write fails.
                 try? FileManager.default.setAttributes(
@@ -722,7 +919,7 @@ final class FoundationDownloadsTests: XCTestCase {
             delegate.activateDelegateQueue()
             session.invalidateAndCancel()
         }
-        let task = try delegate.makeTask {
+        let task = try delegate.makeTask(session: session) {
             let task = session.dataTask(with: URL(string: "https://example.invalid/never-started")!)
             task.cancel()
             return task
@@ -816,7 +1013,7 @@ final class FoundationDownloadsTests: XCTestCase {
             delegate.activateDelegateQueue()
             session.invalidateAndCancel()
         }
-        let task = try delegate.makeTask {
+        let task = try delegate.makeTask(session: session) {
             session.dataTask(with: URL(string: "https://example.invalid/must-never-resume")!)
         }
         let gate = DownloadGate()
@@ -970,7 +1167,7 @@ final class FoundationDownloadsTests: XCTestCase {
                 try store.reserve()
                 try store.beginCreating()
                 let session = URLSession(configuration: .ephemeral)
-                let task = try delegate.makeTask {
+                let task = try delegate.makeTask(session: session) {
                     session.dataTask(with: URL(string: "https://example.invalid/never-started")!)
                 }
                 task.cancel()
@@ -4513,6 +4710,87 @@ private actor DownloadsLibrary: FoundationLibrary {
         var request = URLRequest(url: URL(string: "https://example.invalid/original")!)
         request.setValue("fixture-secret", forHTTPHeaderField: "Authorization")
         return FoundationDownloadSource(request: request, fileExtension: "mp3", expectedBytes: nil)
+    }
+}
+
+nonisolated private final class NativeFirstCompletionProof: @unchecked Sendable {
+    let parent: URL
+    let target: URL
+    private let lock = NSLock()
+    private var parentGeneration = 1
+    private var replaced = false
+    private var failSnapshot = false
+    private var mutateTarget = false
+    private var targetGeneration = 1
+    private var parentCount = 0
+    private var packageCount = 0
+    private var targetCount = 0
+    var parentSnapshots: Int { lock.withLock { parentCount } }
+    var packageSnapshots: Int { lock.withLock { packageCount } }
+    var targetReads: Int { lock.withLock { targetCount } }
+    init(directory: URL) throws {
+        parent = directory.appendingPathComponent(
+            "com.apple.UserManagedAssets.synthetic", isDirectory: true)
+        target = parent.appendingPathComponent("asset.movpkg", isDirectory: true)
+        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: false)
+    }
+    func materialize() throws {
+        try FileManager.default.createDirectory(at: target, withIntermediateDirectories: false)
+        lock.withLock { parentGeneration = 2 }
+    }
+    func replaceParent() { lock.withLock { replaced = true } }
+    func failPackageSnapshot() { lock.withLock { failSnapshot = true } }
+    func changeTargetDuringSnapshot() { lock.withLock { mutateTarget = true } }
+    private func values(file: String, generation: Int) -> [URLResourceKey: Any] {
+        [
+            .fileResourceIdentifierKey: NSString(string: file),
+            .volumeIdentifierKey: NSString(string: "volume"),
+            .generationIdentifierKey: NSNumber(value: generation), .isDirectoryKey: true,
+            .isSymbolicLinkKey: false,
+        ]
+    }
+    private func resources(_ url: URL) throws -> [URLResourceKey: Any] {
+        if url == parent {
+            return lock.withLock {
+                values(file: replaced ? "replacement" : "parent", generation: parentGeneration)
+            }
+        }
+        guard url == target else { throw FoundationDownloadError.cleanup }
+        lock.withLock { targetCount += 1 }
+        guard FileManager.default.fileExists(atPath: target.path) else {
+            throw CocoaError(.fileReadNoSuchFile)
+        }
+        return lock.withLock { values(file: "package", generation: targetGeneration) }
+    }
+    private func snapshot(_ url: URL) throws -> Data {
+        if url == parent {
+            lock.withLock { parentCount += 1 }
+            return Data("parent-pin".utf8)
+        }
+        guard url == target else { throw FoundationDownloadError.cleanup }
+        let fails = lock.withLock { () -> Bool in
+            packageCount += 1
+            if mutateTarget { targetGeneration = 2 }
+            return failSnapshot
+        }
+        if fails { throw CocoaError(.fileReadNoSuchFile) }
+        return Data("package-pin".utf8)
+    }
+    private func embedded(_ data: Data) -> [URLResourceKey: Any]? {
+        if data == Data("parent-pin".utf8) { return values(file: "parent", generation: 1) }
+        if data == Data("package-pin".utf8) { return values(file: "package", generation: 1) }
+        return nil
+    }
+    func announce(_ store: FoundationNativeAllocationStore, url: URL, task: Int) throws {
+        try store.announce(
+            url, taskIdentifier: task, snapshot: snapshot,
+            namespaceProof: { $0 == self.target }, resources: resources, embedded: embedded)
+    }
+    func seal(_ store: FoundationNativeAllocationStore, url: URL, task: Int) throws {
+        try store.sealAnnouncement(
+            url, taskIdentifier: task, snapshot: snapshot,
+            namespaceProof: { $0 == self.target }, resources: resources, embedded: embedded,
+            prove: { $0.nativeURL == self.target && $0.bookmark == Data("package-pin".utf8) })
     }
 }
 

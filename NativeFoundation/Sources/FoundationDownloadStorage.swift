@@ -743,6 +743,7 @@ nonisolated struct FoundationNativeAllocationStore: Sendable {
         // Only this lifecycle writes creating BEFORE the OS session/task factory.
         // Missing on older receipts: reserved could already have issued a factory.
         var creationVersion: Int? = nil
+        var completionAttempted: Bool? = nil
     }
     let directory: URL
     let sessionIdentifier: String
@@ -833,6 +834,182 @@ nonisolated struct FoundationNativeAllocationStore: Sendable {
         try write(receipt)
     }
 
+    /// Record only native announcement authority. The destination need not exist yet.
+    func announce(
+        _ location: URL, taskIdentifier: Int,
+        snapshot: (URL) throws -> Data = {
+            try $0.bookmarkData(
+                options: [],
+                includingResourceValuesForKeys: Set(FoundationManagedPackageMetadata.keys),
+                relativeTo: nil)
+        }, namespaceProof: (URL) -> Bool = { FoundationNativeDownloadPackage.ownsNamespace($0) },
+        resources: (URL) throws -> [URLResourceKey: Any] = FoundationManagedPackageMetadata
+            .resources,
+        embedded: (Data) -> [URLResourceKey: Any]? = {
+            NSURL.resourceValues(
+                forKeys: FoundationManagedPackageMetadata.keys, fromBookmarkData: $0)
+        }
+    ) throws {
+        #if DEBUG
+            var stage = FoundationNativeDownloadErrorFields.CaptureStage.binding
+        #endif
+        do {
+            var receipt = try load()
+            guard validSession, taskIdentifier > 0, receipt.taskIdentifier == taskIdentifier,
+                receipt.creationVersion == 1, receipt.retired != true,
+                FoundationManagedPackageMetadata.plain(location),
+                receipt.phase == .creating || receipt.phase == .resuming
+                    || receipt.phase == .allocated,
+                receipt.nativeURL == nil || receipt.nativeURL == location
+            else { throw FoundationDownloadError.cleanup }
+            if receipt.nativeURL != nil {
+                // Never refresh a previously pinned namespace, even on a duplicate.
+                guard receipt.namespaceBookmark != nil else {
+                    throw FoundationDownloadError.cleanup
+                }
+                return
+            }
+            receipt.nativeURL = location
+            receipt.phase = .allocated
+            #if DEBUG
+                stage = .allocatedWrite
+            #endif
+            try write(receipt)
+            #if DEBUG
+                stage = .namespace
+            #endif
+            guard namespaceProof(location) else { throw FoundationDownloadError.cleanup }
+            #if DEBUG
+                stage = .parentBookmark
+            #endif
+            let namespace = location.deletingLastPathComponent()
+            let before = try resources(namespace)
+            let bookmark = try snapshot(namespace)
+            guard let saved = embedded(bookmark) else { throw FoundationDownloadError.cleanup }
+            let after = try resources(namespace)
+            func stable(_ other: [URLResourceKey: Any]) -> Bool {
+                let identity = FoundationManagedPackageMetadata.comparison(before, other)
+                return identity.file == .equal && identity.volume == .equal
+                    && identity.generation == .equal
+            }
+            guard before[.isDirectoryKey] as? Bool == true,
+                before[.isSymbolicLinkKey] as? Bool == false,
+                after[.isDirectoryKey] as? Bool == true,
+                after[.isSymbolicLinkKey] as? Bool == false,
+                stable(saved), stable(after), namespaceProof(location)
+            else { throw FoundationDownloadError.cleanup }
+            receipt.namespaceBookmark = bookmark
+            try write(receipt)
+        } catch {
+            #if DEBUG
+                if ProcessInfo.processInfo.arguments.contains("-diagnosticNativeDownload") {
+                    FoundationJournal.shared.record(
+                        FoundationNativeDownloadErrorFields.capture(
+                            stage: stage, location: location, writeError: error))
+                }
+            #endif
+            throw FoundationDownloadError.cleanup
+        }
+    }
+
+    /// Called only by the original live bound delegate's successful task callback.
+    /// The first completed identity is created once; cold recovery never calls this.
+    func sealAnnouncement(
+        _ location: URL, taskIdentifier: Int,
+        snapshot: (URL) throws -> Data = {
+            try $0.bookmarkData(
+                options: [],
+                includingResourceValuesForKeys: Set(FoundationManagedPackageMetadata.keys),
+                relativeTo: nil)
+        }, namespaceProof: (URL) -> Bool = { FoundationNativeDownloadPackage.ownsNamespace($0) },
+        resources: (URL) throws -> [URLResourceKey: Any] = FoundationManagedPackageMetadata
+            .resources,
+        embedded: (Data) -> [URLResourceKey: Any]? = {
+            NSURL.resourceValues(
+                forKeys: FoundationManagedPackageMetadata.keys, fromBookmarkData: $0)
+        }, prove: (FoundationNativeDownloadPackage) -> Bool = { $0.resolveOwnedURL() != nil }
+    ) throws {
+        typealias Metadata = FoundationManagedPackageMetadata
+        #if DEBUG
+            var stage = FoundationNativeDownloadErrorFields.CaptureStage.binding
+        #endif
+        do {
+            var receipt = try load()
+            guard validSession, receipt.creationVersion == 1, taskIdentifier > 0,
+                receipt.taskIdentifier == taskIdentifier, receipt.phase == .allocated,
+                receipt.nativeURL == location, Metadata.plain(location), receipt.retired != true,
+                receipt.package == nil, receipt.completionAttempted != true,
+                let namespaceBookmark = receipt.namespaceBookmark
+            else { throw FoundationDownloadError.cleanup }
+            // A consumed attempt is durable even if a later proof fails. Never retry a
+            // first snapshot from an ambient path or replace a failed/stale snapshot.
+            receipt.completionAttempted = true
+            #if DEBUG
+                stage = .completionClaim
+            #endif
+            try write(receipt)
+            #if DEBUG
+                stage = .namespace
+            #endif
+            // Establish the pinned parent BEFORE any resource read at the target.
+            let namespace = location.deletingLastPathComponent()
+            guard namespaceProof(location), let savedParent = embedded(namespaceBookmark) else {
+                throw FoundationDownloadError.cleanup
+            }
+            func directory(_ values: [URLResourceKey: Any]) -> Bool {
+                values[.isDirectoryKey] as? Bool == true
+                    && values[.isSymbolicLinkKey] as? Bool == false
+            }
+            func same(_ a: [URLResourceKey: Any], _ b: [URLResourceKey: Any], generation: Bool)
+                -> Bool
+            {
+                let result = Metadata.comparison(a, b)
+                return result.file == .equal && result.volume == .equal
+                    && (!generation || result.generation == .equal)
+            }
+            let parentBefore = try resources(namespace)
+            guard directory(parentBefore), same(savedParent, parentBefore, generation: false) else {
+                throw FoundationDownloadError.cleanup
+            }
+            #if DEBUG
+                stage = .packageBookmark
+            #endif
+            let before = try resources(location)
+            guard directory(before) else { throw FoundationDownloadError.cleanup }
+            let bookmark = try snapshot(location)
+            guard let saved = embedded(bookmark), same(before, saved, generation: true) else {
+                throw FoundationDownloadError.cleanup
+            }
+            let after = try resources(location)
+            let parentAfter = try resources(namespace)
+            guard directory(after), same(before, after, generation: true),
+                directory(parentAfter), same(parentBefore, parentAfter, generation: true),
+                namespaceProof(location)
+            else { throw FoundationDownloadError.cleanup }
+            let package = FoundationNativeDownloadPackage(
+                nativeURL: location, bookmark: bookmark, sessionIdentifier: sessionIdentifier,
+                namespaceBookmark: namespaceBookmark)
+            #if DEBUG
+                stage = .ownershipProof
+            #endif
+            guard prove(package) else { throw FoundationDownloadError.cleanup }
+            receipt.package = package
+            #if DEBUG
+                stage = .packageWrite
+            #endif
+            try write(receipt)
+        } catch {
+            #if DEBUG
+                if ProcessInfo.processInfo.arguments.contains("-diagnosticNativeDownload") {
+                    FoundationJournal.shared.record(
+                        FoundationNativeDownloadErrorFields.capture(
+                            stage: stage, location: location, writeError: error))
+                }
+            #endif
+            throw FoundationDownloadError.cleanup
+        }
+    }
+
     /// The callback doesn't return until its protected authority record is atomically
     /// written and synchronized. Any bookmark/proof/write failure cancels acquisition
     /// and retains the observed receipt/pending session; it never becomes a network error.
@@ -895,6 +1072,9 @@ nonisolated struct FoundationNativeAllocationStore: Sendable {
                     throw FoundationDownloadError.cleanup
                 }
                 if existing.package != nil { return }  // Never replace a pinned resource snapshot.
+                guard existing.completionAttempted != true else {
+                    throw FoundationDownloadError.cleanup
+                }
             }
             var receipt = Receipt(
                 scope: scope, sessionIdentifier: sessionIdentifier,
@@ -946,7 +1126,10 @@ nonisolated struct FoundationNativeAllocationStore: Sendable {
                 #endif
             } catch {
                 #if DEBUG
-                    if writing != nil { writeError = error }
+                    // Keep the original bookmark error before cleanup remapping.
+                    if writing != nil || stage == .parentBookmark || stage == .packageBookmark {
+                        writeError = error
+                    }
                 #endif
                 throw FoundationDownloadError.cleanup
             }
@@ -988,6 +1171,11 @@ nonisolated struct FoundationNativeAllocationStore: Sendable {
                 || (receipt.package?.sessionIdentifier == sessionIdentifier
                     && receipt.package?.nativeURL == receipt.nativeURL)
         else { throw FoundationDownloadError.cleanup }
+        if receipt.completionAttempted == true {
+            guard receipt.phase == .allocated, receipt.creationVersion == 1,
+                receipt.nativeURL != nil, receipt.namespaceBookmark != nil
+            else { throw FoundationDownloadError.cleanup }
+        }
         if receipt.phase == .creating {
             guard receipt.creationVersion == 1, receipt.nativeURL == nil, receipt.package == nil
             else { throw FoundationDownloadError.cleanup }
