@@ -20,7 +20,7 @@ enum FoundationDownloadError: Error, LocalizedError, Equatable {
         case .systemManagementUnavailable:
             "System Settings downloads are not yet available on this device. Turn off Manage New Downloads in iPhone Storage to download in VelaCanto."
         case .originalSystemManagementUnavailable:
-            "Original files cannot yet be managed in iPhone Storage. Choose AAC or turn off system management; Original is never converted automatically."
+            "Original downloads stay in VelaCanto. Remove this failed request, then download again with iPhone Storage management off."
         case .unsupported: "This download quality is not available for this file or server."
         case .permission: "The server did not allow this download."
         case .response: "The download response could not be verified."

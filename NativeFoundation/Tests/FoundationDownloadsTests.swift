@@ -103,8 +103,10 @@ final class FoundationDownloadsTests: XCTestCase {
         let downloads = FoundationDownloads(
             scope: "management-intent", library: library, root: downloadRoot,
             transfer: transfer, monitorConnectivity: false,
+            requestedQuality: { preferences.downloadQuality },
             systemManagedDownloads: { preferences.systemManagedDownloads })
         downloads.download(item("one"))
+        preferences.setDownloadQuality(.aac192)
         preferences.setSystemManagedDownloads(true)
         downloads.download(item("two"))
         XCTAssertEqual(downloads.owners.map(\.systemManaged), [false, true])
@@ -118,6 +120,149 @@ final class FoundationDownloadsTests: XCTestCase {
         XCTAssertEqual(persisted.owners[1].systemManaged, true)
         XCTAssertFalse(FoundationPlaybackPreferences(defaults: defaults).systemManagedDownloads)
         downloads.invalidate()
+    }
+
+    func testOriginalSettingsConflictAtLaunchKeepsOrdinaryDownloadBytesUnchanged() async throws {
+        let name = "OriginalLaunch-" + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
+        defer { defaults.removePersistentDomain(forName: name) }
+        defaults.set("original", forKey: FoundationPlaybackPreferences.downloadQualityKey)
+        defaults.set(true, forKey: FoundationPlaybackPreferences.systemManagedDownloadsKey)
+        let preferences = FoundationPlaybackPreferences(defaults: defaults)
+        XCTAssertEqual(preferences.downloadQuality, .original)
+        XCTAssertFalse(preferences.systemManagedDownloads)
+        XCTAssertFalse(
+            defaults.bool(forKey: FoundationPlaybackPreferences.systemManagedDownloadsKey))
+        let bytes = Data("original source bytes - never AAC converted".utf8)
+        let track = item("original-conflict")
+        let manager = FoundationDownloads(
+            scope: "original-conflict", library: DownloadsLibrary(tracks: [track]),
+            root: try root(),
+            transfer: { source, destination, _, _ in
+                XCTAssertEqual(source.fileExtension, "mp3")
+                XCTAssertEqual(source.request.url?.path, "/original")
+                try bytes.write(to: destination)
+            }, monitorConnectivity: false,
+            convertedTransfer: { _, _, _, _ in
+                XCTFail("Original must not enter AAC conversion")
+                throw FoundationDownloadError.response
+            }, requestedQuality: { preferences.downloadQuality },
+            systemManagedDownloads: { preferences.systemManagedDownloads },
+            nativeTransfer: { _, _, _, _ in
+                XCTFail("Original must not enter native HLS")
+                throw FoundationDownloadError.response
+            })
+        defer { manager.invalidate() }
+        manager.download(track)
+        manager.updateConnectivity(isAllowed: true)
+        try await waitUntil { manager.isReady(track) }
+        let resource = try await manager.playbackResource(for: track, allowsRemoteFallback: false)
+        XCTAssertEqual(try Data(contentsOf: resource.url), bytes)
+        await resource.release()
+        XCTAssertEqual(manager.owners.first?.requestedQuality, .original)
+        XCTAssertEqual(manager.owners.first?.systemManaged, false)
+    }
+
+    func testExternalOriginalPreferenceRefreshPublishesOffBeforeNewOriginalAdmission() throws {
+        let name = "OriginalRefresh-" + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
+        defer { defaults.removePersistentDomain(forName: name) }
+        let preferences = FoundationPlaybackPreferences(defaults: defaults)
+        preferences.setDownloadQuality(.aac192)
+        preferences.setSystemManagedDownloads(true)
+        let track = item("external-original")
+        let manager = FoundationDownloads(
+            scope: "external-original", library: DownloadsLibrary(tracks: [track]),
+            root: try root(),
+            transfer: transfer, monitorConnectivity: false,
+            requestedQuality: { preferences.downloadQuality },
+            systemManagedDownloads: { preferences.systemManagedDownloads })
+        defer { manager.invalidate() }
+        defaults.set("original", forKey: FoundationPlaybackPreferences.downloadQualityKey)
+        defaults.set(true, forKey: FoundationPlaybackPreferences.systemManagedDownloadsKey)
+        preferences.refresh()
+        manager.download(track)
+        XCTAssertEqual(manager.owners.first?.requestedQuality, .original)
+        XCTAssertEqual(manager.owners.first?.systemManaged, false)
+        XCTAssertFalse(
+            defaults.bool(forKey: FoundationPlaybackPreferences.systemManagedDownloadsKey))
+        preferences.setDownloadQuality(.aac320)
+        XCTAssertFalse(preferences.systemManagedDownloads)  // Changing quality never opts back in.
+        preferences.setSystemManagedDownloads(true)
+        XCTAssertTrue(preferences.systemManagedDownloads)
+    }
+
+    func testOriginalPreferenceSettersPreserveExistingRequestedQualityAndRoute() throws {
+        let name = "OriginalSetters-" + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
+        defer { defaults.removePersistentDomain(forName: name) }
+        let preferences = FoundationPlaybackPreferences(defaults: defaults)
+        preferences.setSystemManagedDownloads(true)
+        XCTAssertEqual(preferences.downloadQuality, .original)
+        XCTAssertFalse(preferences.systemManagedDownloads)
+        preferences.setDownloadQuality(.aac128)
+        preferences.setSystemManagedDownloads(true)
+        let track = item("prior-aac-intent")
+        let manager = FoundationDownloads(
+            scope: "prior-aac-intent", library: DownloadsLibrary(tracks: [track]), root: try root(),
+            transfer: transfer, monitorConnectivity: false,
+            requestedQuality: { preferences.downloadQuality },
+            systemManagedDownloads: { preferences.systemManagedDownloads })
+        defer { manager.invalidate() }
+        manager.download(track)
+        preferences.setDownloadQuality(.original)
+        XCTAssertFalse(preferences.systemManagedDownloads)
+        XCTAssertFalse(
+            defaults.bool(forKey: FoundationPlaybackPreferences.systemManagedDownloadsKey))
+        manager.retry(ownerID: "track:" + track.id)
+        XCTAssertEqual(manager.owners.first?.requestedQuality, .aac128)
+        XCTAssertEqual(manager.owners.first?.systemManaged, true)
+    }
+
+    func testHistoricalNativeOriginalRequiresExplicitNewRequestRatherThanRetryReroute() async throws
+    {
+        let name = "OriginalHistorical-" + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
+        defer { defaults.removePersistentDomain(forName: name) }
+        let preferences = FoundationPlaybackPreferences(defaults: defaults)
+        let track = item("historical-original")
+        let storageRoot = try root()
+        let directory = FoundationDownloadStorage.directory(
+            scope: "historical-original", root: storageRoot)
+        var manifest = FoundationDownloadManifest()
+        manifest.owners = [
+            .init(
+                id: "track:" + track.id, item: .init(track), tracks: [.init(track)], paused: false,
+                expanded: true, requestedQuality: .original, systemManaged: true)
+        ]
+        try FoundationDownloadStorage.prepare(directory)
+        try FoundationDownloadStorage.save(manifest, directory: directory)
+        let manager = FoundationDownloads(
+            scope: "historical-original", library: DownloadsLibrary(tracks: [track]),
+            root: storageRoot,
+            transfer: transfer, monitorConnectivity: false,
+            requestedQuality: { preferences.downloadQuality },
+            systemManagedDownloads: { preferences.systemManagedDownloads },
+            nativeTransfer: { _, _, _, _ in
+                XCTFail("Historical Original must not enter HLS")
+                throw FoundationDownloadError.response
+            })
+        defer { manager.invalidate() }
+        manager.updateConnectivity(isAllowed: true)
+        try await waitUntil { manager.owners.first?.state == .failed }
+        manager.retry(ownerID: "track:" + track.id)
+        try await waitUntil { manager.owners.first?.state == .failed }
+        XCTAssertEqual(manager.owners.first?.requestedQuality, .original)
+        XCTAssertEqual(manager.owners.first?.systemManaged, true)
+        XCTAssertFalse(manager.isReady(track))
+        XCTAssertEqual(
+            manager.errorMessage,
+            FoundationDownloadError.originalSystemManagementUnavailable.errorDescription)
+        manager.remove(ownerID: "track:" + track.id)
+        manager.download(track)
+        try await waitUntil { manager.isReady(track) }
+        XCTAssertEqual(manager.owners.first?.requestedQuality, .original)
+        XCTAssertEqual(manager.owners.first?.systemManaged, false)
     }
 
     func testSystemManagedOriginalRejectsWithoutProgressiveOrNativeFallback() async throws {
