@@ -10,10 +10,17 @@ struct FoundationDownloadSource: Sendable {
 
 enum FoundationDownloadError: Error, LocalizedError, Equatable {
     case unsupported, permission, response, incomplete, storage, cleanup, cancelled, network
-    case conversionCleanup
+    case nativeProtection, conversionCleanup, systemManagementUnavailable,
+        originalSystemManagementUnavailable
 
     var errorDescription: String? {
         switch self {
+        case .nativeProtection:
+            "System download protection could not be verified. The asset was not saved. Use VelaCanto downloads while system management is being validated."
+        case .systemManagementUnavailable:
+            "System Settings downloads are not yet available on this device. Turn off Manage New Downloads in iPhone Storage to download in VelaCanto."
+        case .originalSystemManagementUnavailable:
+            "Original files cannot yet be managed in iPhone Storage. Choose AAC or turn off system management; Original is never converted automatically."
         case .unsupported: "This download quality is not available for this file or server."
         case .permission: "The server did not allow this download."
         case .response: "The download response could not be verified."
@@ -144,6 +151,8 @@ enum FoundationDownloadTransport {
     static func configuration(allowsCellular: Bool) -> URLSessionConfiguration {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.allowsCellularAccess = allowsCellular
+        configuration.allowsExpensiveNetworkAccess = allowsCellular
+        configuration.allowsConstrainedNetworkAccess = false
         configuration.allowsExpensiveNetworkAccess = allowsCellular
         configuration.allowsConstrainedNetworkAccess = false
         configuration.waitsForConnectivity = false
@@ -280,4 +289,485 @@ final class FoundationDownloadDelegate: NSObject, URLSessionDownloadDelegate, @u
         _ session: URLSession, downloadTask: URLSessionDownloadTask,
         didFinishDownloadingTo location: URL
     ) {}
+}
+
+/// Native HLS remains a distinct transport. It never moves or edits package contents,
+/// substitutes an Original file, or hands an unowned location to AVFoundation.
+nonisolated enum FoundationNativeDownloadTransport {
+    static func transfer(
+        _ proposal: FoundationNativeDownloadProposal, store: FoundationNativeAllocationStore,
+        allowsCellular: Bool, progress: @escaping FoundationDownloadTransport.Progress
+    ) async throws -> FoundationDownloadManifest.File {
+        #if !os(iOS)
+            throw FoundationDownloadError.systemManagementUnavailable
+        #else
+            guard proposal.plan.quality.aacBitrate != nil,
+                let source = proposal.request.url,
+                let c = URLComponents(url: source, resolvingAgainstBaseURL: false),
+                c.scheme == "https", c.host != nil, c.user == nil, c.password == nil,
+                c.fragment == nil,
+                !(c.queryItems ?? []).contains(where: {
+                    ["api_key", "apikey", "token", "access_token"].contains($0.name.lowercased())
+                }), let token = proposal.request.value(forHTTPHeaderField: "X-Emby-Token"),
+                !token.isEmpty, !token.contains("\r"), !token.contains("\n")
+            else { throw FoundationDownloadError.response }
+            try store.reserve()  // No OS task exists yet; cancellation/preflight can retire safely.
+            let mediaURL: URL
+            do {
+                mediaURL = try await finiteMediaURL(proposal, allowsCellular: allowsCellular)
+            } catch {
+                try await closeConversion(proposal.cleanupRequest, allowsCellular: allowsCellular)
+                throw (error as? FoundationDownloadError) ?? FoundationDownloadError.network
+            }
+            let sessionIdentifier = store.sessionIdentifier
+            let worker = FoundationNativeDownloadDelegate(progress: progress, store: store)
+            let configuration = URLSessionConfiguration.background(
+                withIdentifier: sessionIdentifier)
+            configuration.allowsCellularAccess = allowsCellular
+            configuration.allowsExpensiveNetworkAccess = allowsCellular
+            configuration.allowsConstrainedNetworkAccess = false
+            configuration.isDiscretionary = false
+            configuration.httpCookieStorage = nil
+            configuration.urlCredentialStorage = nil
+            configuration.httpAdditionalHeaders = [
+                "X-Emby-Token": token, "Accept-Encoding": "identity",
+            ]
+            let session = AVAssetDownloadURLSession(
+                configuration: configuration, assetDownloadDelegate: worker,
+                delegateQueue: nil)
+            defer { session.finishTasksAndInvalidate() }
+            let asset = AVURLAsset(url: mediaURL)
+            let download = AVAssetDownloadConfiguration(asset: asset, title: proposal.title)
+            if let data = proposal.artwork, FoundationCurrentArtwork.decode(data) != nil {
+                download.artworkData = data
+            }
+            let task = session.makeAssetDownloadTask(downloadConfiguration: download)
+            var acquired: FoundationNativeDownloadPackage?
+            do {
+                let location = try await worker.run(task)
+                // Only the callback's durable, pre-completion identity can authorize this
+                // allocation. Never create a replacement snapshot after a bookmark failure.
+                let package = try store.completedPackage(taskIdentifier: task.taskIdentifier)
+                guard package.nativeURL == location else { throw FoundationDownloadError.cleanup }
+                acquired = package
+                guard let owned = package.resolveOwnedURL() else {
+                    throw FoundationDownloadError.response
+                }
+                let local = AVURLAsset(
+                    url: owned,
+                    options: [
+                        AVURLAssetReferenceRestrictionsKey:
+                            NSNumber(
+                                value: AVAssetReferenceRestrictions.forbidLocalReferenceToRemote
+                                    .rawValue),
+                        AVURLAssetAllowsCellularAccessKey: false,
+                        AVURLAssetAllowsExpensiveNetworkAccessKey: false,
+                        AVURLAssetAllowsConstrainedNetworkAccessKey: false,
+                    ])
+                guard local.assetCache?.isPlayableOffline == true else {
+                    throw FoundationDownloadError.incomplete
+                }
+                let duration = try await local.load(.duration).seconds
+                let tolerance = min(1, max(0.1, proposal.plan.duration * 0.001))
+                guard duration.isFinite, abs(duration - proposal.plan.duration) <= tolerance else {
+                    throw FoundationDownloadError.incomplete
+                }
+                // Verify all regular payload files and allocated bytes; root metadata alone
+                // is insufficient. Do not lower protection or recursively rewrite OS data.
+                let bytes = try protectedAllocationBytes(owned)
+                let rendition = try await FoundationConvertedDownload.inspectNativePackage(
+                    owned, plan: proposal.plan)
+                try Task.checkCancellation()
+                try await closeConversion(proposal.cleanupRequest, allowsCellular: allowsCellular)
+                return .init(
+                    name: UUID().uuidString + ".movpkg", bytes: bytes, digest: "",
+                    convertedRendition: rendition, nativePackage: package)
+            } catch {
+                task.cancel()
+                // No raw AV/HTTP error, header, URL or server response reaches product diagnostics.
+                let failure =
+                    error as? FoundationDownloadError
+                    ?? (Task.isCancelled ? .cancelled : .network)
+                if let acquired {
+                    do {
+                        try acquired.removeOwnedPackage()
+                        try store.retire()
+                    } catch { throw FoundationDownloadError.cleanup }
+                } else {
+                    // A receipt/identity failure is never recategorized as a network error.
+                    do { try store.retire() } catch { throw FoundationDownloadError.cleanup }
+                }
+                do {
+                    try await closeConversion(
+                        proposal.cleanupRequest, allowsCellular: allowsCellular)
+                } catch { throw FoundationDownloadError.conversionCleanup }
+                throw failure
+            }
+        #endif
+    }
+
+    private static func finiteMediaURL(
+        _ proposal: FoundationNativeDownloadProposal, allowsCellular: Bool
+    ) async throws -> URL {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.allowsCellularAccess = allowsCellular
+        configuration.allowsExpensiveNetworkAccess = allowsCellular
+        configuration.allowsConstrainedNetworkAccess = false
+        configuration.httpCookieStorage = nil
+        configuration.urlCredentialStorage = nil
+        let session = URLSession(
+            configuration: configuration,
+            delegate: FoundationNativeDownloadRedirectGuard(), delegateQueue: nil)
+        defer { session.invalidateAndCancel() }
+        func playlist(_ url: URL) async throws -> String {
+            var request = proposal.request
+            request.url = url
+            let (bytes, response) = try await session.bytes(for: request)
+            guard let http = response as? HTTPURLResponse, http.statusCode == 200,
+                http.url == url
+            else { throw FoundationDownloadError.response }
+            var data = Data()
+            for try await byte in bytes {
+                guard data.count < 512 * 1_024 else { throw FoundationDownloadError.response }
+                data.append(byte)
+            }
+            guard let text = String(data: data, encoding: .utf8), text.hasPrefix("#EXTM3U") else {
+                throw FoundationDownloadError.response
+            }
+            return text
+        }
+        let masterURL = proposal.request.url!
+        let master = try await playlist(masterURL)
+        let lines = master.split(whereSeparator: \.isNewline).map(String.init)
+        let candidates = lines.filter { !$0.hasPrefix("#") && !$0.isEmpty }
+        guard candidates.count == 1, !lines.contains(where: { $0.hasPrefix("#EXT-X-MEDIA:") })
+        else {
+            throw FoundationDownloadError.response
+        }
+        let media = try safeResource(candidates[0], relativeTo: masterURL)
+        let text = try await playlist(media)
+        try validateFinitePlaylist(text, base: media, expectedDuration: proposal.plan.duration)
+        return media
+    }
+
+    static func safeResource(_ value: String, relativeTo base: URL) throws -> URL {
+        guard let url = URL(string: value, relativeTo: base)?.absoluteURL,
+            let a = URLComponents(url: url, resolvingAgainstBaseURL: false),
+            let b = URLComponents(url: base, resolvingAgainstBaseURL: false),
+            a.scheme == "https", a.host == b.host, a.port == b.port,
+            a.user == nil, a.password == nil, a.fragment == nil,
+            !(a.queryItems ?? []).contains(where: {
+                ["api_key", "apikey", "token", "access_token", "authorization"].contains(
+                    $0.name.lowercased())
+            })
+        else { throw FoundationDownloadError.response }
+        return url
+    }
+
+    static func validateFinitePlaylist(_ text: String, base: URL, expectedDuration: Double) throws {
+        let lines = text.split(whereSeparator: \.isNewline).map(String.init)
+        guard lines.first == "#EXTM3U", lines.last == "#EXT-X-ENDLIST",
+            !lines.contains(where: {
+                $0.hasPrefix("#EXT-X-KEY:") || $0.hasPrefix("#EXT-X-SESSION-KEY:")
+            })
+        else { throw FoundationDownloadError.incomplete }
+        var duration: Double = 0
+        var segments = 0
+        for line in lines {
+            if line.hasPrefix("#EXTINF:") {
+                guard
+                    let value = Double(
+                        line.dropFirst(8).split(separator: ",", omittingEmptySubsequences: false)[0]
+                    ),
+                    value.isFinite, value > 0
+                else { throw FoundationDownloadError.incomplete }
+                duration += value
+            } else if !line.hasPrefix("#"), !line.isEmpty {
+                _ = try safeResource(line, relativeTo: base)
+                segments += 1
+            } else if line.hasPrefix("#EXT-X-MAP:") {
+                guard let marker = line.range(of: "URI=\""),
+                    let end = line[marker.upperBound...].firstIndex(of: "\"")
+                else {
+                    throw FoundationDownloadError.response
+                }
+                _ = try safeResource(String(line[marker.upperBound..<end]), relativeTo: base)
+            }
+        }
+        let tolerance = min(1, max(0.1, expectedDuration * 0.001))
+        guard segments > 0, duration.isFinite, abs(duration - expectedDuration) <= tolerance else {
+            throw FoundationDownloadError.incomplete
+        }
+    }
+
+    /// Reconnect only to opaque sessions recorded by this account. Interrupted acquisitions
+    /// are cancelled and reconciled; they never become ready from a stale callback.
+    static func retireInterruptedSessions(_ identifiers: Set<String>, directory: URL) async -> Set<
+        String
+    > {
+        var retired: Set<String> = []
+        #if os(iOS)
+            for identifier in identifiers {
+                let store = FoundationNativeAllocationStore(
+                    directory: directory, sessionIdentifier: identifier)
+                guard store.validSession else { continue }
+                let worker = FoundationNativeDownloadDelegate(progress: { _, _ in }, store: store)
+                let configuration = URLSessionConfiguration.background(withIdentifier: identifier)
+                let session = AVAssetDownloadURLSession(
+                    configuration: configuration,
+                    assetDownloadDelegate: worker, delegateQueue: nil)
+                do {
+                    try await worker.retire(session)
+                    retired.insert(identifier)
+                } catch {
+                    // Preserve this receipt; unrelated verified downloads remain usable.
+                }
+            }
+        #endif
+        return retired
+    }
+
+    static func protectedAllocationBytes(_ root: URL) throws -> Int64 {
+        let keys: Set<URLResourceKey> = [
+            .isSymbolicLinkKey, .isRegularFileKey, .isDirectoryKey,
+            .totalFileAllocatedSizeKey, .fileAllocatedSizeKey,
+        ]
+        let failure = FoundationNativeDownloadEnumerationFailure()
+        guard
+            try root.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup
+                == true,
+            let enumerator = FileManager.default.enumerator(
+                at: root, includingPropertiesForKeys: Array(keys), options: [],
+                errorHandler: { _, _ in
+                    failure.record()
+                    return false
+                })
+        else { throw FoundationDownloadError.storage }
+        var bytes: Int64 = 0
+        var regularFiles = 0
+        var visited = 0
+        for case let url as URL in enumerator {
+            try Task.checkCancellation()
+            visited += 1
+            guard visited <= 100_000 else { throw FoundationDownloadError.storage }
+            let values = try url.resourceValues(forKeys: keys)
+            guard values.isSymbolicLink != true else { throw FoundationDownloadError.storage }
+            if values.isRegularFile == true {
+                regularFiles += 1
+                #if os(iOS)
+                    let protection =
+                        try FileManager.default.attributesOfItem(atPath: url.path)[.protectionKey]
+                        as? String
+                    guard
+                        protection
+                            == FileProtectionType.completeUntilFirstUserAuthentication.rawValue
+                            || protection == FileProtectionType.complete.rawValue
+                    else {
+                        throw FoundationDownloadError.nativeProtection
+                    }
+                #endif
+                let allocated = Int64(
+                    values.totalFileAllocatedSize ?? values.fileAllocatedSize ?? 0)
+                let sum = bytes.addingReportingOverflow(allocated)
+                guard allocated >= 0, !sum.overflow else { throw FoundationDownloadError.storage }
+                bytes = sum.partialValue
+            } else if values.isDirectory != true {
+                throw FoundationDownloadError.storage
+            }
+        }
+        guard !failure.failed, regularFiles > 0, bytes > 0 else {
+            throw FoundationDownloadError.storage
+        }
+        return bytes
+    }
+
+    private static func closeConversion(_ request: URLRequest, allowsCellular: Bool) async throws {
+        // Cleanup retains the existing converted transport's cancellation-independent lifetime.
+        let task = Task.detached(priority: .utility) {
+            try await closeConversionNow(request, allowsCellular: allowsCellular)
+        }
+        try await task.value
+    }
+
+    private static func closeConversionNow(_ request: URLRequest, allowsCellular: Bool) async throws
+    {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.allowsCellularAccess = allowsCellular
+        configuration.allowsExpensiveNetworkAccess = allowsCellular
+        configuration.allowsConstrainedNetworkAccess = false
+        configuration.timeoutIntervalForRequest = 8
+        configuration.timeoutIntervalForResource = 8
+        let delegate = FoundationNativeDownloadRedirectGuard()
+        let session = URLSession(
+            configuration: configuration, delegate: delegate, delegateQueue: nil)
+        defer { session.invalidateAndCancel() }
+        let (bytes, response) = try await session.bytes(for: request)
+        guard let response = response as? HTTPURLResponse, (200...299).contains(response.statusCode)
+        else {
+            throw FoundationDownloadError.conversionCleanup
+        }
+        var count = 0
+        for try await _ in bytes {
+            count += 1
+            guard count <= 4_096 else { throw FoundationDownloadError.conversionCleanup }
+        }
+    }
+}
+
+/// Decline redirects rather than forwarding a private-library header to another origin.
+nonisolated class FoundationNativeDownloadRedirectGuard: NSObject, URLSessionTaskDelegate,
+    @unchecked Sendable
+{
+    func urlSession(
+        _ session: URLSession, task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) { completionHandler(nil) }
+}
+
+nonisolated final class FoundationNativeDownloadDelegate: FoundationNativeDownloadRedirectGuard,
+    AVAssetDownloadDelegate, @unchecked Sendable
+{
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<URL, Error>?
+    private var location: URL?
+    private var cancelled = false
+    private var retirement: CheckedContinuation<Void, Error>?
+    private var cleanupFailed = false
+    private var liveTaskIdentifier: Int?
+    private var observedAllocation = false
+    private var terminalResult: Result<URL, Error>?
+    private let progress: FoundationDownloadTransport.Progress
+    private let store: FoundationNativeAllocationStore
+
+    init(
+        progress: @escaping FoundationDownloadTransport.Progress,
+        store: FoundationNativeAllocationStore
+    ) {
+        self.progress = progress
+        self.store = store
+    }
+
+    func retire(_ session: AVAssetDownloadURLSession) async throws {
+        try await withCheckedThrowingContinuation { continuation in
+            lock.withLock { retirement = continuation }
+            session.getAllTasks { tasks in
+                for task in tasks { task.cancel() }
+                session.invalidateAndCancel()
+            }
+        }
+    }
+
+    func urlSession(_ session: URLSession, didBecomeInvalidWithError error: Error?) {
+        let pending = lock.withLock { () -> CheckedContinuation<Void, Error>? in
+            let pending = retirement
+            retirement = nil
+            return pending
+        }
+        guard let pending else { return }
+        do {
+            guard error == nil else { throw FoundationDownloadError.cleanup }
+            try store.retire()
+            pending.resume()
+        } catch { pending.resume(throwing: FoundationDownloadError.cleanup) }
+    }
+
+    func run(_ task: URLSessionTask) async throws -> URL {
+        // Bind a suspended task durably before cancellation handling can reach it.
+        // This is the same path for native acquisition and native-free delegate tests.
+        try store.reserve(taskIdentifier: task.taskIdentifier)
+        lock.withLock { liveTaskIdentifier = task.taskIdentifier }
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                let state = lock.withLock { () -> (Result<URL, Error>?, Bool) in
+                    if let result = terminalResult { return (result, cancelled) }
+                    self.continuation = continuation
+                    return (nil, cancelled)
+                }
+                if let result = state.0 {
+                    continuation.resume(with: result)
+                    return
+                }
+                if state.1 {
+                    task.cancel()
+                    return
+                }
+                do {
+                    // A process lost after this phase cannot infer "no allocation".
+                    let shouldResume = try lock.withLock {
+                        guard !cancelled, terminalResult == nil else { return false }
+                        // Serialize this write with the terminal callback's state read;
+                        // cancellation cannot overwrite a terminal tombstone with resuming.
+                        try store.beginResuming(taskIdentifier: task.taskIdentifier)
+                        return true
+                    }
+                    if shouldResume { task.resume() } else { task.cancel() }
+                } catch {
+                    lock.withLock { cleanupFailed = true }
+                    task.cancel()
+                }
+            }
+        } onCancel: {
+            self.lock.withLock { self.cancelled = true }
+            // Await the actual terminal callback, including cancellation before resume.
+            task.cancel()
+        }
+    }
+
+    private func complete(_ result: Result<URL, Error>) {
+        let pending = lock.withLock { () -> CheckedContinuation<URL, Error>? in
+            guard terminalResult == nil else { return nil }
+            terminalResult = result
+            let pending = continuation
+            continuation = nil
+            return pending
+        }
+        pending?.resume(with: result)
+    }
+
+    func urlSession(
+        _ session: URLSession, assetDownloadTask: AVAssetDownloadTask,
+        willDownloadTo location: URL
+    ) {
+        // Mark observation BEFORE any fallible persistence. A failed callback write
+        // cannot later be mistaken for proof that this task never allocated anything.
+        lock.withLock { observedAllocation = true }
+        do {
+            try store.capture(location, taskIdentifier: assetDownloadTask.taskIdentifier)
+            lock.withLock { self.location = location }
+        } catch {
+            lock.withLock { cleanupFailed = true }
+            assetDownloadTask.cancel()
+        }
+    }
+
+    func urlSession(
+        _ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?
+    ) {
+        // Cold retirement deliberately cannot manufacture terminal-no-allocation proof.
+        if lock.withLock({ retirement != nil }) { return }
+        let state = lock.withLock {
+            (liveTaskIdentifier, observedAllocation, location, cancelled || cleanupFailed)
+        }
+        do {
+            if state.0 == task.taskIdentifier && !state.1 {
+                try store.recordTerminalNoAllocation(taskIdentifier: task.taskIdentifier)
+            }
+            if error != nil || state.3 {
+                try store.retire()
+                complete(.failure(FoundationDownloadError.cancelled))
+            } else if let location = state.2 {
+                complete(.success(location))
+            } else {
+                try store.retire()
+                complete(.failure(FoundationDownloadError.incomplete))
+            }
+        } catch { complete(.failure(FoundationDownloadError.cleanup)) }
+    }
+}
+nonisolated private final class FoundationNativeDownloadEnumerationFailure: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+    var failed: Bool { lock.withLock { value } }
+    func record() { lock.withLock { value = true } }
 }

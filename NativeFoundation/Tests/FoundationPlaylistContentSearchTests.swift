@@ -567,6 +567,92 @@ final class FoundationPlaylistContentSearchTests: XCTestCase {
     }
 
     @MainActor
+    func testExplicitVisibleRetryResumesExactFailedCursorAndPreservesSuccessfulMatches()
+        async throws
+    {
+        for partial in [false, true] {
+            let existing = Self.item("existing", kind: .playlist)
+            let pending = Self.item("pending", kind: .playlist)
+            let cursor = FoundationPlaylistContentCursor(
+                candidateOffset: 12, pending: [.init(playlist: pending, trackOffset: 200)])
+            let responses = PlaylistRetryResponses(partial: partial, initial: cursor)
+            let library = AutomaticPlaylistLibrary { _, cursor in
+                try await responses.next(cursor)
+            }
+            let model = FoundationPlaylistLookupModel(
+                scope: library.metadataScopeID,
+                seed: .init(
+                    items: [existing], nextStartIndex: 12, hasIncompleteCoverage: true,
+                    partialFailureCount: 0, continuation: cursor))
+            let client = UUID()
+            let context = FoundationMusicSearchContext(trackIDs: ["selected"])
+            let first = model.registerVisible(client, context: context, library: library)
+            await first?.value
+            XCTAssertEqual(model.error, .network)
+            XCTAssertTrue(model.canRetryContinuation)
+            let retained = model.items
+            let failedCursor = try XCTUnwrap(model.cursor)
+            XCTAssertEqual(retained.map(\.id), partial ? ["existing", "found"] : ["existing"])
+            // Redraw/handover is not explicit consent to retry failed work.
+            let successor = UUID()
+            XCTAssertNil(model.registerVisible(successor, context: context, library: library))
+            XCTAssertNil(model.retryVisible(UUID(), context: context, library: library))
+            XCTAssertEqual(model.items, retained)
+            let beforeRetry = await library.calls
+            XCTAssertEqual(beforeRetry, 1)
+            let retried = model.retryVisible(client, context: context, library: library)
+            XCTAssertNotNil(retried)
+            XCTAssertNil(model.retryVisible(successor, context: context, library: library))
+            await retried?.value
+            let cursors = await responses.cursors
+            XCTAssertEqual(cursors, [cursor, failedCursor])
+            XCTAssertEqual(
+                model.items.map(\.id),
+                partial ? ["existing", "found", "final"] : ["existing", "final"])
+            XCTAssertNil(model.error)
+            XCTAssertNil(model.cursor)
+            XCTAssertFalse(model.canRetryContinuation)
+            let reads = await library.calls
+            XCTAssertEqual(reads, 2)
+            model.cancel()
+        }
+    }
+
+    @MainActor
+    func testContinuationRetryRejectsHiddenRetiredAccountAndExhaustedBudget() async {
+        let library = AutomaticPlaylistLibrary { _, _ in
+            XCTFail("A stale client or exhausted budget cannot issue a request")
+            throw FoundationLibraryError.network
+        }
+        let seed = FoundationPlaylistContentPage(
+            items: [], nextStartIndex: 0, hasIncompleteCoverage: true, partialFailureCount: 1)
+        let model = FoundationPlaylistLookupModel(scope: library.metadataScopeID, seed: seed)
+        let client = UUID()
+        let context = FoundationMusicSearchContext(trackIDs: ["selected"])
+        XCTAssertNil(model.registerVisible(client, context: context, library: library))
+        let otherRequests = PlaylistContentRequests()
+        let other = Self.library(requests: otherRequests)
+        XCTAssertNil(model.retryVisible(client, context: context, library: other))
+        XCTAssertEqual(model.error, .network)
+        let accountReads = await otherRequests.values
+        XCTAssertTrue(accountReads.isEmpty)
+        model.releaseVisible(client)
+        XCTAssertNil(model.retryVisible(client, context: context, library: library))
+        model.cancel()
+        XCTAssertNil(model.retryVisible(client, context: context, library: library))
+        var limits = FoundationCatalogBudget()
+        limits.maximumPages = 1  // The retained seed already consumed this page.
+        let exhausted = FoundationPlaylistLookupModel(
+            scope: library.metadataScopeID, seed: seed, limits: limits)
+        XCTAssertNil(exhausted.registerVisible(client, context: context, library: library))
+        XCTAssertFalse(exhausted.canRetryContinuation)
+        XCTAssertNil(exhausted.retryVisible(client, context: context, library: library))
+        let reads = await library.calls
+        XCTAssertEqual(reads, 0)
+        exhausted.cancel()
+    }
+
+    @MainActor
     func testVisibleSearchStopsAtExistingPageBudgetAndNonadvancingCursor() async {
         for advances in [false, true] {
             let library = AutomaticPlaylistLibrary { _, cursor in
@@ -824,6 +910,34 @@ private actor PlaylistContentHarness {
     func tracks(id: String) throws -> FoundationPage {
         trackCalls.append(id)
         return try (contents[id] ?? .success(.init(items: [], nextStartIndex: nil))).get()
+    }
+}
+
+private actor PlaylistRetryResponses {
+    let partial: Bool
+    let initial: FoundationPlaylistContentCursor
+    var cursors: [FoundationPlaylistContentCursor] = []
+
+    init(partial: Bool, initial: FoundationPlaylistContentCursor) {
+        self.partial = partial
+        self.initial = initial
+    }
+
+    func next(_ cursor: FoundationPlaylistContentCursor) throws -> FoundationPlaylistContentPage {
+        cursors.append(cursor)
+        func item(_ id: String) -> FoundationItem {
+            .init(id: id, title: "Fixture", subtitle: "", kind: .playlist, duration: nil)
+        }
+        if cursors.count == 1 {
+            if !partial { throw FoundationLibraryError.network }
+            return .init(
+                items: [item("found")], nextStartIndex: 18, hasIncompleteCoverage: true,
+                partialFailureCount: 1,
+                continuation: .init(candidateOffset: 18, pending: initial.pending))
+        }
+        return .init(
+            items: [item("existing")] + (partial ? [item("found")] : []) + [item("final")],
+            nextStartIndex: nil, hasIncompleteCoverage: false, partialFailureCount: 0)
     }
 }
 

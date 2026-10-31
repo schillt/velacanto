@@ -57,12 +57,14 @@ final class FoundationPlaybackPreferences: ObservableObject {
     static let streamingCellularQualityKey = "audio.streaming.cellularQuality"
     static let streamingCellularKey = "audio.streaming.allowCellular"
     static let downloadQualityKey = "audio.downloads.quality"
+    static let systemManagedDownloadsKey = "audio.downloads.systemManaged"
     static let downloadsCellularKey = "audio.downloads.allowCellular"
     static let offlineModeKey = "library.offlineMode"
     static let duplicateAlbumTracksKey = "library.showDuplicateAlbumTracks"
     @Published private(set) var streamingWiFiQuality: FoundationStreamingQuality
     @Published private(set) var streamingCellularQuality: FoundationStreamingQuality
     @Published private(set) var downloadQuality: FoundationDownloadQuality
+    @Published private(set) var systemManagedDownloads: Bool
     @Published private(set) var allowsCellularStreaming: Bool
     @Published private(set) var allowsCellularDownloads: Bool
     @Published private(set) var showDuplicateAlbumTracks: Bool
@@ -84,6 +86,7 @@ final class FoundationPlaybackPreferences: ObservableObject {
         downloadQuality =
             defaults.string(forKey: Self.downloadQualityKey)
             .flatMap(FoundationDownloadQuality.init(rawValue:)) ?? .original
+        systemManagedDownloads = defaults.bool(forKey: Self.systemManagedDownloadsKey)
         allowsCellularStreaming = defaults.bool(forKey: Self.streamingCellularKey)
         allowsCellularDownloads = defaults.bool(forKey: Self.downloadsCellularKey)
         showDuplicateAlbumTracks = defaults.bool(forKey: Self.duplicateAlbumTracksKey)
@@ -152,6 +155,8 @@ final class FoundationPlaybackPreferences: ObservableObject {
             defaults.string(forKey: Self.downloadQualityKey)
             .flatMap(FoundationDownloadQuality.init(rawValue:)) ?? .original
         if quality != downloadQuality { downloadQuality = quality }
+        let managed = defaults.bool(forKey: Self.systemManagedDownloadsKey)
+        if managed != systemManagedDownloads { systemManagedDownloads = managed }
         let streaming = defaults.bool(forKey: Self.streamingCellularKey)
         let downloads = defaults.bool(forKey: Self.downloadsCellularKey)
         if streaming != allowsCellularStreaming { allowsCellularStreaming = streaming }
@@ -164,6 +169,11 @@ final class FoundationPlaybackPreferences: ObservableObject {
 
     func setOfflineMode(_ value: Bool) {
         defaults.set(value, forKey: Self.offlineModeKey)
+        refresh()
+    }
+
+    func setSystemManagedDownloads(_ value: Bool) {
+        defaults.set(value, forKey: Self.systemManagedDownloadsKey)
         refresh()
     }
 
@@ -188,7 +198,22 @@ final class FoundationPlaybackPreferences: ObservableObject {
     }
 
     func makePlayerItem(for url: URL) -> AVPlayerItem {
-        guard !url.isFileURL else { return AVPlayerItem(url: url) }
+        if url.isFileURL {
+            let asset = AVURLAsset(
+                url: url,
+                options: [
+                    AVURLAssetReferenceRestrictionsKey:
+                        NSNumber(
+                            value: AVAssetReferenceRestrictions.forbidLocalReferenceToRemote
+                                .rawValue),
+                    AVURLAssetAllowsCellularAccessKey: false,
+                    AVURLAssetAllowsExpensiveNetworkAccessKey: false,
+                    AVURLAssetAllowsConstrainedNetworkAccessKey: false,
+                ])
+            let item = AVPlayerItem(asset: asset)
+            item.canUseNetworkResourcesForLiveStreamingWhilePaused = false
+            return item
+        }
         let asset = AVURLAsset(
             url: url, options: [AVURLAssetAllowsCellularAccessKey: allowsCellularStreaming])
         return AVPlayerItem(asset: asset)

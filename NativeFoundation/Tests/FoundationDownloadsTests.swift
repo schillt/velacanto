@@ -92,6 +92,664 @@ final class FoundationDownloadsTests: XCTestCase {
         XCTAssertTrue(preferences.allowsCellularStreaming)
     }
 
+    func testSystemManagementPreferenceDefaultsOffAndSnapshotsOnlyNewOwners() throws {
+        let name = "SystemDownloadManagement-" + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
+        defer { defaults.removePersistentDomain(forName: name) }
+        let preferences = FoundationPlaybackPreferences(defaults: defaults)
+        XCTAssertFalse(preferences.systemManagedDownloads)
+        let downloadRoot = try root()
+        let library = DownloadsLibrary(tracks: [item("one"), item("two")])
+        let downloads = FoundationDownloads(
+            scope: "management-intent", library: library, root: downloadRoot,
+            transfer: transfer, monitorConnectivity: false,
+            systemManagedDownloads: { preferences.systemManagedDownloads })
+        downloads.download(item("one"))
+        preferences.setSystemManagedDownloads(true)
+        downloads.download(item("two"))
+        XCTAssertEqual(downloads.owners.map(\.systemManaged), [false, true])
+        preferences.setSystemManagedDownloads(false)
+        downloads.retry(ownerID: "track:two")
+        XCTAssertEqual(downloads.owners.map(\.systemManaged), [false, true])
+        let persisted = try FoundationDownloadStorage.load(
+            directory: FoundationDownloadStorage.directory(
+                scope: "management-intent", root: downloadRoot))
+        XCTAssertNil(persisted.owners[0].systemManaged)
+        XCTAssertEqual(persisted.owners[1].systemManaged, true)
+        XCTAssertFalse(FoundationPlaybackPreferences(defaults: defaults).systemManagedDownloads)
+        downloads.invalidate()
+    }
+
+    func testSystemManagedOriginalRejectsWithoutProgressiveOrNativeFallback() async throws {
+        let track = item("original-no-substitution")
+        let downloads = FoundationDownloads(
+            scope: "native-original", library: DownloadsLibrary(tracks: [track]), root: try root(),
+            transfer: { _, _, _, _ in XCTFail("No progressive fallback") },
+            monitorConnectivity: false,
+            systemManagedDownloads: { true },
+            nativeTransfer: { _, _, _, _ in
+                XCTFail("Original must not enter the HLS transport")
+                throw FoundationDownloadError.response
+            })
+        downloads.download(track)
+        downloads.updateConnectivity(isConnected: true, usesWiFi: true)
+        try await waitUntil { downloads.owners.first?.state == .failed }
+        XCTAssertFalse(downloads.isReady(track))
+        XCTAssertEqual(
+            downloads.errorMessage,
+            FoundationDownloadError.originalSystemManagementUnavailable.errorDescription)
+        downloads.invalidate()
+    }
+
+    func testPrivateReceiptBindingRejectsCopiedContentAtWrongResource() throws {
+        let directory = try root()
+        try FoundationDownloadStorage.prepare(directory)
+        let identifier =
+            "dev.novoluxor.velacanto.offline." + directory.lastPathComponent + "."
+            + UUID().uuidString
+        let store = FoundationNativeAllocationStore(
+            directory: directory, sessionIdentifier: identifier)
+        try store.reserve(taskIdentifier: 1)
+        let copiedDirectory = try root()
+        let copied = copiedDirectory.appendingPathComponent(store.receiptURL.lastPathComponent)
+        try FileManager.default.copyItem(at: store.receiptURL, to: copied)
+        XCTAssertEqual(try Data(contentsOf: copied), try Data(contentsOf: store.receiptURL))
+        let identity = FoundationManagedPackageMetadata.comparison(
+            try FoundationManagedPackageMetadata.resources(store.receiptURL),
+            try FoundationManagedPackageMetadata.resources(copied))
+        XCTAssertEqual(identity.file, .different)
+        XCTAssertThrowsError(
+            try FoundationNativeAllocationStore.existingReceipt(at: copied, directory: directory))
+        let linkedDirectory = try root()
+        let linked = linkedDirectory.appendingPathComponent(store.receiptURL.lastPathComponent)
+        try FileManager.default.linkItem(at: store.receiptURL, to: linked)
+        let linkedIdentity = FoundationManagedPackageMetadata.comparison(
+            try FoundationManagedPackageMetadata.resources(store.receiptURL),
+            try FoundationManagedPackageMetadata.resources(linked))
+        XCTAssertEqual(linkedIdentity.file, .equal)
+        XCTAssertEqual(linkedIdentity.volume, .equal)
+        XCTAssertThrowsError(
+            try FoundationNativeAllocationStore.existingReceipt(at: linked, directory: directory))
+        let wrongName = directory.appendingPathComponent("native-receipt-wrong-hash.json")
+        try FileManager.default.copyItem(at: store.receiptURL, to: wrongName)
+        XCTAssertEqual(try Data(contentsOf: wrongName), try Data(contentsOf: store.receiptURL))
+        XCTAssertThrowsError(
+            try FoundationNativeAllocationStore.existingReceipt(at: wrongName, directory: directory)
+        )
+        XCTAssertNoThrow(
+            try FoundationNativeAllocationStore.existingReceipt(
+                at: store.receiptURL, directory: directory))
+        // Rejected copies must not retire the owned receipt.
+        XCTAssertNil(try store.load().retired)
+    }
+
+    func testQuarantineThenSuccessfulRemoveAllAllowsSameIDNewDownload() async throws {
+        try await checkQuarantineRemovalAndNewAcquisition(holdingOtherLease: false)
+    }
+
+    func testQuarantineRemovalPreservesLeaseAndClearsOnlyProvedRetiredResource() async throws {
+        try await checkQuarantineRemovalAndNewAcquisition(holdingOtherLease: true)
+    }
+
+    private func checkQuarantineRemovalAndNewAcquisition(holdingOtherLease: Bool) async throws {
+        let storageRoot = try root()
+        let scope = "remove-all-quarantine"
+        let directory = FoundationDownloadStorage.directory(scope: scope, root: storageRoot)
+        try FoundationDownloadStorage.prepare(directory)
+        let track = item("same-id")
+        let playing = item("leased-other-id")
+        let oldFileURL = directory.appendingPathComponent("leased.mp3")
+        let bytes = Data("synthetic retained audio".utf8)
+        try bytes.write(to: oldFileURL)
+        try FoundationDownloadStorage.protect(oldFileURL)
+        var manifest = FoundationDownloadManifest()
+        manifest.owners = [track, playing].map { item in
+            .init(
+                id: "track:" + item.id, item: FoundationStoredDownloadItem(item),
+                tracks: [FoundationStoredDownloadItem(item)], paused: false, expanded: true)
+        }
+        manifest.files[playing.id] = .init(
+            name: "leased.mp3", bytes: Int64(bytes.count),
+            digest: try FoundationDownloadStorage.digest(oldFileURL))
+        manifest.files[track.id] = .init(
+            name: "native.movpkg", bytes: 1, digest: "",
+            nativePackage:
+                .init(
+                    nativeURL: directory.appendingPathComponent("issued.movpkg"),
+                    bookmark: Data("unverified identity".utf8), sessionIdentifier: "synthetic"))
+        try FoundationDownloadStorage.save(manifest, directory: directory)
+        let resolution = NativeDownloadVerificationFixture()
+        let transfers = NativeDownloadVerificationFixture()
+        let manager = FoundationDownloads(
+            scope: scope, library: DownloadsLibrary(tracks: [track, playing]), root: storageRoot,
+            transfer: { _, destination, _, progress in
+                transfers.recordVerification()
+                try bytes.write(to: destination)
+                progress(Int64(bytes.count), Int64(bytes.count))
+            }, monitorConnectivity: false,
+            nativeResolution: { _, _ in resolution.available ? .provenMissing : .unverifiable },
+            verifyInventoryFiles: { files, _ in files.filter { $0.value.nativePackage == nil } })
+        try await waitUntil { !manager.isLoading }
+        XCTAssertFalse(manager.isReady(track))
+        var lease: FoundationPlaybackResource?
+        if holdingOtherLease {
+            lease = try await manager.playbackResource(for: playing, allowsRemoteFallback: false)
+        }
+        let failedRemoval = await manager.removeAll()
+        XCTAssertFalse(failedRemoval)
+        XCTAssertNotNil(try FoundationDownloadStorage.load(directory: directory).files[track.id])
+        XCTAssertFalse(
+            try FoundationDownloadStorage.load(directory: directory).excludedTrackIDs?.contains(
+                track.id) == true)
+        XCTAssertEqual(transfers.verifications, 0)
+        if holdingOtherLease {
+            XCTAssertTrue(FileManager.default.fileExists(atPath: oldFileURL.path))
+            manager.download(track)
+            manager.updateConnectivity(isAllowed: true)
+            try await waitUntil {
+                manager.owners.first(where: { $0.item.id == track.id })?.state == .failed
+            }
+            // Failed cleanup must retain the quarantine.
+            XCTAssertEqual(transfers.verifications, 0)
+        }
+        // Fixture now supplies affirmative proof of prior allocation absence.
+        resolution.makeAvailable()
+        let removed = await manager.removeAll()
+        XCTAssertTrue(removed)
+        XCTAssertNil(try FoundationDownloadStorage.load(directory: directory).files[track.id])
+        if holdingOtherLease {
+            XCTAssertTrue(FileManager.default.fileExists(atPath: oldFileURL.path))
+        }
+        manager.download(track)
+        manager.updateConnectivity(isAllowed: true)
+        try await waitUntil { manager.isReady(track) }
+        // Prove a fresh acquisition, rather than a stale ready flag/file.
+        XCTAssertEqual(transfers.verifications, 1)
+        let saved = try FoundationDownloadStorage.load(directory: directory)
+        XCTAssertNil(saved.files[track.id]?.nativePackage)
+        XCTAssertFalse(saved.excludedTrackIDs?.contains(track.id) == true)
+        if let lease {
+            await lease.release()
+            XCTAssertFalse(FileManager.default.fileExists(atPath: oldFileURL.path))
+            XCTAssertTrue(manager.isReady(track))
+        }
+        manager.invalidate()
+    }
+
+    func testActualNativeDelegateCancellationBeforeAllocationSurvivesRelaunchAndClearsAccount()
+        async throws
+    {
+        let storageRoot = try root()
+        let scope = "delegate-preallocation-cancel"
+        let directory = FoundationDownloadStorage.directory(scope: scope, root: storageRoot)
+        try FoundationDownloadStorage.prepare(directory)
+        let identifier =
+            "dev.novoluxor.velacanto.offline." + directory.lastPathComponent + "."
+            + UUID().uuidString
+        let store = FoundationNativeAllocationStore(
+            directory: directory, sessionIdentifier: identifier, trackID: "track")
+        let delegate = FoundationNativeDownloadDelegate(progress: { _, _ in }, store: store)
+        let session = URLSession(configuration: .ephemeral, delegate: delegate, delegateQueue: nil)
+        defer { session.invalidateAndCancel() }
+        let task = session.dataTask(with: URL(string: "https://example.invalid/must-never-resume")!)
+        let gate = DownloadGate()
+        let observation = NativeDownloadVerificationFixture()
+        let operation = Task {
+            await gate.wait()
+            do {
+                _ = try await delegate.run(task)
+                XCTFail("Cancelled task succeeded")
+            } catch { observation.finish() }
+        }
+        try await waitUntilAsync { await gate.started }
+        operation.cancel()  // Already cancelled before run attaches/resumes its URLSession task.
+        await gate.resume()
+        try await waitUntil { observation.finished }
+        XCTAssertEqual(task.countOfBytesSent, 0)
+        let receipt = try store.load()
+        XCTAssertEqual(receipt.taskIdentifier, task.taskIdentifier)
+        XCTAssertEqual(receipt.phase, .terminalNoAllocation)
+        XCTAssertNil(receipt.nativeURL)
+        XCTAssertEqual(receipt.retired, true)
+        // Simulate cold account inventory using the actual delegate's durable terminal record.
+        var manifest = FoundationDownloadManifest()
+        manifest.nativePendingSessions = [identifier]
+        try FoundationDownloadStorage.save(manifest, directory: directory)
+        let manager = FoundationDownloads(
+            scope: scope, library: DownloadsLibrary(tracks: []), root: storageRoot,
+            monitorConnectivity: false,
+            nativeRetirement: { identifiers, directory in
+                var retired: Set<String> = []
+                for identifier in identifiers {
+                    let store = FoundationNativeAllocationStore(
+                        directory: directory, sessionIdentifier: identifier)
+                    do {
+                        try store.retire()
+                        retired.insert(identifier)
+                    } catch {}
+                }
+                return retired
+            })
+        try await waitUntil { !manager.isLoading }
+        XCTAssertTrue(
+            try FoundationDownloadStorage.load(directory: directory).nativePendingSessions?.isEmpty
+                == true)
+        XCTAssertNoThrow(try store.load(), "Fixture receipt remained readable after inventory")
+        let enumeratedReceipt = try XCTUnwrap(
+            FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+                .first(where: { $0.lastPathComponent.hasPrefix("native-receipt-") }))
+        let expectedURL = store.receiptURL
+        let identity = FoundationManagedPackageMetadata.comparison(
+            try FoundationManagedPackageMetadata.resources(expectedURL),
+            try FoundationManagedPackageMetadata.resources(enumeratedReceipt))
+        let flags =
+            "rawEqual=\(expectedURL == enumeratedReceipt) "
+            + "absoluteEqual=\(expectedURL.absoluteURL == enumeratedReceipt.absoluteURL) "
+            + "canonicalEqual=\(FoundationManagedPackageMetadata.equalPath(FoundationManagedPackageMetadata.canonical(expectedURL), FoundationManagedPackageMetadata.canonical(enumeratedReceipt))) "
+            + "expectedHasBase=\(expectedURL.baseURL != nil) enumeratedHasBase=\(enumeratedReceipt.baseURL != nil) "
+            + "file=\(identity.file.rawValue) volume=\(identity.volume.rawValue)"
+        XCTAssertNoThrow(
+            try FoundationNativeAllocationStore.existingReceipt(
+                at: enumeratedReceipt, directory: directory),
+            "Fixture receipt sweep binding: " + flags)
+        let cleared = await manager.clearAccount()
+        XCTAssertTrue(cleared)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
+    }
+
+    func testReservedReceiptAndUnknownColdResumingReceiptHaveDifferentRetirementAuthority() throws {
+        let directory = try root()
+        try FoundationDownloadStorage.prepare(directory)
+        func store() -> FoundationNativeAllocationStore {
+            .init(
+                directory: directory,
+                sessionIdentifier: "dev.novoluxor.velacanto.offline." + directory.lastPathComponent
+                    + "." + UUID().uuidString)
+        }
+        let reserved = store()
+        try reserved.reserve(taskIdentifier: 1)
+        try reserved.retire()  // Durable ordering proves no resume was issued.
+        XCTAssertEqual(try reserved.load().retired, true)
+        let unknown = store()
+        try unknown.reserve(taskIdentifier: 2)
+        try unknown.beginResuming(taskIdentifier: 2)
+        let relaunched = FoundationNativeAllocationStore(
+            directory: directory, sessionIdentifier: unknown.sessionIdentifier)
+        XCTAssertThrowsError(try relaunched.retire())
+        XCTAssertEqual(try relaunched.load().phase, .resuming)
+        XCTAssertNil(try relaunched.load().retired)
+        let missing = store()
+        XCTAssertThrowsError(try missing.retire())  // Missing receipt is never "no allocation".
+    }
+
+    func testColdDelegateTerminalWithoutEarlierAllocationCallbackDoesNotInventNoAllocationProof()
+        throws
+    {
+        let directory = try root()
+        try FoundationDownloadStorage.prepare(directory)
+        let identifier =
+            "dev.novoluxor.velacanto.offline." + directory.lastPathComponent + "."
+            + UUID().uuidString
+        let store = FoundationNativeAllocationStore(
+            directory: directory, sessionIdentifier: identifier)
+        let coldDelegate = FoundationNativeDownloadDelegate(progress: { _, _ in }, store: store)
+        let session = URLSession(configuration: .ephemeral)
+        defer { session.invalidateAndCancel() }
+        let task = session.dataTask(with: URL(string: "https://example.invalid/never-started")!)
+        try store.reserve(taskIdentifier: task.taskIdentifier)
+        try store.beginResuming(taskIdentifier: task.taskIdentifier)
+        // This delegate never owned the original live run, so a terminal callback in
+        // the new process cannot prove that no earlier allocation callback occurred.
+        coldDelegate.urlSession(session, task: task, didCompleteWithError: URLError(.cancelled))
+        XCTAssertEqual(try store.load().phase, .resuming)
+        XCTAssertNil(try store.load().retired)
+        XCTAssertThrowsError(try store.retire())
+    }
+
+    func testExplicitRetryRevalidatesQuarantinedNativeWithoutReacquiringOrFalseReady() async throws
+    {
+        try await checkNativeRevalidation(useRetry: true)
+    }
+
+    func testForegroundRevalidatesQuarantinedNativeWithoutReacquiringOrFalseReady() async throws {
+        try await checkNativeRevalidation(useRetry: false)
+    }
+
+    private func checkNativeRevalidation(useRetry: Bool) async throws {
+        let storageRoot = try root()
+        let scope = "native-revalidation"
+        let directory = FoundationDownloadStorage.directory(scope: scope, root: storageRoot)
+        try FoundationDownloadStorage.prepare(directory)
+        let track = item("recoverable-native")
+        let package = FoundationNativeDownloadPackage(
+            nativeURL: directory.appendingPathComponent("issued.movpkg"),
+            bookmark: Data("unchanged pinned bookmark".utf8), sessionIdentifier: "synthetic")
+        var manifest = FoundationDownloadManifest()
+        manifest.owners = [
+            .init(
+                id: "track:" + track.id, item: FoundationStoredDownloadItem(track),
+                tracks: [FoundationStoredDownloadItem(track)], paused: false, expanded: true,
+                requestedQuality: .aac192, systemManaged: true)
+        ]
+        manifest.files[track.id] = .init(
+            name: "pinned.movpkg", bytes: 1, digest: "", nativePackage: package)
+        try FoundationDownloadStorage.save(manifest, directory: directory)
+        let fixture = NativeDownloadVerificationFixture()
+        let manager = FoundationDownloads(
+            scope: scope, library: DownloadsLibrary(tracks: [track]), root: storageRoot,
+            transfer: { _, _, _, _ in XCTFail("Revalidation must not download progressive bytes") },
+            monitorConnectivity: false,
+            nativeTransfer: { _, _, _, _ in
+                XCTFail("Revalidation must not reacquire native media")
+                throw FoundationDownloadError.response
+            },
+            nativeResolution: { _, _ in
+                fixture.available ? .available(package.nativeURL) : .unverifiable
+            },
+            verifyInventoryFiles: { files, _ in
+                if !files.isEmpty { fixture.recordVerification() }
+                return fixture.available ? files : [:]
+            })
+        try await waitUntil { !manager.isLoading }
+        manager.updateConnectivity(isAllowed: true)
+        XCTAssertFalse(manager.isReady(track))
+        XCTAssertEqual(manager.owners.first?.state, .failed)
+        let before = fixture.verifications
+        fixture.makeAvailable()
+        if useRetry {
+            manager.retry(ownerID: "track:" + track.id)
+        } else {
+            manager.refreshPresentation()
+        }
+        // Ownership alone doesn't publish ready synchronously; full verifier must finish.
+        XCTAssertFalse(manager.isReady(track))
+        try await waitUntil { manager.isReady(track) }
+        XCTAssertEqual(manager.owners.first?.state, .ready)
+        XCTAssertEqual(fixture.verifications, before + 1)
+        let persisted = try FoundationDownloadStorage.load(directory: directory)
+        XCTAssertEqual(persisted.files[track.id]?.nativePackage?.bookmark, package.bookmark)
+        XCTAssertFalse(persisted.excludedTrackIDs?.contains(track.id) == true)
+        manager.invalidate()
+    }
+
+    func testNativeCallbackBookmarkFailureRetainsDurableObservedAuthority() throws {
+        let directory = try root()
+        try FoundationDownloadStorage.prepare(directory)
+        let session =
+            "dev.novoluxor.velacanto.offline." + directory.lastPathComponent + "."
+            + UUID().uuidString
+        let store = FoundationNativeAllocationStore(
+            directory: directory, sessionIdentifier: session, trackID: "track")
+        let target = directory.appendingPathComponent("synthetic.movpkg", isDirectory: true)
+        try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+        var calls = 0
+        XCTAssertThrowsError(
+            try store.capture(
+                target, taskIdentifier: 7,
+                snapshot: { _ in
+                    // Synchronous ordering: authority is on disk before either bookmark call.
+                    XCTAssertEqual(try store.load().nativeURL, target)
+                    calls += 1
+                    if calls == 2 { throw CocoaError(.fileReadNoPermission) }
+                    return Data("namespace snapshot".utf8)
+                },
+                prove: { _ in
+                    XCTFail("Failed snapshot cannot authorize reuse")
+                    return true
+                }, namespaceProof: { _ in true }))
+        let relaunched = FoundationNativeAllocationStore(
+            directory: directory, sessionIdentifier: session)
+        let receipt = try relaunched.load()
+        XCTAssertEqual(receipt.taskIdentifier, 7)
+        XCTAssertEqual(receipt.trackID, "track")
+        XCTAssertNil(receipt.package)
+        XCTAssertNotNil(receipt.namespaceBookmark)
+        XCTAssertThrowsError(
+            try relaunched.retire(
+                resolve: { _ in .unverifiable },
+                remove: { _ in XCTFail("Unproved target must survive") }))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: target.path))
+        XCTAssertNil(try relaunched.load().retired)
+    }
+
+    func testNativeDurableReceiptSurvivesCancellationAndRetiresIdempotentlyAfterRelaunch() throws {
+        let directory = try root()
+        try FoundationDownloadStorage.prepare(directory)
+        let session =
+            "dev.novoluxor.velacanto.offline." + directory.lastPathComponent + "."
+            + UUID().uuidString
+        let store = FoundationNativeAllocationStore(
+            directory: directory, sessionIdentifier: session, trackID: "track")
+        let target = directory.appendingPathComponent("synthetic.movpkg", isDirectory: true)
+        try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+        try store.capture(
+            target, taskIdentifier: 8, snapshot: { _ in Data("pinned identity".utf8) },
+            prove: { _ in true }, namespaceProof: { _ in true })
+        let pinned = try store.completedPackage(taskIdentifier: 8)
+        // Replayed callback must reuse the pinned snapshot, never refresh it from a path.
+        try store.capture(
+            target, taskIdentifier: 8,
+            snapshot: { _ in
+                XCTFail("Snapshot refreshed")
+                return Data()
+            })
+        XCTAssertEqual(try store.completedPackage(taskIdentifier: 8).bookmark, pinned.bookmark)
+        XCTAssertThrowsError(try store.capture(target, taskIdentifier: 9))
+        let relaunched = FoundationNativeAllocationStore(
+            directory: directory, sessionIdentifier: session)
+        try relaunched.retire(resolve: { _ in .available(target) })
+        XCTAssertFalse(FileManager.default.fileExists(atPath: target.path))
+        XCTAssertEqual(try relaunched.load().retired, true)
+        // A crash before manifest publication leaves a protected tombstone, not a bare ID.
+        try relaunched.retire(resolve: { _ in
+            XCTFail("Retired allocation re-opened")
+            return .unverifiable
+        })
+        XCTAssertEqual(try relaunched.load().retired, true)
+    }
+
+    func testOwnedNativeResourceRejectsGenerationChangeReplacementAndDistinguishesConfirmedAbsence()
+        throws
+    {
+        typealias Metadata = FoundationManagedPackageMetadata
+        let home = try root()
+        let namespace = home.appendingPathComponent(
+            "Library/com.apple.UserManagedAssets.synthetic", isDirectory: true)
+        let target = namespace.appendingPathComponent("asset.movpkg", isDirectory: true)
+        try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+        let bookmark = try target.bookmarkData(
+            options: [], includingResourceValuesForKeys: Set(Metadata.keys), relativeTo: nil)
+        let namespaceBookmark = try namespace.bookmarkData(
+            options: [], includingResourceValuesForKeys: Set(Metadata.keys), relativeTo: nil)
+        let package = FoundationNativeDownloadPackage(
+            nativeURL: target, bookmark: bookmark,
+            sessionIdentifier: "synthetic", namespaceBookmark: namespaceBookmark)
+        func stable(_ url: URL) throws -> [URLResourceKey: Any] {
+            var values = try Metadata.resources(url)
+            values[.generationIdentifierKey] = Data([1]) as NSData
+            return values
+        }
+        func inspect(_ read: (URL) throws -> [URLResourceKey: Any]) -> Metadata.Result {
+            var report = Metadata.Report()
+            report.bound = true
+            return Metadata.inspectResult(
+                .init(nativeURL: target, canonicalURL: target, completedBookmark: bookmark),
+                home: home, initial: report, readResources: read)
+        }
+        XCTAssertNotNil(inspect(stable).resolvedURL)
+        let canonicalTarget = Metadata.canonical(target)
+        func isSyntheticTarget(_ url: URL) -> Bool {
+            Metadata.equalPath(Metadata.canonical(url), canonicalTarget)
+        }
+        var reads = 0
+        let changing = inspect { url in
+            var values = try stable(url)
+            if isSyntheticTarget(url) {
+                reads += 1
+                values[.generationIdentifierKey] = Data([UInt8(reads)]) as NSData
+            }
+            return values
+        }
+        XCTAssertGreaterThanOrEqual(
+            reads, 2, "Changing reader must reach the same canonical synthetic target twice")
+        XCTAssertNil(changing.resolvedURL)
+        try FileManager.default.removeItem(at: target)
+        XCTAssertTrue(package.provesMissing(home: home, resources: stable))
+        if case .provenMissing = package.resolution(
+            home: home, inspect: { _ in inspect(stable) },
+            missing: { $0.provesMissing(home: home, resources: stable) })
+        {
+        } else {
+            XCTFail("Confirmed owned namespace absence was not recognized")
+        }
+        try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+        // Deterministically model an already-replaced resource with different file identity.
+        let replaced = inspect { url in
+            var values = try stable(url)
+            if isSyntheticTarget(url) {
+                values[.fileResourceIdentifierKey] = Data("different file".utf8) as NSData
+            }
+            return values
+        }
+        XCTAssertNil(replaced.resolvedURL)
+        if case .unverifiable = package.resolution(
+            home: home, inspect: { _ in replaced },
+            missing: { $0.provesMissing(home: home, resources: stable) })
+        {
+        } else {
+            XCTFail("Replacement became absence or availability")
+        }
+        XCTAssertFalse(
+            package.provesMissing(
+                home: home, resources: { _ in throw CocoaError(.fileReadNoPermission) }))
+    }
+
+    func testUnverifiableNativeInventoryPreservesAuthorityAndOtherVerifiedDownloads() async throws {
+        try await checkNativeInventoryResolution(provenMissing: false)
+    }
+
+    func testProvenNativeAbsenceAloneExcludesTrackAndPreservesOtherDownloads() async throws {
+        try await checkNativeInventoryResolution(provenMissing: true)
+    }
+
+    private func checkNativeInventoryResolution(provenMissing: Bool) async throws {
+        let storageRoot = try root()
+        let scope = "native-inventory"
+        let directory = FoundationDownloadStorage.directory(scope: scope, root: storageRoot)
+        try FoundationDownloadStorage.prepare(directory)
+        let good = item("regular")
+        let native = item("native")
+        let next = item("next")
+        let bytes = Data("regular verified audio".utf8)
+        let url = directory.appendingPathComponent("regular.mp3")
+        try bytes.write(to: url)
+        try FoundationDownloadStorage.protect(url)
+        var manifest = FoundationDownloadManifest()
+        manifest.owners = [good, native].map { track in
+            .init(
+                id: "track:" + track.id, item: FoundationStoredDownloadItem(track),
+                tracks: [FoundationStoredDownloadItem(track)], paused: false, expanded: true)
+        }
+        manifest.files[good.id] = .init(
+            name: "regular.mp3", bytes: Int64(bytes.count),
+            digest: try FoundationDownloadStorage.digest(url))
+        let package = FoundationNativeDownloadPackage(
+            nativeURL: directory.appendingPathComponent("issued.movpkg"),
+            bookmark: Data("saved identity".utf8), sessionIdentifier: "synthetic")
+        manifest.files[native.id] = .init(
+            name: "native.movpkg", bytes: 1, digest: "", nativePackage: package)
+        if !provenMissing {
+            let session =
+                "dev.novoluxor.velacanto.offline." + directory.lastPathComponent + "."
+                + UUID().uuidString
+            manifest.nativePendingSessions = [session]
+            let pending = FoundationNativeAllocationStore(
+                directory: directory, sessionIdentifier: session, trackID: native.id)
+            XCTAssertThrowsError(
+                try pending.capture(
+                    package.nativeURL, taskIdentifier: 10,
+                    snapshot: { _ in Data("namespace identity".utf8) }, prove: { _ in false },
+                    namespaceProof: { _ in true }))
+        }
+        try FoundationDownloadStorage.save(manifest, directory: directory)
+        let downloads = FoundationDownloads(
+            scope: scope, library: DownloadsLibrary(tracks: [good, native, next]),
+            root: storageRoot,
+            transfer: transfer, monitorConnectivity: false,
+            nativeRetirement: { identifiers, directory in
+                for identifier in identifiers {
+                    let store = FoundationNativeAllocationStore(
+                        directory: directory, sessionIdentifier: identifier)
+                    do { try store.retire(resolve: { _ in .unverifiable }) } catch {
+                        // Preserve unknown authority without starting an OS session in this fixture.
+                    }
+                }
+                return []
+            },
+            nativeResolution: { _, _ in provenMissing ? .provenMissing : .unverifiable },
+            verifyInventoryFiles: { files, _ in files.filter { $0.value.nativePackage == nil } })
+        try await waitUntil { !downloads.isLoading }
+        XCTAssertTrue(downloads.isReady(good))
+        XCTAssertFalse(downloads.isReady(native))
+        downloads.refreshPresentation()
+        let saved = try FoundationDownloadStorage.load(directory: directory)
+        XCTAssertEqual(saved.files[native.id] == nil, provenMissing)
+        XCTAssertEqual(saved.excludedTrackIDs?.contains(native.id) == true, provenMissing)
+        XCTAssertEqual(saved.nativePendingSessions?.isEmpty == false, !provenMissing)
+        downloads.download(next)
+        downloads.updateConnectivity(isAllowed: true)
+        try await waitUntil { downloads.isReady(next) }
+        if !provenMissing {
+            let cleared = await downloads.clearAccount()
+            XCTAssertFalse(cleared)
+            XCTAssertNotNil(
+                try FoundationDownloadStorage.load(directory: directory).files[native.id])
+            XCTAssertTrue(FileManager.default.fileExists(atPath: directory.path))
+        } else {
+            downloads.invalidate()
+        }
+    }
+
+    func testNativeFinitePlaylistRejectsLiveForeignAndCredentialResources() throws {
+        let base = URL(string: "https://example.invalid/Audio/synthetic/main.m3u8")!
+        let finite = "#EXTM3U\n#EXTINF:1,\nsegment.mp4\n#EXT-X-ENDLIST\n"
+        XCTAssertNoThrow(
+            try FoundationNativeDownloadTransport.validateFinitePlaylist(
+                finite, base: base, expectedDuration: 1))
+        for invalid in [
+            finite.replacingOccurrences(of: "#EXT-X-ENDLIST\n", with: ""),
+            finite.replacingOccurrences(
+                of: "segment.mp4", with: "https://foreign.invalid/segment.mp4"),
+            finite.replacingOccurrences(
+                of: "segment.mp4", with: "segment.mp4?api_key=synthetic-secret"),
+            finite.replacingOccurrences(of: "#EXTINF:1,", with: "#EXTINF:0.1,"),
+            finite.replacingOccurrences(
+                of: "#EXTINF:1,", with: "#EXT-X-KEY:METHOD=AES-128\n#EXTINF:1,"),
+        ] {
+            XCTAssertThrowsError(
+                try FoundationNativeDownloadTransport.validateFinitePlaylist(
+                    invalid, base: base, expectedDuration: 1))
+        }
+    }
+
+    func testManagedManifestDecodesLegacyIntentAndRejectsMalformedBookmarkBeforeNativeUse() throws {
+        let owner = FoundationDownloadManifest.Owner(
+            id: "track:legacy", item: FoundationStoredDownloadItem(item("legacy")), tracks: [],
+            paused: false, expanded: false)
+        let encoded = try JSONEncoder().encode(owner)
+        let decoded = try JSONDecoder().decode(FoundationDownloadManifest.Owner.self, from: encoded)
+        XCTAssertNil(decoded.systemManaged)
+        XCTAssertNil(decoded.requestedQuality)
+        let package = FoundationNativeDownloadPackage(
+            nativeURL: URL(string: "https://example.invalid/not-a-local-allocation")!,
+            bookmark: Data("not a bookmark".utf8), sessionIdentifier: "synthetic")
+        XCTAssertNil(package.resolveOwnedURL())
+        let file = FoundationDownloadManifest.File(
+            name: "synthetic.movpkg", bytes: 1, digest: "", nativePackage: package)
+        XCTAssertFalse(FoundationDownloadStorage.valid(file, directory: try root()))
+        XCTAssertNil(FoundationDownloadStorage.fileURL(file, directory: try root()))
+    }
+
     func testConvertedOwnerSnapshotsQualityAndPublishesActualRenditionWithoutReplacingReadyFile()
         async throws
     {
@@ -2947,6 +3605,19 @@ private actor DownloadsLibrary: FoundationLibrary {
         request.setValue("fixture-secret", forHTTPHeaderField: "Authorization")
         return FoundationDownloadSource(request: request, fileExtension: "mp3", expectedBytes: nil)
     }
+}
+
+nonisolated private final class NativeDownloadVerificationFixture: @unchecked Sendable {
+    private let lock = NSLock()
+    private var isAvailable = false
+    private var count = 0
+    private var isFinished = false
+    var available: Bool { lock.withLock { isAvailable } }
+    var verifications: Int { lock.withLock { count } }
+    var finished: Bool { lock.withLock { isFinished } }
+    func makeAvailable() { lock.withLock { isAvailable = true } }
+    func recordVerification() { lock.withLock { count += 1 } }
+    func finish() { lock.withLock { isFinished = true } }
 }
 
 private actor DownloadGate {

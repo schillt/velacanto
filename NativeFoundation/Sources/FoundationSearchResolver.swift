@@ -598,6 +598,10 @@ struct FoundationSearchResolver: Sendable {
     var showsSearchProgress: Bool {
         searching || (!hasStartedSearch && cursor != nil && error == nil)
     }
+    var canRetryContinuation: Bool {
+        !searching && !loading && cursor != nil && budget.canRequestPage
+            && (error == .network || error == .unavailable)
+    }
     private var searchOwner = UUID()
     private var visibleClients: Set<UUID> = []
     private var visibleTask: Task<Void, Never>?
@@ -669,6 +673,20 @@ struct FoundationSearchResolver: Sendable {
             guard let self, visibilityRevision == revision, visibleClients.isEmpty else { return }
             cancel()
         }
+    }
+
+    /// Only an explicit action from a current visible client can resume a failed
+    /// cursor. Preserve results and the existing budget; redraws never retry.
+    @discardableResult
+    func retryVisible(
+        _ client: UUID, context: FoundationMusicSearchContext,
+        library: any FoundationLibrary
+    ) -> Task<Void, Never>? {
+        guard visibleClients.contains(client), library.metadataScopeID == scope,
+            canRetryContinuation
+        else { return nil }
+        error = nil
+        return registerVisible(client, context: context, library: library)
     }
 
     /// The caller owns visibility/query lifetime. Each step uses the unchanged

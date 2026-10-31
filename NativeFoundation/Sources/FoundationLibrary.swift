@@ -504,6 +504,10 @@ protocol FoundationLibrary: Sendable {
     func downloadSource(for item: FoundationItem) async throws -> FoundationDownloadSource
     func downloadPreparation(for item: FoundationItem, quality: FoundationDownloadQuality)
         async throws -> FoundationDownloadPreparation
+    func nativeDownloadProposal(
+        for item: FoundationItem, quality: FoundationDownloadQuality, allowsCellular: Bool
+    )
+        async throws -> FoundationNativeDownloadProposal
     var supportsOfflinePlaylistPreparation: Bool { get }
     var supportsPlaylistManagement: Bool { get }
     var supportsRepeatedPlaylistTracks: Bool { get }
@@ -639,6 +643,12 @@ extension FoundationLibrary {
         guard quality == .original else { throw FoundationDownloadError.unsupported }
         return .original(try await downloadSource(for: item))
     }
+    func nativeDownloadProposal(
+        for item: FoundationItem, quality: FoundationDownloadQuality, allowsCellular: Bool
+    )
+        async throws -> FoundationNativeDownloadProposal
+    { throw FoundationDownloadError.systemManagementUnavailable }
+
     var supportsPlaylistManagement: Bool { false }
     var supportsRepeatedPlaylistTracks: Bool { false }
     var supportsPlaylistReordering: Bool { false }
@@ -2308,6 +2318,47 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
         guard acceptsCatalogItem(item) else { throw FoundationLibraryError.unavailable }
         if quality == .original { return .original(try await downloadSource(for: item)) }
         return .converted(try await convertedDownloadProposal(for: item, quality: quality))
+    }
+
+    func nativeDownloadProposal(
+        for item: FoundationItem, quality: FoundationDownloadQuality, allowsCellular: Bool
+    )
+        async throws -> FoundationNativeDownloadProposal
+    {
+        guard quality != .original else {
+            throw FoundationDownloadError.originalSystemManagementUnavailable
+        }
+        #if !os(iOS)
+            throw FoundationDownloadError.systemManagementUnavailable
+        #else
+            // Reuse fresh CanDownload/user/transcode/source authorization and unique
+            // server conversion lifetime. Preparing this does not start a conversion.
+            let converted = try await convertedDownloadProposal(for: item, quality: quality)
+            var components = URLComponents(
+                url: converted.request.url!, resolvingAgainstBaseURL: false)!
+            components.path = components.path.replacingOccurrences(
+                of: "/stream.m4a", with: "/master.m3u8")
+            components.queryItems =
+                try converted.plan.queryItems(deviceID: session.deviceID) + [
+                    URLQueryItem(name: "Container", value: "mp4"),
+                    URLQueryItem(name: "SegmentContainer", value: "mp4"),
+                    URLQueryItem(name: "Context", value: "Static"),
+                    URLQueryItem(name: "SegmentLength", value: "6"),
+                ]
+            guard let url = components.url else { throw FoundationDownloadError.response }
+            var request = URLRequest(url: url)
+            request.httpMethod = "GET"
+            // A documented nonreserved session header, not AVURLAssetHTTPHeaderFieldsKey
+            // or credential-bearing playlist URLs. Nested propagation needs real acceptance.
+            request.setValue(session.accessToken, forHTTPHeaderField: "X-Emby-Token")
+            request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
+            let artwork = try? await downloadArtwork(
+                for: item.catalogArtworkItem, size: 640, allowsCellular: allowsCellular)
+            try Task.checkCancellation()
+            return FoundationNativeDownloadProposal(
+                request: request, cleanupRequest: converted.cleanupRequest,
+                plan: converted.plan, title: item.title, artwork: artwork)
+        #endif
     }
 
     /// Fresh authorization and source checks, before starting this transfer's conversion.

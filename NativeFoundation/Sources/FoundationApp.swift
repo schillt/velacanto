@@ -670,6 +670,9 @@ final class FoundationAppModel: ObservableObject {
             requestedQuality: { [weak playbackPreferences] in
                 playbackPreferences?.downloadQuality ?? .original
             },
+            systemManagedDownloads: { [weak playbackPreferences] in
+                playbackPreferences?.systemManagedDownloads ?? false
+            },
             observeTracks: { [weak self] items, albumID in
                 self?.actions?.observeTrackCopies(items, albumID: albumID)
             },

@@ -767,6 +767,15 @@ private struct FoundationPlaylistLookupView: View {
                 if model.error != nil {
                     Text("Playlist search could not finish. Results found so far are shown.")
                         .font(.caption).foregroundStyle(.secondary)
+                    if model.canRetryContinuation {
+                        Button("Retry playlist search") {
+                            guard isActive, visible, !connectivity.localOnly else { return }
+                            model.retryVisible(
+                                visibilityOwner, context: context, library: library)
+                        }
+                        .accessibilityIdentifier("search-playlists-retry")
+                        .disabled(!isActive || !visible)
+                    }
                 } else if !model.searching, model.incomplete, model.cursor == nil {
                     Text("Some music relationships could not be checked in this library.")
                         .font(.caption).foregroundStyle(.secondary)

@@ -171,3 +171,12 @@ nonisolated struct FoundationDownloadConversionPlan: Sendable {
                 })
     }
 }
+
+/// Account-authorized, transient native request. No request/header enters persisted metadata.
+nonisolated struct FoundationNativeDownloadProposal: Sendable {
+    let request: URLRequest
+    let cleanupRequest: URLRequest
+    let plan: FoundationDownloadConversionPlan
+    let title: String
+    let artwork: Data?
+}

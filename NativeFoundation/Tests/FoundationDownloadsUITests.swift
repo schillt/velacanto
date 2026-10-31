@@ -4615,6 +4615,9 @@ final class FoundationDownloadsUITests: XCTestCase {
             XCTAssertTrue(
                 app.staticTexts["Refresh to confirm the server's order before moving songs."].exists
             )
+            let blockedActions = app.buttons["playlist-reorder-actions-occurrence-0"]
+            XCTAssertTrue(blockedActions.exists)
+            XCTAssertFalse(blockedActions.isEnabled)
             capture("Unconfirmed server move requires explicit refresh", in: app)
             app.buttons["Refresh"].tap()
         }

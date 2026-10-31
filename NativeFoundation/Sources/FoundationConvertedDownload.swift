@@ -228,7 +228,38 @@ nonisolated enum FoundationConvertedDownload {
             else {
                 throw FoundationDownloadError.incomplete
             }
-            let asset = AVURLAsset(url: url)
+            return try await inspectCompressedAsset(AVURLAsset(url: url), plan: plan)
+        } catch {
+            if Task.isCancelled || error is CancellationError { throw CancellationError() }
+            throw FoundationDownloadError.incomplete
+        }
+    }
+
+    static func inspectNativePackage(_ url: URL, plan: FoundationDownloadConversionPlan)
+        async throws -> FoundationConvertedDownloadRendition
+    {
+        let asset = AVURLAsset(
+            url: url,
+            options: [
+                AVURLAssetReferenceRestrictionsKey:
+                    NSNumber(
+                        value: AVAssetReferenceRestrictions.forbidLocalReferenceToRemote.rawValue),
+                AVURLAssetAllowsCellularAccessKey: false,
+                AVURLAssetAllowsExpensiveNetworkAccessKey: false,
+                AVURLAssetAllowsConstrainedNetworkAccessKey: false,
+            ])
+        let rendition = try await inspectCompressedAsset(asset, plan: plan)
+        return .init(
+            container: "hls-fmp4", codec: rendition.codec, sampleRate: rendition.sampleRate,
+            channels: rendition.channels, duration: rendition.duration)
+    }
+
+    private static func inspectCompressedAsset(
+        _ asset: AVURLAsset, plan: FoundationDownloadConversionPlan
+    )
+        async throws -> FoundationConvertedDownloadRendition
+    {
+        do {
             let tracks = try await asset.loadTracks(withMediaType: .audio)
             guard tracks.count == 1, let track = tracks.first,
                 try await asset.loadTracks(withMediaType: .video).isEmpty
@@ -293,4 +324,5 @@ nonisolated enum FoundationConvertedDownload {
             throw FoundationDownloadError.incomplete
         }
     }
+
 }
