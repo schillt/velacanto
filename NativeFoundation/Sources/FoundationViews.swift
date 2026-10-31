@@ -847,25 +847,27 @@ struct FoundationLibraryView: View {
                     }
                     macNavigation.updatePlaylistTitle(id: item.id, name: name)
                 },
-                onUpdated: { updated in
-                    guard displayedCatalogScope == library.catalogScopeID,
-                        updated.kind == .playlist, updated.id == item.id,
-                        updated.catalogSource == item.catalogSource
+                onUpdated: { [scope = library.metadataScopeID] updated in
+                    guard let activeLibrary = appModel.browseLibrary ?? appModel.library,
+                        activeLibrary.metadataScopeID == scope,
+                        displayedCatalogScope == activeLibrary.catalogScopeID,
+                        foundationPlaylistUpdateMatches(
+                            updated, original: item, library: activeLibrary)
                     else { return }
                     switch macLibraryRoute {
                     case .playlist(let displayed)
-                    where displayed.id == item.id && displayed.catalogSource == item.catalogSource:
+                    where foundationPlaylistUpdateMatches(
+                        updated, original: displayed, library: activeLibrary):
                         macLibraryRoute = .playlist(updated)
                     case .item(let displayed)
-                    where displayed.kind == .playlist && displayed.id == item.id
-                        && displayed.catalogSource == item.catalogSource:
+                    where foundationPlaylistUpdateMatches(
+                        updated, original: displayed, library: activeLibrary):
                         macLibraryRoute = .item(updated)
                     default: break
                     }
                     for index in macNavigation.path.indices
-                    where macNavigation.path[index].item.kind == .playlist
-                        && macNavigation.path[index].item.id == item.id
-                        && macNavigation.path[index].item.catalogSource == item.catalogSource
+                    where foundationPlaylistUpdateMatches(
+                        updated, original: macNavigation.path[index].item, library: activeLibrary)
                     {
                         macNavigation.path[index].item = updated
                     }
@@ -2448,6 +2450,19 @@ private struct FoundationArtistView: View {
     }
 }
 
+/// Nil source is a legacy Jellyfin snapshot only within its current account owner.
+private func foundationPlaylistUpdateMatches(
+    _ updated: FoundationItem, original: FoundationItem, library: any FoundationLibrary
+) -> Bool {
+    guard updated.kind == .playlist, original.kind == .playlist, updated.id == original.id,
+        let adapter = library as? FoundationJellyfinLibrary,
+        let source = try? FoundationCatalogSource.jellyfin(scope: adapter.catalogAccountIdentity),
+        updated.catalogSource == source,
+        original.catalogSource == nil || original.catalogSource == source
+    else { return false }
+    return true
+}
+
 private struct FoundationCollectionView: View {
     @EnvironmentObject private var downloads: FoundationDownloads
     @EnvironmentObject private var connectivity: FoundationConnectivity
@@ -2466,9 +2481,8 @@ private struct FoundationCollectionView: View {
 
     private var displayItem: FoundationItem {
         var copy = item
-        if let updatedPlaylist, updatedPlaylist.scope == library.catalogScopeID,
-            updatedPlaylist.item.id == item.id,
-            updatedPlaylist.item.catalogSource == item.catalogSource
+        if let updatedPlaylist, updatedPlaylist.scope == library.metadataScopeID,
+            foundationPlaylistUpdateMatches(updatedPlaylist.item, original: item, library: library)
         {
             copy = updatedPlaylist.item
         }
@@ -2496,7 +2510,7 @@ private struct FoundationCollectionView: View {
         .onChange(of: connectivity.localOnly) { _, offline in
             if offline { playlistSheet = nil }
         }
-        .onChange(of: library.catalogScopeID) { _, _ in
+        .onChange(of: library.metadataScopeID) { _, _ in
             playlistSheet = nil
             updatedPlaylist = nil
             playlistName = nil
@@ -2517,11 +2531,12 @@ private struct FoundationCollectionView: View {
                     FoundationPlaylistEditor(
                         playlist: displayItem, onDeleted: { dismiss() },
                         onRenamed: { playlistName = $0 },
-                        onUpdated: { updated in
-                            guard updated.kind == .playlist, updated.id == item.id,
-                                updated.catalogSource == item.catalogSource
+                        onUpdated: { [scope = library.metadataScopeID] updated in
+                            guard
+                                foundationPlaylistUpdateMatches(
+                                    updated, original: item, library: library)
                             else { return }
-                            updatedPlaylist = (updated, library.catalogScopeID)
+                            updatedPlaylist = (updated, scope)
                         },
                         library: library)
                 }
