@@ -123,6 +123,12 @@ final class FoundationDownloads: ObservableObject {
     private var pendingClear = false
     private var leaseWaiters: [UUID: CheckedContinuation<Bool, Never>] = [:]
     private var storageUsable = true
+    // Admission comes only from this account's loaded manifest or a live acquisition.
+    private var knownNativeSessions: Set<String> = []
+    private var liveNativeSessions: Set<String> = []
+    private var settlingNativeSessions: Set<String> = []
+    private var drainedNativeSessions: Set<String> = []
+    private var nativeSessionWaiters: [String: [CheckedContinuation<Void, Never>]] = [:]
 
     init(
         scope: String, library: any FoundationLibrary, root: URL? = nil,
@@ -180,6 +186,7 @@ final class FoundationDownloads: ObservableObject {
         do {
             try FoundationDownloadStorage.prepare(directory)
             manifest = try FoundationDownloadStorage.load(directory: directory)
+            knownNativeSessions = manifest.nativePendingSessions ?? []
             allowsCellular = manifest.allowsCellular
             for saved in manifest.owners {
                 if saved.paused { paused.insert(saved.id) }
@@ -233,6 +240,92 @@ final class FoundationDownloads: ObservableObject {
         syncTask?.cancel()
         inventoryTask?.cancel()
         monitor?.cancel()
+    }
+
+    func recordBackgroundSessionDrain(_ identifier: String) {
+        if knownNativeSessions.contains(identifier) { drainedNativeSessions.insert(identifier) }
+    }
+
+    func backgroundSessionHasDrained(_ identifier: String) -> Bool {
+        drainedNativeSessions.contains(identifier)
+    }
+
+    /// Reuse the live account owner; never create a second session for its task or inventory.
+    func reconcileBackgroundSession(_ identifier: String) async -> Bool {
+        let store = FoundationNativeAllocationStore(
+            directory: directory, sessionIdentifier: identifier)
+        guard isLive, knownNativeSessions.contains(identifier), store.validSession else {
+            return false
+        }
+        if liveNativeSessions.contains(identifier) {
+            await withCheckedContinuation { continuation in
+                nativeSessionWaiters[identifier, default: []].append(continuation)
+            }
+        } else if let inventoryTask {
+            await inventoryTask.value
+        } else {
+            // Historical IDs alone are not current callback authority. A settled
+            // session needs both a current manifest binding and a verified drain.
+            let recorded =
+                manifest.nativePendingSessions?.contains(identifier) == true
+                || manifest.files.values.contains {
+                    $0.nativePackage?.sessionIdentifier == identifier
+                }
+            guard recorded, drainedNativeSessions.contains(identifier),
+                (try? store.load()) != nil
+            else { return false }
+        }
+        // An account retirement during the wait forbids publication by the existing
+        // acquisition/inventory guards. It does not erase its delivered-event authority.
+        return true
+    }
+
+    private func finishNativeSession(_ identifier: String) {
+        liveNativeSessions.remove(identifier)
+        let waiters = nativeSessionWaiters.removeValue(forKey: identifier) ?? []
+        for waiter in waiters { waiter.resume() }
+    }
+
+    private func finishSettlingNativeSessions() {
+        // schedule() retains one worker until run() returns. Its sequential acquisition
+        // and catch cannot interleave another worker's failed session publication.
+        let settled = settlingNativeSessions
+        settlingNativeSessions.removeAll()
+        for identifier in settled { finishNativeSession(identifier) }
+    }
+
+    /// Headless recovery reads one authenticated account's exact pending record. It does
+    /// not construct a library/player, open a catalog, or schedule an acquisition.
+    static func reconcileBackgroundSession(
+        _ identifier: String, scope: String, root: URL? = nil,
+        retirement: NativeRetirement? = nil,
+        mayCommit: @MainActor () -> Bool
+    ) async -> Bool {
+        let directory = FoundationDownloadStorage.directory(scope: scope, root: root)
+        let store = FoundationNativeAllocationStore(
+            directory: directory, sessionIdentifier: identifier)
+        guard mayCommit(), store.validSession,
+            let manifest = try? FoundationDownloadStorage.load(directory: directory),
+            manifest.nativePendingSessions?.contains(identifier) == true,
+            (try? store.load()) != nil
+        else { return false }
+        let retired: Set<String>
+        if let retirement {
+            retired = await retirement([identifier], directory)
+        } else {
+            retired = await FoundationNativeDownloadTransport.retireInterruptedSessions(
+                [identifier], directory: directory)
+        }
+        // Failure leaves the protected pending record/receipt intact. Successful
+        // cancellation publishes only this ID, using the latest account manifest.
+        if retired.contains(identifier), mayCommit(),
+            var latest = try? FoundationDownloadStorage.load(directory: directory),
+            latest.nativePendingSessions?.contains(identifier) == true
+        {
+            latest.nativePendingSessions?.remove(identifier)
+            try? FoundationDownloadStorage.save(latest, directory: directory)
+        }
+        return true
     }
 
     private func beginInventory() {
@@ -1163,6 +1256,9 @@ final class FoundationDownloads: ObservableObject {
                 setState(owner.id, hasUnavailable ? .failed : .ready)
                 scheduleArtwork()
             } catch {
+                // Failure publication belongs to this existing worker catch. Do not
+                // acknowledge its native session before owner pause/error is durable.
+                defer { finishSettlingNativeSessions() }
                 if !isLive || generation != epoch { return }
                 if Task.isCancelled || !allowed || paused.contains(owner.id) {
                     setState(owner.id, paused.contains(owner.id) ? .cancelled : .queued)
@@ -1336,6 +1432,16 @@ final class FoundationDownloads: ObservableObject {
             manifest.nativePendingSessions?.remove(session)
             throw error
         }
+        knownNativeSessions.insert(session)
+        liveNativeSessions.insert(session)
+        var published = false
+        defer {
+            if published {
+                finishNativeSession(session)
+            } else {
+                settlingNativeSessions.insert(session)
+            }
+        }
         let file: FoundationDownloadManifest.File
         do {
             file = try await nativeTransfer(
@@ -1368,6 +1474,7 @@ final class FoundationDownloads: ObservableObject {
             }
             readyFileIDs.insert(track.id)
             refreshBytes()
+            published = true
         } catch {
             do {
                 try file.nativePackage?.removeOwnedPackage(scope: directory.lastPathComponent)

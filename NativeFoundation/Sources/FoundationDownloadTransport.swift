@@ -798,13 +798,24 @@ nonisolated final class FoundationNativeDownloadDelegate: FoundationNativeDownlo
     private var terminalResult: Result<URL, Error>?
     private let progress: FoundationDownloadTransport.Progress
     private let store: FoundationNativeAllocationStore
+    private let backgroundEventsFinished: @Sendable (String) -> Void
 
     init(
         progress: @escaping FoundationDownloadTransport.Progress,
-        store: FoundationNativeAllocationStore
+        store: FoundationNativeAllocationStore,
+        backgroundEventsFinished: @escaping @Sendable (String) -> Void = { identifier in
+            Task { @MainActor in
+                FoundationAppRuntime.model.finishBackgroundDownloadEvents(identifier)
+            }
+        }
     ) {
         self.progress = progress
         self.store = store
+        self.backgroundEventsFinished = backgroundEventsFinished
+    }
+
+    func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
+        backgroundEventsFinished(store.sessionIdentifier)
     }
 
     func retire(_ session: AVAssetDownloadURLSession) async throws {
@@ -812,12 +823,19 @@ nonisolated final class FoundationNativeDownloadDelegate: FoundationNativeDownlo
             lock.withLock { retirement = continuation }
             session.getAllTasks { tasks in
                 for task in tasks { task.cancel() }
-                session.invalidateAndCancel()
+                // Cancellation policy is unchanged. Wait for the cancelled tasks and
+                // their final delegate callbacks before invalidating this connection.
+                session.finishTasksAndInvalidate()
             }
         }
     }
 
     func urlSession(_ session: URLSession, didBecomeInvalidWithError error: Error?) {
+        // Both native session owners use finishTasksAndInvalidate after task completion
+        // or explicit task cancellation. This is their final delegate-call boundary.
+        defer {
+            if error == nil { backgroundEventsFinished(store.sessionIdentifier) }
+        }
         let pending = lock.withLock { () -> CheckedContinuation<Void, Error>? in
             let pending = retirement
             retirement = nil

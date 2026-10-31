@@ -357,6 +357,149 @@ final class FoundationDownloadsTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
     }
 
+    func testBackgroundEventsReuseExistingInventoryWithoutOpeningAnotherNativeSession() async throws
+    {
+        let storageRoot = try root()
+        let scope = "background-inventory"
+        let directory = FoundationDownloadStorage.directory(scope: scope, root: storageRoot)
+        try FoundationDownloadStorage.prepare(directory)
+        let identifier =
+            "dev.novoluxor.velacanto.offline." + directory.lastPathComponent + "."
+            + UUID().uuidString
+        let store = FoundationNativeAllocationStore(
+            directory: directory, sessionIdentifier: identifier)
+        try store.reserve()
+        var manifest = FoundationDownloadManifest()
+        manifest.nativePendingSessions = [identifier]
+        try FoundationDownloadStorage.save(manifest, directory: directory)
+        let gate = DownloadGate()
+        let observation = NativeDownloadVerificationFixture()
+        let manager = FoundationDownloads(
+            scope: scope, library: DownloadsLibrary(tracks: []), root: storageRoot,
+            monitorConnectivity: false,
+            nativeTransfer: { _, _, _, _ in
+                XCTFail("Callback acquired a new asset")
+                throw FoundationDownloadError.network
+            },
+            nativeRetirement: { identifiers, directory in
+                observation.recordVerification()
+                await gate.wait()
+                for identifier in identifiers {
+                    try? FoundationNativeAllocationStore(
+                        directory: directory, sessionIdentifier: identifier
+                    ).retire()
+                }
+                return identifiers
+            })
+        try await waitUntilAsync { await gate.started }
+        var completed = false
+        let callback = Task {
+            let admitted = await manager.reconcileBackgroundSession(identifier)
+            completed = true
+            return admitted
+        }
+        let unknown = await manager.reconcileBackgroundSession(identifier + ".unknown")
+        XCTAssertFalse(unknown)
+        XCTAssertFalse(completed)
+        XCTAssertEqual(observation.verifications, 1)
+        await gate.resume()
+        let admitted = await callback.value
+        XCTAssertTrue(admitted)
+        XCTAssertEqual(observation.verifications, 1)
+        XCTAssertEqual(try store.load().retired, true)
+        XCTAssertTrue(
+            try FoundationDownloadStorage.load(directory: directory).nativePendingSessions?.isEmpty
+                == true)
+        let historical = await manager.reconcileBackgroundSession(identifier)
+        XCTAssertFalse(historical)
+        manager.recordBackgroundSessionDrain(identifier)
+        let alreadyDrainedHistorical = await manager.reconcileBackgroundSession(identifier)
+        XCTAssertFalse(alreadyDrainedHistorical)
+        manager.invalidate()
+    }
+
+    func testBackgroundEventsWaitForLiveAcquisitionWithoutCancellingOrDuplicatingIt() async throws {
+        let storageRoot = try root()
+        let scope = "background-live-acquisition"
+        let track = item("live-native")
+        let directory = FoundationDownloadStorage.directory(scope: scope, root: storageRoot)
+        let gate = DownloadGate()
+        let observation = NativeDownloadVerificationFixture()
+        let manager = FoundationDownloads(
+            scope: scope, library: DownloadsLibrary(tracks: [track]), root: storageRoot,
+            monitorConnectivity: false, requestedQuality: { .aac192 },
+            systemManagedDownloads: { true },
+            nativeTransfer: { _, store, _, _ in
+                observation.recordVerification()
+                try store.reserve(taskIdentifier: 1)
+                try store.beginResuming(taskIdentifier: 1)
+                await gate.wait()
+                throw FoundationDownloadError.cleanup
+            },
+            nativeRetirement: { _, _ in
+                XCTFail("Live task opened a duplicate recovery session")
+                return []
+            })
+        manager.updateConnectivity(isAllowed: true)
+        manager.download(track)
+        try await waitUntilAsync { await gate.started }
+        let identifier = try XCTUnwrap(
+            FoundationDownloadStorage.load(directory: directory).nativePendingSessions?.first)
+        manager.recordBackgroundSessionDrain(identifier)
+        XCTAssertTrue(manager.backgroundSessionHasDrained(identifier))
+        var completed = false
+        let callback = Task {
+            let admitted = await manager.reconcileBackgroundSession(identifier)
+            completed = true
+            return admitted
+        }
+        await Task.yield()
+        XCTAssertFalse(completed)
+        XCTAssertEqual(observation.verifications, 1)
+        XCTAssertFalse(manager.isReady(track))
+        await gate.resume()
+        let admitted = await callback.value
+        XCTAssertTrue(admitted)
+        XCTAssertEqual(observation.verifications, 1)
+        let saved = try FoundationDownloadStorage.load(directory: directory)
+        XCTAssertTrue(saved.nativePendingSessions?.contains(identifier) == true)
+        XCTAssertEqual(saved.owners.first?.paused, true)
+        XCTAssertEqual(manager.owners.first?.state, .failed)
+        let retained = try FoundationNativeAllocationStore(
+            directory: directory, sessionIdentifier: identifier
+        ).load()
+        XCTAssertEqual(retained.phase, .resuming)
+        XCTAssertNil(retained.retired)
+        XCTAssertFalse(manager.isReady(track))
+        manager.invalidate()
+    }
+
+    func testNativeBackgroundDelegateForwardsEventDrainAtBothEstablishedSessionBoundaries() throws {
+        let directory = try root()
+        let identifier =
+            "dev.novoluxor.velacanto.offline." + directory.lastPathComponent + "."
+            + UUID().uuidString
+        let store = FoundationNativeAllocationStore(
+            directory: directory, sessionIdentifier: identifier)
+        let observation = NativeDownloadVerificationFixture()
+        let delegate = FoundationNativeDownloadDelegate(
+            progress: { _, _ in }, store: store,
+            backgroundEventsFinished: { incoming in
+                XCTAssertEqual(incoming, identifier)
+                observation.recordVerification()
+            })
+        let session = URLSession(configuration: .ephemeral)
+        defer { session.invalidateAndCancel() }
+        delegate.urlSessionDidFinishEvents(forBackgroundURLSession: session)
+        XCTAssertEqual(observation.verifications, 1)
+        delegate.urlSession(session, didBecomeInvalidWithError: nil)
+        XCTAssertEqual(observation.verifications, 2)
+        delegate.urlSession(session, didBecomeInvalidWithError: URLError(.unknown))
+        XCTAssertEqual(observation.verifications, 2)
+        // Merely draining callbacks cannot invent a receipt, retire a file or mark ready.
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.receiptURL.path))
+    }
+
     func testReservedReceiptAndUnknownColdResumingReceiptHaveDifferentRetirementAuthority() throws {
         let directory = try root()
         try FoundationDownloadStorage.prepare(directory)
@@ -3569,6 +3712,19 @@ private actor DownloadsLibrary: FoundationLibrary {
                 request: request, cleanupRequest: request, plan: plan,
                 base: base, itemID: item.id, deviceID: "fixture-device"))
     }
+    func nativeDownloadProposal(
+        for item: FoundationItem, quality: FoundationDownloadQuality, allowsCellular: Bool
+    ) async throws -> FoundationNativeDownloadProposal {
+        // This fixture's nativeTransfer is injected; no URL is loaded or passed to AVFoundation.
+        let plan = try FoundationDownloadConversionPlan(
+            quality: quality, duration: 1, sourceID: "fixture-source", audioStreamIndex: 0)
+        let request = URLRequest(url: URL(string: "https://example.invalid/master.m3u8")!)
+        return .init(
+            request: request, authenticatedMasterURL: request.url!, expectedToken: "fixture-token",
+            expectedDeviceID: "fixture-device", cleanupRequest: request, plan: plan,
+            title: "Synthetic", artwork: nil)
+    }
+
     private var tracks: [FoundationItem]
     private var fails = false
     private var playlistPageSize: Int?

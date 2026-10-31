@@ -54,6 +54,7 @@ struct VelacantoFoundationApp: App {
         @NSApplicationDelegateAdaptor(FoundationHandoffApplicationDelegate.self) private
             var handoffDelegate
     #endif
+    @Environment(\.scenePhase) private var scenePhase
     @StateObject private var model = FoundationAppRuntime.model
     @State private var localLibrary = FoundationLocalLibraryModel.appOwned()
 
@@ -71,7 +72,8 @@ struct VelacantoFoundationApp: App {
                 } else {
                     FoundationRootView(model: model)
                         .environment(\.foundationLocalLibrary, localLibrary)
-                        .task {
+                        .task(id: scenePhase) {
+                            guard scenePhase == .active else { return }
                             #if DEBUG
                                 guard !FoundationAppRuntime.isTesting else { return }
                             #endif
@@ -82,7 +84,8 @@ struct VelacantoFoundationApp: App {
             #else
                 FoundationRootView(model: model)
                     .environment(\.foundationLocalLibrary, localLibrary)
-                    .task {
+                    .task(id: scenePhase) {
+                        guard scenePhase == .active else { return }
                         #if DEBUG
                             guard !FoundationAppRuntime.isTesting else { return }
                         #endif
@@ -222,6 +225,17 @@ final class FoundationAppModel: ObservableObject {
     private let restoreAccount: (@MainActor (FoundationAppModel) -> Void)?
     private var startupTask: Task<Void, Never>?
     private var startupGeneration = 0
+    private struct BackgroundDownloadEvents {
+        var completions: [@MainActor () -> Void]
+        var drained = false
+        var reconciled = false
+    }
+    private var backgroundDownloadEvents: [String: BackgroundDownloadEvents] = [:]
+    private var backgroundDownloadTask: Task<Void, Never>?
+    private var backgroundDownloadGeneration = 0
+    private var headlessBackgroundRecoveryInFlight = false
+    private let backgroundDownloadRoot: URL?
+    private let backgroundNativeRetirement: FoundationDownloads.NativeRetirement?
     private let credentialOperations: FoundationCredentials.Operations
     private let accountRetention: FoundationAccountRetention
     private let credentialDefaults: UserDefaults
@@ -249,7 +263,9 @@ final class FoundationAppModel: ObservableObject {
         accountRetention: FoundationAccountRetention? = nil,
         credentialDefaults: UserDefaults = .standard,
         publishAccount: ((FoundationSession, String) -> Void)? = nil,
-        playbackPreferences: FoundationPlaybackPreferences? = nil
+        playbackPreferences: FoundationPlaybackPreferences? = nil,
+        backgroundDownloadRoot: URL? = nil,
+        backgroundNativeRetirement: FoundationDownloads.NativeRetirement? = nil
     ) {
         self.playbackPreferences = playbackPreferences ?? FoundationPlaybackPreferences()
         self.prepareCaches =
@@ -262,6 +278,8 @@ final class FoundationAppModel: ObservableObject {
         self.accountRetention = accountRetention ?? .system
         self.credentialDefaults = credentialDefaults
         self.publishAccount = publishAccount
+        self.backgroundDownloadRoot = backgroundDownloadRoot
+        self.backgroundNativeRetirement = backgroundNativeRetirement
     }
 
     @Published private(set) var library: FoundationJellyfinLibrary?
@@ -321,6 +339,79 @@ final class FoundationAppModel: ObservableObject {
         currentArtwork?.invalidate()
     }
 
+    /// UIKit events do not authorize a normal account/catalog bootstrap. Completion
+    /// requires both the native event drain and this account's durable reconciliation.
+    func receiveBackgroundDownloadEvents(
+        _ identifier: String, completionHandler: @escaping @MainActor () -> Void
+    ) {
+        if backgroundDownloadEvents[identifier] != nil {
+            backgroundDownloadEvents[identifier]?.completions.append(completionHandler)
+            return
+        }
+        backgroundDownloadEvents[identifier] = .init(completions: [completionHandler])
+        let previous = backgroundDownloadTask
+        let existingStartup = startupTask
+        let epoch = accountEpoch
+        let generation = startupGeneration
+        backgroundDownloadGeneration += 1
+        let recovery = backgroundDownloadGeneration
+        backgroundDownloadTask = Task { [weak self] in
+            await previous?.value
+            // If foreground startup was already authorized, reuse its resulting owner.
+            // Startup created AFTER this task instead waits for this headless work.
+            await existingStartup?.value
+            guard let self else { return }
+            defer {
+                if self.backgroundDownloadGeneration == recovery {
+                    self.backgroundDownloadTask = nil
+                }
+            }
+            let admitted: Bool
+            var previouslyDrained = false
+            if let downloads = self.downloads {
+                admitted = await downloads.reconcileBackgroundSession(identifier)
+                previouslyDrained = downloads.backgroundSessionHasDrained(identifier)
+            } else if self.accountEpoch == epoch, self.startupGeneration == generation,
+                let session = try? FoundationCredentials.load(operations: self.credentialOperations)
+            {
+                let scope = Self.sourceScope(for: session)
+                self.headlessBackgroundRecoveryInFlight = true
+                admitted = await FoundationDownloads.reconcileBackgroundSession(
+                    identifier, scope: scope, root: self.backgroundDownloadRoot,
+                    retirement: self.backgroundNativeRetirement,
+                    mayCommit: { [weak self] in
+                        self?.accountEpoch == epoch && self?.startupGeneration == generation
+                    })
+                self.headlessBackgroundRecoveryInFlight = false
+            } else {
+                admitted = false
+            }
+            guard var pending = self.backgroundDownloadEvents[identifier] else { return }
+            pending.reconciled = true
+            // Unknown, inaccessible or retired accounts never open a native session.
+            // Their retained metadata remains unchanged for a later authenticated start.
+            if !admitted || previouslyDrained { pending.drained = true }
+            self.backgroundDownloadEvents[identifier] = pending
+            self.completeBackgroundDownloadEventsIfReady(identifier)
+        }
+    }
+
+    func finishBackgroundDownloadEvents(_ identifier: String) {
+        downloads?.recordBackgroundSessionDrain(identifier)
+        guard backgroundDownloadEvents[identifier] != nil else { return }
+        backgroundDownloadEvents[identifier]?.drained = true
+        completeBackgroundDownloadEventsIfReady(identifier)
+    }
+
+    private func completeBackgroundDownloadEventsIfReady(_ identifier: String) {
+        guard let pending = backgroundDownloadEvents[identifier],
+            pending.drained, pending.reconciled
+        else { return }
+        backgroundDownloadEvents.removeValue(forKey: identifier)
+        // The model and UIApplicationDelegate entry point are main-actor isolated.
+        for completion in pending.completions { completion() }
+    }
+
     /// Starts one retained preparation task, independently of a phone window's lifetime.
     func restore() {
         guard !restored else { return }
@@ -335,7 +426,10 @@ final class FoundationAppModel: ObservableObject {
         let epoch = accountEpoch
         let generation = startupGeneration
         let prepare = prepareCaches
+        let backgroundRecovery = backgroundDownloadTask
         startupTask = Task { [weak self] in
+            await backgroundRecovery?.value
+            guard !Task.isCancelled else { return }
             let prepared = await prepare()
             guard !Task.isCancelled, let self,
                 self.startupGeneration == generation, self.accountEpoch == epoch
@@ -353,6 +447,11 @@ final class FoundationAppModel: ObservableObject {
                 self.restoreCredentials()
             }
         }
+    }
+
+    func prepareForScene(isActive: Bool) async {
+        guard isActive else { return }
+        _ = await ensureReady()
     }
 
     /// A cancelled caller cannot cancel another surface's shared account restoration.
@@ -472,6 +571,8 @@ final class FoundationAppModel: ObservableObject {
     func prepareSignIn(
         authenticate: @MainActor () async throws -> FoundationSession
     ) async throws -> FoundationSignInView.Acceptance {
+        await backgroundDownloadTask?.value
+        try Task.checkCancellation()
         cancelCredentialUpgrade()
         // A prior owner's cleanup cannot complete migration during a new sign-in.
         accountCleanupTask?.cancel()
@@ -527,7 +628,9 @@ final class FoundationAppModel: ObservableObject {
         _ session: FoundationSession, saveCredentials: Bool = true,
         allowScopeDiscard: Bool = false
     ) throws {
-        guard cachesReady else { throw FoundationLibraryError.unavailable }
+        guard cachesReady, !headlessBackgroundRecoveryInFlight else {
+            throw FoundationLibraryError.unavailable
+        }
         let scope = Self.sourceScope(for: session)
         if awaitsCredentialUpgrade {
             if !allowScopeDiscard, try accountRetention.inventory(scope) == .unmatched {
@@ -1050,7 +1153,11 @@ struct FoundationRootView: View {
                 controller: model.handoff, accountAlert: accountAlertPresented.wrappedValue)
         )
         .environment(\.foundationHandoff, model.handoff)
-        .task { _ = await model.ensureReady() }
+        .task(id: scenePhase) {
+            // A background-session launch must not bootstrap a catalog or acquisition.
+            // Explicit Siri/Handoff entry points retain their own readiness admission.
+            await model.prepareForScene(isActive: scenePhase == .active)
+        }
         #if os(iOS)
             .onContinueUserActivity(FoundationHandoffPayload.activityType) { activity in
                 // Preserve SwiftUI's phone scene proxy. Native cold/appdelegate

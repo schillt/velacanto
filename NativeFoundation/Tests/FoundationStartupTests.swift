@@ -1,3 +1,4 @@
+import CryptoKit
 import Security
 import XCTest
 
@@ -10,6 +11,266 @@ import XCTest
 
 @MainActor
 final class FoundationStartupTests: XCTestCase {
+    private func backgroundFixture() throws -> (
+        root: URL, directory: URL, identifier: String, data: Data,
+        store: FoundationNativeAllocationStore
+    ) {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let session = FoundationSession(
+            serverURL: URL(string: "https://background-fixture.invalid")!,
+            accessToken: "fixture-token",
+            userID: "00000000000000000000000000000001",
+            deviceID: "00000000-0000-0000-0000-000000000002")
+        let identity = "jellyfin\0" + session.serverURL.absoluteString + "\0" + session.userID
+        let scope = SHA256.hash(data: Data(identity.utf8)).map { String(format: "%02x", $0) }
+            .joined()
+        let directory = FoundationDownloadStorage.directory(scope: scope, root: root)
+        try FoundationDownloadStorage.prepare(directory)
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        let identifier =
+            "dev.novoluxor.velacanto.offline." + directory.lastPathComponent + "."
+            + UUID().uuidString
+        let store = FoundationNativeAllocationStore(
+            directory: directory, sessionIdentifier: identifier)
+        try store.reserve()
+        var manifest = FoundationDownloadManifest()
+        manifest.nativePendingSessions = [identifier]
+        try FoundationDownloadStorage.save(manifest, directory: directory)
+        return (root, directory, identifier, try JSONEncoder().encode(session), store)
+    }
+
+    private func backgroundPreferences() throws -> FoundationPlaybackPreferences {
+        let suite = "BackgroundSessionTests." + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        addTeardownBlock { defaults.removePersistentDomain(forName: suite) }
+        return FoundationPlaybackPreferences(defaults: defaults)
+    }
+
+    private func backgroundCredentials(_ data: Data, status: OSStatus = errSecSuccess)
+        -> FoundationCredentials.Operations
+    {
+        .init(
+            update: { _, _ in
+                XCTFail("Background events must not save credentials")
+                return errSecParam
+            },
+            add: { _ in
+                XCTFail("Background events must not add credentials")
+                return errSecParam
+            },
+            copy: { _ in (status, status == errSecSuccess ? data as CFData : nil) },
+            delete: { _ in
+                XCTFail("Background events must not clear credentials")
+                return errSecParam
+            })
+    }
+
+    private func waitForBackgroundOutcome(_ outcome: @MainActor () -> Bool) async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(3))
+        while !outcome() {
+            guard clock.now < deadline else {
+                XCTFail("Background handoff did not settle")
+                return
+            }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+    }
+
+    func testBackgroundEventDrainWaitsForDurableAccountRecoveryAndSerializesStartup() async throws {
+        let fixture = try backgroundFixture()
+        let gate = PreparationGate()
+        var preparations = 0
+        var restorations = 0
+        var completions = 0
+        let model = FoundationAppModel(
+            prepareCaches: {
+                preparations += 1
+                return true
+            },
+            restoreAccount: { _ in restorations += 1 },
+            credentialOperations: backgroundCredentials(fixture.data),
+            playbackPreferences: try backgroundPreferences(),
+            backgroundDownloadRoot: fixture.root,
+            backgroundNativeRetirement: { identifiers, directory in
+                _ = await gate.prepare()
+                for identifier in identifiers {
+                    try? FoundationNativeAllocationStore(
+                        directory: directory, sessionIdentifier: identifier
+                    ).retire()
+                }
+                return identifiers
+            })
+        let completion: @MainActor () -> Void = {
+            XCTAssertTrue(Thread.isMainThread)
+            completions += 1
+        }
+        model.receiveBackgroundDownloadEvents(fixture.identifier, completionHandler: completion)
+        model.receiveBackgroundDownloadEvents(fixture.identifier, completionHandler: completion)
+        try await gate.waitUntilStarted()
+        // Drain arrives before durable publication.
+        model.finishBackgroundDownloadEvents(fixture.identifier)
+        XCTAssertEqual(completions, 0)
+        model.restore()
+        await Task.yield()
+        let startup = Task { await model.ensureReady() }
+        XCTAssertEqual(preparations, 0)
+        XCTAssertEqual(restorations, 0)
+        gate.complete(true)
+        let readiness = await startup.value
+        XCTAssertEqual(readiness, .signedOut)
+        XCTAssertEqual(completions, 2)
+        XCTAssertEqual(preparations, 1)
+        XCTAssertEqual(restorations, 1)
+        XCTAssertTrue(
+            try FoundationDownloadStorage.load(directory: fixture.directory).nativePendingSessions?
+                .isEmpty == true)
+        XCTAssertEqual(try fixture.store.load().retired, true)
+        model.finishBackgroundDownloadEvents(fixture.identifier)
+        XCTAssertEqual(completions, 2)
+    }
+
+    func testBackgroundDurableRecoveryWaitsForNativeDrainWithoutBootstrappingAccount() async throws
+    {
+        let fixture = try backgroundFixture()
+        var completions = 0
+        let model = FoundationAppModel(
+            prepareCaches: {
+                XCTFail("Headless callback bootstrapped caches")
+                return false
+            },
+            restoreAccount: { _ in XCTFail("Headless callback restored catalog/player") },
+            credentialOperations: backgroundCredentials(fixture.data),
+            playbackPreferences: try backgroundPreferences(),
+            backgroundDownloadRoot: fixture.root,
+            backgroundNativeRetirement: { identifiers, directory in
+                for identifier in identifiers {
+                    try? FoundationNativeAllocationStore(
+                        directory: directory, sessionIdentifier: identifier
+                    ).retire()
+                }
+                return identifiers
+            })
+        model.receiveBackgroundDownloadEvents(fixture.identifier) { completions += 1 }
+        try await waitForBackgroundOutcome {
+            (try? FoundationDownloadStorage.load(directory: fixture.directory)
+                .nativePendingSessions?.isEmpty) == true
+        }
+        XCTAssertEqual(completions, 0)
+        XCTAssertNil(model.library)
+        XCTAssertFalse(model.cachesReady)
+        model.finishBackgroundDownloadEvents(fixture.identifier)
+        XCTAssertEqual(completions, 1)
+        model.finishBackgroundDownloadEvents(fixture.identifier)
+        XCTAssertEqual(completions, 1)
+    }
+
+    func testUnknownAndLockedBackgroundEventsPreserveProtectedAccountRecords() async throws {
+        for locked in [false, true] {
+            let fixture = try backgroundFixture()
+            let manifestURL = fixture.directory.appendingPathComponent("manifest.json")
+            let manifestBefore = try Data(contentsOf: manifestURL)
+            let receiptBefore = try Data(contentsOf: fixture.store.receiptURL)
+            var completions = 0
+            let model = FoundationAppModel(
+                prepareCaches: {
+                    XCTFail("Unexpected bootstrap")
+                    return false
+                },
+                restoreAccount: { _ in XCTFail("Unexpected account restore") },
+                credentialOperations: backgroundCredentials(
+                    fixture.data, status: locked ? errSecInteractionNotAllowed : errSecSuccess),
+                playbackPreferences: try backgroundPreferences(),
+                backgroundDownloadRoot: fixture.root,
+                backgroundNativeRetirement: { _, _ in
+                    XCTFail("Unadmitted native session opened")
+                    return []
+                })
+            model.receiveBackgroundDownloadEvents(
+                locked ? fixture.identifier : fixture.identifier + ".unknown"
+            ) { completions += 1 }
+            try await waitForBackgroundOutcome { completions == 1 }
+            model.finishBackgroundDownloadEvents(fixture.identifier)
+            XCTAssertEqual(completions, 1)
+            XCTAssertEqual(try Data(contentsOf: manifestURL), manifestBefore)
+            XCTAssertEqual(try Data(contentsOf: fixture.store.receiptURL), receiptBefore)
+            XCTAssertNil(model.library)
+        }
+    }
+
+    func testRetiredAccountCannotPublishLateBackgroundRecovery() async throws {
+        let fixture = try backgroundFixture()
+        let gate = PreparationGate()
+        var completions = 0
+        let model = FoundationAppModel(
+            prepareCaches: {
+                XCTFail("Unexpected bootstrap")
+                return false
+            },
+            restoreAccount: { _ in XCTFail("Unexpected account restore") },
+            credentialOperations: backgroundCredentials(fixture.data),
+            playbackPreferences: try backgroundPreferences(),
+            backgroundDownloadRoot: fixture.root,
+            backgroundNativeRetirement: { identifiers, directory in
+                _ = await gate.prepare()
+                for identifier in identifiers {
+                    try? FoundationNativeAllocationStore(
+                        directory: directory, sessionIdentifier: identifier
+                    ).retire()
+                }
+                return identifiers
+            })
+        model.receiveBackgroundDownloadEvents(fixture.identifier) { completions += 1 }
+        try await gate.waitUntilStarted()
+        model.invalidateAccountReadiness()
+        model.finishBackgroundDownloadEvents(fixture.identifier)
+        gate.complete(true)
+        try await waitForBackgroundOutcome { completions == 1 }
+        XCTAssertTrue(
+            try FoundationDownloadStorage.load(directory: fixture.directory).nativePendingSessions?
+                .contains(fixture.identifier) == true)
+        // Retain cleanup authority for the matching account.
+        XCTAssertEqual(try fixture.store.load().retired, true)
+        XCTAssertNil(model.library)
+    }
+
+    func testInactiveSceneDoesNotRestoreAccountButExplicitReadinessStillWorks() async throws {
+        var preparations = 0
+        var restorations = 0
+        let model = FoundationAppModel(
+            prepareCaches: {
+                preparations += 1
+                return true
+            },
+            restoreAccount: { _ in restorations += 1 },
+            playbackPreferences: try backgroundPreferences())
+        await model.prepareForScene(isActive: false)
+        XCTAssertEqual(preparations, 0)
+        XCTAssertEqual(restorations, 0)
+        XCTAssertTrue(model.isPreparingCaches)
+        // Siri/Handoff explicitly call readiness without relying on scene activity.
+        let explicit = await model.ensureReady()
+        XCTAssertEqual(explicit, .signedOut)
+        XCTAssertEqual(preparations, 1)
+        XCTAssertEqual(restorations, 1)
+        await model.prepareForScene(isActive: true)
+        XCTAssertEqual(preparations, 1)
+        XCTAssertEqual(restorations, 1)
+        let freshForegroundModel = FoundationAppModel(
+            prepareCaches: {
+                preparations += 1
+                return true
+            },
+            restoreAccount: { _ in restorations += 1 },
+            playbackPreferences: try backgroundPreferences())
+        await freshForegroundModel.prepareForScene(isActive: false)
+        XCTAssertEqual(preparations, 1)
+        await freshForegroundModel.prepareForScene(isActive: true)
+        XCTAssertEqual(preparations, 2)
+        XCTAssertEqual(restorations, 2)
+        XCTAssertTrue(freshForegroundModel.cachesReady)
+    }
+
     func testAppModelRetainsInjectedPlaybackPreferencesDuringReadiness() async throws {
         let suite = "StartupPlaybackPreferences-" + UUID().uuidString
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
