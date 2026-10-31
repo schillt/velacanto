@@ -72,8 +72,7 @@ struct FoundationItemMenu: View {
                 switch item.kind {
                 case .album: Button("View Album", systemImage: "square.stack", action: performOpen)
                 case .artist: Button("View Artist", systemImage: "music.mic", action: performOpen)
-                case .playlist:
-                    Button("View Playlist", systemImage: "music.note.list", action: performOpen)
+                case .playlist: EmptyView()
                 case .genre: Button("View Genre", systemImage: "guitars", action: performOpen)
                 case .track: EmptyView()
                 }

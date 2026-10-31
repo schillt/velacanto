@@ -109,6 +109,7 @@ struct FoundationPlaylistEditor: View {
     @State private var requiresRefresh = true
     #if os(iOS)
         @State private var phoneKeyboardVisible = false
+        @State private var phoneSavingDetails = false
     #endif
     @State private var selectingSongs = false
     #if os(macOS)
@@ -183,7 +184,16 @@ struct FoundationPlaylistEditor: View {
                             }.disabled(operation.isPending)
                         }
                         ToolbarItemGroup(placement: .confirmationAction) {
-                            Button("Save", systemImage: "checkmark") { confirmSave = true }
+                            Button {
+                                confirmSave = true
+                            } label: {
+                                if phoneSavingDetails {
+                                    ProgressView().controlSize(.small)
+                                } else {
+                                    Label("Save", systemImage: "checkmark")
+                                }
+                            }
+                            .accessibilityLabel(phoneSavingDetails ? "Saving playlist" : "Save")
                             .disabled(!canEditDetails || operation.isPending || !dirty)
                             .buttonStyle(.glassProminent)
                         }
@@ -303,7 +313,21 @@ struct FoundationPlaylistEditor: View {
             operation.cancel()
         }
         .onChange(of: operation.isPending) { _, pending in
-            if pending { operationFailure = nil } else { presentOperationFailure() }
+            if pending {
+                operationFailure = nil
+            } else {
+                #if os(iOS)
+                    if phoneSavingDetails {
+                        phoneSavingDetails = false
+                        if operation.succeeded, editorActive,
+                            editorScope == library.catalogScopeID, !connectivity.localOnly
+                        {
+                            dismiss()
+                        }
+                    }
+                #endif
+                presentOperationFailure()
+            }
         }
         .onChange(of: operation.message) { _, _ in presentOperationFailure() }
         .onChange(of: addModel.errorMessage) { _, _ in presentSearchFailure(.track) }
@@ -1154,6 +1178,9 @@ struct FoundationPlaylistEditor: View {
     private func saveDetails() {
         guard canEditDetails, !operation.isPending, dirty else { return }
         saveSummary = ""
+        #if os(iOS)
+            phoneSavingDetails = true
+        #endif
         operation.run(
             successMessage: { "Playlist saved." },
             {
