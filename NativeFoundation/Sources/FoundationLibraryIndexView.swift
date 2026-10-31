@@ -17,6 +17,7 @@ struct FoundationLibraryIndexView: View {
     @EnvironmentObject private var connectivity: FoundationConnectivity
     @EnvironmentObject private var actions: FoundationLibraryActions
     @Environment(\.foundationAddToPlaylist) private var addToPlaylist
+    @Environment(\.foundationManagePlaylist) private var managePlaylist
     @Environment(\.foundationRequestDownloadRemoval) private var requestRemoval
     @Environment(\.foundationReduceMotion) private var reduceMotion
     @Environment(\.foundationReduceTransparency) private var reduceTransparency
@@ -580,6 +581,7 @@ struct FoundationLibraryIndexView: View {
                         library.catalogScopeID + ":" + entry.id
                     )
                     .environment(\.foundationAddToPlaylist, addToPlaylist)
+                    .environment(\.foundationManagePlaylist, managePlaylist)
                     .environment(\.foundationRequestDownloadRemoval, requestRemoval)
                     .environment(\.foundationShowsDownloadBadges, showsBadges)
                     .environment(\.foundationReduceMotion, reduceMotion)

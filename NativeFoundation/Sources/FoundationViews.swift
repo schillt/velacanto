@@ -167,6 +167,9 @@ struct FoundationLibraryView: View {
     #endif
     @State private var showingSettings = false
     @State private var playlistSource: FoundationItem?
+    #if os(iOS)
+        @State private var managedPlaylist: FoundationItem?
+    #endif
     @StateObject private var playlistChanges = FoundationPlaylistChanges()
     @State private var profileName = ""
     @State private var profileImage: Image?
@@ -271,6 +274,9 @@ struct FoundationLibraryView: View {
         .onChange(of: connectivity.localOnly) { _, localOnly in
             if localOnly {
                 playlistSource = nil
+                #if os(iOS)
+                    managedPlaylist = nil
+                #endif
                 #if os(macOS)
                     macLibrarySheet = nil
                 #endif
@@ -337,6 +343,20 @@ struct FoundationLibraryView: View {
             }
         }
         .environment(\.foundationAddToPlaylist, playlistPresentation)
+        .environment(\.foundationManagePlaylist, playlistManagementPresentation)
+        #if os(iOS)
+            .fullScreenCover(item: $managedPlaylist) { item in
+                FoundationPlaylistEditor(
+                    playlist: item,
+                    onDeleted: {
+                        if openedItem?.kind == .playlist, openedItem?.id == item.id {
+                            openedItem = nil
+                        }
+                    }, library: library
+                )
+                .environmentObject(playlistChanges)
+            }
+        #endif
         #if os(iOS)
             .environment(\.foundationPlayerArtworkPresentation, playerArtworkPresentation)
             .onChange(of: playerArtworkPresentation.isPlayerPresented) { wasPresented, presented in
@@ -400,6 +420,9 @@ struct FoundationLibraryView: View {
     }
 
     private func resetCatalogScope() {
+        #if os(iOS)
+            managedPlaylist = nil
+        #endif
         #if os(macOS)
             macLibraryRoute = .overview
             macLibrarySheet = nil
@@ -434,6 +457,25 @@ struct FoundationLibraryView: View {
     private var playlistPresentation: (@MainActor @Sendable (FoundationItem) -> Void)? {
         guard !connectivity.localOnly, library.supportsPlaylistManagement else { return nil }
         return { playlistSource = $0 }
+    }
+
+    private var playlistManagementPresentation: (@MainActor @Sendable (FoundationItem) -> Void)? {
+        guard !connectivity.localOnly, library.supportsPlaylistManagement else { return nil }
+        return { item in
+            guard item.kind == .playlist, !connectivity.localOnly,
+                library.supportsPlaylistManagement,
+                displayedCatalogScope == library.catalogScopeID,
+                let adapter = accountLibrary as? FoundationJellyfinLibrary,
+                let source = try? FoundationCatalogSource.jellyfin(
+                    scope: adapter.catalogAccountIdentity),
+                item.catalogSource == nil || item.catalogSource == source
+            else { return }
+            #if os(macOS)
+                macLibrarySheet = .manage(item)
+            #else
+                managedPlaylist = item
+            #endif
+        }
     }
 
     @ViewBuilder private var shell: some View {
@@ -789,7 +831,7 @@ struct FoundationLibraryView: View {
                     )
                     .contextMenu {
                         Button("Manage Playlist", systemImage: "checklist") {
-                            macLibrarySheet = .manage(item)
+                            playlistManagementPresentation?(item)
                         }.disabled(connectivity.localOnly || !library.supportsPlaylistManagement)
                     }
                 }
@@ -924,6 +966,13 @@ struct FoundationLibraryView: View {
             .listRowInsets(EdgeInsets(top: 0, leading: 8, bottom: 0, trailing: 8))
             .foregroundStyle(selected ? Color.accentColor : Color.primary)
             .accessibilityValue(selected ? "Selected" : "")
+            .contextMenu {
+                if item.kind == .playlist {
+                    Button("Manage Playlist", systemImage: "checklist") {
+                        playlistManagementPresentation?(item)
+                    }.disabled(connectivity.localOnly || !library.supportsPlaylistManagement)
+                }
+            }
         }
     #endif
 
@@ -2708,6 +2757,7 @@ struct FoundationTrackList: View {
                 FoundationItemMenu(
                     item: collection, actions: actions, initialFavorite: collection.isFavorite,
                     showsFavoriteAction: collection.kind != .album,
+                    showsPlaylistManagementAction: managePlaylist == nil,
                     library: library, player: player)
             } label: {
                 Image(systemName: "ellipsis")

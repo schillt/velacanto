@@ -10,6 +10,7 @@ struct FoundationItemMenu: View {
     var showsFavoriteAction = true
     var showsQueueActions = true
     var showsDownloadActions = true
+    var showsPlaylistManagementAction = true
     var open: (() -> Void)?
     var play: (() -> Void)?
 
@@ -24,6 +25,7 @@ struct FoundationItemMenu: View {
     @EnvironmentObject private var downloads: FoundationDownloads
     @EnvironmentObject private var connectivity: FoundationConnectivity
     @Environment(\.foundationAddToPlaylist) private var addToPlaylist
+    @Environment(\.foundationManagePlaylist) private var managePlaylist
 
     var body: some View {
         Section {
@@ -136,6 +138,13 @@ struct FoundationItemMenu: View {
                     addToPlaylist(item)
                 }
             }
+            if showsPlaylistManagementAction, item.kind == .playlist, let managePlaylist {
+                Button("Manage Playlist", systemImage: "checklist") {
+                    guard canPerform(.playlistManagement), !connectivity.localOnly else { return }
+                    managePlaylist(item)
+                }
+                .disabled(connectivity.localOnly || !canPerform(.playlistManagement))
+            }
             if showsDownloadActions,
                 item.kind == .track || item.kind == .album || item.kind == .playlist
             {
@@ -218,11 +227,20 @@ struct FoundationRelatedDestinations: View {
     }
 }
 
+private struct FoundationManagePlaylistKey: EnvironmentKey {
+    static let defaultValue: (@MainActor @Sendable (FoundationItem) -> Void)? = nil
+}
+
 private struct FoundationAddToPlaylistKey: EnvironmentKey {
     static let defaultValue: (@MainActor @Sendable (FoundationItem) -> Void)? = nil
 }
 
 extension EnvironmentValues {
+    var foundationManagePlaylist: (@MainActor @Sendable (FoundationItem) -> Void)? {
+        get { self[FoundationManagePlaylistKey.self] }
+        set { self[FoundationManagePlaylistKey.self] = newValue }
+    }
+
     var foundationAddToPlaylist: (@MainActor @Sendable (FoundationItem) -> Void)? {
         get { self[FoundationAddToPlaylistKey.self] }
         set { self[FoundationAddToPlaylistKey.self] = newValue }
