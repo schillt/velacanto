@@ -515,6 +515,11 @@ protocol FoundationLibrary: Sendable {
     var supportsRepeatedPlaylistTracks: Bool { get }
     var supportsPlaylistReordering: Bool { get }
     func playlistPermissions(id: String) async throws -> FoundationPlaylistPermissions
+    func playlistDetails(id: String) async throws -> FoundationPlaylistDetails
+    func updatePlaylistDetails(id: String, name: String?, overview: String?, isPublic: Bool?)
+        async throws -> FoundationPlaylistDetails
+    func setPlaylistCover(id: String, data: Data, contentType: String) async throws
+        -> FoundationItem
     func playlistEntries(id: String, startIndex: Int) async throws -> FoundationPlaylistPage
     func createPlaylist(name: String) async throws -> FoundationItem
     func renamePlaylist(id: String, name: String) async throws
@@ -658,6 +663,21 @@ extension FoundationLibrary {
     var supportsRepeatedPlaylistTracks: Bool { false }
     var supportsPlaylistReordering: Bool { false }
     func playlistPermissions(id: String) async throws -> FoundationPlaylistPermissions {
+        throw FoundationLibraryError.unavailable
+    }
+    func playlistDetails(id: String) async throws -> FoundationPlaylistDetails {
+        let permissions = try await playlistPermissions(id: id)
+        return .init(
+            item: .init(
+                id: id, title: permissions.name, subtitle: "", kind: .playlist, duration: nil),
+            overview: "", isPublic: nil, permissions: permissions)
+    }
+    func updatePlaylistDetails(id: String, name: String?, overview: String?, isPublic: Bool?)
+        async throws -> FoundationPlaylistDetails
+    { throw FoundationLibraryError.unavailable }
+    func setPlaylistCover(id: String, data: Data, contentType: String) async throws
+        -> FoundationItem
+    {
         throw FoundationLibraryError.unavailable
     }
     func playlistEntries(id: String, startIndex: Int) async throws -> FoundationPlaylistPage {
@@ -1276,6 +1296,102 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
         return FoundationPlaylistPermissions(
             name: item.name ?? "Untitled", canEdit: permission.canEdit == true,
             canDelete: item.canDelete == true)
+    }
+
+    func playlistDetails(id: String) async throws -> FoundationPlaylistDetails {
+        guard Self.validID(id) else { throw FoundationLibraryError.invalidResponse }
+        let permission = try await send(
+            Paths.getPlaylistUser(playlistID: id, userID: session.userID))
+        let dto = try await send(
+            Paths.getItem(itemID: id, userID: session.userID),
+            maximumBytes: FoundationPlaylistMetadata.maximumItemBytes)
+        guard dto.id == id, dto.type == .playlist, permission.userID == session.userID,
+            let item = try mappedItems([dto], kinds: [.playlist]).first
+        else { throw FoundationLibraryError.invalidResponse }
+        let permissions = FoundationPlaylistPermissions(
+            name: dto.name ?? "Untitled", canEdit: permission.canEdit == true,
+            canDelete: dto.canDelete == true)
+        let sharing = try await responseData(
+            Paths.getPlaylist(playlistID: id), notFoundIsEmpty: true)
+        let isPublic = try FoundationPlaylistMetadata.publicSetting(sharing)
+        let user = try await send(Paths.getCurrentUser)
+        guard user.id == session.userID else { throw FoundationLibraryError.invalidResponse }
+        try Task.checkCancellation()
+        let elevated = permissions.canEdit && user.policy?.isAdministrator == true
+        return .init(
+            item: item, overview: dto.overview ?? "", isPublic: isPublic, permissions: permissions,
+            canEditOverview: elevated && dto.lockData != nil, canEditCover: elevated)
+    }
+
+    func updatePlaylistDetails(id: String, name: String?, overview: String?, isPublic: Bool?)
+        async throws -> FoundationPlaylistDetails
+    {
+        let name = try name.map(FoundationPlaylistName.validated)
+        if let overview { try FoundationPlaylistMetadata.validateOverview(overview) }
+        let before = try await playlistDetails(id: id)
+        guard before.permissions.canEdit else { throw FoundationPlaylistError.readOnly }
+        if overview != nil && !before.canEditOverview {
+            throw FoundationPlaylistMetadataError.overviewReadOnly
+        }
+        if isPublic != nil && before.isPublic == nil {
+            throw FoundationPlaylistMetadataError.sharingUnavailable
+        }
+        if name == nil && overview == nil && isPublic == nil { return before }
+        var attemptedWrite = false
+        do {
+            if overview != nil {
+                // Refetch immediately before the full metadata POST. Nil inputs preserve
+                // freshly returned fields, including concurrent name/description edits.
+                let fresh = try await responseData(
+                    Paths.getItem(itemID: id, userID: session.userID))
+                let body = try FoundationPlaylistMetadata.updatedItem(
+                    fresh, id: id, name: name, overview: overview)
+                try Task.checkCancellation()
+                attemptedWrite = true
+                _ = try await responseData(
+                    Paths.updateItem(itemID: id, BaseItemDto()), rawBody: body,
+                    contentType: "application/json")
+            }
+            if (overview == nil && name != nil) || isPublic != nil {
+                try Task.checkCancellation()
+                attemptedWrite = true
+                _ = try await responseData(
+                    Paths.updatePlaylist(
+                        playlistID: id,
+                        UpdatePlaylistDto(isPublic: isPublic, name: overview == nil ? name : nil)))
+            }
+            let after = try await playlistDetails(id: id)
+            guard name == nil || after.item.title == name,
+                overview == nil || after.overview == overview,
+                isPublic == nil || after.isPublic == isPublic
+            else { throw FoundationPlaylistMetadataError.partialUpdate }
+            return after
+        } catch {
+            if attemptedWrite { throw FoundationPlaylistMetadataError.partialUpdate }
+            throw error
+        }
+    }
+
+    func setPlaylistCover(id: String, data: Data, contentType: String) async throws
+        -> FoundationItem
+    {
+        try FoundationPlaylistMetadata.validateCover(data, contentType: contentType)
+        let before = try await playlistDetails(id: id)
+        guard before.permissions.canEdit, before.canEditCover else {
+            throw FoundationPlaylistError.readOnly
+        }
+        try Task.checkCancellation()
+        do {
+            // Jellyfin ImageController decodes raw base64, not a JSON string or raw PNG.
+            _ = try await responseData(
+                Paths.setItemImage(itemID: id, imageType: "Primary"),
+                rawBody: data.base64EncodedData(), contentType: contentType)
+            let after = try await playlistDetails(id: id)
+            guard let tag = after.item.primaryImageTag, !tag.isEmpty,
+                tag != before.item.primaryImageTag
+            else { throw FoundationPlaylistMetadataError.partialCover }
+            return after.item
+        } catch { throw FoundationPlaylistMetadataError.partialCover }
     }
 
     func playlistEntries(id: String, startIndex: Int) async throws -> FoundationPlaylistPage {
@@ -3314,7 +3430,7 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
     private func responseData<Response>(
         _ endpoint: Request<Response>, accept: String = "application/json",
         notFoundIsEmpty: Bool = false, allowsCellular: Bool? = nil, loadOverride: Load? = nil,
-        requestTimeout: TimeInterval? = nil
+        requestTimeout: TimeInterval? = nil, rawBody: Data? = nil, contentType: String? = nil
     ) async throws -> Data {
         #if DEBUG
             let operationID = UUID().uuidString
@@ -3348,7 +3464,10 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
             request.setValue(
                 "MediaBrowser Client=\"Velacanto Native\", Device=\"\(deviceName.rawValue)\", DeviceId=\"\(device)\", Version=\"1\", Token=\"\(token)\"",
                 forHTTPHeaderField: "Authorization")
-            if let body = endpoint.body {
+            if let rawBody {
+                request.httpBody = rawBody
+                request.setValue(contentType, forHTTPHeaderField: "Content-Type")
+            } else if let body = endpoint.body {
                 request.httpBody = try JSONEncoder().encode(body)
                 request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             }

@@ -1,4 +1,6 @@
+import ImageIO
 import SwiftUI
+import UniformTypeIdentifiers
 
 enum FoundationPlaylistSheet: String, Identifiable {
     case manage, addSongs, reorderSongs
@@ -65,289 +67,620 @@ struct FoundationPlaylistFeedback: ViewModifier {
 
 struct FoundationPlaylistEditor: View {
     @EnvironmentObject private var changes: FoundationPlaylistChanges
-    @EnvironmentObject private var preferences: FoundationPlaybackPreferences
     @EnvironmentObject private var connectivity: FoundationConnectivity
     @EnvironmentObject private var downloads: FoundationDownloads
     @Environment(\.dismiss) private var dismiss
     let playlist: FoundationItem
     var onDeleted: () -> Void = {}
     var onRenamed: (String) -> Void = { _ in }
+    var onUpdated: (FoundationItem) -> Void = { _ in }
     let library: any FoundationLibrary
     var showsDetailsInitially = false
+    var startsAddingSongs = false
     @State private var name = ""
+    @State private var overview = ""
+    @State private var isPublic: Bool?
+    @State private var savedName = ""
+    @State private var savedOverview = ""
+    @State private var savedPublic: Bool?
     @State private var permissions: FoundationPlaylistPermissions?
+    @State private var canEditOverview = false
+    @State private var canEditCover = false
+    @State private var saveSummary = ""
+    @State private var addSummary = ""
     @State private var entries: [FoundationPlaylistEntry] = []
     @State private var selection: Set<String> = []
     @State private var query = ""
-    @State private var detailsExpanded = false
-    private enum RelatedSheet: String, Identifiable {
-        case addSongs, reorderSongs
-        var id: String { rawValue }
-    }
-    @State private var relatedSheet: RelatedSheet?
     @State private var confirmDelete = false
+    @State private var confirmDiscard = false
     @State private var loaded = false
+    @State private var requiresRefresh = true
+    @State private var showingCovers = false
+    @State private var hoveringCover = false
+    @State private var selectedCover: FoundationPlaylistCoverPreset?
+    @State private var savedCover: FoundationPlaylistCoverPreset?
+    @State private var updatedPlaylist: FoundationItem?
+    @State private var addingSongs = false
+    @State private var addQuery = ""
+    @State private var addRevision = 0
+    @State private var addedSelection: [FoundationItem] = []
+    @StateObject private var addModel = FoundationBrowseModel()
     @StateObject private var operation = FoundationPlaylistOperation()
 
-    private var visibleEntries: [FoundationPlaylistEntry] {
-        let _ = preferences.showDuplicateAlbumTracks
-        return changes.visibleEntries(entries)
-    }
-    private var filteredEntries: [FoundationPlaylistEntry] {
-        let text = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        let ambiguous = FoundationPlaylistSnapshot.hasAmbiguousMemberships(entries)
-        return visibleEntries.filter {
-            text.isEmpty || $0.item.title.localizedStandardContains(text)
-                || $0.item.subtitle.localizedStandardContains(text)
-                || ($0.item.album?.title.localizedStandardContains(text) ?? false)
-        }.map {
-            FoundationPlaylistEntry(
-                id: ambiguous ? $0.id : $0.mutationID, mutationID: $0.mutationID, item: $0.item)
-        }
-    }
     private var canEditDetails: Bool {
-        !connectivity.localOnly && permissions?.canEdit == true
+        loaded && !connectivity.localOnly && permissions?.canEdit == true
     }
     private var editable: Bool {
-        canEditDetails && !FoundationPlaylistSnapshot.hasAmbiguousMemberships(entries)
+        canEditDetails && !requiresRefresh
+            && !FoundationPlaylistSnapshot.hasAmbiguousMemberships(entries)
+    }
+    private var canMove: Bool {
+        editable && !operation.isPending && query.isEmpty && library.supportsPlaylistReordering
+    }
+    private var rows: [FoundationPlaylistReorderRow] {
+        FoundationPlaylistReorderRow.make(entries).filter { row in
+            query.isEmpty || row.entry.item.title.localizedStandardContains(query)
+                || row.entry.item.subtitle.localizedStandardContains(query)
+                || (row.entry.item.album?.title.localizedStandardContains(query) ?? false)
+        }
     }
     private var selectedEntries: [FoundationPlaylistEntry] {
-        visibleEntries.filter { selection.contains($0.mutationID) }
+        entries.filter { selection.contains($0.mutationID) }
+    }
+    private var cachedArtwork: FoundationCurrentArtwork.Result? {
+        library.immediateArtworkResult(for: updatedPlaylist ?? playlist, size: 160)
+    }
+    private var covers: [FoundationPlaylistCoverPreset] {
+        var values = FoundationPlaylistCoverPreset.presets
+        if let palette = cachedArtwork?.tint {
+            values.insert(
+                .init(id: "match", title: "Match Artwork", color: palette, symbol: "music.note"),
+                at: 0)
+        }
+        return values
+    }
+    private var dirty: Bool {
+        loaded
+            && (name != savedName || overview != savedOverview || isPublic != savedPublic
+                || selectedCover != nil)
     }
 
     var body: some View {
         NavigationStack {
-            songList
-                .navigationTitle(name.isEmpty ? playlist.title : name)
-                .searchable(text: $query, prompt: "Find in Playlist")
-                .toolbar {
-                    ToolbarItem(placement: .cancellationAction) {
-                        Button("Done") { dismiss() }
+            List(selection: $selection) {
+                detailsSection
+                if showingCovers { coverSection }
+                if addingSongs { addSection }
+                songsSection
+                Section {
+                    Button("Delete Playlist", systemImage: "trash", role: .destructive) {
+                        confirmDelete = true
                     }
-                    ToolbarItemGroup(placement: .primaryAction) {
-                        Button("Add Songs", systemImage: "plus") { relatedSheet = .addSongs }
-                            .disabled(!editable || operation.isPending)
-                        Button("Reorder Songs", systemImage: "arrow.up.arrow.down") {
-                            relatedSheet = .reorderSongs
-                        }
-                        .disabled(
-                            !editable || !library.supportsPlaylistReordering || operation.isPending
-                        )
-                        .accessibilityIdentifier("playlist-editor-reorder-songs")
-                        Button("Playlist Details", systemImage: "pencil") {
-                            detailsExpanded.toggle()
+                    .disabled(
+                        !loaded || connectivity.localOnly || permissions?.canDelete != true
+                            || operation.isPending)
+                }
+            }
+            .reorderContainer(
+                for: FoundationPlaylistReorderRow.self, isEnabled: canMove, move: reorder
+            )
+            .swipeActionsContainer()
+            .scrollContentBackground(.hidden)
+            #if os(macOS)
+                .listStyle(.inset)
+            #else
+                .listStyle(.insetGrouped)
+            #endif
+            .navigationTitle("Manage Playlist")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    #if os(macOS)
+                        Button("Close", systemImage: "xmark") {
+                            if dirty { confirmDiscard = true } else { dismiss() }
                         }.disabled(operation.isPending)
-                        Button("Refresh", systemImage: "arrow.clockwise") {
-                            operation.run { try await refresh() }
-                        }.disabled(connectivity.localOnly || operation.isPending)
-                    }
-                }
-                .safeAreaInset(edge: .bottom, spacing: 0) { managementFooter }
-                .modifier(FoundationPlaylistFeedback(operation: operation))
-                .confirmationDialog(
-                    "Delete this playlist from Jellyfin?",
-                    isPresented: $confirmDelete, titleVisibility: .visible
-                ) {
-                    Button("Delete Playlist", role: .destructive) {
-                        operation.run {
-                            guard !connectivity.localOnly else { throw CancellationError() }
-                            try await FoundationPlaylistMutation.delete(
-                                id: playlist.id, library: library)
-                            try Task.checkCancellation()
-                            downloads.reconcilePlaylists()
-                            changes.catalogDidChange()
-                            dismiss()
-                            onDeleted()
+                    #else
+                        if dirty {
+                            Button("Discard", systemImage: "xmark") { confirmDiscard = true }
+                                .disabled(operation.isPending)
                         }
-                    }
-                } message: {
-                    Text("The songs will stay in your Jellyfin library.")
+                    #endif
                 }
-                .sheet(
-                    item: $relatedSheet,
-                    onDismiss: {
-                        if !connectivity.localOnly { operation.run { try await refresh() } }
-                    }
-                ) { destination in
-                    switch destination {
-                    case .addSongs:
-                        FoundationPlaylistSongPicker(playlist: playlist, library: library)
-                    case .reorderSongs:
-                        FoundationPlaylistReorderSheet(playlist: playlist, library: library)
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save", systemImage: "checkmark") { saveDetails() }
+                        .disabled(!canEditDetails || operation.isPending || !dirty)
+                        .buttonStyle(.glassProminent)
+                }
+            }
+            .safeAreaInset(edge: .bottom, spacing: 0) { managementFooter }
+            .modifier(FoundationPlaylistFeedback(operation: operation))
+            .confirmationDialog(
+                "Delete this playlist from Jellyfin?", isPresented: $confirmDelete,
+                titleVisibility: .visible
+            ) {
+                Button("Delete Playlist", role: .destructive) {
+                    operation.run {
+                        guard !connectivity.localOnly else { throw CancellationError() }
+                        try await FoundationPlaylistMutation.delete(
+                            id: playlist.id, library: library)
+                        try Task.checkCancellation()
+                        downloads.reconcilePlaylists()
+                        changes.catalogDidChange()
+                        dismiss()
+                        onDeleted()
                     }
                 }
+            } message: {
+                Text("The songs will stay in your Jellyfin library.")
+            }
+            .confirmationDialog(
+                "Discard unsaved changes?", isPresented: $confirmDiscard, titleVisibility: .visible
+            ) {
+                Button("Discard Changes", role: .destructive) { dismiss() }
+                Button("Keep Editing", role: .cancel) {}
+            }
+            #if os(macOS)
+                .onDeleteCommand { if editable { remove(selectedEntries) } }
+            #endif
         }
         .modifier(FoundationPlaylistSheetSize())
+        .presentationBackground(.ultraThinMaterial)
+        .interactiveDismissDisabled(dirty || operation.isPending)
+        #if os(iOS)
+            .presentationDragIndicator(.visible)
+        #endif
         .onAppear {
-            name = playlist.title
-            if !loaded { detailsExpanded = showsDetailsInitially }
+            if !loaded {
+                name = playlist.title
+                addingSongs = startsAddingSongs
+            }
             if !connectivity.localOnly { operation.run { try await refresh() } }
+            addModel.configureCatalogPagination()
         }
         .onDisappear { operation.cancel() }
-        .onChange(of: visibleEntries.map(\.mutationID)) { _, ids in
-            selection.formIntersection(ids)
+        .onChange(of: library.catalogScopeID) { _, _ in
+            operation.cancel()
+            permissions = nil
+            loaded = false
+            requiresRefresh = true
+            selectedCover = nil
+            addedSelection = []
+            selection = []
+            dismiss()
         }
         .onChange(of: connectivity.localOnly) { _, offline in
             if offline {
                 confirmDelete = false
-                relatedSheet = nil
                 operation.cancel()
+                requiresRefresh = true
             }
         }
-    }
-
-    private var songList: some View {
-        List(selection: $selection) {
-            if detailsExpanded { detailsSection }
-            Section {
-                ForEach(filteredEntries) { entry in
-                    FoundationPlaylistMusicRow(item: entry.item, library: library)
-                        .tag(entry.mutationID)
-                        .contextMenu {
-                            Button(
-                                "Remove from Playlist", systemImage: "minus.circle",
-                                role: .destructive
-                            ) {
-                                let selected =
-                                    selection.contains(entry.mutationID)
-                                    ? selectedEntries : [entry]
-                                remove(selected)
-                            }.disabled(!editable || operation.isPending)
-                        }
-                        #if os(iOS)
-                            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                                Button("Remove", systemImage: "minus.circle", role: .destructive) {
-                                    remove([entry])
-                                }.disabled(!editable || operation.isPending)
-                            }
-                        #endif
-                }
-                if loaded, filteredEntries.isEmpty {
-                    ContentUnavailableView(
-                        query.isEmpty ? "No Songs Yet" : "No Matching Songs",
-                        systemImage: "music.note.list",
-                        description: Text(
-                            query.isEmpty
-                                ? "Add songs to start building this playlist."
-                                : "Try another title, artist or album.")
-                    )
-                }
-            } header: {
-                HStack {
-                    Text("\(visibleEntries.count) Songs")
-                    Spacer()
-                    if !filteredEntries.isEmpty {
-                        Button(
-                            selection.isSuperset(of: filteredEntries.map(\.mutationID))
-                                ? "Deselect All" : "Select All"
-                        ) {
-                            let ids = Set(filteredEntries.map(\.mutationID))
-                            if selection.isSuperset(of: ids) {
-                                selection.subtract(ids)
-                            } else {
-                                selection.formUnion(ids)
-                            }
-                        }.buttonStyle(.borderless)
-                    }
-                }
-            } footer: {
-                if permissions?.canEdit == false {
-                    Text("This playlist is read-only for your account.")
-                } else if FoundationPlaylistSnapshot.hasAmbiguousMemberships(entries) {
-                    Text(FoundationPlaylistError.ambiguousMemberships.errorDescription ?? "")
-                }
-            }
+        .onChange(of: entries.map(\.mutationID)) { _, ids in selection.formIntersection(ids) }
+        .onChange(of: addQuery) { _, _ in
+            addModel.clearRetainedData()
+            addRevision = 0
         }
-        .disabled(operation.isPending)
-        #if os(iOS)
-            .environment(\.editMode, .constant(.active))
-        #else
-            .onDeleteCommand { if editable { remove(selectedEntries) } }
-        #endif
-        .accessibilityIdentifier("playlist-management-songs")
+        .task(
+            id:
+                "\(library.catalogScopeID)-\(addingSongs)-\(addQuery)-\(addRevision)-\(connectivity.localOnly)"
+        ) {
+            guard addingSongs, !connectivity.localOnly else { return }
+            do {
+                if !addQuery.isEmpty { try await Task.sleep(for: .milliseconds(250)) }
+                try Task.checkCancellation()
+                await addModel.loadPending(using: loadAddSongs)
+            } catch {}
+        }
     }
 
     private var detailsSection: some View {
-        Section("Playlist Details") {
-            TextField("Playlist name", text: $name)
-            Button("Save Name") {
-                operation.run {
-                    let requested = try FoundationPlaylistName.validated(name)
-                    guard !connectivity.localOnly else { throw CancellationError() }
-                    try await library.renamePlaylist(id: playlist.id, name: requested)
-                    try Task.checkCancellation()
-                    try await refresh()
-                    guard name == requested else { throw FoundationPlaylistError.changed }
-                    downloads.reconcilePlaylists()
-                    onRenamed(name)
-                    changes.catalogDidChange()
-                    detailsExpanded = false
+        Section {
+            HStack(alignment: .top, spacing: 20) {
+                Button {
+                    showingCovers.toggle()
+                } label: {
+                    ZStack(alignment: .bottomTrailing) {
+                        Group {
+                            if let cover = selectedCover ?? savedCover {
+                                FoundationPlaylistCoverArtwork(preset: cover)
+                            } else if let image = cachedArtwork?.image {
+                                Image(decorative: image, scale: 1).resizable().scaledToFill()
+                            } else {
+                                Rectangle().fill(.quaternary).overlay {
+                                    Image(systemName: "music.note.list").font(.largeTitle)
+                                }
+                            }
+                        }
+                        .frame(width: 104, height: 104).clipShape(.rect(cornerRadius: 16))
+                        #if os(macOS)
+                            if hoveringCover || showingCovers {
+                                Image(systemName: "pencil").padding(9).background(
+                                    .regularMaterial, in: .circle
+                                ).padding(6)
+                            }
+                        #else
+                            Image(systemName: "pencil").padding(9).background(
+                                .regularMaterial, in: .circle
+                            ).padding(6)
+                        #endif
+                    }
                 }
-            }.disabled(
-                !canEditDetails || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            Button("Delete Playlist", systemImage: "trash", role: .destructive) {
-                confirmDelete = true
-            }
-            .disabled(connectivity.localOnly || permissions?.canDelete != true)
+                .buttonStyle(.plain)
+                .onHover { hoveringCover = $0 }
+                .accessibilityLabel("Edit playlist artwork")
+                .accessibilityHint("Choose a cover; artwork changes only when you save.")
+                .disabled(!canEditDetails || !canEditCover || operation.isPending)
+                VStack(alignment: .leading, spacing: 12) {
+                    TextField("Playlist name", text: $name).font(.title2.weight(.semibold))
+                    TextField("Description", text: $overview, axis: .vertical)
+                        .lineLimit(3...6).font(.body).disabled(!canEditOverview)
+                    if !canEditOverview || !canEditCover {
+                        Text("Your server permissions limit description or artwork editing.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Toggle(isOn: Binding(get: { isPublic ?? false }, set: { isPublic = $0 })) {
+                        Label("Public Playlist", systemImage: "globe")
+                    }
+                    .disabled(isPublic == nil)
+                    if isPublic == nil {
+                        Text("Visibility isn’t available for this playlist.").font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .disabled(!canEditDetails || operation.isPending)
+            }.padding(.vertical, 12)
         }
     }
 
-    private var managementFooter: some View {
-        VStack(spacing: 0) {
-            Divider()
-            HStack(spacing: 12) {
-                if operation.isPending {
-                    ProgressView().controlSize(.small)
-                    Text("Updating playlist…").foregroundStyle(.secondary)
-                    Spacer()
-                    Button("Cancel Request") { operation.cancel() }
-                } else {
-                    Text(
-                        selection.isEmpty
-                            ? "Select songs to manage" : "\(selectedEntries.count) selected"
-                    )
-                    .foregroundStyle(.secondary)
-                    Spacer()
-                    Button("Remove", systemImage: "minus.circle", role: .destructive) {
-                        remove(selectedEntries)
-                    }.disabled(!editable || selectedEntries.isEmpty)
-                }
+    private var coverSection: some View {
+        Section {
+            ScrollView(.horizontal) {
+                HStack(spacing: 12) {
+                    ForEach(covers) { preset in
+                        Button {
+                            selectedCover = preset
+                        } label: {
+                            FoundationPlaylistCoverArtwork(preset: preset)
+                                .frame(width: 76, height: 76)
+                                .clipShape(.rect(cornerRadius: 12))
+                                .overlay(alignment: .bottomTrailing) {
+                                    if selectedCover?.id == preset.id {
+                                        Image(systemName: "checkmark.circle.fill").padding(5)
+                                    }
+                                }
+                        }.buttonStyle(.plain).accessibilityLabel(preset.title)
+                    }
+                }.padding(.vertical, 4)
+            }.scrollIndicators(.hidden)
+            Button("Keep Current Artwork", systemImage: "arrow.uturn.backward") {
+                selectedCover = nil
             }
-            .padding(16)
-        }.background(.bar)
+        } header: {
+            Label("Artwork", systemImage: "photo")
+        }
+        .disabled(!canEditDetails || !canEditCover || operation.isPending)
     }
 
-    private func remove(_ selected: [FoundationPlaylistEntry]) {
-        guard editable, !selected.isEmpty else { return }
+    private var songsSection: some View {
+        Section {
+            TextField("Find in Playlist", text: $query)
+            ForEach(rows) { row in
+                HStack(spacing: 10) {
+                    FoundationPlaylistMusicRow(item: row.entry.item, library: library)
+                    Image(systemName: "line.3.horizontal").foregroundStyle(.secondary)
+                        .opacity(canMove ? 1 : 0.35)
+                        .accessibilityLabel("Reorder \(row.entry.item.title)")
+                }
+                .tag(row.entry.mutationID)
+                .accessibilityIdentifier("playlist-reorder-\(row.id)")
+                .contextMenu {
+                    Button("Remove from Playlist", systemImage: "minus.circle", role: .destructive)
+                    { remove([row.entry]) }
+                    .disabled(!editable || operation.isPending)
+                    Button("Move Up", systemImage: "arrow.up") { move(row, upwards: true) }
+                        .disabled(!canMove || row.index == 0)
+                    Button("Move Down", systemImage: "arrow.down") { move(row, upwards: false) }
+                        .disabled(!canMove || row.index + 1 == entries.count)
+                }
+                .swipeActions(
+                    edge: .trailing, allowsFullSwipe: true,
+                    content: {
+                        Button("Remove from Playlist", systemImage: "minus", role: .destructive) {
+                            remove([row.entry])
+                        }
+                        .labelStyle(.iconOnly).disabled(!editable || operation.isPending)
+                    }, onPresentationChanged: { _ in })
+            }
+            .reorderable()
+            if loaded, entries.isEmpty {
+                Text("Add songs to start building this playlist.").foregroundStyle(.secondary)
+            }
+        } header: {
+            HStack {
+                Label("\(entries.count) Songs", systemImage: "music.note.list")
+                Spacer()
+                Button(addingSongs ? "Hide Add Songs" : "Add Songs", systemImage: "plus") {
+                    addingSongs.toggle()
+                }
+                .buttonStyle(.borderless).disabled(!editable || operation.isPending)
+            }
+        } footer: {
+            if permissions?.canEdit == false {
+                Text("This playlist is read-only for your account.")
+            } else if FoundationPlaylistSnapshot.hasAmbiguousMemberships(entries) {
+                Text(FoundationPlaylistError.ambiguousMemberships.errorDescription ?? "")
+            } else if requiresRefresh {
+                Text("Refresh to confirm songs before making another change.")
+            } else if !query.isEmpty {
+                Text("Clear the search to reorder songs.")
+            }
+        }
+        .accessibilityIdentifier("playlist-management-songs")
+    }
+
+    private var addSection: some View {
+        Section {
+            TextField("Search library songs", text: $addQuery)
+            ForEach(addModel.items) { song in
+                Button {
+                    if addedSelection.contains(where: { $0.id == song.id }) {
+                        addedSelection.removeAll { $0.id == song.id }
+                    } else {
+                        addedSelection.append(song)
+                    }
+                } label: {
+                    HStack {
+                        FoundationPlaylistMusicRow(item: song, library: library)
+                        Image(
+                            systemName: addedSelection.contains(where: { $0.id == song.id })
+                                ? "checkmark.circle.fill" : "plus.circle"
+                        )
+                        .foregroundStyle(.tint)
+                    }
+                }.buttonStyle(.plain)
+            }
+            if addModel.isLoading { ProgressView("Loading songs…") }
+            if let error = addModel.errorMessage {
+                Text(error).foregroundStyle(.secondary)
+                Button("Retry", systemImage: "arrow.clockwise") {
+                    addModel.request(addModel.retryRequest)
+                    addRevision += 1
+                }
+            }
+            if addModel.nextStartIndex != nil {
+                Button("More Songs", systemImage: "ellipsis") {
+                    addModel.request(.more)
+                    addRevision += 1
+                }
+                .disabled(addModel.isLoading)
+            }
+            Button("Add \(addedSelection.count) Songs", systemImage: "plus.circle.fill") {
+                addSongs()
+            }
+            .buttonStyle(.glassProminent).disabled(addedSelection.isEmpty)
+        } header: {
+            Label("Add Songs", systemImage: "plus.circle")
+        }
+        .disabled(!editable || operation.isPending)
+    }
+
+    private var managementFooter: some View {
+        HStack(spacing: 12) {
+            if operation.isPending {
+                ProgressView().controlSize(.small)
+                Text("Updating playlist…").foregroundStyle(.secondary)
+                Spacer()
+                Button("Cancel Request") {
+                    requiresRefresh = true
+                    operation.cancel()
+                }
+            } else {
+                if !saveSummary.isEmpty {
+                    Text(saveSummary).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                }
+                if !selection.isEmpty {
+                    Button(
+                        "Remove \(selectedEntries.count)", systemImage: "minus.circle",
+                        role: .destructive
+                    ) { remove(selectedEntries) }
+                    .disabled(!editable)
+                }
+                Spacer()
+                Button("Refresh", systemImage: "arrow.clockwise") {
+                    operation.run { try await refresh() }
+                }
+                .disabled(connectivity.localOnly)
+            }
+        }.padding(16).background(.bar)
+    }
+
+    private func saveDetails() {
+        guard canEditDetails, !operation.isPending, dirty else { return }
+        saveSummary = ""
         operation.run(
-            successMessage: { "Removed \(selected.count) songs from the playlist." },
+            successMessage: { "Playlist saved." },
             {
                 guard !connectivity.localOnly else { throw CancellationError() }
-                do {
-                    try await changes.remove(
-                        playlistID: playlist.id, entries: selected, library: library)
-                } catch {
-                    downloads.reconcilePlaylists()
-                    throw error
+                if name != savedName || overview != savedOverview || isPublic != savedPublic {
+                    // Nil preserves the fresh server value. Never send an unchanged
+                    // draft field back over another client's newer metadata or visibility.
+                    let requestedName: String?
+                    if name != savedName {
+                        requestedName = try FoundationPlaylistName.validated(name)
+                    } else {
+                        requestedName = nil
+                    }
+                    let requestedOverview = overview != savedOverview ? overview : nil
+                    let requestedPublic = isPublic != savedPublic ? isPublic : nil
+                    let details = try await library.updatePlaylistDetails(
+                        id: playlist.id, name: requestedName, overview: requestedOverview,
+                        isPublic: requestedPublic)
+                    try Task.checkCancellation()
+                    savedName = details.item.title
+                    savedOverview = details.overview
+                    savedPublic = details.isPublic
+                    name = savedName
+                    overview = savedOverview
+                    isPublic = savedPublic
+                    permissions = details.permissions
+                    canEditOverview = details.canEditOverview
+                    canEditCover = details.canEditCover
+                    onRenamed(savedName)
+                    updatedPlaylist = details.item
+                    onUpdated(details.item)
+                    changes.catalogDidChange()
+                    saveSummary = "Playlist details saved."
                 }
+                if let selectedCover {
+                    guard canEditCover else { throw FoundationPlaylistError.readOnly }
+                    saveSummary =
+                        saveSummary.isEmpty
+                        ? "Artwork is still pending." : "Details saved; artwork is still pending."
+                    let data = try FoundationPlaylistCoverArtwork.png(selectedCover)
+                    let updated = try await library.setPlaylistCover(
+                        id: playlist.id, data: data, contentType: "image/png")
+                    try Task.checkCancellation()
+                    updatedPlaylist = updated
+                    onUpdated(updated)
+                    savedCover = selectedCover
+                    self.selectedCover = nil
+                    changes.catalogDidChange()
+                }
+                saveSummary = "Playlist saved."
                 downloads.reconcilePlaylists()
-                selection.subtract(selected.map(\.mutationID))
+            })
+    }
+    private func remove(_ selected: [FoundationPlaylistEntry]) {
+        guard editable, !operation.isPending, !selected.isEmpty else { return }
+        requiresRefresh = true
+        operation.run {
+            defer { downloads.reconcilePlaylists() }
+            try await changes.remove(playlistID: playlist.id, entries: selected, library: library)
+            try Task.checkCancellation()
+            selection.subtract(selected.map(\.mutationID))
+            try await refresh()
+        }
+    }
+    private func reorder(
+        _ difference: ReorderDifference<String, ReorderableSingleCollectionIdentifier>
+    ) {
+        guard canMove else { return }
+        let all = FoundationPlaylistReorderRow.make(entries)
+        let ids = Set(difference.sources)
+        let source = IndexSet(all.filter { ids.contains($0.id) }.map(\.index))
+        guard source.count == ids.count else { return }
+        switch difference.destination.position {
+        case .before(let id):
+            guard let destination = all.first(where: { $0.id == id })?.index else { return }
+            move(from: source, to: destination)
+        case .end: move(from: source, to: entries.count)
+        }
+    }
+    private func move(_ row: FoundationPlaylistReorderRow, upwards: Bool) {
+        move(from: IndexSet(integer: row.index), to: upwards ? row.index - 1 : row.index + 2)
+    }
+    private func move(from source: IndexSet, to destination: Int) {
+        guard canMove,
+            let plan = try? FoundationPlaylistReorderPlan(
+                entries: entries, from: source, to: destination), !plan.moves.isEmpty
+        else { return }
+        let before = entries
+        entries = plan.entries
+        requiresRefresh = true
+        operation.run {
+            defer { downloads.reconcilePlaylists() }
+            entries = try await changes.reorder(
+                playlistID: playlist.id, entries: before, from: source, to: destination,
+                library: library)
+            try Task.checkCancellation()
+            guard !connectivity.localOnly else { throw CancellationError() }
+            requiresRefresh = false
+        }
+    }
+    private func loadAddSongs(_ offset: Int) async throws -> FoundationPage {
+        let text = addQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        if text.isEmpty { return try await library.songs(startIndex: offset) }
+        return try await library.search(query: text, kind: .track, startIndex: offset, limit: 50)
+    }
+    private func addSongs() {
+        guard editable, !operation.isPending, !addedSelection.isEmpty else { return }
+        let selected = addedSelection
+        requiresRefresh = true
+        operation.run(
+            successMessage: { addSummary },
+            {
+                defer { downloads.reconcilePlaylists() }
+                let result = try await changes.add(
+                    playlistID: playlist.id, tracks: selected, library: library)
+                addSummary = result.message
+                try Task.checkCancellation()
+                addedSelection = []
                 try await refresh()
             })
     }
-
     private func refresh() async throws {
         guard !connectivity.localOnly else { throw CancellationError() }
-        let permission = try await library.playlistPermissions(id: playlist.id)
+        let details = try await library.playlistDetails(id: playlist.id)
         try Task.checkCancellation()
         let snapshot = try await FoundationPlaylistSnapshot.load(id: playlist.id, library: library)
         try Task.checkCancellation()
         guard !connectivity.localOnly else { throw CancellationError() }
+        if !loaded || name == savedName { name = details.item.title }
+        if !loaded || overview == savedOverview { overview = details.overview }
+        if !loaded || isPublic == savedPublic { isPublic = details.isPublic }
+        savedName = details.item.title
+        savedOverview = details.overview
+        savedPublic = details.isPublic
+        permissions = details.permissions
+        updatedPlaylist = details.item
+        canEditOverview = details.canEditOverview
+        canEditCover = details.canEditCover
         changes.observe(snapshot.map(\.item))
-        permissions = permission
-        name = permission.name
         entries = snapshot
         loaded = true
+        requiresRefresh = false
+    }
+}
+
+private struct FoundationPlaylistCoverPreset: Identifiable, Sendable {
+    let id: String
+    let title: String
+    let color: Color
+    let symbol: String
+    static let presets: [Self] = [
+        .init(id: "blue", title: "Blue Notes", color: .blue, symbol: "music.note.list"),
+        .init(id: "purple", title: "Night Mix", color: .purple, symbol: "moon.stars.fill"),
+        .init(id: "orange", title: "Sunrise", color: .orange, symbol: "sun.max.fill"),
+        .init(id: "pink", title: "Favorites", color: .pink, symbol: "heart.fill"),
+        .init(id: "green", title: "Fresh Tracks", color: .green, symbol: "waveform"),
+        .init(id: "teal", title: "Flow", color: .teal, symbol: "sparkles"),
+    ]
+}
+
+private struct FoundationPlaylistCoverArtwork: View {
+    let preset: FoundationPlaylistCoverPreset
+    var body: some View {
+        GeometryReader { geometry in
+            ZStack {
+                LinearGradient(
+                    colors: [preset.color, preset.color.mix(with: .black, by: 0.5)],
+                    startPoint: .topLeading, endPoint: .bottomTrailing)
+                Image(systemName: preset.symbol).resizable().scaledToFit()
+                    .foregroundStyle(.white.opacity(0.9))
+                    .frame(width: geometry.size.width * 0.45, height: geometry.size.height * 0.45)
+            }
+        }.aspectRatio(1, contentMode: .fit)
+    }
+    @MainActor static func png(_ preset: FoundationPlaylistCoverPreset) throws -> Data {
+        let renderer = ImageRenderer(content: Self(preset: preset).frame(width: 512, height: 512))
+        guard let image = renderer.cgImage else { throw FoundationPlaylistError.changed }
+        let data = NSMutableData()
+        guard
+            let destination = CGImageDestinationCreateWithData(
+                data, UTType.png.identifier as CFString, 1, nil)
+        else { throw FoundationPlaylistError.changed }
+        CGImageDestinationAddImage(destination, image, nil)
+        guard CGImageDestinationFinalize(destination) else { throw FoundationPlaylistError.changed }
+        return data as Data
     }
 }
 
@@ -713,8 +1046,8 @@ struct FoundationPlaylistCreate: View {
     var body: some View {
         Group {
             if showingSongs, let createdPlaylist {
-                FoundationPlaylistSongPicker(
-                    playlist: createdPlaylist, library: library, dismissTitle: "Done")
+                FoundationPlaylistEditor(
+                    playlist: createdPlaylist, library: library, startsAddingSongs: true)
             } else {
                 composer
             }
@@ -759,7 +1092,7 @@ struct FoundationPlaylistCreate: View {
                                 .onSubmit { if canCreate { create() } }
                         }
                         .disabled(operation.isPending)
-                        Toggle("Add Songs Next", isOn: $addSongsNext)
+                        Toggle("Open Playlist Manager Next", isOn: $addSongsNext)
                             .disabled(operation.isPending)
                         Text(
                             "Create a playlist in your Jellyfin library, then choose the songs you want to add."

@@ -158,10 +158,9 @@ struct FoundationLibraryView: View {
                 switch self {
                 case .create: "create"
                 case .credits(let item): "credits-" + item.id
-                case .addSongs(let item): "add-" + item.id
-                case .reorderSongs(let item): "reorder-" + item.id
-                case .manage(let item): "manage-" + item.id
-                case .details(let item): "details-" + item.id
+                case .addSongs(let item), .reorderSongs(let item), .manage(let item),
+                    .details(let item):
+                    "manage-" + item.id
                 }
             }
         }
@@ -382,14 +381,9 @@ struct FoundationLibraryView: View {
                     case .credits(let item):
                         FoundationItemMetadataView(item: item, library: accountLibrary)
                         .environmentObject(primaryGenres)
-                    case .addSongs(let item):
-                        FoundationPlaylistSongPicker(playlist: item, library: library)
-                    case .reorderSongs(let item):
-                        FoundationPlaylistReorderSheet(playlist: item, library: library)
-                    case .manage(let item):
-                        macPlaylistEditor(item, showsDetails: false)
-                    case .details(let item):
-                        macPlaylistEditor(item, showsDetails: true)
+                    case .addSongs(let item), .reorderSongs(let item), .manage(let item),
+                        .details(let item):
+                        macPlaylistEditor(item)
                     }
                 }
                 // This sheet is outside the earlier root-content injection.
@@ -780,7 +774,6 @@ struct FoundationLibraryView: View {
                 HStack {
                     Text("Library")
                     Spacer()
-                    localLibraryButton
                 }
             }
             Section(isExpanded: $macPlaylistsExpanded) {
@@ -795,17 +788,8 @@ struct FoundationLibraryView: View {
                         item.title, symbol: "music.note.list", route: .playlist(item)
                     )
                     .contextMenu {
-                        Button("Add Songs", systemImage: "plus") {
-                            macLibrarySheet = .addSongs(item)
-                        }.disabled(connectivity.localOnly || !library.supportsPlaylistManagement)
-                        Button("Reorder Songs", systemImage: "arrow.up.arrow.down") {
-                            macLibrarySheet = .reorderSongs(item)
-                        }.disabled(connectivity.localOnly || !library.supportsPlaylistReordering)
                         Button("Manage Playlist", systemImage: "checklist") {
                             macLibrarySheet = .manage(item)
-                        }.disabled(connectivity.localOnly || !library.supportsPlaylistManagement)
-                        Button("Playlist Details", systemImage: "pencil") {
-                            macLibrarySheet = .details(item)
                         }.disabled(connectivity.localOnly || !library.supportsPlaylistManagement)
                     }
                 }
@@ -831,7 +815,7 @@ struct FoundationLibraryView: View {
             }
         }
 
-        private func macPlaylistEditor(_ item: FoundationItem, showsDetails: Bool) -> some View {
+        private func macPlaylistEditor(_ item: FoundationItem) -> some View {
             FoundationPlaylistEditor(
                 playlist: item,
                 onDeleted: {
@@ -863,7 +847,30 @@ struct FoundationLibraryView: View {
                     }
                     macNavigation.updatePlaylistTitle(id: item.id, name: name)
                 },
-                library: library, showsDetailsInitially: showsDetails)
+                onUpdated: { updated in
+                    guard displayedCatalogScope == library.catalogScopeID,
+                        updated.kind == .playlist, updated.id == item.id,
+                        updated.catalogSource == item.catalogSource
+                    else { return }
+                    switch macLibraryRoute {
+                    case .playlist(let displayed)
+                    where displayed.id == item.id && displayed.catalogSource == item.catalogSource:
+                        macLibraryRoute = .playlist(updated)
+                    case .item(let displayed)
+                    where displayed.kind == .playlist && displayed.id == item.id
+                        && displayed.catalogSource == item.catalogSource:
+                        macLibraryRoute = .item(updated)
+                    default: break
+                    }
+                    for index in macNavigation.path.indices
+                    where macNavigation.path[index].item.kind == .playlist
+                        && macNavigation.path[index].item.id == item.id
+                        && macNavigation.path[index].item.catalogSource == item.catalogSource
+                    {
+                        macNavigation.path[index].item = updated
+                    }
+                },
+                library: library)
         }
 
         private var macPinnedSidebar: some View {
@@ -2452,13 +2459,20 @@ private struct FoundationCollectionView: View {
     let isActive: Bool
     @State private var playlistSheet: FoundationPlaylistSheet?
     @State private var playlistName: String?
+    @State private var updatedPlaylist: (item: FoundationItem, scope: String)?
     @Environment(\.dismiss) private var dismiss
 
     private var tracks: FoundationBrowseModel { downloads.collectionModel(for: item) }
 
     private var displayItem: FoundationItem {
         var copy = item
-        copy.title = playlistName ?? item.title
+        if let updatedPlaylist, updatedPlaylist.scope == library.catalogScopeID,
+            updatedPlaylist.item.id == item.id,
+            updatedPlaylist.item.catalogSource == item.catalogSource
+        {
+            copy = updatedPlaylist.item
+        }
+        copy.title = playlistName ?? copy.title
         return copy
     }
 
@@ -2471,8 +2485,6 @@ private struct FoundationCollectionView: View {
                 ? playlistChanges.revision(for: item.id) : 0,
             refreshRevision: refreshRevision,
             managePlaylist: item.kind == .playlist ? { playlistSheet = .manage } : nil,
-            addPlaylistSongs: item.kind == .playlist ? { playlistSheet = .addSongs } : nil,
-            reorderPlaylistSongs: item.kind == .playlist ? { playlistSheet = .reorderSongs } : nil,
             loader: { offset in
                 if item.kind == .playlist {
                     return try await library.playlistTracks(
@@ -2484,6 +2496,15 @@ private struct FoundationCollectionView: View {
         .onChange(of: connectivity.localOnly) { _, offline in
             if offline { playlistSheet = nil }
         }
+        .onChange(of: library.catalogScopeID) { _, _ in
+            playlistSheet = nil
+            updatedPlaylist = nil
+            playlistName = nil
+        }
+        .onChange(of: item) { _, _ in
+            updatedPlaylist = nil
+            playlistName = nil
+        }
         .sheet(
             item: $playlistSheet,
             onDismiss: {
@@ -2492,14 +2513,17 @@ private struct FoundationCollectionView: View {
             },
             content: { destination in
                 switch destination {
-                case .manage:
+                case .manage, .addSongs, .reorderSongs:
                     FoundationPlaylistEditor(
                         playlist: displayItem, onDeleted: { dismiss() },
-                        onRenamed: { playlistName = $0 }, library: library)
-                case .addSongs:
-                    FoundationPlaylistSongPicker(playlist: displayItem, library: library)
-                case .reorderSongs:
-                    FoundationPlaylistReorderSheet(playlist: displayItem, library: library)
+                        onRenamed: { playlistName = $0 },
+                        onUpdated: { updated in
+                            guard updated.kind == .playlist, updated.id == item.id,
+                                updated.catalogSource == item.catalogSource
+                            else { return }
+                            updatedPlaylist = (updated, library.catalogScopeID)
+                        },
+                        library: library)
                 }
             })
     }
@@ -2525,8 +2549,6 @@ struct FoundationTrackList: View {
     var playlistRevision = 0
     var refreshRevision = 0
     var managePlaylist: (() -> Void)? = nil
-    var addPlaylistSongs: (() -> Void)? = nil
-    var reorderPlaylistSongs: (() -> Void)? = nil
     var localItems: (() -> [FoundationItem])? = nil
     @State private var loadedPlaylistRevision = 0
     @State private var loadedRefreshRevision = 0
@@ -2661,18 +2683,6 @@ struct FoundationTrackList: View {
                     item: collection, iconFont: collectionActionFont)
             #endif
             Menu {
-                if let addPlaylistSongs {
-                    Button("Add Songs", systemImage: "plus", action: addPlaylistSongs)
-                        .disabled(!library.supportsPlaylistManagement || connectivity.localOnly)
-                }
-                if let reorderPlaylistSongs {
-                    Button(
-                        "Reorder Songs", systemImage: "arrow.up.arrow.down",
-                        action: reorderPlaylistSongs
-                    )
-                    .disabled(!library.supportsPlaylistReordering || connectivity.localOnly)
-                    .accessibilityIdentifier("playlist-reorder-songs")
-                }
                 if let managePlaylist {
                     Button("Manage Playlist", systemImage: "pencil", action: managePlaylist)
                         .disabled(!library.supportsPlaylistManagement || connectivity.localOnly)
@@ -2743,22 +2753,6 @@ struct FoundationTrackList: View {
                 .listRowInsets(EdgeInsets())
                 .listRowBackground(Color.clear)
                 .listRowSeparator(.hidden)
-        }
-        if collection?.kind == .playlist, library.supportsPlaylistManagement {
-            HStack(spacing: 12) {
-                if let addPlaylistSongs {
-                    Button("Add Songs", systemImage: "plus", action: addPlaylistSongs)
-                }
-                if let managePlaylist {
-                    Button("Manage Songs", systemImage: "checklist", action: managePlaylist)
-                }
-                Spacer(minLength: 0)
-            }
-            .buttonStyle(.bordered)
-            .disabled(connectivity.localOnly)
-            .padding(.vertical, 8)
-            .listRowBackground(Color.clear)
-            .listRowSeparator(.hidden)
         }
         if connectivity.hasConnectionIssue || tracks.hasConnectionIssue {
             FoundationOfflineNotice().listRowBackground(Color.clear)
