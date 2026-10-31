@@ -374,7 +374,16 @@ nonisolated enum FoundationNativeDownloadTransport {
             // The delegate queue exists and is gated before either OS factory. A
             // crash after this durable phase can never be mistaken for no allocation.
             defer { worker.activateDelegateQueue() }
-            do { try store.beginCreating() } catch { throw FoundationDownloadError.cleanup }
+            do { try store.beginCreating() } catch {
+                // Finite preflight may already have started this scoped conversion.
+                // A creation write can commit before reporting an error; retain its
+                // authority even if cancellation-independent server cleanup also fails.
+                do {
+                    try await closeConversion(
+                        proposal.cleanupRequest, allowsCellular: allowsCellular)
+                } catch {}
+                throw FoundationDownloadError.cleanup
+            }
             let configuration = URLSessionConfiguration.background(
                 withIdentifier: sessionIdentifier)
             configuration.allowsCellularAccess = allowsCellular
