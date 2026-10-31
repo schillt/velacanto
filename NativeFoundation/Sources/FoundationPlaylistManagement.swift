@@ -94,6 +94,10 @@ struct FoundationPlaylistEditor: View {
     @State private var canEditOverview = false
     @State private var canEditCover = false
     @State private var saveSummary = ""
+    @State private var operationFailure: String?
+    @State private var failedSearchKind: FoundationItem.Kind?
+    @State private var editorActive = false
+    @State private var editorScope = ""
     @State private var addSummary = ""
     @State private var entries: [FoundationPlaylistEntry] = []
     @State private var selection: Set<String> = []
@@ -190,17 +194,20 @@ struct FoundationPlaylistEditor: View {
                         if !addingSongs { macManagementFooter }
                     }
                 #endif
-                .modifier(FoundationPlaylistFeedback(operation: operation))
+                .alert(
+                    "Playlist Update", isPresented: operationFailurePresentation(forSearch: false)
+                ) {
+                    operationFailureActions
+                } message: {
+                    Text(operationFailure ?? "")
+                }
                 .alert("Save playlist changes?", isPresented: $confirmSave) {
                     Button("Save Changes", systemImage: "checkmark") { saveDetails() }
                     Button("Keep Editing", role: .cancel) {}
                 } message: {
                     Text("Save your playlist details and artwork changes.")
                 }
-                .confirmationDialog(
-                    "Delete this playlist from Jellyfin?", isPresented: $confirmDelete,
-                    titleVisibility: .visible
-                ) {
+                .alert("Delete this playlist from Jellyfin?", isPresented: $confirmDelete) {
                     Button("Delete Playlist", role: .destructive) {
                         operation.run {
                             guard !connectivity.localOnly else { throw CancellationError() }
@@ -213,13 +220,13 @@ struct FoundationPlaylistEditor: View {
                             onDeleted()
                         }
                     }
+                    Button("Cancel", role: .cancel) {}
                 } message: {
-                    Text("The songs will stay in your Jellyfin library.")
+                    Text(
+                        "The playlist will be deleted from your Jellyfin server. Its songs will stay in your library."
+                    )
                 }
-                .confirmationDialog(
-                    "Discard unsaved changes?", isPresented: $confirmDiscard,
-                    titleVisibility: .visible
-                ) {
+                .alert("Discard unsaved changes?", isPresented: $confirmDiscard) {
                     Button("Discard Changes", role: .destructive) { dismiss() }
                     Button("Keep Editing", role: .cancel) {}
                 }
@@ -256,6 +263,8 @@ struct FoundationPlaylistEditor: View {
         #endif
         .interactiveDismissDisabled(dirty || operation.isPending)
         .onAppear {
+            editorActive = true
+            editorScope = library.catalogScopeID
             if !loaded {
                 name = playlist.title
                 addingSongs = startsAddingSongs
@@ -288,8 +297,21 @@ struct FoundationPlaylistEditor: View {
                 setPhoneKeyboardVisible(false)
             }
         #endif
-        .onDisappear { operation.cancel() }
+        .onDisappear {
+            editorActive = false
+            operationFailure = nil
+            operation.cancel()
+        }
+        .onChange(of: operation.isPending) { _, pending in
+            if pending { operationFailure = nil } else { presentOperationFailure() }
+        }
+        .onChange(of: operation.message) { _, _ in presentOperationFailure() }
+        .onChange(of: addModel.errorMessage) { _, _ in presentSearchFailure(.track) }
+        .onChange(of: addAlbums.errorMessage) { _, _ in presentSearchFailure(.album) }
+        .onChange(of: addArtists.errorMessage) { _, _ in presentSearchFailure(.artist) }
         .onChange(of: library.catalogScopeID) { _, _ in
+            operationFailure = nil
+            failedSearchKind = nil
             operation.cancel()
             permissions = nil
             loaded = false
@@ -406,24 +428,7 @@ struct FoundationPlaylistEditor: View {
                 .buttonStyle(.glassProminent)
             #endif
             .disabled(!editable || operation.isPending || addedSelection.isEmpty)
-            if operation.isPending {
-                HStack {
-                    ProgressView().controlSize(.small)
-                    Text("Updating playlist…")
-                    Spacer()
-                    Button("Cancel Request") { operation.cancel() }
-                }
-            } else if !operation.succeeded, let message = operation.message {
-                HStack {
-                    Text(message).foregroundStyle(.secondary)
-                    Spacer()
-                    Button("Retry", systemImage: "arrow.clockwise") {
-                        operation.run { try await refresh() }
-                    }.disabled(connectivity.localOnly)
-                }
-            } else if !addSummary.isEmpty {
-                Text(addSummary).foregroundStyle(.secondary)
-            }
+
         }
         .padding(24)
         #if os(macOS)
@@ -437,24 +442,25 @@ struct FoundationPlaylistEditor: View {
             .presentationBackground(.ultraThinMaterial)
             .interactiveDismissDisabled(operation.isPending)
         #endif
+        .alert("Playlist Update", isPresented: operationFailurePresentation(forSearch: true)) {
+            operationFailureActions
+        } message: {
+            Text(operationFailure ?? "")
+        }
+
     }
 
     @ViewBuilder private var managerContents: some View {
         #if os(macOS)
             GroupBox { detailsSection }
-            GroupBox { visibilitySection }
+            GroupBox { macVisibilityContents }
+                .frame(maxWidth: .infinity, alignment: .leading)
         #else
             detailsSection
                 .listRowBackground(Color(uiColor: .secondarySystemGroupedBackground))
             visibilitySection
                 .listRowBackground(Color(uiColor: .secondarySystemGroupedBackground))
         #endif
-        if showingCovers {
-            coverSection
-                #if os(iOS)
-                    .listRowBackground(Color(uiColor: .secondarySystemGroupedBackground))
-                #endif
-        }
         songsSection
             #if os(iOS)
                 .listRowBackground(Color(uiColor: .secondarySystemGroupedBackground))
@@ -560,6 +566,13 @@ struct FoundationPlaylistEditor: View {
                 .accessibilityLabel("Edit playlist artwork")
                 .accessibilityHint("Choose a cover; artwork changes only when you save.")
                 .disabled(!canEditDetails || !canEditCover || operation.isPending)
+                .popover(
+                    isPresented: $showingCovers, attachmentAnchor: .rect(.bounds),
+                    arrowEdge: .bottom
+                ) {
+                    coverChoicesPopover
+                        .presentationCompactAdaptation(.popover)
+                }
                 VStack(alignment: .leading, spacing: 12) {
                     TextField("Playlist name", text: $name).font(.title2.weight(.semibold))
                     TextField("Description", text: $overview, axis: .vertical)
@@ -573,6 +586,36 @@ struct FoundationPlaylistEditor: View {
             }.padding(.vertical, 12)
         }
     }
+
+    #if os(macOS)
+        private var macVisibilityContents: some View {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 12) {
+                    Image(systemName: "globe").foregroundStyle(.secondary).frame(width: 20)
+                    Text("Public Playlist").font(.body.weight(.medium))
+                    Spacer(minLength: 16)
+                    Toggle(
+                        "Public Playlist",
+                        isOn: Binding(get: { isPublic ?? false }, set: { isPublic = $0 })
+                    )
+                    .labelsHidden().toggleStyle(.switch)
+                    .disabled(!canEditDetails || operation.isPending || isPublic == nil)
+                }
+                Text(
+                    isPublic == nil
+                        ? "Visibility isn’t available for this playlist."
+                        : isPublic == true
+                            ? "Other people on your server can discover this playlist."
+                            : "This playlist is private to you and the people you share it with."
+                )
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.leading, 32)
+            }
+            .padding(8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    #endif
 
     private var visibilitySection: some View {
         Section {
@@ -596,32 +639,33 @@ struct FoundationPlaylistEditor: View {
         }
     }
 
-    private var coverSection: some View {
-        Section {
-            ScrollView(.horizontal) {
-                HStack(spacing: 12) {
-                    ForEach(covers) { preset in
-                        Button {
-                            selectedCover = preset
-                        } label: {
-                            FoundationPlaylistCoverArtwork(preset: preset, playlistTitle: name)
-                                .frame(width: 76, height: 76)
-                                .clipShape(.rect(cornerRadius: 12))
-                                .overlay(alignment: .bottomTrailing) {
-                                    if selectedCover?.id == preset.id {
-                                        Image(systemName: "checkmark.circle.fill").padding(5)
-                                    }
+    private var coverChoicesPopover: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Playlist Artwork").font(.headline)
+            LazyVGrid(
+                columns: Array(repeating: GridItem(.fixed(80), spacing: 8), count: 3), spacing: 8
+            ) {
+                ForEach(covers) { preset in
+                    Button {
+                        selectedCover = preset
+                        showingCovers = false
+                    } label: {
+                        FoundationPlaylistCoverArtwork(preset: preset, playlistTitle: name)
+                            .frame(width: 80, height: 80)
+                            .clipShape(.rect(cornerRadius: 12))
+                            .overlay(alignment: .bottomTrailing) {
+                                if selectedCover?.id == preset.id {
+                                    Image(systemName: "checkmark.circle.fill").padding(5)
                                 }
-                        }.buttonStyle(.plain).accessibilityLabel(preset.title)
+                            }
                     }
-                }.padding(.vertical, 4)
-            }.scrollIndicators(.hidden)
-            Button("Keep Current Artwork", systemImage: "arrow.uturn.backward") {
-                selectedCover = nil
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(preset.title)
+                }
             }
-        } header: {
-            Label("Artwork", systemImage: "photo")
         }
+        .padding(16)
+        .frame(width: 288)
         .disabled(!canEditDetails || !canEditCover || operation.isPending)
     }
 
@@ -791,7 +835,11 @@ struct FoundationPlaylistEditor: View {
                     .font(.subheadline).foregroundStyle(.secondary)
             }
             if let collection = addCollection {
-                addResults(addModel, title: "Songs in \(collection.title)")
+                #if os(macOS)
+                    addResults(addModel, title: "Songs")
+                #else
+                    addResults(addModel, title: "Songs in \(collection.title)")
+                #endif
             } else if !addSearchTerm.isEmpty {
                 addResults(
                     addResultKind == .track
@@ -843,14 +891,6 @@ struct FoundationPlaylistEditor: View {
                         }
                     }.buttonStyle(.plain)
                 }
-                if model.isLoading { ProgressView("Searching…") }
-                if let error = model.errorMessage {
-                    Text(error).foregroundStyle(.secondary)
-                    Button("Retry", systemImage: "arrow.clockwise") {
-                        model.request(model.retryRequest)
-                        addRevision += 1
-                    }
-                }
                 if visibleAddItems(model).count < model.items.count || model.nextStartIndex != nil {
                     Button("More \(title)", systemImage: "ellipsis") {
                         let hasHiddenItems = visibleAddItems(model).count < model.items.count
@@ -862,7 +902,11 @@ struct FoundationPlaylistEditor: View {
                     }.disabled(model.isLoading)
                 }
             } header: {
-                Text(title)
+                #if os(macOS)
+                    if addCollection == nil { Text(title) }
+                #else
+                    Text(title)
+                #endif
             }
         } else if addCollection != nil, model.loaded {
             Section { Text("No songs are available here.").foregroundStyle(.secondary) }
@@ -880,29 +924,23 @@ struct FoundationPlaylistEditor: View {
         addRevision = 0
     }
 
-    private var showsManagementFeedback: Bool {
-        operation.isPending || !saveSummary.isEmpty
-            || (!operation.succeeded && operation.message != nil)
-    }
-
     #if os(macOS)
         private var macManagementFooter: some View {
             VStack(spacing: 12) {
                 batchRemovalControl
                 VStack(spacing: 12) {
-                    if showsManagementFeedback { managementFeedback }
                     HStack(spacing: 12) {
                         Button("Add Songs", systemImage: "plus") { openAddMusicSearch() }
                             .buttonStyle(.borderedProminent)
                             .disabled(!editable || operation.isPending)
                             .accessibilityIdentifier("playlist-manager-add-disclosure")
                         Spacer()
-                        Button("Save", systemImage: "checkmark") { confirmSave = true }
-                            .disabled(!canEditDetails || operation.isPending || !dirty)
-                            .buttonStyle(.borderedProminent)
                         Button("Close", systemImage: "xmark") {
                             if dirty { confirmDiscard = true } else { dismiss() }
                         }.disabled(operation.isPending).buttonStyle(.bordered)
+                        Button("Save", systemImage: "checkmark") { confirmSave = true }
+                            .disabled(!canEditDetails || operation.isPending || !dirty)
+                            .buttonStyle(.borderedProminent)
                     }
                 }
                 .padding(16)
@@ -913,17 +951,6 @@ struct FoundationPlaylistEditor: View {
 
     private var managementBar: some View {
         VStack(spacing: 12) {
-            if showsManagementFeedback {
-                #if os(macOS)
-                    managementFeedback
-                #else
-                    if operation.isPending || !saveSummary.isEmpty
-                        || (!operation.succeeded && operation.message != nil)
-                    {
-                        managementFeedback
-                    }
-                #endif
-            }
             Button {
                 openAddMusicSearch()
             } label: {
@@ -1004,29 +1031,46 @@ struct FoundationPlaylistEditor: View {
         }
     #endif
 
-    private var managementFeedback: some View {
-        HStack(spacing: 12) {
-            if operation.isPending {
-                ProgressView().controlSize(.small)
-                Text("Updating playlist…").foregroundStyle(.secondary)
-                Spacer()
-                Button("Cancel Request") {
-                    requiresRefresh = true
-                    operation.cancel()
-                }
+    private func operationFailurePresentation(forSearch: Bool) -> Binding<Bool> {
+        Binding(
+            get: { operationFailure != nil && addingSongs == forSearch },
+            set: { if !$0 { operationFailure = nil } })
+    }
+
+    @ViewBuilder private var operationFailureActions: some View {
+        Button("Retry") {
+            let searchKind = failedSearchKind
+            operationFailure = nil
+            failedSearchKind = nil
+            if let searchKind {
+                let model =
+                    searchKind == .track ? addModel : searchKind == .album ? addAlbums : addArtists
+                model.request(model.retryRequest)
+                addRevision += 1
             } else {
-                if !saveSummary.isEmpty {
-                    Text(saveSummary).font(.caption).foregroundStyle(.secondary).lineLimit(2)
-                }
-                Spacer()
-                if !operation.succeeded, operation.message != nil {
-                    Button("Retry", systemImage: "arrow.clockwise") {
-                        operation.run { try await refresh() }
-                    }
-                    .disabled(connectivity.localOnly)
-                }
+                operation.run { try await refresh() }
             }
-        }
+        }.disabled(connectivity.localOnly || operation.isPending)
+        Button("Close", role: .cancel) { operationFailure = nil }
+    }
+
+    private func presentOperationFailure() {
+        guard editorActive, editorScope == library.catalogScopeID,
+            !operation.isPending, !operation.succeeded, let message = operation.message,
+            !message.isEmpty
+        else { return }
+        failedSearchKind = nil
+        operationFailure = message
+    }
+
+    private func presentSearchFailure(_ kind: FoundationItem.Kind) {
+        guard editorActive, editorScope == library.catalogScopeID, addingSongs,
+            addCollection != nil ? kind == .track : kind == addResultKind
+        else { return }
+        let model = kind == .track ? addModel : kind == .album ? addAlbums : addArtists
+        guard let message = model.errorMessage, !message.isEmpty else { return }
+        failedSearchKind = kind
+        operationFailure = message
     }
 
     #if os(macOS)
