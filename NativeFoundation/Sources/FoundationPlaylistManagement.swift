@@ -166,55 +166,25 @@ struct FoundationPlaylistEditor: View {
                     .navigationTitle("Manage Playlist")
                     .navigationBarTitleDisplayMode(.inline)
                 #endif
-                .toolbar {
-                    ToolbarItem(placement: .cancellationAction) {
-                        #if os(macOS)
-                            if !addingSongs {
-                                Button("Close", systemImage: "xmark") {
-                                    if dirty { confirmDiscard = true } else { dismiss() }
-                                }.disabled(operation.isPending).buttonStyle(.bordered)
-                            }
-                        #else
+                #if os(iOS)
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
                             Button("Close", systemImage: "xmark") {
                                 if dirty { confirmDiscard = true } else { dismiss() }
                             }.disabled(operation.isPending)
-                        #endif
-                    }
-                    ToolbarItemGroup(placement: .confirmationAction) {
-                        #if os(macOS)
-                            if !addingSongs {
-                                Button("Save", systemImage: "checkmark") { confirmSave = true }
-                                    .disabled(!canEditDetails || operation.isPending || !dirty)
-                                    .buttonStyle(.borderedProminent)
-                                Button("Add Songs", systemImage: "plus") { openAddMusicSearch() }
-                                    .buttonStyle(.borderedProminent)
-                                    .disabled(!editable || operation.isPending)
-                                    .accessibilityIdentifier("playlist-manager-add-disclosure")
-                            }
-                        #else
-                            Button("Save", systemImage: "checkmark") { confirmSave = true }
-                                .disabled(!canEditDetails || operation.isPending || !dirty)
-                                .buttonStyle(.glassProminent)
-                        #endif
-                    }
-                    #if os(iOS)
-                        ToolbarItem(placement: .primaryAction) { playlistOptions }
-                    #endif
-                }
-                .safeAreaInset(edge: .bottom, spacing: 0) {
-                    #if os(macOS)
-                        if !addingSongs && showsManagementFeedback {
-                            managementFeedback.padding(16).background(.bar)
                         }
-                    #else
-                        if !phoneKeyboardVisible { managementBar }
-                    #endif
-                }
-                .overlay(alignment: .bottomTrailing) {
-                    #if os(iOS)
-                        if phoneKeyboardVisible && !addingSongs { phoneKeyboardDismissButton }
-                    #endif
-                }
+                        ToolbarItemGroup(placement: .confirmationAction) {
+                            Button("Save", systemImage: "checkmark") { confirmSave = true }
+                            .disabled(!canEditDetails || operation.isPending || !dirty)
+                            .buttonStyle(.glassProminent)
+                        }
+                        ToolbarItem(placement: .primaryAction) { playlistOptions }
+                    }
+                #else
+                    .safeAreaInset(edge: .bottom, spacing: 0) {
+                        if !addingSongs { macManagementFooter }
+                    }
+                #endif
                 .modifier(FoundationPlaylistFeedback(operation: operation))
                 .alert("Save playlist changes?", isPresented: $confirmSave) {
                     Button("Save Changes", systemImage: "checkmark") { saveDetails() }
@@ -257,9 +227,25 @@ struct FoundationPlaylistEditor: View {
             .background { FoundationPlaylistSheetActivation().frame(width: 0, height: 0) }
         #endif
         #if os(iOS)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                // Retain the footer host across keyboard transitions; only its extent changes.
+                managementBar
+                .frame(height: phoneKeyboardVisible ? 0 : nil)
+                .clipped()
+                .opacity(phoneKeyboardVisible ? 0 : 1)
+                .allowsHitTesting(!phoneKeyboardVisible)
+                .accessibilityHidden(phoneKeyboardVisible)
+            }
+            .overlay(alignment: .bottomTrailing) {
+                if phoneKeyboardVisible && !addingSongs { phoneKeyboardDismissButton }
+            }
+            .background { Color(uiColor: .systemGroupedBackground).ignoresSafeArea() }
             .sheet(isPresented: $addingSongs) { addMusicSheet }
+            .presentationBackground(Color(uiColor: .systemGroupedBackground))
+        #else
+            .presentationBackground(.ultraThinMaterial)
         #endif
-        .presentationBackground(.ultraThinMaterial)
         .interactiveDismissDisabled(dirty || operation.isPending)
         .onAppear {
             if !loaded {
@@ -819,6 +805,29 @@ struct FoundationPlaylistEditor: View {
         operation.isPending || !saveSummary.isEmpty || !selection.isEmpty
             || (!operation.succeeded && operation.message != nil)
     }
+
+    #if os(macOS)
+        private var macManagementFooter: some View {
+            VStack(spacing: 12) {
+                if showsManagementFeedback { managementFeedback }
+                HStack(spacing: 12) {
+                    Button("Close", systemImage: "xmark") {
+                        if dirty { confirmDiscard = true } else { dismiss() }
+                    }.disabled(operation.isPending).buttonStyle(.bordered)
+                    Button("Save", systemImage: "checkmark") { confirmSave = true }
+                        .disabled(!canEditDetails || operation.isPending || !dirty)
+                        .buttonStyle(.borderedProminent)
+                    Spacer()
+                    Button("Add Songs", systemImage: "plus") { openAddMusicSearch() }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(!editable || operation.isPending)
+                        .accessibilityIdentifier("playlist-manager-add-disclosure")
+                }
+            }
+            .padding(16)
+            .background(.bar)
+        }
+    #endif
 
     private var managementBar: some View {
         VStack(spacing: 12) {
