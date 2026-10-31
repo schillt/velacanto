@@ -851,16 +851,16 @@ struct FoundationPlaylistEditor: View {
                     UIApplication.shared.sendAction(
                         #selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
                 } label: {
-                    Image(systemName: "chevron.down")
+                    Image(systemName: "chevron.down").font(.headline)
                 }
                 .buttonStyle(.glass)
                 .buttonBorderShape(.circle)
-                .frame(width: 44, height: 44)
+                .controlSize(.large)
+                .frame(width: 52, height: 52)
                 .accessibilityLabel("Hide Keyboard")
                 .accessibilityIdentifier("playlist-manager-hide-keyboard")
             }
-            .padding(.horizontal, 16)
-            .background(.ultraThinMaterial)
+            .padding(.horizontal, 16).padding(.vertical, 4)
         }
     #endif
 
