@@ -766,6 +766,19 @@ private enum CrossClientFixtures {
 
 final class FoundationRemoteContinuationTests: XCTestCase {
     #if DEBUG
+        func testRemoteContinuationDiagnosticSeparatesPostRefreshGuards() {
+            let fields = FoundationRemoteContinuationDiagnostic.fields(
+                .postRefresh, outcome: .observed, selection: .fullQueue,
+                postRefresh: .init(
+                    afterRefreshPresent: true, receiverPlaying: true, networkAllowed: true,
+                    supportsControl: false, selectionCanControl: true))
+            XCTAssertEqual(
+                fields,
+                "remote-continuation stage=postRefresh outcome=observed command=Stop"
+                    + " afterRefreshPresent=1 receiverPlaying=1 networkAllowed=1"
+                    + " supportsControl=0 selectionCanControl=1")
+        }
+
         func testRemoteContinuationDiagnosticRejectsPrivateErrorFields() {
             let secret = "private-token-host-track"
             let underlying = NSError(domain: NSURLErrorDomain, code: -1001, userInfo: [

@@ -40,7 +40,8 @@ final class FoundationHandoffController: NSObject, ObservableObject, NSUserActiv
             func diagnostic(
                 _ stage: FoundationRemoteContinuationDiagnostic.Stage,
                 outcome: FoundationRemoteContinuationDiagnostic.Outcome,
-                failedAt: FoundationRemoteContinuationDiagnostic.Stage? = nil, error: Error? = nil
+                failedAt: FoundationRemoteContinuationDiagnostic.Stage? = nil, error: Error? = nil,
+                postRefresh: FoundationRemoteContinuationDiagnostic.PostRefresh? = nil
             ) {
                 guard FoundationRemoteContinuationDiagnostic.enabled, diagnosticEvents < 8 else {
                     return
@@ -49,7 +50,7 @@ final class FoundationHandoffController: NSObject, ObservableObject, NSUserActiv
                 FoundationJournal.shared.record(
                     FoundationRemoteContinuationDiagnostic.fields(
                         stage, outcome: outcome, selection: offer?.selection ?? .fullQueue,
-                        failedAt: failedAt, error: error))
+                        failedAt: failedAt, error: error, postRefresh: postRefresh))
             }
         #endif
         init(
@@ -527,6 +528,18 @@ final class FoundationHandoffController: NSObject, ObservableObject, NSUserActiv
                 let fresh = try await transfer.library.refreshRemoteContinuation(expected)
                 try Task.checkCancellation()
                 guard let self, self.remoteIsCurrent(transfer) else { return }
+                #if DEBUG
+                    transfer.diagnostic(
+                        .postRefresh, outcome: .observed,
+                        postRefresh: .init(
+                            afterRefreshPresent: true,
+                            receiverPlaying: self.player?.isNativeContinuationPlaying(
+                                generation: generation, occurrence: expected.selected) == true,
+                            networkAllowed: transfer.allowsNetworking(),
+                            supportsControl: fresh.supportsRemoteControl,
+                            selectionCanControl: fresh.selection == .fullQueue
+                                || fresh.canPauseCurrentSong))
+                #endif
                 guard
                     self.player?.isNativeContinuationPlaying(
                         generation: generation, occurrence: expected.selected) == true
@@ -1166,22 +1179,36 @@ final class FoundationHandoffController: NSObject, ObservableObject, NSUserActiv
   /// Fixed scalars only. No source identity, position, URL or error description.
   nonisolated enum FoundationRemoteContinuationDiagnostic {
     enum Stage: String {
-      case accepted, nativeStart, sourceRecheck, command, result, confirmation, withheld, retired
+      case accepted, nativeStart, postRefresh, sourceRecheck, command, result, confirmation, withheld, retired
     }
     enum Outcome: String {
-      case validated, attempted, success, confirmed, unconfirmed, failed, finished
+      case validated, observed, attempted, success, confirmed, unconfirmed, failed, finished
+    }
+    struct PostRefresh {
+      let afterRefreshPresent: Bool
+      let receiverPlaying: Bool
+      let networkAllowed: Bool
+      let supportsControl: Bool
+      let selectionCanControl: Bool
     }
     static var enabled: Bool {
       ProcessInfo.processInfo.arguments.contains("-diagnosticRemoteContinuation")
     }
     static func fields(
       _ stage: Stage, outcome: Outcome, selection: FoundationRemoteContinuationSelection,
-      failedAt: Stage? = nil, error: Error? = nil
+      failedAt: Stage? = nil, error: Error? = nil, postRefresh: PostRefresh? = nil
     ) -> String {
       var result =
         "remote-continuation stage=\(stage.rawValue) outcome=\(outcome.rawValue)"
         + " command=\(selection == .currentSong ? "Pause" : "Stop")"
       if let failedAt { result += " failedAt=\(failedAt.rawValue)" }
+      if let flags = postRefresh {
+        result += " afterRefreshPresent=\(flags.afterRefreshPresent ? 1 : 0)"
+          + " receiverPlaying=\(flags.receiverPlaying ? 1 : 0)"
+          + " networkAllowed=\(flags.networkAllowed ? 1 : 0)"
+          + " supportsControl=\(flags.supportsControl ? 1 : 0)"
+          + " selectionCanControl=\(flags.selectionCanControl ? 1 : 0)"
+      }
       if let error {
         let native = error as NSError
         func scalar(_ error: NSError) -> String {
