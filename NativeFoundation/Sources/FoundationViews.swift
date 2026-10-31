@@ -2519,28 +2519,32 @@ private struct FoundationCollectionView: View {
             updatedPlaylist = nil
             playlistName = nil
         }
-        .sheet(
-            item: $playlistSheet,
-            onDismiss: {
-                guard !connectivity.localOnly else { return }
-                refreshRevision += 1
+        #if os(iOS)
+            .fullScreenCover(item: $playlistSheet, onDismiss: playlistEditorDismissed) { _ in
+                playlistEditor
+            }
+        #else
+            .sheet(item: $playlistSheet, onDismiss: playlistEditorDismissed) { _ in
+                playlistEditor
+            }
+        #endif
+    }
+
+    private func playlistEditorDismissed() {
+        guard !connectivity.localOnly else { return }
+        refreshRevision += 1
+    }
+
+    private var playlistEditor: some View {
+        FoundationPlaylistEditor(
+            playlist: displayItem, onDeleted: { dismiss() },
+            onRenamed: { playlistName = $0 },
+            onUpdated: { [scope = library.metadataScopeID] updated in
+                guard foundationPlaylistUpdateMatches(updated, original: item, library: library)
+                else { return }
+                updatedPlaylist = (updated, scope)
             },
-            content: { destination in
-                switch destination {
-                case .manage, .addSongs, .reorderSongs:
-                    FoundationPlaylistEditor(
-                        playlist: displayItem, onDeleted: { dismiss() },
-                        onRenamed: { playlistName = $0 },
-                        onUpdated: { [scope = library.metadataScopeID] updated in
-                            guard
-                                foundationPlaylistUpdateMatches(
-                                    updated, original: item, library: library)
-                            else { return }
-                            updatedPlaylist = (updated, scope)
-                        },
-                        library: library)
-                }
-            })
+            library: library)
     }
 }
 

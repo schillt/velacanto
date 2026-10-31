@@ -165,6 +165,7 @@ struct FoundationPlaylistEditor: View {
             managerSurface
                 #if os(iOS)
                     .navigationTitle("Manage Playlist")
+                    .navigationBarTitleDisplayMode(.inline)
                 #endif
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) {
@@ -173,10 +174,9 @@ struct FoundationPlaylistEditor: View {
                                 if dirty { confirmDiscard = true } else { dismiss() }
                             }.disabled(operation.isPending).buttonStyle(.bordered)
                         #else
-                            if dirty {
-                                Button("Discard", systemImage: "xmark") { confirmDiscard = true }
-                                    .disabled(operation.isPending)
-                            }
+                            Button("Close", systemImage: "xmark") {
+                                if dirty { confirmDiscard = true } else { dismiss() }
+                            }.disabled(operation.isPending)
                         #endif
                     }
                     ToolbarItem(placement: .confirmationAction) {
@@ -189,7 +189,13 @@ struct FoundationPlaylistEditor: View {
                             #endif
                     }
                     #if os(iOS)
-                        ToolbarItem(placement: .primaryAction) { playlistOptions }
+                        ToolbarItemGroup(placement: .primaryAction) {
+                            Button("Add Songs", systemImage: "plus") { openAddMusicSearch() }
+                                .labelStyle(.iconOnly)
+                                .disabled(!editable || operation.isPending)
+                                .accessibilityIdentifier("playlist-manager-add-disclosure")
+                            playlistOptions
+                        }
                     #endif
                 }
                 .safeAreaInset(edge: .bottom, spacing: 0) { managementFooter }
@@ -239,9 +245,6 @@ struct FoundationPlaylistEditor: View {
         .sheet(isPresented: $addingSongs) { addMusicSheet }
         .presentationBackground(.ultraThinMaterial)
         .interactiveDismissDisabled(dirty || operation.isPending)
-        #if os(iOS)
-            .presentationDragIndicator(.visible)
-        #endif
         .onAppear {
             if !loaded {
                 name = playlist.title
@@ -392,8 +395,21 @@ struct FoundationPlaylistEditor: View {
     @ViewBuilder private var managerContents: some View {
         detailsSection
         if showingCovers { coverSection }
-        addMusicDisclosure
+        #if os(macOS)
+            addMusicDisclosure
+        #endif
         songsSection
+    }
+
+    private func openAddMusicSearch() {
+        addCollection = nil
+        addQuery = ""
+        addModel.clearRetainedData()
+        addAlbums.clearRetainedData()
+        addArtists.clearRetainedData()
+        addRevision = 0
+        addVisibleCount = 12
+        addingSongs = true
     }
 
     private var addMusicDisclosure: some View {
@@ -403,14 +419,7 @@ struct FoundationPlaylistEditor: View {
                     if addingSongs {
                         addingSongs = false
                     } else {
-                        addCollection = nil
-                        addQuery = ""
-                        addModel.clearRetainedData()
-                        addAlbums.clearRetainedData()
-                        addArtists.clearRetainedData()
-                        addRevision = 0
-                        addVisibleCount = 12
-                        addingSongs = true
+                        openAddMusicSearch()
                     }
 
                 }
@@ -1328,12 +1337,23 @@ struct FoundationPlaylistCreate: View {
 
     var body: some View {
         Group {
-            if showingSongs, let createdPlaylist {
-                FoundationPlaylistEditor(
-                    playlist: createdPlaylist, library: library, startsAddingSongs: true)
-            } else {
+            #if os(macOS)
+                if showingSongs, let createdPlaylist {
+                    FoundationPlaylistEditor(
+                        playlist: createdPlaylist, library: library, startsAddingSongs: true)
+                } else {
+                    composer
+                }
+            #else
                 composer
-            }
+                    .fullScreenCover(isPresented: $showingSongs, onDismiss: { dismiss() }) {
+                        if let createdPlaylist {
+                            FoundationPlaylistEditor(
+                                playlist: createdPlaylist, library: library, startsAddingSongs: true
+                            )
+                        }
+                    }
+            #endif
         }
         .onDisappear {
             creationAttempt = nil
