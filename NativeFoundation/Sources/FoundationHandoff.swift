@@ -35,6 +35,23 @@ final class FoundationHandoffController: NSObject, ObservableObject, NSUserActiv
         var completion: (@MainActor () -> Void)?
         var onStarted: (@MainActor () -> Void)?
         var didStart = false
+        #if DEBUG
+            private var diagnosticEvents = 0
+            func diagnostic(
+                _ stage: FoundationRemoteContinuationDiagnostic.Stage,
+                outcome: FoundationRemoteContinuationDiagnostic.Outcome,
+                failedAt: FoundationRemoteContinuationDiagnostic.Stage? = nil, error: Error? = nil
+            ) {
+                guard FoundationRemoteContinuationDiagnostic.enabled, diagnosticEvents < 8 else {
+                    return
+                }
+                diagnosticEvents += 1
+                FoundationJournal.shared.record(
+                    FoundationRemoteContinuationDiagnostic.fields(
+                        stage, outcome: outcome, selection: offer?.selection ?? .fullQueue,
+                        failedAt: failedAt, error: error))
+            }
+        #endif
         init(
             activityID: String, context: UUID, intent: UUID, library: any FoundationLibrary,
             completion: @escaping @MainActor () -> Void,
@@ -407,6 +424,9 @@ final class FoundationHandoffController: NSObject, ObservableObject, NSUserActiv
             return
         }
         self.pending = nil
+        #if DEBUG
+            transfer.diagnostic(.accepted, outcome: .validated)
+        #endif
         remoteTask = Task { [weak self, weak transfer] in
             guard let transfer else { return }
             do {
@@ -490,12 +510,18 @@ final class FoundationHandoffController: NSObject, ObservableObject, NSUserActiv
                 generation: generation, occurrence: expected.selected) == true
         else { return }
         transfer.didStart = true
+        #if DEBUG
+            transfer.diagnostic(.nativeStart, outcome: .validated)
+        #endif
         let started = transfer.onStarted
         transfer.onStarted = nil
         started?()
         remoteTask = Task { [weak self, weak transfer] in
             guard let transfer else { return }
             var confirmed = false
+            #if DEBUG
+                var diagnosticStage = FoundationRemoteContinuationDiagnostic.Stage.sourceRecheck
+            #endif
             do {
                 guard transfer.allowsNetworking() else { throw FoundationHandoffError.unavailable }
                 let fresh = try await transfer.library.refreshRemoteContinuation(expected)
@@ -510,17 +536,41 @@ final class FoundationHandoffController: NSObject, ObservableObject, NSUserActiv
                 guard fresh.supportsRemoteControl,
                     fresh.selection == .fullQueue || fresh.canPauseCurrentSong
                 else { throw FoundationHandoffError.unavailable }
+                #if DEBUG
+                    transfer.diagnostic(.sourceRecheck, outcome: .validated)
+                    diagnosticStage = .command
+                    transfer.diagnostic(.command, outcome: .attempted)
+                #endif
                 // Owner accepted best effort: the server has no atomic expected-occurrence
                 // Stop/Pause. This single command follows actual receiving native playback.
                 try await transfer.library.stopRemoteContinuation(fresh)
+                #if DEBUG
+                    transfer.diagnostic(.result, outcome: .success)
+                #endif
                 try Task.checkCancellation()
                 guard self.remoteIsCurrent(transfer) else { return }
                 if transfer.allowsNetworking() {
-                    confirmed =
-                        (try? await transfer.library.confirmRemoteContinuationStopped(fresh))
-                        == true
+                    #if DEBUG
+                        diagnosticStage = .confirmation
+                        do {
+                            confirmed = try await transfer.library.confirmRemoteContinuationStopped(fresh)
+                            transfer.diagnostic(
+                                .confirmation, outcome: confirmed ? .confirmed : .unconfirmed)
+                        } catch {
+                            transfer.diagnostic(.confirmation, outcome: .failed, error: error)
+                        }
+                    #else
+                        confirmed =
+                            (try? await transfer.library.confirmRemoteContinuationStopped(fresh))
+                            == true
+                    #endif
                 }
-            } catch {}
+            } catch {
+                #if DEBUG
+                    transfer.diagnostic(
+                        .withheld, outcome: .failed, failedAt: diagnosticStage, error: error)
+                #endif
+            }
             guard !Task.isCancelled, let self, self.remoteIsCurrent(transfer) else { return }
             self.retireRemote()
             if !confirmed {
@@ -550,6 +600,9 @@ final class FoundationHandoffController: NSObject, ObservableObject, NSUserActiv
 
     private func retireRemote() {
         let transfer = remoteTransfer
+        #if DEBUG
+            transfer?.diagnostic(.retired, outcome: .finished)
+        #endif
         remoteTransfer = nil
         remoteTask?.cancel()
         remoteTask = nil
@@ -1108,3 +1161,63 @@ final class FoundationHandoffController: NSObject, ObservableObject, NSUserActiv
         consumed[id] = Date().timeIntervalSince1970
     }
 }
+
+#if DEBUG
+  /// Fixed scalars only. No source identity, position, URL or error description.
+  nonisolated enum FoundationRemoteContinuationDiagnostic {
+    enum Stage: String {
+      case accepted, nativeStart, sourceRecheck, command, result, confirmation, withheld, retired
+    }
+    enum Outcome: String {
+      case validated, attempted, success, confirmed, unconfirmed, failed, finished
+    }
+    static var enabled: Bool {
+      ProcessInfo.processInfo.arguments.contains("-diagnosticRemoteContinuation")
+    }
+    static func fields(
+      _ stage: Stage, outcome: Outcome, selection: FoundationRemoteContinuationSelection,
+      failedAt: Stage? = nil, error: Error? = nil
+    ) -> String {
+      var result =
+        "remote-continuation stage=\(stage.rawValue) outcome=\(outcome.rawValue)"
+        + " command=\(selection == .currentSong ? "Pause" : "Stop")"
+      if let failedAt { result += " failedAt=\(failedAt.rawValue)" }
+      if let error {
+        let native = error as NSError
+        func scalar(_ error: NSError) -> String {
+          let domain: String
+          switch error.domain {
+          case NSURLErrorDomain: domain = "url"
+          case "AVFoundationErrorDomain": domain = "av"
+          case NSOSStatusErrorDomain: domain = "osstatus"
+          case NSCocoaErrorDomain: domain = "cocoa"
+          case NSPOSIXErrorDomain: domain = "posix"
+          default: domain = "other"
+          }
+          return "\(domain):\(domain == "other" ? 0 : error.code)"
+        }
+        result += " error=\(scalar(native))"
+        if let application = error as? FoundationHandoffError {
+          let reason: String
+          switch application {
+          case .unsupported: reason = "unsupported"
+          case .invalid: reason = "invalid"
+          case .expired: reason = "expired"
+          case .differentAccount: reason = "differentAccount"
+          case .tooLarge: reason = "tooLarge"
+          case .unavailable: reason = "unavailable"
+          case .changed: reason = "changed"
+          case .interrupted: reason = "interrupted"
+          case .positionUnavailable: reason = "positionUnavailable"
+          case .queueUnavailable: reason = "queueUnavailable"
+          }
+          result += " reason=\(reason)"
+        }
+        if let underlying = native.userInfo[NSUnderlyingErrorKey] as? NSError {
+          result += " underlying=\(scalar(underlying))"
+        }
+      }
+      return result
+    }
+  }
+#endif

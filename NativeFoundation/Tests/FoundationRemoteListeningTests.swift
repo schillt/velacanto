@@ -765,6 +765,28 @@ private enum CrossClientFixtures {
 }
 
 final class FoundationRemoteContinuationTests: XCTestCase {
+    #if DEBUG
+        func testRemoteContinuationDiagnosticRejectsPrivateErrorFields() {
+            let secret = "private-token-host-track"
+            let underlying = NSError(domain: NSURLErrorDomain, code: -1001, userInfo: [
+                NSLocalizedDescriptionKey: secret,
+                NSURLErrorFailingURLErrorKey: URL(string: "https://example.invalid/" + secret)!,
+                NSUnderlyingErrorKey: NSError(domain: secret, code: 999, userInfo: [:]),
+            ])
+            let error = NSError(domain: secret, code: 123, userInfo: [
+                NSLocalizedDescriptionKey: secret, NSUnderlyingErrorKey: underlying,
+            ])
+            let fields = FoundationRemoteContinuationDiagnostic.fields(
+                .withheld, outcome: .failed, selection: .fullQueue, failedAt: .command, error: error)
+            XCTAssertEqual(
+                fields,
+                "remote-continuation stage=withheld outcome=failed command=Stop failedAt=command error=other:0 underlying=url:-1001")
+            XCTAssertFalse(fields.contains(secret))
+            XCTAssertFalse(fields.contains("https"))
+            XCTAssertFalse(fields.contains("999"))
+        }
+    #endif
+
     func testExplicitSongSelectionNeverInfersMissingQueueOrCopiesSourceModes() throws {
         let queues: [[[String: String]]?] = [
             nil, [], [["Id": CrossClientFixtures.first, "PlaylistItemId": "stale"]],
