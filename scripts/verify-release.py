@@ -69,6 +69,7 @@ markers = (
     b"-foundationDownloadsUITesting", b"DownloadUITestFixtures", b"FoundationDownloadUIFixture",
     b"FoundationAccountUITestHarness", b"synthetic-not-a-password",
     b"-diagnosticCarPlaySearch", b"-diagnosticCarPlayNativeSearch",
+    b"-diagnosticNativeDownload", b"download.native stage=", b"FoundationNativeDownloadErrorFields",
     b"FoundationCarPlayInputDiagnostic", b"CarPlaySearchDiagnostics",
     b"-diagnosticHomeRebound", b"HomeReboundDiagnostics", b"FoundationHomeReboundDiagnostic",
     b"-fixtureQueueArtworkTransition", b"-fixtureSharedChromeEvidence", b"-fixtureRemoteListening", b"FoundationChromeUIScrollProbe",

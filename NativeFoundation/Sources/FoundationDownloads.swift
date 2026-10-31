@@ -328,7 +328,7 @@ final class FoundationDownloads: ObservableObject {
         return true
     }
 
-    private func beginInventory() {
+    private func beginInventory(recoveringRemovalFailure: Bool = false) {
         isLoading = true
         let files = manifest.files
         let artwork = manifest.artwork ?? [:]
@@ -372,6 +372,23 @@ final class FoundationDownloads: ObservableObject {
                         "Some system downloads could not be verified. Other downloads remain available."
                 }
                 self.isLoading = false
+                if recoveringRemovalFailure {
+                    // Destructive cleanup may have partially succeeded. Publish only
+                    // freshly verified retained resources before restoring availability.
+                    // Do not run another collector or schedule transfers from recovery.
+                    self.readyFileIDs = Set(self.manifest.files.keys)
+                        .intersection(self.retainedTrackIDs)
+                        .subtracting(self.quarantinedNativeTrackIDs)
+                    try self.save()
+                    self.storageUsable = true
+                    self.refreshStates()
+                    self.refreshBytes()
+                    self.artworkRevision &+= 1
+                    self.errorMessage =
+                        "Some downloads could not be removed. Verified downloads remain available."
+                    self.inventoryTask = nil
+                    return
+                }
                 try self.finishInventory()
                 self.inventoryTask = nil
                 self.scheduleArtwork()
@@ -2111,6 +2128,17 @@ final class FoundationDownloads: ObservableObject {
         resetting = true
         defer { resetting = false }
         let previouslyUsable = storageUsable
+        if previouslyUsable {
+            // Removal intent must survive a failed/partial cleanup and cold launch.
+            // A failed pause publication aborts before any destructive operation.
+            paused.formUnion(owners.map(\.id))
+            do { try save() } catch {
+                worker?.cancel()
+                refreshStates()
+                reportStorageFailure()
+                return false
+            }
+        }
         storageUsable = false
         generation &+= 1
         syncPending = false
@@ -2148,6 +2176,13 @@ final class FoundationDownloads: ObservableObject {
                 reportStorageFailure()
                 return false
             }
+            // Pending-only native authority is invisible to the file collector. It
+            // cannot be reported removed merely because another file has a lease.
+            if !(manifest.nativePendingSessions?.isEmpty ?? true) {
+                collectUnusedFiles()  // Keeps every active lease and unproved allocation.
+                await recoverFailedRemoval(previouslyUsable: previouslyUsable)
+                return false
+            }
             storageUsable = true
             collectUnusedFiles()
             return errorMessage == nil
@@ -2173,10 +2208,19 @@ final class FoundationDownloads: ObservableObject {
             refreshBytes()
             return true
         } catch {
-            errorMessage = "Downloaded storage could not be removed. Retry Remove All Downloads."
-            refreshBytes()
+            await recoverFailedRemoval(previouslyUsable: previouslyUsable)
             return false
         }
+    }
+
+    private func recoverFailedRemoval(previouslyUsable: Bool) async {
+        errorMessage = "Downloaded storage could not be removed. Retry Remove All Downloads."
+        refreshBytes()
+        guard previouslyUsable, isLive else { return }
+        // One existing inventory owner/verification pass. Its generation/live checks
+        // and protected save gate availability; unreadable prior storage stays blocked.
+        beginInventory(recoveringRemovalFailure: true)
+        await inventoryTask?.value
     }
 
     /// Account teardown has already stopped playback; wait for its asynchronous lease releases.

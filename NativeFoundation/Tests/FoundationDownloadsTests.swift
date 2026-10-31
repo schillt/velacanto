@@ -276,6 +276,292 @@ final class FoundationDownloadsTests: XCTestCase {
         manager.invalidate()
     }
 
+    private enum RemovalRecoveryFailure: Sendable { case none, verification, publication }
+
+    private func removalFailureFixture(
+        failure: RemovalRecoveryFailure = .none, pendingNative: Bool = true
+    ) async throws -> (
+        manager: FoundationDownloads, directory: URL, storageRoot: URL,
+        good: FoundationItem, unknown: FoundationItem, file: URL,
+        store: FoundationNativeAllocationStore, checks: NativeDownloadVerificationFixture,
+        transfers: NativeDownloadVerificationFixture, retirements: NativeDownloadVerificationFixture
+    ) {
+        let storageRoot = try root()
+        let scope = "remove-failure"
+        let directory = FoundationDownloadStorage.directory(scope: scope, root: storageRoot)
+        try FoundationDownloadStorage.prepare(directory)
+        let good = item("verified-survivor")
+        let unknown = item("unknown-native")
+        let bytes = Data([1, 2, 3])
+        let file = directory.appendingPathComponent("verified.mp3")
+        try bytes.write(to: file)
+        try FoundationDownloadStorage.protect(file)
+        let store = FoundationNativeAllocationStore(
+            directory: directory,
+            sessionIdentifier: "dev.novoluxor.velacanto.offline." + directory.lastPathComponent
+                + "." + UUID().uuidString,
+            trackID: unknown.id)
+        if pendingNative {
+            try store.reserve(taskIdentifier: 1)
+            try store.beginResuming(taskIdentifier: 1)
+        }
+        var manifest = FoundationDownloadManifest()
+        manifest.owners = [good, unknown].map {
+            .init(
+                id: "track:" + $0.id, item: FoundationStoredDownloadItem($0),
+                tracks: [FoundationStoredDownloadItem($0)], paused: $0.id == unknown.id,
+                expanded: true)
+        }
+        manifest.files[good.id] = .init(
+            name: file.lastPathComponent, bytes: 3,
+            digest: try FoundationDownloadStorage.digest(file))
+        manifest.nativePendingSessions = pendingNative ? [store.sessionIdentifier] : nil
+        try FoundationDownloadStorage.save(manifest, directory: directory)
+        let checks = NativeDownloadVerificationFixture()
+        let transfers = NativeDownloadVerificationFixture()
+        let retirements = NativeDownloadVerificationFixture()
+        let manager = FoundationDownloads(
+            scope: scope, library: DownloadsLibrary(tracks: [good, unknown]), root: storageRoot,
+            transfer: { _, destination, _, _ in
+                transfers.recordVerification()
+                try bytes.write(to: destination)
+            },
+            monitorConnectivity: false,
+            nativeRetirement: { _, _ in
+                retirements.recordVerification()
+                return []
+            },
+            verifyInventoryFiles: { files, directory in
+                checks.recordVerification()
+                if checks.verifications > 2 {
+                    switch failure {
+                    case .verification: throw CocoaError(.fileReadNoPermission)
+                    case .publication:
+                        if !files.isEmpty {
+                            let manifest = directory.appendingPathComponent("manifest.json")
+                            try FileManager.default.removeItem(at: manifest)
+                            try FileManager.default.createDirectory(
+                                at: manifest, withIntermediateDirectories: false)
+                        }
+                    case .none: break
+                    }
+                }
+                return try await FoundationDownloadStorage.verifiedFiles(
+                    files, directory: directory)
+            })
+        try await waitUntil { !manager.isLoading }
+        XCTAssertTrue(manager.isReady(good))
+        XCTAssertFalse(manager.isReady(unknown))
+        return (
+            manager, directory, storageRoot, good, unknown, file, store, checks, transfers,
+            retirements
+        )
+    }
+
+    func testFailedRemoveAllReverifiesUnrelatedFileAndPersistsPausedIntentAcrossRelaunch()
+        async throws
+    {
+        let fixture = try await removalFailureFixture()
+        let receipt = try Data(contentsOf: fixture.store.receiptURL)
+        let removed = await fixture.manager.removeAll()
+        XCTAssertFalse(removed)
+        XCTAssertTrue(fixture.manager.isReady(fixture.good))
+        XCTAssertFalse(fixture.manager.isReady(fixture.unknown))
+        // One files/artwork pass before and after failure.
+        XCTAssertEqual(fixture.checks.verifications, 4)
+        XCTAssertEqual(try Data(contentsOf: fixture.store.receiptURL), receipt)
+        let saved = try FoundationDownloadStorage.load(directory: fixture.directory)
+        XCTAssertTrue(saved.owners.allSatisfy(\.paused))
+        XCTAssertTrue(
+            saved.nativePendingSessions?.contains(fixture.store.sessionIdentifier) == true)
+        fixture.manager.updateConnectivity(isAllowed: true)
+        await Task.yield()
+        XCTAssertEqual(fixture.transfers.verifications, 0)
+        fixture.manager.invalidate()
+        let relaunched = FoundationDownloads(
+            scope: "remove-failure",
+            library: DownloadsLibrary(tracks: [fixture.good, fixture.unknown]),
+            root: fixture.storageRoot,
+            transfer: { _, _, _, _ in XCTFail("Removal intent silently reacquired music") },
+            monitorConnectivity: false, nativeRetirement: { _, _ in [] })
+        try await waitUntil { !relaunched.isLoading }
+        relaunched.updateConnectivity(isAllowed: true)
+        await Task.yield()
+        XCTAssertTrue(relaunched.isReady(fixture.good))
+        XCTAssertTrue(relaunched.owners.allSatisfy { $0.state == .cancelled })
+        relaunched.invalidate()
+    }
+
+    func testFailedRemoveAllDoesNotReenableBeforeRecoveryVerificationAndPublication() async throws {
+        for failure in [RemovalRecoveryFailure.verification, .publication] {
+            let fixture = try await removalFailureFixture(failure: failure)
+            let before = try Data(contentsOf: fixture.store.receiptURL)
+            let removed = await fixture.manager.removeAll()
+            XCTAssertFalse(removed)
+            XCTAssertFalse(fixture.manager.isReady(fixture.good))
+            XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.file.path))
+            XCTAssertEqual(try Data(contentsOf: fixture.store.receiptURL), before)
+            let oldOwners = fixture.manager.owners.map(\.id)
+            fixture.manager.download(item("must-not-start"))
+            fixture.manager.updateConnectivity(isAllowed: true)
+            await Task.yield()
+            XCTAssertEqual(fixture.manager.owners.map(\.id), oldOwners)
+            XCTAssertEqual(fixture.transfers.verifications, 0)
+            fixture.manager.invalidate()
+        }
+    }
+
+    func testLeasedRemoveAllReportsPendingNativeFailureAndPreservesLeaseUntilRelease() async throws
+    {
+        let fixture = try await removalFailureFixture()
+        let receipt = try Data(contentsOf: fixture.store.receiptURL)
+        let lease = try await fixture.manager.playbackResource(
+            for: fixture.good, allowsRemoteFallback: false)
+        let removed = await fixture.manager.removeAll()
+        XCTAssertFalse(removed)
+        XCTAssertNotNil(fixture.manager.errorMessage)
+        XCTAssertTrue(fixture.manager.owners.isEmpty)
+        XCTAssertFalse(fixture.manager.isReady(fixture.good))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: lease.url.path))
+        XCTAssertEqual(try Data(contentsOf: fixture.store.receiptURL), receipt)
+        await lease.release()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: lease.url.path))
+        XCTAssertEqual(try Data(contentsOf: fixture.store.receiptURL), receipt)
+        XCTAssertTrue(
+            try FoundationDownloadStorage.load(directory: fixture.directory).nativePendingSessions?
+                .contains(fixture.store.sessionIdentifier) == true)
+        fixture.manager.invalidate()
+    }
+
+    func testHealthyLeasedRemoveAllStillSucceedsAndDeletesOnlyAfterRelease() async throws {
+        let fixture = try await removalFailureFixture(pendingNative: false)
+        let lease = try await fixture.manager.playbackResource(
+            for: fixture.good, allowsRemoteFallback: false)
+        let removed = await fixture.manager.removeAll()
+        XCTAssertTrue(removed)
+        XCTAssertTrue(fixture.manager.owners.isEmpty)
+        XCTAssertNil(fixture.manager.errorMessage)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: lease.url.path))
+        XCTAssertEqual(fixture.checks.verifications, 2)
+        XCTAssertFalse(fixture.manager.isReady(fixture.good))
+        await lease.release()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: lease.url.path))
+        fixture.manager.invalidate()
+    }
+
+    func testRemoveAllPauseSaveFailureAbortsBeforeDestructionOrRecovery() async throws {
+        let fixture = try await removalFailureFixture()
+        let manifest = fixture.directory.appendingPathComponent("manifest.json")
+        try FileManager.default.removeItem(at: manifest)
+        try FileManager.default.createDirectory(at: manifest, withIntermediateDirectories: false)
+        let receipt = try Data(contentsOf: fixture.store.receiptURL)
+        let retirementsBefore = fixture.retirements.verifications
+        let removed = await fixture.manager.removeAll()
+        XCTAssertFalse(removed)
+        XCTAssertEqual(fixture.retirements.verifications, retirementsBefore)
+        XCTAssertEqual(fixture.checks.verifications, 2)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.file.path))
+        XCTAssertEqual(try Data(contentsOf: fixture.store.receiptURL), receipt)
+        XCTAssertTrue(fixture.manager.isReady(fixture.good))
+        fixture.manager.updateConnectivity(isAllowed: true)
+        await Task.yield()
+        XCTAssertEqual(fixture.transfers.verifications, 0)
+        fixture.manager.invalidate()
+    }
+
+    func testRemoveAllWithUnreadableManifestCannotEnableStorageThroughFailureRecovery() async throws
+    {
+        let storageRoot = try root()
+        let directory = FoundationDownloadStorage.directory(
+            scope: "unreadable-removal", root: storageRoot)
+        try FoundationDownloadStorage.prepare(directory)
+        let manifest = directory.appendingPathComponent("manifest.json")
+        let corrupt = Data("not a manifest".utf8)
+        try corrupt.write(to: manifest)
+        let store = FoundationNativeAllocationStore(
+            directory: directory,
+            sessionIdentifier: "dev.novoluxor.velacanto.offline." + directory.lastPathComponent
+                + "." + UUID().uuidString)
+        try store.reserve(taskIdentifier: 1)
+        try store.beginResuming(taskIdentifier: 1)
+        let manager = FoundationDownloads(
+            scope: "unreadable-removal", library: DownloadsLibrary(tracks: []), root: storageRoot,
+            monitorConnectivity: false,
+            verifyInventoryFiles: { _, _ in
+                XCTFail("Unreadable account entered usable recovery")
+                return [:]
+            })
+        let removed = await manager.removeAll()
+        XCTAssertFalse(removed)
+        manager.download(item("blocked"))
+        XCTAssertTrue(manager.owners.isEmpty)
+        XCTAssertEqual(try Data(contentsOf: manifest), corrupt)
+        XCTAssertNil(try store.load().retired)
+        manager.invalidate()
+    }
+
+    func testPartialNativeRemovalReconcilesMissingAndUnverifiableWithoutStaleReady() async throws {
+        let storageRoot = try root()
+        let scope = "partial-native-removal"
+        let directory = FoundationDownloadStorage.directory(scope: scope, root: storageRoot)
+        try FoundationDownloadStorage.prepare(directory)
+        let tracks = [item("native-a"), item("native-b"), item("private-survivor")]
+        var manifest = FoundationDownloadManifest()
+        manifest.owners = tracks.map {
+            .init(
+                id: "track:" + $0.id, item: FoundationStoredDownloadItem($0),
+                tracks: [FoundationStoredDownloadItem($0)], paused: false, expanded: true)
+        }
+        for track in tracks {
+            let native = track.id.hasPrefix("native-")
+            let url = directory.appendingPathComponent(track.id + (native ? ".movpkg" : ".mp3"))
+            if native {
+                try FileManager.default.createDirectory(at: url, withIntermediateDirectories: false)
+            } else {
+                try Data([1, 2, 3]).write(to: url)
+            }
+            manifest.files[track.id] = .init(
+                name: url.lastPathComponent, bytes: 3,
+                digest: native ? "" : try FoundationDownloadStorage.digest(url),
+                nativePackage: native
+                    ? .init(
+                        nativeURL: url, bookmark: Data("synthetic proof".utf8),
+                        sessionIdentifier: track.id) : nil)
+        }
+        try FoundationDownloadStorage.save(manifest, directory: directory)
+        let checks = NativeDownloadVerificationFixture()
+        let nativeChecks = NativeDownloadVerificationFixture()
+        let manager = FoundationDownloads(
+            scope: scope, library: DownloadsLibrary(tracks: tracks), root: storageRoot,
+            transfer: { _, _, _, _ in XCTFail("Failed removal reacquired music") },
+            monitorConnectivity: false,
+            nativeResolution: { package, _ in
+                if !FileManager.default.fileExists(atPath: package.nativeURL.path) {
+                    return .provenMissing
+                }
+                nativeChecks.recordVerification()
+                return nativeChecks.verifications == 1
+                    ? .available(package.nativeURL) : .unverifiable
+            },
+            verifyInventoryFiles: { files, _ in
+                checks.recordVerification()
+                return checks.verifications <= 2
+                    ? files : files.filter { $0.value.nativePackage == nil }
+            })
+        try await waitUntil { !manager.isLoading }
+        XCTAssertTrue(tracks.allSatisfy { manager.isReady($0) })
+        let removed = await manager.removeAll()
+        XCTAssertFalse(removed)
+        XCTAssertTrue(manager.isReady(tracks[2]))
+        XCTAssertFalse(manager.isReady(tracks[0]))
+        XCTAssertFalse(manager.isReady(tracks[1]))
+        let saved = try FoundationDownloadStorage.load(directory: directory)
+        XCTAssertEqual(saved.files.values.filter { $0.nativePackage != nil }.count, 1)
+        XCTAssertEqual(saved.excludedTrackIDs?.count, 1)
+        XCTAssertTrue(saved.owners.allSatisfy(\.paused))
+        manager.invalidate()
+    }
+
     func testActualNativeDelegateCancellationBeforeAllocationSurvivesRelaunchAndClearsAccount()
         async throws
     {
