@@ -263,7 +263,14 @@ private actor PlaylistMetadataServer {
             value = ["ItemIds": [], "Shares": [["UserId": userID, "CanEdit": true]]]
             if sharingVisible { value["OpenAccess"] = isPublic }
         } else if path == "/jf/Users/Me" {
-            value = ["Id": userID, "Policy": ["IsAdministrator": administrator]]
+            value = [
+                "Id": userID,
+                "Policy": [
+                    "IsAdministrator": administrator,
+                    "AuthenticationProviderId": "fixture-authentication",
+                    "PasswordResetProviderId": "fixture-password-reset",
+                ],
+            ]
         } else if path == "/jf/Playlists/" + id + "/Users/" + userID {
             value = ["UserId": foreignPermission ? id : userID, "CanEdit": true]
         } else {

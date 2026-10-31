@@ -1306,8 +1306,9 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
             Paths.getItem(itemID: id, userID: session.userID),
             maximumBytes: FoundationPlaylistMetadata.maximumItemBytes)
         guard dto.id == id, dto.type == .playlist, permission.userID == session.userID,
-            let item = try mappedItems([dto], kinds: [.playlist]).first
+            var item = try mappedItems([dto], kinds: [.playlist]).first
         else { throw FoundationLibraryError.invalidResponse }
+        item.catalogSource = try .jellyfin(scope: catalogAccountIdentity)
         let permissions = FoundationPlaylistPermissions(
             name: dto.name ?? "Untitled", canEdit: permission.canEdit == true,
             canDelete: dto.canDelete == true)
