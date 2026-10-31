@@ -596,7 +596,7 @@ final class FoundationDownloadsTests: XCTestCase {
 
     private func firstCompletionFixture() throws -> (
         store: FoundationNativeAllocationStore, proof: NativeFirstCompletionProof,
-        delegate: FoundationNativeDownloadDelegate, session: URLSession, task: URLSessionDataTask
+        delegate: FoundationNativeDownloadDelegate, session: URLSession, task: URLSessionTask
     ) {
         let directory = try root()
         try FoundationDownloadStorage.prepare(directory)
