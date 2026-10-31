@@ -180,12 +180,16 @@ struct FoundationPlaylistEditor: View {
                             }.disabled(operation.isPending)
                         #endif
                     }
-                    ToolbarItem(placement: .confirmationAction) {
+                    ToolbarItemGroup(placement: .confirmationAction) {
                         #if os(macOS)
                             if !addingSongs {
                                 Button("Save", systemImage: "checkmark") { confirmSave = true }
                                     .disabled(!canEditDetails || operation.isPending || !dirty)
                                     .buttonStyle(.borderedProminent)
+                                Button("Add Songs", systemImage: "plus") { openAddMusicSearch() }
+                                    .buttonStyle(.borderedProminent)
+                                    .disabled(!editable || operation.isPending)
+                                    .accessibilityIdentifier("playlist-manager-add-disclosure")
                             }
                         #else
                             Button("Save", systemImage: "checkmark") { confirmSave = true }
@@ -199,9 +203,16 @@ struct FoundationPlaylistEditor: View {
                 }
                 .safeAreaInset(edge: .bottom, spacing: 0) {
                     #if os(macOS)
-                        if !addingSongs { managementBar }
+                        if !addingSongs && showsManagementFeedback {
+                            managementFeedback.padding(16).background(.bar)
+                        }
                     #else
-                        if phoneKeyboardVisible { phoneKeyboardDismissBar } else { managementBar }
+                        if !phoneKeyboardVisible { managementBar }
+                    #endif
+                }
+                .overlay(alignment: .bottomTrailing) {
+                    #if os(iOS)
+                        if phoneKeyboardVisible && !addingSongs { phoneKeyboardDismissButton }
                     #endif
                 }
                 .modifier(FoundationPlaylistFeedback(operation: operation))
@@ -427,8 +438,8 @@ struct FoundationPlaylistEditor: View {
         #if os(macOS)
             .frame(minWidth: 500, idealWidth: 560, minHeight: 440, idealHeight: 560)
         #else
-            .safeAreaInset(edge: .bottom, spacing: 0) {
-                if phoneKeyboardVisible { phoneKeyboardDismissBar }
+            .overlay(alignment: .bottomTrailing) {
+                if phoneKeyboardVisible { phoneKeyboardDismissButton }
             }
             .presentationDetents([.large])
             .presentationDragIndicator(.visible)
@@ -843,24 +854,21 @@ struct FoundationPlaylistEditor: View {
     }
 
     #if os(iOS)
-        private var phoneKeyboardDismissBar: some View {
-            HStack {
-                Spacer()
-                Button {
-                    // An explicit user action follows UIKit's existing responder chain.
-                    UIApplication.shared.sendAction(
-                        #selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
-                } label: {
-                    Image(systemName: "chevron.down").font(.headline)
-                }
-                .buttonStyle(.glass)
-                .buttonBorderShape(.circle)
-                .controlSize(.large)
-                .frame(width: 52, height: 52)
-                .accessibilityLabel("Hide Keyboard")
-                .accessibilityIdentifier("playlist-manager-hide-keyboard")
+        private var phoneKeyboardDismissButton: some View {
+            Button {
+                // An explicit user action follows UIKit's existing responder chain.
+                UIApplication.shared.sendAction(
+                    #selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+            } label: {
+                Image(systemName: "chevron.down").font(.headline)
             }
-            .padding(.horizontal, 16).padding(.vertical, 4)
+            .buttonStyle(.glass)
+            .buttonBorderShape(.circle)
+            .controlSize(.large)
+            .frame(width: 52, height: 52)
+            .accessibilityLabel("Hide Keyboard")
+            .accessibilityIdentifier("playlist-manager-hide-keyboard")
+            .padding(.trailing, 16).padding(.bottom, 4)
         }
     #endif
 
