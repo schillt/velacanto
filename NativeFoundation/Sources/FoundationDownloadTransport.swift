@@ -785,7 +785,13 @@ nonisolated enum FoundationNativeDownloadTransport {
             let original = try resources(resolvedRoot)
             // Canonicalization chooses an address, never authority. Before using it,
             // bind BOTH addresses to the same already-proved resource, then repeat.
-            let root = Metadata.canonical(resolvedRoot)
+            let freshRoot = NSURL(fileURLWithPath: resolvedRoot.path)
+            freshRoot.removeAllCachedResourceValues()
+            guard
+                let canonicalPath = try freshRoot.resourceValues(forKeys: [.canonicalPathKey])[
+                    .canonicalPathKey] as? String, canonicalPath.hasPrefix("/")
+            else { throw FoundationDownloadError.nativeProtection }
+            let root = URL(fileURLWithPath: canonicalPath, isDirectory: true)
             guard Metadata.plain(root) else { throw FoundationDownloadError.nativeProtection }
             let initial = try resources(root)
             #if DEBUG

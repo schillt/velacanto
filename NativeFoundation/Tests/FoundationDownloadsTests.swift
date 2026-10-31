@@ -5200,8 +5200,8 @@ nonisolated private final class NativeProtectionFixture: @unchecked Sendable {
     var resolutions = 0
     var replaceBeforeWrite = false
     var failure: Failure?
-    var rootIdentity: String { FoundationManagedPackageMetadata.canonical(root).path }
-    var leafIdentity: String { FoundationManagedPackageMetadata.canonical(leaf).path }
+    let rootIdentity: String
+    let leafIdentity: String
     var mismatchCanonicalRoot = false
     var classAtMutationGate: String?
     var replaceRootAtResolution: Int?
@@ -5226,8 +5226,19 @@ nonisolated private final class NativeProtectionFixture: @unchecked Sendable {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         try Data([1, 2, 3]).write(to: leaf)
         try Data([9]).write(to: outside)
+        rootIdentity = try Self.canonicalPath(root)
+        leafIdentity = try Self.canonicalPath(leaf)
         classes[rootIdentity] = "NSFileProtectionCompleteUntilFirstUserAuthentication"
         classes[leafIdentity] = "NSFileProtectionNone"
+    }
+    private static func canonicalPath(_ url: URL) throws -> String {
+        let fresh = NSURL(fileURLWithPath: url.path)
+        fresh.removeAllCachedResourceValues()
+        guard
+            let path = try fresh.resourceValues(forKeys: [.canonicalPathKey])[.canonicalPathKey]
+                as? String, path.hasPrefix("/")
+        else { throw FoundationDownloadError.nativeProtection }
+        return path
     }
     func remove() { try? FileManager.default.removeItem(at: container) }
     func strengthen() throws {
@@ -5238,7 +5249,7 @@ nonisolated private final class NativeProtectionFixture: @unchecked Sendable {
                 return package.bookmark == self.package.bookmark ? self.root : nil
             },
             resources: { url in
-                let identity = FoundationManagedPackageMetadata.canonical(url).path
+                let identity = try Self.canonicalPath(url)
                 let attrs = try FileManager.default.attributesOfItem(atPath: url.path)
                 let type = attrs[.type] as? FileAttributeType
                 if identity == self.leafIdentity {
@@ -5263,15 +5274,15 @@ nonisolated private final class NativeProtectionFixture: @unchecked Sendable {
                 values[.isSymbolicLinkKey] = type == .typeSymbolicLink
                 return values
             },
-            protection: { self.classes[FoundationManagedPackageMetadata.canonical($0).path] },
+            protection: { self.classes[try Self.canonicalPath($0)] },
             setProtection: { url in
                 self.writes.append(url.path)
                 if self.failure != .ignored {
-                    self.classes[FoundationManagedPackageMetadata.canonical(url).path] =
+                    self.classes[try Self.canonicalPath(url)] =
                         "NSFileProtectionCompleteUntilFirstUserAuthentication"
                 }
                 if self.failure == .completeReadback {
-                    self.classes[FoundationManagedPackageMetadata.canonical(url).path] =
+                    self.classes[try Self.canonicalPath(url)] =
                         "NSFileProtectionComplete"
                 }
                 if self.failure == .throwAfterWrite { throw CocoaError(.fileWriteUnknown) }
