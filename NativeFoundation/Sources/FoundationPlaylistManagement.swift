@@ -175,18 +175,9 @@ struct FoundationPlaylistEditor: View {
                             .disabled(!canEditDetails || operation.isPending || !dirty)
                             .buttonStyle(.glassProminent)
                     }
-                    ToolbarItem(placement: .primaryAction) {
-                        Menu("Playlist Options", systemImage: "ellipsis") {
-                            Button("Delete Playlist", systemImage: "trash", role: .destructive) {
-                                confirmDelete = true
-                            }
-                            .disabled(
-                                !loaded || connectivity.localOnly || permissions?.canDelete != true
-                                    || operation.isPending)
-                        }
-                        .labelStyle(.iconOnly)
-                        .accessibilityIdentifier("playlist-manager-options")
-                    }
+                    #if os(iOS)
+                        ToolbarItem(placement: .primaryAction) { playlistOptions }
+                    #endif
                 }
                 .safeAreaInset(edge: .bottom, spacing: 0) { managementFooter }
                 .modifier(FoundationPlaylistFeedback(operation: operation))
@@ -304,6 +295,19 @@ struct FoundationPlaylistEditor: View {
         }
     }
 
+    private var playlistOptions: some View {
+        Menu("Playlist Options", systemImage: "ellipsis") {
+            Button("Delete Playlist", systemImage: "trash", role: .destructive) {
+                confirmDelete = true
+            }
+            .disabled(
+                !loaded || connectivity.localOnly || permissions?.canDelete != true
+                    || operation.isPending)
+        }
+        .labelStyle(.iconOnly)
+        .accessibilityIdentifier("playlist-manager-options")
+    }
+
     @ViewBuilder private var managerContents: some View {
         detailsSection
         if showingCovers { coverSection }
@@ -323,6 +327,16 @@ struct FoundationPlaylistEditor: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             .swipeActionsContainer()
+            .safeAreaInset(edge: .top, spacing: 0) {
+                HStack {
+                    Spacer()
+                    playlistOptions
+                        .buttonStyle(.glass)
+                        .menuIndicator(.hidden)
+                        .accessibilityLabel("Playlist Options")
+                }
+                .padding(.horizontal, 24).padding(.vertical, 8)
+            }
         #else
             List(selection: $selection) {
                 managerContents
