@@ -104,4 +104,54 @@ final class FoundationFeatureIntroductionTests: XCTestCase {
         XCTAssertEqual(history.seen.count, ids.count)
         XCTAssertNil(defaults.object(forKey: FoundationPinSync.storagePrefix + "synthetic"))
     }
+
+    func testSystemStorageUpgradeOfferIsPlatformScopedAndAcknowledgementIsNotConsent() {
+        let defaults = defaults()
+        let preferences = FoundationPlaybackPreferences(defaults: defaults)
+        let history = FoundationIntroductionHistory(defaults: defaults)
+        let storageID = FoundationIntroductionFeature.systemStorageID
+        // Simulate completion of the highlights shipped before the new storage feature.
+        history.acknowledge(
+            FoundationIntroductionFeature.current.filter { $0.id != storageID }.map(\.id))
+        #if os(iOS)
+            XCTAssertEqual(history.pending().map(\.id), [storageID])
+        #else
+            XCTAssertFalse(FoundationIntroductionFeature.current.contains { $0.id == storageID })
+            XCTAssertTrue(history.pending().isEmpty)
+        #endif
+        XCTAssertEqual(preferences.downloadQuality, .original)
+        XCTAssertFalse(preferences.systemManagedDownloads)
+        // Finish/Skip records presentation history only; a fresh owner stays opted out.
+        history.acknowledge(history.pending().map(\.id))
+        let restored = FoundationPlaybackPreferences(defaults: defaults)
+        XCTAssertEqual(restored.downloadQuality, .original)
+        XCTAssertFalse(restored.systemManagedDownloads)
+        XCTAssertTrue(FoundationIntroductionHistory(defaults: defaults).pending().isEmpty)
+    }
+
+    #if os(iOS)
+        func testStorageWalkthroughExplicitActionsRequireAACWithoutSubstitutingOriginal() {
+            let defaults = defaults()
+            let preferences = FoundationPlaybackPreferences(defaults: defaults)
+            FoundationIntroductionSystemStorageStep.setEnabled(true, preferences: preferences)
+            XCTAssertEqual(preferences.downloadQuality, .original)
+            XCTAssertFalse(preferences.systemManagedDownloads)
+            for quality in [FoundationDownloadQuality.aac320, .aac192, .aac128] {
+                FoundationIntroductionSystemStorageStep.chooseQuality(
+                    quality, preferences: preferences)
+                XCTAssertEqual(preferences.downloadQuality, quality)
+                XCTAssertFalse(
+                    preferences.systemManagedDownloads, "Quality selection alone is not consent")
+                FoundationIntroductionSystemStorageStep.setEnabled(true, preferences: preferences)
+                XCTAssertTrue(preferences.systemManagedDownloads)
+                let restored = FoundationPlaybackPreferences(defaults: defaults)
+                XCTAssertEqual(restored.downloadQuality, quality)
+                XCTAssertTrue(restored.systemManagedDownloads)
+                FoundationIntroductionSystemStorageStep.chooseQuality(
+                    .original, preferences: preferences)
+                XCTAssertEqual(preferences.downloadQuality, .original)
+                XCTAssertFalse(preferences.systemManagedDownloads)
+            }
+        }
+    #endif
 }

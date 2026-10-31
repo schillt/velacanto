@@ -11,7 +11,8 @@ struct FoundationIntroductionFeature: Identifiable, Equatable {
 
     static let welcomeID = "welcome.navigation.v1"
     static let pinSyncID = "pins.icloud.opt-in.v1"
-    static let current: [Self] = [
+    static let systemStorageID = "music.system-storage.opt-in.v1"
+    private static let shared: [Self] = [
         .init(
             id: welcomeID, release: "0.6", title: "Welcome to VelaCanto",
             symbol: "music.note.house",
@@ -31,6 +32,21 @@ struct FoundationIntroductionFeature: Identifiable, Equatable {
                 "Open Song Credits from a song’s menu to see the credits available for that recording."
         ),
     ]
+
+    static var current: [Self] {
+        #if os(iOS)
+            shared + [
+                .init(
+                    id: systemStorageID, release: "0.6", title: "Manage new downloads in Settings",
+                    symbol: "internaldrive",
+                    detail:
+                        "Choose AAC quality to manage new downloads in your device’s storage settings. Existing downloads stay in VelaCanto."
+                )
+            ]
+        #else
+            shared
+        #endif
+    }
 }
 
 /// Device-local presentation history contains feature IDs only. Account consent

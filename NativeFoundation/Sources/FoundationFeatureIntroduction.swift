@@ -1,5 +1,9 @@
 import SwiftUI
 
+#if os(iOS)
+    import UIKit
+#endif
+
 /// This is a nonmodal offer inside Home's natural scroll content. The user
 /// chooses when to open it; startup account, Siri and Handoff retain their owners.
 struct FoundationFeatureIntroductionOffer: View {
@@ -155,7 +159,20 @@ struct FoundationFeatureIntroductionView: View {
         .onDisappear { sync?.releaseOptInPrompt(owner: promptOwner) }
     }
 
+    @ViewBuilder
     private func featurePage(_ feature: FoundationIntroductionFeature) -> some View {
+        #if os(iOS)
+            if feature.id == FoundationIntroductionFeature.systemStorageID {
+                FoundationIntroductionSystemStorageStep()
+            } else {
+                highlightPage(feature)
+            }
+        #else
+            highlightPage(feature)
+        #endif
+    }
+
+    private func highlightPage(_ feature: FoundationIntroductionFeature) -> some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 Image(systemName: feature.symbol)
@@ -186,6 +203,78 @@ struct FoundationFeatureIntroductionView: View {
         dismiss()
     }
 }
+
+#if os(iOS)
+    /// Consent uses the app's existing preference owner. Merely viewing or finishing
+    /// this feature never changes quality or enables system-managed downloads.
+    struct FoundationIntroductionSystemStorageStep: View {
+        @EnvironmentObject private var preferences: FoundationPlaybackPreferences
+
+        private var storageName: String {
+            UIDevice.current.userInterfaceIdiom == .pad ? "iPad Storage" : "iPhone Storage"
+        }
+
+        var body: some View {
+            Form {
+                Section {
+                    Picker(
+                        "New download quality",
+                        selection: Binding(
+                            get: { preferences.downloadQuality },
+                            set: { Self.chooseQuality($0, preferences: preferences) })
+                    ) {
+                        ForEach(FoundationDownloadQuality.allCases, id: \.self) { quality in
+                            Text(
+                                quality == .original
+                                    ? "Original · In VelaCanto" : "AAC · " + quality.title
+                            )
+                            .tag(quality)
+                        }
+                    }
+                    .accessibilityIdentifier("introduction-system-storage-quality")
+                    Toggle(
+                        "Manage New Downloads in \(storageName)",
+                        isOn: Binding(
+                            get: { preferences.systemManagedDownloads },
+                            set: { Self.setEnabled($0, preferences: preferences) })
+                    )
+                    .disabled(
+                        preferences.downloadQuality == .original
+                            && !preferences.systemManagedDownloads
+                    )
+                    .accessibilityIdentifier("introduction-system-storage-toggle")
+                } header: {
+                    Text("Your downloads, your choice")
+                } footer: {
+                    Text(
+                        "Choose an AAC quality before turning this on. Original downloads stay in VelaCanto; choosing Original turns this option off."
+                    )
+                }
+                Section {
+                    Text(
+                        "Find new AAC downloads in Settings → General → \(storageName) → VelaCanto."
+                    )
+                    Text(
+                        "Existing downloads stay in VelaCanto. You can still play and remove music from its menu in the app."
+                    )
+                }
+            }
+            .formStyle(.grouped)
+        }
+
+        static func setEnabled(_ enabled: Bool, preferences: FoundationPlaybackPreferences) {
+            guard !enabled || preferences.downloadQuality.aacBitrate != nil else { return }
+            preferences.setSystemManagedDownloads(enabled)
+        }
+
+        static func chooseQuality(
+            _ quality: FoundationDownloadQuality, preferences: FoundationPlaybackPreferences
+        ) {
+            preferences.setDownloadQuality(quality)
+            if quality == .original { preferences.setSystemManagedDownloads(false) }
+        }
+    }
+#endif
 
 private struct FoundationIntroductionPinStep: View {
     @ObservedObject var sync: FoundationPinSync
