@@ -195,20 +195,14 @@ struct FoundationPlaylistEditor: View {
                         #endif
                     }
                     #if os(iOS)
-                        ToolbarItemGroup(placement: .primaryAction) {
-                            Button("Add Songs", systemImage: "plus") { openAddMusicSearch() }
-                                .labelStyle(.iconOnly)
-                                .disabled(!editable || operation.isPending)
-                                .accessibilityIdentifier("playlist-manager-add-disclosure")
-                            playlistOptions
-                        }
+                        ToolbarItem(placement: .primaryAction) { playlistOptions }
                     #endif
                 }
                 .safeAreaInset(edge: .bottom, spacing: 0) {
                     #if os(macOS)
                         if !addingSongs { managementFooter }
                     #else
-                        managementFooter
+                        phoneManagementBar
                     #endif
                 }
                 .modifier(FoundationPlaylistFeedback(operation: operation))
@@ -502,7 +496,7 @@ struct FoundationPlaylistEditor: View {
         #endif
     }
 
-    private var detailsSection: some View {
+    @ViewBuilder private var detailsSection: some View {
         Section {
             HStack(alignment: .top, spacing: 20) {
                 Button {
@@ -547,18 +541,34 @@ struct FoundationPlaylistEditor: View {
                         Text("Your server permissions limit description or artwork editing.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
-                    Toggle(isOn: Binding(get: { isPublic ?? false }, set: { isPublic = $0 })) {
-                        Label("Public Playlist", systemImage: "globe")
-                    }
-                    .disabled(isPublic == nil)
-                    if isPublic == nil {
-                        Text("Visibility isn’t available for this playlist.").font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
+                    #if os(macOS)
+                        Toggle(isOn: Binding(get: { isPublic ?? false }, set: { isPublic = $0 })) {
+                            Label("Public Playlist", systemImage: "globe")
+                        }
+                        .disabled(isPublic == nil)
+                        if isPublic == nil {
+                            Text("Visibility isn’t available for this playlist.").font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    #endif
                 }
                 .disabled(!canEditDetails || operation.isPending)
             }.padding(.vertical, 12)
         }
+        #if os(iOS)
+            Section {
+                Toggle(isOn: Binding(get: { isPublic ?? false }, set: { isPublic = $0 })) {
+                    Label("Public Playlist", systemImage: "globe")
+                }
+                .disabled(!canEditDetails || operation.isPending || isPublic == nil)
+                if isPublic == nil {
+                    Text("Visibility isn’t available for this playlist.").font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            } header: {
+                Text("Visibility")
+            }
+        #endif
     }
 
     private var coverSection: some View {
@@ -779,39 +789,64 @@ struct FoundationPlaylistEditor: View {
         addRevision = 0
     }
 
-    @ViewBuilder private var managementFooter: some View {
-        if operation.isPending || !saveSummary.isEmpty || !selection.isEmpty
+    private var showsManagementFeedback: Bool {
+        operation.isPending || !saveSummary.isEmpty || !selection.isEmpty
             || (!operation.succeeded && operation.message != nil)
-        {
-            HStack(spacing: 12) {
-                if operation.isPending {
-                    ProgressView().controlSize(.small)
-                    Text("Updating playlist…").foregroundStyle(.secondary)
-                    Spacer()
-                    Button("Cancel Request") {
-                        requiresRefresh = true
-                        operation.cancel()
-                    }
-                } else {
-                    if !saveSummary.isEmpty {
-                        Text(saveSummary).font(.caption).foregroundStyle(.secondary).lineLimit(2)
-                    }
-                    if !selection.isEmpty {
-                        Button(
-                            "Remove \(selectedEntries.count)", systemImage: "minus.circle",
-                            role: .destructive
-                        ) { remove(selectedEntries) }
-                        .disabled(!editable)
-                    }
-                    Spacer()
-                    if !operation.succeeded, operation.message != nil {
-                        Button("Retry", systemImage: "arrow.clockwise") {
-                            operation.run { try await refresh() }
-                        }
-                        .disabled(connectivity.localOnly)
-                    }
+    }
+
+    @ViewBuilder private var managementFooter: some View {
+        if showsManagementFeedback {
+            managementFeedback.padding(16).background(.bar)
+        }
+    }
+
+    #if os(iOS)
+        private var phoneManagementBar: some View {
+            VStack(spacing: 12) {
+                if showsManagementFeedback { managementFeedback }
+                Button {
+                    openAddMusicSearch()
+                } label: {
+                    Label("Add Songs", systemImage: "plus").frame(maxWidth: .infinity)
                 }
-            }.padding(16).background(.bar)
+                .buttonStyle(.glassProminent)
+                .disabled(!editable || operation.isPending)
+                .accessibilityIdentifier("playlist-manager-add-disclosure")
+            }
+            .padding(.horizontal, 16).padding(.vertical, 12)
+            .background(.bar)
+        }
+    #endif
+
+    private var managementFeedback: some View {
+        HStack(spacing: 12) {
+            if operation.isPending {
+                ProgressView().controlSize(.small)
+                Text("Updating playlist…").foregroundStyle(.secondary)
+                Spacer()
+                Button("Cancel Request") {
+                    requiresRefresh = true
+                    operation.cancel()
+                }
+            } else {
+                if !saveSummary.isEmpty {
+                    Text(saveSummary).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                }
+                if !selection.isEmpty {
+                    Button(
+                        "Remove \(selectedEntries.count)", systemImage: "minus.circle",
+                        role: .destructive
+                    ) { remove(selectedEntries) }
+                    .disabled(!editable)
+                }
+                Spacer()
+                if !operation.succeeded, operation.message != nil {
+                    Button("Retry", systemImage: "arrow.clockwise") {
+                        operation.run { try await refresh() }
+                    }
+                    .disabled(connectivity.localOnly)
+                }
+            }
         }
     }
 
