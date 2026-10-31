@@ -687,18 +687,9 @@ struct FoundationLibraryView: View {
     }
 
     private var composedSongs: some View {
-        FoundationComposedSongsView(
-            query: .songs, library: library, player: player,
-            isActive: catalogIsActive(.library), initialFilter: .jellyfin,
-            openLocalLibrary: { showingLocalLibrary = true },
-            isCurrent: { context in
-                composedCatalogIsCurrent(context) && catalogIsActive(.library)
-            },
-            nativeIndex: { active, presented in
-                FoundationLibraryIndexView(
-                    kind: .track, model: songs, library: library, player: player, isActive: active,
-                    showsContent: presented)
-            })
+        FoundationLibraryIndexView(
+            kind: .track, model: songs, library: library, player: player,
+            isActive: catalogIsActive(.library), showsContent: true)
     }
 
     private func composedCatalogIsCurrent(_ context: FoundationComposedCatalogModel.Context) -> Bool
