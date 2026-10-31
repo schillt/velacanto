@@ -73,11 +73,11 @@ struct FoundationHandoffPresentation: ViewModifier {
             return controller.remoteNotice ? "Continue Listening" : "Handoff"
         }
         if let remote = pending.remoteOffer {
-            return "Continue listening from \(remote.client)?"
+            return "Continue from \(remote.client)?"
         }
         guard pending.payload.session?.wasPlaying == true else { return "Continue VelaCanto?" }
         let device = pending.payload.header.sourceDevice?.displayName ?? "your other device"
-        return "Continue listening from \(device)?"
+        return "Continue from \(device)?"
     }
 
     func body(content: Content) -> some View {
@@ -110,23 +110,23 @@ struct FoundationHandoffPresentation: ViewModifier {
             } message: {
                 if let remote = controller.pending?.remoteOffer, remote.selection == .currentSong {
                     Text(
-                        "Continue this song here at its latest reported position? This player hasn’t shared a usable complete queue, so the queue here will contain this song with shuffle and repeat off. After playback starts, VelaCanto will try once to pause that player; its other queued songs stay there. The player could change before the pause arrives."
+                        "No complete queue was shared. Replace this queue with the current song at its latest position. Shuffle and repeat will be off."
                             + (remote.supportsRemoteControl && remote.canPauseCurrentSong
-                                ? ""
-                                : " Automatic pausing is unavailable for this source; pause it there if needed.")
+                                ? " VelaCanto will try to pause the other player; its queue stays there."
+                                : " Pause the other player manually; its queue stays there.")
                     )
                 } else if let remote = controller.pending?.remoteOffer {
                     Text(
-                        "Continue the complete reported queue here at its latest available position? Its reported order and repeat setting are preserved; the original unshuffled queue is not available. After playback starts here, VelaCanto will try once to stop the original player. That player could change before the stop arrives."
+                        "Replace this queue and continue at the latest position. Songs keep their reported order and repeat setting; shuffle will be off."
                             + (remote.supportsRemoteControl
-                                ? ""
-                                : " This player currently does not support remote stopping; you may need to stop it there.")
+                                ? " VelaCanto will try to stop the other player."
+                                : " Stop the other player manually.")
                     )
                 } else if let pending = controller.pending, let session = pending.payload.session {
                     Text(
                         session.wasPlaying
-                            ? "Move playback and the full queue here at the current position? After playback starts here, the other device’s playback and queue will be cleared."
-                            : "Restore the queue, position, shuffle and repeat settings here? Playback will remain paused."
+                            ? "Replace this queue and continue here. Playback and the queue on the other device will clear after playback starts."
+                            : "Replace this queue and restore its position, shuffle and repeat settings. Playback will stay paused."
                     )
                 } else {
                     Text(controller.notice ?? "")

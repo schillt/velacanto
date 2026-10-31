@@ -350,10 +350,10 @@ private func foundationDownloadRemovalMessage(item: FoundationItem, downloads: F
 {
     if downloads.removalAffectsPlaylist(for: item) {
         return
-            "This music belongs to downloaded playlists. Removing it reduces their offline availability on this device. Removed tracks stay removed until you explicitly download them again. Your server playlists are unchanged."
+            "Downloaded playlists may be incomplete until you download these songs again. Your server playlists stay unchanged."
     }
     return
-        "This changes downloaded music on this device. Your server library and playlists are unchanged. Music currently playing is removed after playback releases it."
+        "Removes downloads from this device only. Server music and playlists stay unchanged. Playing songs are removed when no longer in use."
 }
 
 struct FoundationDownloadRemovalRequest: Sendable {

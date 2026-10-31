@@ -215,9 +215,9 @@ struct FoundationPlaylistEditor: View {
                     Button("Save Changes", systemImage: "checkmark") { saveDetails() }
                     Button("Keep Editing", role: .cancel) {}
                 } message: {
-                    Text("Save your playlist details and artwork changes.")
+                    Text("Updates this playlist on your server.")
                 }
-                .alert("Delete this playlist from Jellyfin?", isPresented: $confirmDelete) {
+                .alert("Delete Playlist?", isPresented: $confirmDelete) {
                     Button("Delete Playlist", role: .destructive) {
                         operation.run {
                             guard !connectivity.localOnly else { throw CancellationError() }
@@ -233,7 +233,7 @@ struct FoundationPlaylistEditor: View {
                     Button("Cancel", role: .cancel) {}
                 } message: {
                     Text(
-                        "The playlist will be deleted from your Jellyfin server. Its songs will stay in your library."
+                        "Deletes the playlist from your server. Its songs stay in your library."
                     )
                 }
                 .alert("Discard unsaved changes?", isPresented: $confirmDiscard) {
@@ -1660,7 +1660,7 @@ struct FoundationPlaylistPicker: View {
                 Button("Create and Add") { createAndAdd() }
                     .disabled(newName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             } message: {
-                Text("Create a playlist and add this music to it.")
+                Text("Adds this music to the new playlist.")
             }
             .task(id: "\(revision)-\(connectivity.localOnly)") {
                 await playlists.loadPending(

@@ -593,30 +593,47 @@ struct FoundationHandoffListeningGuide: View {
     @Binding var suppressed: Bool
     let done: () -> Void
 
+    private var receivingInstruction: String {
+        #if os(iOS)
+            if UIDevice.current.userInterfaceIdiom == .pad {
+                return "Tap VelaCanto’s Handoff icon at the right end of the Dock."
+            }
+        #endif
+        return instruction
+    }
+
     var body: some View {
         NavigationStack {
-            VStack(alignment: .leading, spacing: 20) {
-                Text("Continue listening here").font(.title2).bold()
-                Text(instruction)
-                Text(
-                    "Keep VelaCanto open on the device playing music. Both devices need the same Apple Account, Bluetooth, Wi-Fi, and Handoff enabled."
-                )
-                Text(
-                    "If no Handoff offer appears, check those settings. This card cannot start a transfer by itself."
-                )
-                .foregroundStyle(.secondary)
-                Toggle("Don’t show this guide again", isOn: $suppressed)
-                Text(
-                    "Tapping the card will show short instructions. Handoff Help remains available."
-                )
-                .font(.footnote).foregroundStyle(.secondary)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 24) {
+                    FoundationHandoffDestinationIllustration(animatesOnAppear: true)
+                    Text("Continue listening here").font(.title2.bold())
+                        .accessibilityAddTraits(.isHeader)
+                    Text(receivingInstruction).font(.title3)
+                    Text(
+                        "Keep VelaCanto open on the device playing music."
+                    )
+                    .foregroundStyle(.secondary)
+                    Toggle("Don’t show this guide again", isOn: $suppressed)
+                    NavigationLink {
+                        FoundationContinueListeningUserGuide()
+                    } label: {
+                        Label("See More", systemImage: "book.closed")
+                    }
+                    .font(.subheadline)
+                }
+                .padding(24)
+                .frame(maxWidth: 560, alignment: .leading)
+                .frame(maxWidth: .infinity)
             }
-            .padding(24)
-            .frame(maxWidth: 520, alignment: .leading)
+            .navigationTitle("Handoff")
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) { Button("Done", action: done) }
             }
         }
+        #if os(macOS)
+            .frame(minWidth: 440, idealWidth: 560, minHeight: 520, idealHeight: 620)
+        #endif
     }
 }
 

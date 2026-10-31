@@ -105,7 +105,7 @@ struct FoundationLocalLibraryView: View {
             Button("Forget Folder", role: .destructive) { model.forget() }
         } message: {
             Text(
-                "Removes saved folder access and hides its index. Music files are never deleted. Private cached index snapshots remain on this device; this does not erase them or existing backups."
+                "Forgets folder access and hides its index. Music files, cached indexes and backups are kept."
             )
         }
     }

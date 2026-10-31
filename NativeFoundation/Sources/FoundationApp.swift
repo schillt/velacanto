@@ -1058,26 +1058,26 @@ final class FoundationAppModel: ObservableObject {
             guard self.accountEpoch == epoch, self.library == nil else { return }
             let pinResult: String
             if attempt.pinsCleared {
-                pinResult = "Saved pins were removed from this device."
+                pinResult = "Pins removed."
             } else {
-                pinResult = "Saved pins could not be removed from this device."
+                pinResult = "Pins couldn’t be removed."
             }
             let sessionResult =
                 playbackSessionsCleared
-                ? "Saved playback sessions were removed."
-                : "Saved playback sessions could not be removed from this device."
+                ? "Saved playback sessions removed."
+                : "Saved playback sessions couldn’t be removed."
             let downloadResult =
                 downloadsCleared
-                ? "Downloaded music was removed."
-                : "Downloaded music could not be removed from this device."
+                ? "Downloads removed."
+                : "Downloads couldn’t be removed."
             if serverAccepted {
                 self.signOutNotice =
-                    "Signed out here. \(pinResult) \(sessionResult) \(downloadResult) "
-                    + "Jellyfin accepted the sign-out request."
+                    "Signed out on this device. \(pinResult) \(sessionResult) \(downloadResult) "
+                    + "Server sign-out confirmed."
             } else {
                 self.signOutNotice =
-                    "Signed out here. \(pinResult) \(sessionResult) \(downloadResult) "
-                    + "Jellyfin sign-out could not be confirmed."
+                    "Signed out on this device. \(pinResult) \(sessionResult) \(downloadResult) "
+                    + "Server sign-out unconfirmed."
             }
         }
     }
@@ -1341,7 +1341,7 @@ struct FoundationSignInView: View {
                     }
                 } message: { _ in
                     Text(
-                        "Existing downloads, pins, playback history and library settings don’t match this server address and account. Retry with the previous server address to keep them, or remove local data and continue. Your Jellyfin library will not be changed."
+                        "Downloads, pins, playback history and settings belong to a different server address or account. Retry with the previous address and account to keep them, or remove local data. Your server library stays unchanged."
                     )
                 }
         }

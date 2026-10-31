@@ -326,7 +326,7 @@ struct FoundationLibraryView: View {
             Button("OK", role: .cancel) {}
         } message: {
             Text(
-                "Build or refresh primary genres for this music library, then open the pin again. Your saved pin is retained."
+                "Rebuild genres in Library Settings, then reopen this pin. Your pin is kept."
             )
         }
         .environmentObject(primaryGenres)

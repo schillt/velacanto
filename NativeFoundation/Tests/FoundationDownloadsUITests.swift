@@ -5541,7 +5541,7 @@ final class FoundationDownloadsUITests: XCTestCase {
         tapVisible(app.buttons["Remove Selected"], in: app)
         let warning = app.staticTexts.matching(
             NSPredicate(
-                format: "label CONTAINS %@", "Some selected songs belong to downloaded playlists.")
+                format: "label CONTAINS %@", "Downloaded playlists may be incomplete.")
         )
         .firstMatch
         XCTAssertTrue(warning.waitForExistence(timeout: 5))

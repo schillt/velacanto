@@ -12,24 +12,45 @@ struct FoundationIntroductionFeature: Identifiable, Equatable {
     static let welcomeID = "welcome.navigation.v1"
     static let pinSyncID = "pins.icloud.opt-in.v1"
     static let systemStorageID = "music.system-storage.opt-in.v1"
+    static let continuationID = "music.continue-listening.v1"
     private static let shared: [Self] = [
         .init(
             id: welcomeID, release: "0.6", title: "Welcome to VelaCanto",
             symbol: "music.note.house",
             detail:
-                "Explore your music in Home, New, Library and Search. Your Jellyfin library stays yours."
+                "Explore albums, artists and genres in a fresh home for your music."
         ),
         .init(
             id: "music.offline.v1", release: "0.6", title: "Take your music with you",
             symbol: "arrow.down.circle",
             detail:
-                "Download music from its menu, then use Offline Mode in Settings to browse and play your downloads."
+                "Save your favorites and enjoy your downloaded music, even without a connection."
+        ),
+        .init(
+            id: "music.queue.v1", release: "0.6", title: "Make the next song yours",
+            symbol: "list.bullet",
+            detail: "Artwork, history and quick swipe actions bring your queue into focus."
+        ),
+        .init(
+            id: "music.lyrics.v1", release: "0.6", title: "Follow every word",
+            symbol: "quote.bubble",
+            detail: "Follow timed lyrics, jump to a line, or return to the words playing now."
+        ),
+        .init(
+            id: "music.playlists.v1", release: "0.6", title: "Give every playlist a personality",
+            symbol: "music.note.list",
+            detail: "Create a cover, find songs and shape the order in one playlist editor."
+        ),
+        .init(
+            id: continuationID, release: "0.6", title: "Pick up where you left off",
+            symbol: "arrow.trianglehead.2.clockwise.rotate.90",
+            detail: "Continue from another VelaCanto device or a compatible server player."
         ),
         .init(
             id: "music.song-credits.v1", release: "0.6", title: "Look behind the music",
             symbol: "person.text.rectangle",
             detail:
-                "Open Song Credits from a song’s menu to see the credits available for that recording."
+                "Discover the people behind a recording with Song Credits."
         ),
     ]
 

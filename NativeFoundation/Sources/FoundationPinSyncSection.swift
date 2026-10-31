@@ -26,7 +26,7 @@ struct FoundationPinSyncSection: View {
                     Button("Delete Cloud-Saved Pins", role: .destructive) { sync.deleteCloudPins() }
                 } message: {
                     Text(
-                        "Local pins on this device are kept. Other enabled devices remove these pins on their next sync. Old offline edits cannot restore them. This cannot be undone."
+                        "Pins stay on this device, but are removed from iCloud and other syncing devices. Offline edits won’t restore them. This can’t be undone."
                     )
                 }
             }

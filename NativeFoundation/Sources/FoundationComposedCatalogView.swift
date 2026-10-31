@@ -194,7 +194,7 @@ struct FoundationComposedCatalogView<NativeIndex: View>: View {
         ) {
             Button("OK") { model.dismissDetailFailure() }
         } message: {
-            Text("These details could not be opened. Other catalog results remain available.")
+            Text("Couldn’t open these details. You can still browse other results.")
         }
         .sheet(item: Binding(get: { model.detail }, set: { if $0 == nil { model.closeDetail() } }))
         {

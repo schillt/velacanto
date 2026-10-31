@@ -127,9 +127,15 @@ struct FoundationSettingsView: View {
                     NavigationLink {
                         FoundationFeatureIntroductionView(sync: pinSync, replay: true)
                     } label: {
-                        Label("What’s New & Walkthrough", systemImage: "sparkles")
+                        Label("What’s New", systemImage: "sparkles")
                     }
                     .accessibilityIdentifier("settings-feature-introduction")
+                    NavigationLink {
+                        FoundationUserGuideView()
+                    } label: {
+                        Label("User Guide", systemImage: "book.closed")
+                    }
+                    .accessibilityIdentifier("settings-user-guide")
                     NavigationLink {
                         FoundationLicensesView()
                     } label: {

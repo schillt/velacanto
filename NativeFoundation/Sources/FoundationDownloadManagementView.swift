@@ -48,8 +48,8 @@ struct FoundationDownloadManagementView: View {
         } message: {
             Text(
                 affectsPlaylist
-                    ? "Some selected songs belong to downloaded playlists. Removing them leaves those playlists partially available. They stay removed on this device until you explicitly download them again. Your server playlists are unchanged."
-                    : "Selected songs are removed from every local collection that uses them. Files retained by an unselected collection remain when you remove only a collection. Your server library is unchanged."
+                    ? "These songs won’t play offline until downloaded again. Downloaded playlists may be incomplete. Your server playlists stay unchanged."
+                    : "Selected songs are removed from all local collections. Removing a collection keeps files used elsewhere. Your server library stays unchanged."
             )
         }
         .alert("Remove all downloads?", isPresented: $confirmingAll) {
@@ -64,7 +64,7 @@ struct FoundationDownloadManagementView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text(
-                "This removes this account’s downloaded music from this device. Your server library, playlists and favorites are unchanged. Music currently playing is removed after playback releases it."
+                "Removes this account’s downloads from this device. Server music, playlists and favorites stay unchanged. Playing songs are removed when no longer in use."
             )
         }
         .onChange(of: downloads.owners.map(\.id)) { _, ids in
