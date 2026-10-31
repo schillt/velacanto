@@ -4,6 +4,8 @@ import UniformTypeIdentifiers
 
 #if os(macOS)
     import AppKit
+#elseif os(iOS)
+    import UIKit
 #endif
 
 enum FoundationPlaylistSheet: String, Identifiable {
@@ -101,7 +103,13 @@ struct FoundationPlaylistEditor: View {
     @State private var confirmDiscard = false
     @State private var loaded = false
     @State private var requiresRefresh = true
+    #if os(iOS)
+        @State private var phoneKeyboardVisible = false
+    #endif
     @State private var showingCovers = false
+    @State private var coverOpeningID = UUID()
+    @State private var preparedCoverOpeningID: UUID?
+    @State private var covers = FoundationPlaylistCoverPreset.choices(palettes: [.teal])
     @State private var hoveringCover = false
     @State private var selectedCover: FoundationPlaylistCoverPreset?
     @State private var savedCover: FoundationPlaylistCoverPreset?
@@ -144,15 +152,6 @@ struct FoundationPlaylistEditor: View {
     }
     private var cachedArtwork: FoundationCurrentArtwork.Result? {
         library.immediateArtworkResult(for: updatedPlaylist ?? playlist, size: 160)
-    }
-    private var covers: [FoundationPlaylistCoverPreset] {
-        var values = FoundationPlaylistCoverPreset.presets
-        if let palette = cachedArtwork?.tint {
-            values.insert(
-                .init(id: "match", title: "Match Artwork", color: palette, symbol: "music.note"),
-                at: 0)
-        }
-        return values
     }
     private var dirty: Bool {
         loaded
@@ -200,9 +199,9 @@ struct FoundationPlaylistEditor: View {
                 }
                 .safeAreaInset(edge: .bottom, spacing: 0) {
                     #if os(macOS)
-                        if !addingSongs { managementFooter }
+                        if !addingSongs { managementBar }
                     #else
-                        phoneManagementBar
+                        if phoneKeyboardVisible { phoneKeyboardDismissBar } else { managementBar }
                     #endif
                 }
                 .modifier(FoundationPlaylistFeedback(operation: operation))
@@ -263,6 +262,32 @@ struct FoundationPlaylistEditor: View {
             addAlbums.configureCatalogPagination()
             addArtists.configureCatalogPagination()
         }
+        .task(
+            id:
+                "\(library.catalogScopeID)-\(showingCovers)-\(coverOpeningID)-\(connectivity.localOnly)"
+        ) {
+            await prepareCoverChoices()
+        }
+        #if os(iOS)
+            .onReceive(
+                NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)
+            ) { notification in
+                guard
+                    notification.userInfo?[UIResponder.keyboardIsLocalUserInfoKey] as? Bool != false
+                else { return }
+                let frame =
+                    notification.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect
+                phoneKeyboardVisible = (frame?.height ?? 0) > 0
+            }
+            .onReceive(
+                NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)
+            ) { _ in
+                phoneKeyboardVisible = false
+            }
+            .onChange(of: addingSongs) { _, shown in
+                if !shown { phoneKeyboardVisible = false }
+            }
+        #endif
         .onDisappear { operation.cancel() }
         .onChange(of: library.catalogScopeID) { _, _ in
             operation.cancel()
@@ -404,6 +429,9 @@ struct FoundationPlaylistEditor: View {
         #if os(macOS)
             .frame(minWidth: 500, idealWidth: 560, minHeight: 440, idealHeight: 560)
         #else
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                if phoneKeyboardVisible { phoneKeyboardDismissBar }
+            }
             .presentationDetents([.large])
             .presentationDragIndicator(.visible)
             .presentationBackground(.ultraThinMaterial)
@@ -412,12 +440,25 @@ struct FoundationPlaylistEditor: View {
     }
 
     @ViewBuilder private var managerContents: some View {
-        detailsSection
-        if showingCovers { coverSection }
         #if os(macOS)
-            addMusicDisclosure
+            GroupBox { detailsSection }
+            GroupBox { visibilitySection }
+        #else
+            detailsSection
+                .listRowBackground(Color(uiColor: .secondarySystemGroupedBackground))
+            visibilitySection
+                .listRowBackground(Color(uiColor: .secondarySystemGroupedBackground))
         #endif
+        if showingCovers {
+            coverSection
+                #if os(iOS)
+                    .listRowBackground(Color(uiColor: .secondarySystemGroupedBackground))
+                #endif
+        }
         songsSection
+            #if os(iOS)
+                .listRowBackground(Color(uiColor: .secondarySystemGroupedBackground))
+            #endif
     }
 
     private func openAddMusicSearch() {
@@ -429,35 +470,6 @@ struct FoundationPlaylistEditor: View {
         addRevision = 0
         addVisibleCount = 12
         addingSongs = true
-    }
-
-    private var addMusicDisclosure: some View {
-        Section {
-            Button {
-                withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.2)) {
-                    if addingSongs {
-                        addingSongs = false
-                    } else {
-                        openAddMusicSearch()
-                    }
-
-                }
-            } label: {
-                HStack {
-                    Label("Add Songs", systemImage: "plus.circle")
-                    Spacer()
-                    Image(systemName: "chevron.right")
-                        .foregroundStyle(.secondary)
-                }
-                .frame(maxWidth: .infinity, minHeight: 36, alignment: .leading)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Add Songs")
-            .accessibilityHint("Open music search")
-            .accessibilityIdentifier("playlist-manager-add-disclosure")
-            .disabled(!editable || operation.isPending)
-        }
     }
 
     @ViewBuilder private var managerSurface: some View {
@@ -492,7 +504,10 @@ struct FoundationPlaylistEditor: View {
             )
             .swipeActionsContainer()
             .scrollContentBackground(.hidden)
+            .background(Color(uiColor: .systemGroupedBackground))
+            .foregroundStyle(.primary)
             .listStyle(.insetGrouped)
+            .listSectionSpacing(20)
         #endif
     }
 
@@ -500,12 +515,23 @@ struct FoundationPlaylistEditor: View {
         Section {
             HStack(alignment: .top, spacing: 20) {
                 Button {
+                    if !showingCovers {
+                        coverOpeningID = UUID()
+                        covers = FoundationPlaylistCoverPreset.choices(
+                            palettes: [cachedArtwork?.tint ?? .teal]).map { preset in
+                                if let frozen = selectedCover ?? savedCover, frozen.id == preset.id
+                                {
+                                    return frozen
+                                }
+                                return preset
+                            }
+                    }
                     showingCovers.toggle()
                 } label: {
                     ZStack(alignment: .bottomTrailing) {
                         Group {
                             if let cover = selectedCover ?? savedCover {
-                                FoundationPlaylistCoverArtwork(preset: cover)
+                                FoundationPlaylistCoverArtwork(preset: cover, playlistTitle: name)
                             } else if let image = cachedArtwork?.image {
                                 Image(decorative: image, scale: 1).resizable().scaledToFill()
                             } else {
@@ -541,34 +567,25 @@ struct FoundationPlaylistEditor: View {
                         Text("Your server permissions limit description or artwork editing.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
-                    #if os(macOS)
-                        Toggle(isOn: Binding(get: { isPublic ?? false }, set: { isPublic = $0 })) {
-                            Label("Public Playlist", systemImage: "globe")
-                        }
-                        .disabled(isPublic == nil)
-                        if isPublic == nil {
-                            Text("Visibility isn’t available for this playlist.").font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    #endif
                 }
                 .disabled(!canEditDetails || operation.isPending)
             }.padding(.vertical, 12)
         }
-        #if os(iOS)
-            Section {
-                Toggle(isOn: Binding(get: { isPublic ?? false }, set: { isPublic = $0 })) {
-                    Label("Public Playlist", systemImage: "globe")
-                }
-                .disabled(!canEditDetails || operation.isPending || isPublic == nil)
-                if isPublic == nil {
-                    Text("Visibility isn’t available for this playlist.").font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            } header: {
-                Text("Visibility")
+    }
+
+    private var visibilitySection: some View {
+        Section {
+            Toggle(isOn: Binding(get: { isPublic ?? false }, set: { isPublic = $0 })) {
+                Label("Public Playlist", systemImage: "globe")
             }
-        #endif
+            .disabled(!canEditDetails || operation.isPending || isPublic == nil)
+            if isPublic == nil {
+                Text("Visibility isn’t available for this playlist.").font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        } header: {
+            Text("Visibility")
+        }
     }
 
     private var coverSection: some View {
@@ -579,7 +596,7 @@ struct FoundationPlaylistEditor: View {
                         Button {
                             selectedCover = preset
                         } label: {
-                            FoundationPlaylistCoverArtwork(preset: preset)
+                            FoundationPlaylistCoverArtwork(preset: preset, playlistTitle: name)
                                 .frame(width: 76, height: 76)
                                 .clipShape(.rect(cornerRadius: 12))
                                 .overlay(alignment: .bottomTrailing) {
@@ -794,27 +811,57 @@ struct FoundationPlaylistEditor: View {
             || (!operation.succeeded && operation.message != nil)
     }
 
-    @ViewBuilder private var managementFooter: some View {
-        if showsManagementFeedback {
-            managementFeedback.padding(16).background(.bar)
+    private var managementBar: some View {
+        VStack(spacing: 12) {
+            if showsManagementFeedback { managementFeedback }
+            Button {
+                openAddMusicSearch()
+            } label: {
+                #if os(macOS)
+                    Label("Add Songs", systemImage: "plus").frame(maxWidth: .infinity)
+                #else
+                    Label("Add Songs", systemImage: "plus")
+                        .font(.headline)
+                        .frame(maxWidth: .infinity, minHeight: 40)
+                #endif
+            }
+            #if os(macOS)
+                .buttonStyle(.borderedProminent)
+            #else
+                .buttonStyle(.glassProminent)
+                .controlSize(.large)
+                .frame(maxWidth: 320)
+                .frame(maxWidth: .infinity)
+            #endif
+            .disabled(!editable || operation.isPending)
+            .accessibilityIdentifier("playlist-manager-add-disclosure")
         }
+        .padding(.horizontal, 16).padding(.vertical, 12)
+        #if os(macOS)
+            .background(.bar)
+        #else
+            .background(.ultraThinMaterial)
+        #endif
     }
 
     #if os(iOS)
-        private var phoneManagementBar: some View {
-            VStack(spacing: 12) {
-                if showsManagementFeedback { managementFeedback }
+        private var phoneKeyboardDismissBar: some View {
+            HStack {
+                Spacer()
                 Button {
-                    openAddMusicSearch()
+                    // An explicit user action follows UIKit's existing responder chain.
+                    UIApplication.shared.sendAction(
+                        #selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
                 } label: {
-                    Label("Add Songs", systemImage: "plus").frame(maxWidth: .infinity)
+                    Image(systemName: "keyboard.chevron.compact.down")
+                        .frame(width: 44, height: 44)
                 }
-                .buttonStyle(.glassProminent)
-                .disabled(!editable || operation.isPending)
-                .accessibilityIdentifier("playlist-manager-add-disclosure")
+                .buttonStyle(.plain)
+                .accessibilityLabel("Hide Keyboard")
+                .accessibilityIdentifier("playlist-manager-hide-keyboard")
             }
-            .padding(.horizontal, 16).padding(.vertical, 12)
-            .background(.bar)
+            .padding(.horizontal, 16)
+            .background(.ultraThinMaterial)
         }
     #endif
 
@@ -847,6 +894,40 @@ struct FoundationPlaylistEditor: View {
                     .disabled(connectivity.localOnly)
                 }
             }
+        }
+    }
+
+    private func prepareCoverChoices() async {
+        guard showingCovers, preparedCoverOpeningID != coverOpeningID else { return }
+        let opening = coverOpeningID
+        let scope = library.catalogScopeID
+        preparedCoverOpeningID = opening
+        // Only this editor's already-loaded album references; never enumerate the library.
+        var seen: Set<String> = []
+        let albums = entries.compactMap { $0.item.relatedAlbum }.filter {
+            seen.insert($0.sharedArtworkIdentity).inserted
+        }.shuffled().prefix(3)
+        var palettes: [Color] = []
+        for album in albums {
+            guard !Task.isCancelled, showingCovers, coverOpeningID == opening,
+                library.catalogScopeID == scope
+            else { return }
+            do {
+                if let result = try await library.artworkResult(
+                    for: album, size: 160, allowsNetwork: !connectivity.localOnly)
+                {
+                    palettes.append(result.tint)
+                }
+            } catch is CancellationError { return } catch {}
+        }
+        guard !Task.isCancelled, showingCovers, coverOpeningID == opening,
+            library.catalogScopeID == scope
+        else { return }
+        if palettes.isEmpty { palettes = [cachedArtwork?.tint ?? .teal] }
+        covers = FoundationPlaylistCoverPreset.choices(palettes: palettes).map { preset in
+            // Preserve the exact palette already selected while late artwork resolves.
+            if let frozen = selectedCover ?? savedCover, frozen.id == preset.id { return frozen }
+            return preset
         }
     }
 
@@ -892,7 +973,8 @@ struct FoundationPlaylistEditor: View {
                     saveSummary =
                         saveSummary.isEmpty
                         ? "Artwork is still pending." : "Details saved; artwork is still pending."
-                    let data = try FoundationPlaylistCoverArtwork.png(selectedCover)
+                    let data = try FoundationPlaylistCoverArtwork.png(
+                        selectedCover, playlistTitle: name)
                     let updated = try await library.setPlaylistCover(
                         id: playlist.id, data: data, contentType: "image/png")
                     try Task.checkCancellation()
@@ -996,34 +1078,61 @@ struct FoundationPlaylistEditor: View {
 private struct FoundationPlaylistCoverPreset: Identifiable, Sendable {
     let id: String
     let title: String
+    let asset: String
     let color: Color
-    let symbol: String
-    static let presets: [Self] = [
-        .init(id: "blue", title: "Blue Notes", color: .blue, symbol: "music.note.list"),
-        .init(id: "purple", title: "Night Mix", color: .purple, symbol: "moon.stars.fill"),
-        .init(id: "orange", title: "Sunrise", color: .orange, symbol: "sun.max.fill"),
-        .init(id: "pink", title: "Favorites", color: .pink, symbol: "heart.fill"),
-        .init(id: "green", title: "Fresh Tracks", color: .green, symbol: "waveform"),
-        .init(id: "teal", title: "Flow", color: .teal, symbol: "sparkles"),
-    ]
+    let showsTitle: Bool
+
+    static func choices(palettes: [Color]) -> [Self] {
+        let colors = palettes.isEmpty ? [Color.teal] : palettes
+        return ["Flow", "Resonance"].flatMap { form in
+            (0..<3).map { treatment in
+                Self(
+                    id: "\(form)-\(treatment)",
+                    title: "\(form) \(treatment == 1 ? "Artwork" : "Title") \(treatment + 1)",
+                    asset: "PlaylistCover\(form)",
+                    color: treatment == 2
+                        ? colors[treatment % colors.count].mix(with: .black, by: 0.25)
+                        : colors[treatment % colors.count],
+                    showsTitle: treatment != 1)
+            }
+        }
+    }
 }
 
 private struct FoundationPlaylistCoverArtwork: View {
     let preset: FoundationPlaylistCoverPreset
+    let playlistTitle: String
+
     var body: some View {
         GeometryReader { geometry in
-            ZStack {
-                LinearGradient(
-                    colors: [preset.color, preset.color.mix(with: .black, by: 0.5)],
-                    startPoint: .topLeading, endPoint: .bottomTrailing)
-                Image(systemName: preset.symbol).resizable().scaledToFit()
-                    .foregroundStyle(.white.opacity(0.9))
-                    .frame(width: geometry.size.width * 0.45, height: geometry.size.height * 0.45)
+            ZStack(alignment: .bottomLeading) {
+                Image(preset.asset).resizable().scaledToFill()
+                    .colorMultiply(preset.color.mix(with: .white, by: 0.25))
+                    .frame(width: geometry.size.width, height: geometry.size.height).clipped()
+                if preset.showsTitle {
+                    LinearGradient(
+                        colors: [.clear, .black.opacity(0.8)],
+                        startPoint: .center, endPoint: .bottom)
+                    Text(playlistTitle.trimmingCharacters(in: .whitespacesAndNewlines))
+                        .font(
+                            .system(
+                                size: geometry.size.width * 0.1, weight: .bold, design: .rounded)
+                        )
+                        .foregroundStyle(.white)
+                        .lineLimit(2).minimumScaleFactor(0.5)
+                        .shadow(color: .black.opacity(0.4), radius: 2)
+                        .padding(geometry.size.width * 0.08)
+                }
             }
         }.aspectRatio(1, contentMode: .fit)
     }
-    @MainActor static func png(_ preset: FoundationPlaylistCoverPreset) throws -> Data {
-        let renderer = ImageRenderer(content: Self(preset: preset).frame(width: 512, height: 512))
+
+    @MainActor static func png(_ preset: FoundationPlaylistCoverPreset, playlistTitle: String)
+        throws -> Data
+    {
+        let renderer = ImageRenderer(
+            content: Self(preset: preset, playlistTitle: playlistTitle).frame(
+                width: 512, height: 512))
         guard let image = renderer.cgImage else { throw FoundationPlaylistError.changed }
         let data = NSMutableData()
         guard
