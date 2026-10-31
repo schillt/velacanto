@@ -96,6 +96,7 @@ struct FoundationPlaylistEditor: View {
     @State private var entries: [FoundationPlaylistEntry] = []
     @State private var selection: Set<String> = []
     @State private var query = ""
+    @State private var confirmSave = false
     @State private var confirmDelete = false
     @State private var confirmDiscard = false
     @State private var loaded = false
@@ -115,7 +116,6 @@ struct FoundationPlaylistEditor: View {
     @StateObject private var addAlbums = FoundationBrowseModel()
     @StateObject private var addArtists = FoundationBrowseModel()
     @State private var addCollection: FoundationItem?
-    @FocusState private var addSearchFocused: Bool
     @StateObject private var operation = FoundationPlaylistOperation()
 
     private var addSearchTerm: String {
@@ -180,7 +180,7 @@ struct FoundationPlaylistEditor: View {
                         #endif
                     }
                     ToolbarItem(placement: .confirmationAction) {
-                        Button("Save", systemImage: "checkmark") { saveDetails() }
+                        Button("Save", systemImage: "checkmark") { confirmSave = true }
                             .disabled(!canEditDetails || operation.isPending || !dirty)
                             #if os(macOS)
                                 .buttonStyle(.borderedProminent)
@@ -194,6 +194,14 @@ struct FoundationPlaylistEditor: View {
                 }
                 .safeAreaInset(edge: .bottom, spacing: 0) { managementFooter }
                 .modifier(FoundationPlaylistFeedback(operation: operation))
+                .confirmationDialog(
+                    "Save playlist changes?", isPresented: $confirmSave, titleVisibility: .visible
+                ) {
+                    Button("Save Changes", systemImage: "checkmark") { saveDetails() }
+                    Button("Keep Editing", role: .cancel) {}
+                } message: {
+                    Text("Save your playlist details and artwork changes.")
+                }
                 .confirmationDialog(
                     "Delete this playlist from Jellyfin?", isPresented: $confirmDelete,
                     titleVisibility: .visible
@@ -227,8 +235,8 @@ struct FoundationPlaylistEditor: View {
         .modifier(FoundationPlaylistSheetSize())
         #if os(macOS)
             .background { FoundationPlaylistSheetActivation().frame(width: 0, height: 0) }
-            .sheet(isPresented: $addingSongs) { macAddMusicSheet }
         #endif
+        .sheet(isPresented: $addingSongs) { addMusicSheet }
         .presentationBackground(.ultraThinMaterial)
         .interactiveDismissDisabled(dirty || operation.isPending)
         #if os(iOS)
@@ -258,6 +266,7 @@ struct FoundationPlaylistEditor: View {
         .onChange(of: connectivity.localOnly) { _, offline in
             if offline {
                 confirmDelete = false
+                confirmSave = false
                 operation.cancel()
                 requiresRefresh = true
             }
@@ -277,7 +286,6 @@ struct FoundationPlaylistEditor: View {
                 "\(library.catalogScopeID)-\(addResultKind)-\(addingSongs)-\(addQuery)-\(addCollection?.sharedArtworkIdentity ?? "search")-\(addRevision)-\(connectivity.localOnly)"
         ) {
             guard addingSongs, !connectivity.localOnly else { return }
-            if addCollection == nil, addSearchTerm.isEmpty { addSearchFocused = true }
             let term = addSearchTerm
             let collection = addCollection
             // An empty search is intentionally inert; never enumerate the catalog here.
@@ -294,31 +302,13 @@ struct FoundationPlaylistEditor: View {
                         return try await library.tracks(artistID: collection.id, startIndex: offset)
                     }
                 } else {
-                    #if os(macOS)
-                        let model =
-                            addResultKind == .track
-                            ? addModel : addResultKind == .album ? addAlbums : addArtists
-                        await model.loadPending {
-                            try await library.search(
-                                query: term, kind: addResultKind, startIndex: $0, limit: 12)
-                        }
-                    #else
-                        // Three explicit typed result groups; one bounded page per group.
-                        await addModel.loadPending {
-                            try await library.search(
-                                query: term, kind: .track, startIndex: $0, limit: 12)
-                        }
-                        try Task.checkCancellation()
-                        await addAlbums.loadPending {
-                            try await library.search(
-                                query: term, kind: .album, startIndex: $0, limit: 12)
-                        }
-                        try Task.checkCancellation()
-                        await addArtists.loadPending {
-                            try await library.search(
-                                query: term, kind: .artist, startIndex: $0, limit: 12)
-                        }
-                    #endif
+                    let model =
+                        addResultKind == .track
+                        ? addModel : addResultKind == .album ? addAlbums : addArtists
+                    await model.loadPending {
+                        try await library.search(
+                            query: term, kind: addResultKind, startIndex: $0, limit: 12)
+                    }
                 }
             } catch {}
         }
@@ -343,53 +333,66 @@ struct FoundationPlaylistEditor: View {
         .accessibilityIdentifier("playlist-manager-delete")
     }
 
-    #if os(macOS)
-        private var macAddMusicSheet: some View {
-            VStack(alignment: .leading, spacing: 16) {
-                HStack {
-                    Label("Add Music", systemImage: "magnifyingglass").font(.title2.bold())
-                    Spacer()
-                    Button("Close", systemImage: "xmark") { addingSongs = false }
-                        .disabled(operation.isPending)
-                }
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 16) { addSection }
-                }
-                if operation.isPending {
-                    HStack {
-                        ProgressView().controlSize(.small)
-                        Text("Updating playlist…")
-                        Spacer()
-                        Button("Cancel Request") { operation.cancel() }
-                    }
-                } else if !operation.succeeded, let message = operation.message {
-                    HStack {
-                        Text(message).foregroundStyle(.secondary)
-                        Spacer()
-                        Button("Retry", systemImage: "arrow.clockwise") {
-                            operation.run { try await refresh() }
-                        }.disabled(connectivity.localOnly)
-                    }
-                } else if !addSummary.isEmpty {
-                    Text(addSummary).foregroundStyle(.secondary)
-                }
+    private var addMusicSheet: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            FoundationPlaylistAddSearchHeader(
+                query: $addQuery, browsingCollection: addCollection != nil,
+                isEnabled: editable && !operation.isPending,
+                closeDisabled: operation.isPending, close: { addingSongs = false })
+            Picker("Search", selection: $addResultKind) {
+                Text("Songs").tag(FoundationItem.Kind.track)
+                Text("Albums").tag(FoundationItem.Kind.album)
+                Text("Artists").tag(FoundationItem.Kind.artist)
             }
-            .padding(24)
+            .pickerStyle(.segmented)
+            .disabled(addCollection != nil || !editable || operation.isPending)
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 16) { addSection }
+            }
+            Button("Add \(addedSelection.count) Songs", systemImage: "plus.circle.fill") {
+                addSongs()
+            }
+            #if os(macOS)
+                .buttonStyle(.borderedProminent)
+            #else
+                .buttonStyle(.glassProminent)
+            #endif
+            .disabled(!editable || operation.isPending || addedSelection.isEmpty)
+            if operation.isPending {
+                HStack {
+                    ProgressView().controlSize(.small)
+                    Text("Updating playlist…")
+                    Spacer()
+                    Button("Cancel Request") { operation.cancel() }
+                }
+            } else if !operation.succeeded, let message = operation.message {
+                HStack {
+                    Text(message).foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Retry", systemImage: "arrow.clockwise") {
+                        operation.run { try await refresh() }
+                    }.disabled(connectivity.localOnly)
+                }
+            } else if !addSummary.isEmpty {
+                Text(addSummary).foregroundStyle(.secondary)
+            }
+        }
+        .padding(24)
+        #if os(macOS)
             .frame(minWidth: 500, idealWidth: 560, minHeight: 440, idealHeight: 560)
             .background { FoundationPlaylistSheetActivation().frame(width: 0, height: 0) }
-            .presentationBackground(.ultraThinMaterial)
-            .interactiveDismissDisabled(operation.isPending)
-            .onDisappear { addSearchFocused = false }
-        }
-    #endif
+        #else
+            .presentationDetents([.large])
+            .presentationDragIndicator(.visible)
+        #endif
+        .presentationBackground(.ultraThinMaterial)
+        .interactiveDismissDisabled(operation.isPending)
+    }
 
     @ViewBuilder private var managerContents: some View {
         detailsSection
         if showingCovers { coverSection }
         addMusicDisclosure
-        #if os(iOS)
-            if addingSongs { addSection.transition(.opacity) }
-        #endif
         songsSection
     }
 
@@ -399,7 +402,6 @@ struct FoundationPlaylistEditor: View {
                 withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.2)) {
                     if addingSongs {
                         addingSongs = false
-                        addSearchFocused = false
                     } else {
                         addCollection = nil
                         addQuery = ""
@@ -417,9 +419,6 @@ struct FoundationPlaylistEditor: View {
                     Label("Add Songs", systemImage: "plus.circle")
                     Spacer()
                     Image(systemName: "chevron.right")
-                        #if os(iOS)
-                            .rotationEffect(.degrees(addingSongs ? 90 : 0))
-                        #endif
                         .foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity, minHeight: 36, alignment: .leading)
@@ -427,14 +426,7 @@ struct FoundationPlaylistEditor: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Add Songs")
-            #if os(iOS)
-                .accessibilityValue(addingSongs ? "Expanded" : "Collapsed")
-                .accessibilityHint(
-                    addingSongs ? "Hide music search" : "Search songs, albums and artists"
-                )
-            #else
-                .accessibilityHint("Open music search")
-            #endif
+            .accessibilityHint("Open music search")
             .accessibilityIdentifier("playlist-manager-add-disclosure")
             .disabled(!editable || operation.isPending)
         }
@@ -651,59 +643,26 @@ struct FoundationPlaylistEditor: View {
 
     @ViewBuilder private var addSection: some View {
         Group {
-            Section {
-                if let collection = addCollection {
-                    Button("Back to Search", systemImage: "chevron.left") {
-                        browseAddCollection(nil)
-                    }
+            if let collection = addCollection {
+                Button("Back to Search", systemImage: "chevron.left") { browseAddCollection(nil) }
                     .buttonStyle(.borderless)
-                    Label(
-                        collection.title,
-                        systemImage: collection.kind == .artist ? "person" : "square.stack"
-                    )
-                    .font(.headline)
-                } else {
-                    TextField("Search songs, albums and artists", text: $addQuery)
-                        .focused($addSearchFocused)
-                        .accessibilityIdentifier("playlist-manager-add-search")
-                    #if os(macOS)
-                        Picker("Search", selection: $addResultKind) {
-                            Text("Songs").tag(FoundationItem.Kind.track)
-                            Text("Albums").tag(FoundationItem.Kind.album)
-                            Text("Artists").tag(FoundationItem.Kind.artist)
-                        }.pickerStyle(.segmented)
-                    #endif
-                    if addSearchTerm.isEmpty {
-                        Text("Search your library, then choose songs or open an album or artist.")
-                            .font(.subheadline).foregroundStyle(.secondary)
-                    }
-                }
-                Button("Add \(addedSelection.count) Songs", systemImage: "plus.circle.fill") {
-                    addSongs()
-                }
-                #if os(macOS)
-                    .buttonStyle(.borderedProminent)
-                #else
-                    .buttonStyle(.glassProminent)
-                #endif
-                .disabled(addedSelection.isEmpty)
-            } header: {
-                Label("Add Music", systemImage: "magnifyingglass")
+                Label(
+                    collection.title,
+                    systemImage: collection.kind == .artist ? "person" : "square.stack"
+                )
+                .font(.headline)
+            } else if addSearchTerm.isEmpty {
+                Text("Search your library, then choose songs or open an album or artist.")
+                    .font(.subheadline).foregroundStyle(.secondary)
             }
             if let collection = addCollection {
                 addResults(addModel, title: "Songs in \(collection.title)")
             } else if !addSearchTerm.isEmpty {
-                #if os(macOS)
-                    addResults(
-                        addResultKind == .track
-                            ? addModel : addResultKind == .album ? addAlbums : addArtists,
-                        title: addResultKind == .track
-                            ? "Songs" : addResultKind == .album ? "Albums" : "Artists")
-                #else
-                    addResults(addModel, title: "Songs")
-                    addResults(addAlbums, title: "Albums")
-                    addResults(addArtists, title: "Artists")
-                #endif
+                addResults(
+                    addResultKind == .track
+                        ? addModel : addResultKind == .album ? addAlbums : addArtists,
+                    title: addResultKind == .track
+                        ? "Songs" : addResultKind == .album ? "Albums" : "Artists")
                 if addSearchHasNoResults {
                     Section { ContentUnavailableView.search(text: addSearchTerm) }
                 }
@@ -713,14 +672,9 @@ struct FoundationPlaylistEditor: View {
     }
 
     private var addSearchHasNoResults: Bool {
-        #if os(macOS)
-            let models = [
-                addResultKind == .track
-                    ? addModel : addResultKind == .album ? addAlbums : addArtists
-            ]
-        #else
-            let models = [addModel, addAlbums, addArtists]
-        #endif
+        let models = [
+            addResultKind == .track ? addModel : addResultKind == .album ? addAlbums : addArtists
+        ]
         return models.allSatisfy { $0.loaded && $0.items.isEmpty && $0.errorMessage == nil }
     }
 
@@ -765,9 +719,7 @@ struct FoundationPlaylistEditor: View {
                 if visibleAddItems(model).count < model.items.count || model.nextStartIndex != nil {
                     Button("More \(title)", systemImage: "ellipsis") {
                         let hasHiddenItems = visibleAddItems(model).count < model.items.count
-                        #if os(macOS)
-                            addVisibleCount += 12
-                        #endif
+                        addVisibleCount += 12
                         if !hasHiddenItems, model.nextStartIndex != nil {
                             model.request(.more)
                             addRevision += 1
@@ -783,11 +735,7 @@ struct FoundationPlaylistEditor: View {
     }
 
     private func visibleAddItems(_ model: FoundationBrowseModel) -> [FoundationItem] {
-        #if os(macOS)
-            Array(model.items.prefix(addVisibleCount))
-        #else
-            model.items
-        #endif
+        Array(model.items.prefix(addVisibleCount))
     }
 
     private func browseAddCollection(_ item: FoundationItem?) {
@@ -795,7 +743,6 @@ struct FoundationPlaylistEditor: View {
         addCollection = item
         addModel.clearRetainedData()
         addRevision = 0
-        addSearchFocused = item == nil
     }
 
     @ViewBuilder private var managementFooter: some View {
@@ -1510,6 +1457,33 @@ struct FoundationPlaylistCreate: View {
             guard permission.name == validName else { throw FoundationPlaylistError.changed }
             if addSongsNext { showingSongs = true } else { dismiss() }
         }
+    }
+}
+
+/// The persistent search field owns focus in its presented sheet, outside lazy result content.
+private struct FoundationPlaylistAddSearchHeader: View {
+    @Binding var query: String
+    let browsingCollection: Bool
+    let isEnabled: Bool
+    let closeDisabled: Bool
+    let close: () -> Void
+    @FocusState private var searchFocused: Bool
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+            TextField("Search songs, albums and artists", text: $query)
+                .textFieldStyle(.roundedBorder)
+                .focused($searchFocused)
+                .disabled(!isEnabled)
+                .accessibilityLabel("Search songs, albums and artists")
+                .accessibilityIdentifier("playlist-manager-add-search")
+            #if os(macOS)
+                Button("Close", systemImage: "xmark", action: close).disabled(closeDisabled)
+            #endif
+        }
+        .defaultFocus($searchFocused, true)
+        .onChange(of: browsingCollection) { _, browsing in searchFocused = !browsing }
     }
 }
 
