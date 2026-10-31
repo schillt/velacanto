@@ -395,6 +395,51 @@ final class FoundationDownloadQualityTests: XCTestCase {
     }
 
     #if DEBUG
+        func testNativeCaptureDiagnosticsContainOnlyFixedStageShapeAndWriteCodes() throws {
+            let secret = "private-callback-secret"
+            let base = try XCTUnwrap(URL(string: "file:///tmp/\(secret)/"))
+            let based = try XCTUnwrap(URL(string: "asset.movpkg", relativeTo: base))
+            XCTAssertNotNil(based.baseURL)
+            let error = NSError(
+                domain: NSCocoaErrorDomain, code: 513,
+                userInfo: [
+                    NSLocalizedDescriptionKey: secret, NSFilePathErrorKey: "/tmp/\(secret)",
+                    NSURLErrorFailingURLErrorKey: based,
+                    NSUnderlyingErrorKey: NSError(
+                        domain: NSPOSIXErrorDomain, code: 13,
+                        userInfo: [NSLocalizedDescriptionKey: secret]),
+                ])
+            for stage in FoundationNativeDownloadErrorFields.CaptureStage.allCases {
+                let event = FoundationNativeDownloadErrorFields.capture(
+                    stage: stage, location: based, writeError: error)
+                XCTAssertEqual(
+                    event,
+                    "download.native stage=allocation.capture substage=\(stage.rawValue) outcome=failed fileURL=1 basePresent=1 plain=0 domain=Cocoa code=513 underlyingDomain=POSIX underlyingCode=13"
+                )
+                XCTAssertFalse(event.contains(secret))
+                XCTAssertFalse(event.contains("file:"))
+                XCTAssertFalse(event.contains("movpkg"))
+            }
+            let unknown = NSError(
+                domain: secret, code: 987654, userInfo: [NSLocalizedDescriptionKey: secret])
+            XCTAssertEqual(
+                FoundationNativeDownloadErrorFields.persistence(
+                    stage: .beginResuming, error: unknown),
+                "download.native stage=allocation.persistence substage=beginResuming domain=other code=0 underlyingDomain=other underlyingCode=0"
+            )
+            XCTAssertEqual(
+                FoundationNativeDownloadErrorFields.terminal(
+                    taskMatches: false, observedAllocation: true, cleanupFailed: true),
+                "download.native stage=allocation.terminal taskMatches=0 observedAllocation=1 cleanupFailed=1"
+            )
+            let unbased = based.absoluteURL
+            XCTAssertEqual(
+                FoundationNativeDownloadErrorFields.capture(
+                    stage: .allocatedWrite, location: unbased),
+                "download.native stage=allocation.capture substage=allocatedWrite outcome=failed fileURL=1 basePresent=0 plain=1"
+            )
+        }
+
         func testNativeDiagnosticErrorsExposeOnlyRecognizedScalarCodes() {
             let secret = "https://private.invalid/Audio/private?ApiKey=private-token"
             let nested = NSError(domain: NSOSStatusErrorDomain, code: -123456)

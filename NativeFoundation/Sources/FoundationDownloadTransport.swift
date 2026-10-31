@@ -862,6 +862,13 @@ nonisolated final class FoundationNativeDownloadDelegate: FoundationNativeDownlo
                     }
                     if shouldResume { task.resume() } else { task.cancel() }
                 } catch {
+                    #if DEBUG
+                        if FoundationNativeDownloadTransport.diagnosticEnabled {
+                            FoundationJournal.shared.record(
+                                FoundationNativeDownloadErrorFields.persistence(
+                                    stage: .beginResuming, error: error))
+                        }
+                    #endif
                     lock.withLock { cleanupFailed = true }
                     task.cancel()
                 }
@@ -912,9 +919,23 @@ nonisolated final class FoundationNativeDownloadDelegate: FoundationNativeDownlo
         #endif
         // Cold retirement deliberately cannot manufacture terminal-no-allocation proof.
         if lock.withLock({ retirement != nil }) { return }
+        #if DEBUG
+            var diagnosticCleanupFailed = false
+        #endif
         let state = lock.withLock {
-            (liveTaskIdentifier, observedAllocation, location, cancelled || cleanupFailed)
+            #if DEBUG
+                diagnosticCleanupFailed = cleanupFailed
+            #endif
+            return (liveTaskIdentifier, observedAllocation, location, cancelled || cleanupFailed)
         }
+        #if DEBUG
+            if FoundationNativeDownloadTransport.diagnosticEnabled {
+                FoundationJournal.shared.record(
+                    FoundationNativeDownloadErrorFields.terminal(
+                        taskMatches: state.0 == task.taskIdentifier,
+                        observedAllocation: state.1, cleanupFailed: diagnosticCleanupFailed))
+            }
+        #endif
         do {
             if state.0 == task.taskIdentifier && !state.1 {
                 try store.recordTerminalNoAllocation(taskIdentifier: task.taskIdentifier)
@@ -942,8 +963,38 @@ nonisolated final class FoundationNativeDownloadDelegate: FoundationNativeDownlo
             case NSURLErrorDomain: return ("URL", error.code)
             case AVFoundationErrorDomain: return ("AVFoundation", error.code)
             case NSOSStatusErrorDomain: return ("OSStatus", error.code)
+            case NSCocoaErrorDomain: return ("Cocoa", error.code)
+            case NSPOSIXErrorDomain: return ("POSIX", error.code)
             default: return ("other", 0)
             }
+        }
+
+        enum CaptureStage: String, CaseIterable {
+            case initialURL, session, task, existingReceipt, binding, allocatedWrite
+            case namespace, parentBookmark, packageBookmark, ownershipProof, packageWrite
+        }
+
+        enum PersistenceStage: String {
+            case allocatedWrite, parentBookmark, packageWrite, beginResuming
+        }
+
+        static func capture(stage: CaptureStage, location: URL, writeError: Error? = nil) -> String
+        {
+            // Project booleans only. Never interpolate the URL or any component text.
+            let shape =
+                "download.native stage=allocation.capture substage=\(stage.rawValue) outcome=failed fileURL=\(location.isFileURL ? 1 : 0) basePresent=\(location.baseURL != nil ? 1 : 0) plain=\(FoundationManagedPackageMetadata.plain(location) ? 1 : 0)"
+            return writeError.map { shape + " " + scalars($0) } ?? shape
+        }
+
+        static func persistence(stage: PersistenceStage, error: Error) -> String {
+            "download.native stage=allocation.persistence substage=\(stage.rawValue) "
+                + scalars(error)
+        }
+
+        static func terminal(taskMatches: Bool, observedAllocation: Bool, cleanupFailed: Bool)
+            -> String
+        {
+            "download.native stage=allocation.terminal taskMatches=\(taskMatches ? 1 : 0) observedAllocation=\(observedAllocation ? 1 : 0) cleanupFailed=\(cleanupFailed ? 1 : 0)"
         }
 
         static func scalars(_ error: Error) -> String {

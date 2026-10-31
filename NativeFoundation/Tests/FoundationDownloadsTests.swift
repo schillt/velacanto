@@ -472,6 +472,46 @@ final class FoundationDownloadsTests: XCTestCase {
         manager.invalidate()
     }
 
+    func testNativeDiagnosticFollowupPreservesEarlyURLAndTaskBindingRejection() throws {
+        let directory = try root()
+        try FoundationDownloadStorage.prepare(directory)
+        let identifier =
+            "dev.novoluxor.velacanto.offline." + directory.lastPathComponent + "."
+            + UUID().uuidString
+        let store = FoundationNativeAllocationStore(
+            directory: directory, sessionIdentifier: identifier, trackID: "track")
+        try store.reserve(taskIdentifier: 1)
+        try store.beginResuming(taskIdentifier: 1)
+        let based = try XCTUnwrap(
+            URL(string: "asset.movpkg", relativeTo: directory))
+        XCTAssertNotNil(based.baseURL)
+        let plain = based.absoluteURL
+        for (url, task) in [(based, 1), (plain, 2)] {
+            XCTAssertThrowsError(
+                try store.capture(
+                    url, taskIdentifier: task,
+                    snapshot: { _ in
+                        XCTFail("Early rejection reached bookmark access")
+                        return Data()
+                    },
+                    prove: { _ in
+                        XCTFail("Early rejection reached ownership proof")
+                        return false
+                    },
+                    namespaceProof: { _ in
+                        XCTFail("Early rejection reached namespace access")
+                        return false
+                    }))
+            let retained = try store.load()
+            XCTAssertEqual(retained.phase, .resuming)
+            XCTAssertEqual(retained.taskIdentifier, 1)
+            XCTAssertNil(retained.nativeURL)
+            XCTAssertNil(retained.package)
+            XCTAssertNil(retained.namespaceBookmark)
+            XCTAssertNil(retained.retired)
+        }
+    }
+
     func testNativeCallbackBookmarkFailureRetainsDurableObservedAuthority() throws {
         let directory = try root()
         try FoundationDownloadStorage.prepare(directory)

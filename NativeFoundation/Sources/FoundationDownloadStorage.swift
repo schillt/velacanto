@@ -814,42 +814,112 @@ nonisolated struct FoundationNativeAllocationStore: Sendable {
         }, prove: (FoundationNativeDownloadPackage) -> Bool = { $0.resolveOwnedURL() != nil },
         namespaceProof: (URL) -> Bool = { FoundationNativeDownloadPackage.ownsNamespace($0) }
     ) throws {
-        guard validSession, taskIdentifier > 0, FoundationManagedPackageMetadata.plain(location)
-        else {
-            throw FoundationDownloadError.cleanup
-        }
-        var status = stat()
-        let existing = receiptURL.path.withCString { lstat($0, &status) }
-        guard existing == 0 || errno == ENOENT else { throw FoundationDownloadError.cleanup }
-        if existing == 0 {
-            let existing = try load()
-            guard existing.taskIdentifier == taskIdentifier,
-                existing.nativeURL == nil || existing.nativeURL == location
-            else {
-                throw FoundationDownloadError.cleanup
-            }
-            guard existing.retired != true, existing.phase != .terminalNoAllocation else {
-                throw FoundationDownloadError.cleanup
-            }
-            if existing.package != nil { return }  // Never replace a pinned resource snapshot.
-        }
-        var receipt = Receipt(
-            scope: scope, sessionIdentifier: sessionIdentifier,
-            taskIdentifier: taskIdentifier, trackID: trackID, nativeURL: location, phase: .allocated
-        )
-        try write(receipt)  // Preserve callback authority BEFORE any fallible bookmark call.
+        #if DEBUG
+            var stage = FoundationNativeDownloadErrorFields.CaptureStage.initialURL
+            var writing: FoundationNativeDownloadErrorFields.PersistenceStage?
+            var writeError: Error?
+        #endif
         do {
-            guard namespaceProof(location) else { throw FoundationDownloadError.cleanup }
-            receipt.namespaceBookmark = try snapshot(location.deletingLastPathComponent())
-            try write(receipt)
-            let bookmark = try snapshot(location)
-            let package = FoundationNativeDownloadPackage(
-                nativeURL: location, bookmark: bookmark,
-                sessionIdentifier: sessionIdentifier, namespaceBookmark: receipt.namespaceBookmark)
-            guard prove(package) else { throw FoundationDownloadError.cleanup }
-            receipt.package = package
-            try write(receipt)
-        } catch { throw FoundationDownloadError.cleanup }
+            #if DEBUG
+                stage = .initialURL
+            #endif
+            guard validSession, taskIdentifier > 0, FoundationManagedPackageMetadata.plain(location)
+            else {
+                #if DEBUG
+                    if !validSession {
+                        stage = .session
+                    } else if taskIdentifier <= 0 {
+                        stage = .task
+                    }
+                #endif
+                throw FoundationDownloadError.cleanup
+            }
+            #if DEBUG
+                stage = .existingReceipt
+            #endif
+            var status = stat()
+            let existing = receiptURL.path.withCString { lstat($0, &status) }
+            guard existing == 0 || errno == ENOENT else { throw FoundationDownloadError.cleanup }
+            if existing == 0 {
+                let existing = try load()
+                #if DEBUG
+                    stage = .binding
+                #endif
+                guard existing.taskIdentifier == taskIdentifier,
+                    existing.nativeURL == nil || existing.nativeURL == location
+                else {
+                    throw FoundationDownloadError.cleanup
+                }
+                guard existing.retired != true, existing.phase != .terminalNoAllocation else {
+                    throw FoundationDownloadError.cleanup
+                }
+                if existing.package != nil { return }  // Never replace a pinned resource snapshot.
+            }
+            var receipt = Receipt(
+                scope: scope, sessionIdentifier: sessionIdentifier,
+                taskIdentifier: taskIdentifier, trackID: trackID, nativeURL: location,
+                phase: .allocated
+            )
+            #if DEBUG
+                stage = .allocatedWrite
+                writing = .allocatedWrite
+            #endif
+            try write(receipt)  // Preserve callback authority BEFORE any fallible bookmark call.
+            #if DEBUG
+                writing = nil
+            #endif
+            do {
+                #if DEBUG
+                    stage = .namespace
+                #endif
+                guard namespaceProof(location) else { throw FoundationDownloadError.cleanup }
+                #if DEBUG
+                    stage = .parentBookmark
+                #endif
+                receipt.namespaceBookmark = try snapshot(location.deletingLastPathComponent())
+                #if DEBUG
+                    writing = .parentBookmark
+                #endif
+                try write(receipt)
+                #if DEBUG
+                    writing = nil
+                    stage = .packageBookmark
+                #endif
+                let bookmark = try snapshot(location)
+                let package = FoundationNativeDownloadPackage(
+                    nativeURL: location, bookmark: bookmark,
+                    sessionIdentifier: sessionIdentifier,
+                    namespaceBookmark: receipt.namespaceBookmark)
+                #if DEBUG
+                    stage = .ownershipProof
+                #endif
+                guard prove(package) else { throw FoundationDownloadError.cleanup }
+                receipt.package = package
+                #if DEBUG
+                    stage = .packageWrite
+                    writing = .packageWrite
+                #endif
+                try write(receipt)
+                #if DEBUG
+                    writing = nil
+                #endif
+            } catch {
+                #if DEBUG
+                    if writing != nil { writeError = error }
+                #endif
+                throw FoundationDownloadError.cleanup
+            }
+        } catch {
+            #if DEBUG
+                if ProcessInfo.processInfo.arguments.contains("-diagnosticNativeDownload") {
+                    FoundationJournal.shared.record(
+                        FoundationNativeDownloadErrorFields.capture(
+                            stage: stage, location: location,
+                            writeError: writeError ?? (writing != nil ? error : nil)))
+                }
+            #endif
+            throw error
+        }
     }
 
     var validSession: Bool {
