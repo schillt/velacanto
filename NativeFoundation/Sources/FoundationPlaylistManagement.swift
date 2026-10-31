@@ -105,7 +105,15 @@ struct FoundationPlaylistEditor: View {
     @State private var addRevision = 0
     @State private var addedSelection: [FoundationItem] = []
     @StateObject private var addModel = FoundationBrowseModel()
+    @StateObject private var addAlbums = FoundationBrowseModel()
+    @StateObject private var addArtists = FoundationBrowseModel()
+    @State private var addCollection: FoundationItem?
+    @FocusState private var addSearchFocused: Bool
     @StateObject private var operation = FoundationPlaylistOperation()
+
+    private var addSearchTerm: String {
+        addQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 
     private var canEditDetails: Bool {
         loaded && !connectivity.localOnly && permissions?.canEdit == true
@@ -152,14 +160,6 @@ struct FoundationPlaylistEditor: View {
                 if showingCovers { coverSection }
                 if addingSongs { addSection }
                 songsSection
-                Section {
-                    Button("Delete Playlist", systemImage: "trash", role: .destructive) {
-                        confirmDelete = true
-                    }
-                    .disabled(
-                        !loaded || connectivity.localOnly || permissions?.canDelete != true
-                            || operation.isPending)
-                }
             }
             .reorderContainer(
                 for: FoundationPlaylistReorderRow.self, isEnabled: canMove, move: reorder
@@ -189,6 +189,18 @@ struct FoundationPlaylistEditor: View {
                     Button("Save", systemImage: "checkmark") { saveDetails() }
                         .disabled(!canEditDetails || operation.isPending || !dirty)
                         .buttonStyle(.glassProminent)
+                }
+                ToolbarItem(placement: .primaryAction) {
+                    Menu("Playlist Options", systemImage: "ellipsis") {
+                        Button("Delete Playlist", systemImage: "trash", role: .destructive) {
+                            confirmDelete = true
+                        }
+                        .disabled(
+                            !loaded || connectivity.localOnly || permissions?.canDelete != true
+                                || operation.isPending)
+                    }
+                    .labelStyle(.iconOnly)
+                    .accessibilityIdentifier("playlist-manager-options")
                 }
             }
             .safeAreaInset(edge: .bottom, spacing: 0) { managementFooter }
@@ -235,6 +247,8 @@ struct FoundationPlaylistEditor: View {
             }
             if !connectivity.localOnly { operation.run { try await refresh() } }
             addModel.configureCatalogPagination()
+            addAlbums.configureCatalogPagination()
+            addArtists.configureCatalogPagination()
         }
         .onDisappear { operation.cancel() }
         .onChange(of: library.catalogScopeID) { _, _ in
@@ -256,18 +270,50 @@ struct FoundationPlaylistEditor: View {
         }
         .onChange(of: entries.map(\.mutationID)) { _, ids in selection.formIntersection(ids) }
         .onChange(of: addQuery) { _, _ in
+            addCollection = nil
             addModel.clearRetainedData()
+            addAlbums.clearRetainedData()
+            addArtists.clearRetainedData()
             addRevision = 0
         }
         .task(
             id:
-                "\(library.catalogScopeID)-\(addingSongs)-\(addQuery)-\(addRevision)-\(connectivity.localOnly)"
+                "\(library.catalogScopeID)-\(addingSongs)-\(addQuery)-\(addCollection?.sharedArtworkIdentity ?? "search")-\(addRevision)-\(connectivity.localOnly)"
         ) {
             guard addingSongs, !connectivity.localOnly else { return }
+            if addCollection == nil, addSearchTerm.isEmpty { addSearchFocused = true }
+            let term = addSearchTerm
+            let collection = addCollection
+            // An empty search is intentionally inert; never enumerate the catalog here.
+            guard collection != nil || !term.isEmpty else { return }
             do {
-                if !addQuery.isEmpty { try await Task.sleep(for: .milliseconds(250)) }
+                if collection == nil { try await Task.sleep(for: .milliseconds(250)) }
                 try Task.checkCancellation()
-                await addModel.loadPending(using: loadAddSongs)
+                if let collection {
+                    await addModel.loadPending { offset in
+                        if collection.kind == .album {
+                            return try await library.tracks(
+                                albumID: collection.id, startIndex: offset)
+                        }
+                        return try await library.tracks(artistID: collection.id, startIndex: offset)
+                    }
+                } else {
+                    // Three explicit typed result groups; one bounded page per group.
+                    await addModel.loadPending {
+                        try await library.search(
+                            query: term, kind: .track, startIndex: $0, limit: 12)
+                    }
+                    try Task.checkCancellation()
+                    await addAlbums.loadPending {
+                        try await library.search(
+                            query: term, kind: .album, startIndex: $0, limit: 12)
+                    }
+                    try Task.checkCancellation()
+                    await addArtists.loadPending {
+                        try await library.search(
+                            query: term, kind: .artist, startIndex: $0, limit: 12)
+                    }
+                }
             } catch {}
         }
     }
@@ -398,8 +444,19 @@ struct FoundationPlaylistEditor: View {
             HStack {
                 Label("\(entries.count) Songs", systemImage: "music.note.list")
                 Spacer()
-                Button(addingSongs ? "Hide Add Songs" : "Add Songs", systemImage: "plus") {
-                    addingSongs.toggle()
+                Button(addingSongs ? "Hide Search" : "Add Songs", systemImage: "plus") {
+                    if addingSongs {
+                        addingSongs = false
+                        addSearchFocused = false
+                    } else {
+                        addCollection = nil
+                        addQuery = ""
+                        addModel.clearRetainedData()
+                        addAlbums.clearRetainedData()
+                        addArtists.clearRetainedData()
+                        addRevision = 0
+                        addingSongs = true
+                    }
                 }
                 .buttonStyle(.borderless).disabled(!editable || operation.isPending)
             }
@@ -409,7 +466,7 @@ struct FoundationPlaylistEditor: View {
             } else if FoundationPlaylistSnapshot.hasAmbiguousMemberships(entries) {
                 Text(FoundationPlaylistError.ambiguousMemberships.errorDescription ?? "")
             } else if requiresRefresh {
-                Text("Refresh to confirm songs before making another change.")
+                Text("Review the latest songs before making another change.")
             } else if !query.isEmpty {
                 Text("Clear the search to reorder songs.")
             }
@@ -417,80 +474,144 @@ struct FoundationPlaylistEditor: View {
         .accessibilityIdentifier("playlist-management-songs")
     }
 
-    private var addSection: some View {
-        Section {
-            TextField("Search library songs", text: $addQuery)
-            ForEach(addModel.items) { song in
-                Button {
-                    if addedSelection.contains(where: { $0.id == song.id }) {
-                        addedSelection.removeAll { $0.id == song.id }
-                    } else {
-                        addedSelection.append(song)
+    @ViewBuilder private var addSection: some View {
+        Group {
+            Section {
+                if let collection = addCollection {
+                    Button("Back to Search", systemImage: "chevron.left") {
+                        browseAddCollection(nil)
                     }
-                } label: {
-                    HStack {
-                        FoundationPlaylistMusicRow(item: song, library: library)
-                        Image(
-                            systemName: addedSelection.contains(where: { $0.id == song.id })
-                                ? "checkmark.circle.fill" : "plus.circle"
-                        )
-                        .foregroundStyle(.tint)
+                    .buttonStyle(.borderless)
+                    Label(
+                        collection.title,
+                        systemImage: collection.kind == .artist ? "person" : "square.stack"
+                    )
+                    .font(.headline)
+                } else {
+                    TextField("Search songs, albums and artists", text: $addQuery)
+                        .focused($addSearchFocused)
+                        .accessibilityIdentifier("playlist-manager-add-search")
+                    if addSearchTerm.isEmpty {
+                        Text("Search your library, then choose songs or open an album or artist.")
+                            .font(.subheadline).foregroundStyle(.secondary)
                     }
-                }.buttonStyle(.plain)
+                }
+                Button("Add \(addedSelection.count) Songs", systemImage: "plus.circle.fill") {
+                    addSongs()
+                }
+                .buttonStyle(.glassProminent).disabled(addedSelection.isEmpty)
+            } header: {
+                Label("Add Music", systemImage: "magnifyingglass")
             }
-            if addModel.isLoading { ProgressView("Loading songs…") }
-            if let error = addModel.errorMessage {
-                Text(error).foregroundStyle(.secondary)
-                Button("Retry", systemImage: "arrow.clockwise") {
-                    addModel.request(addModel.retryRequest)
-                    addRevision += 1
+            if let collection = addCollection {
+                addResults(addModel, title: "Songs in \(collection.title)")
+            } else if !addSearchTerm.isEmpty {
+                addResults(addModel, title: "Songs")
+                addResults(addAlbums, title: "Albums")
+                addResults(addArtists, title: "Artists")
+                if [addModel, addAlbums, addArtists].allSatisfy({
+                    $0.loaded && $0.items.isEmpty && $0.errorMessage == nil
+                }) {
+                    Section { ContentUnavailableView.search(text: addSearchTerm) }
                 }
             }
-            if addModel.nextStartIndex != nil {
-                Button("More Songs", systemImage: "ellipsis") {
-                    addModel.request(.more)
-                    addRevision += 1
-                }
-                .disabled(addModel.isLoading)
-            }
-            Button("Add \(addedSelection.count) Songs", systemImage: "plus.circle.fill") {
-                addSongs()
-            }
-            .buttonStyle(.glassProminent).disabled(addedSelection.isEmpty)
-        } header: {
-            Label("Add Songs", systemImage: "plus.circle")
         }
         .disabled(!editable || operation.isPending)
     }
 
-    private var managementFooter: some View {
-        HStack(spacing: 12) {
-            if operation.isPending {
-                ProgressView().controlSize(.small)
-                Text("Updating playlist…").foregroundStyle(.secondary)
-                Spacer()
-                Button("Cancel Request") {
-                    requiresRefresh = true
-                    operation.cancel()
+    @ViewBuilder private func addResults(_ model: FoundationBrowseModel, title: String) -> some View
+    {
+        if !model.items.isEmpty || model.isLoading || model.errorMessage != nil {
+            Section {
+                ForEach(model.items) { item in
+                    Button {
+                        if item.kind == .track {
+                            if addedSelection.contains(where: { $0.id == item.id }) {
+                                addedSelection.removeAll { $0.id == item.id }
+                            } else {
+                                addedSelection.append(item)
+                            }
+                        } else if item.kind == .album || item.kind == .artist {
+                            browseAddCollection(item)
+                        }
+                    } label: {
+                        HStack {
+                            FoundationPlaylistMusicRow(item: item, library: library)
+                            if item.kind == .track {
+                                Image(
+                                    systemName: addedSelection.contains(where: { $0.id == item.id })
+                                        ? "checkmark.circle.fill" : "plus.circle"
+                                )
+                                .foregroundStyle(.tint)
+                            } else {
+                                Image(systemName: "chevron.right").foregroundStyle(.secondary)
+                            }
+                        }
+                    }.buttonStyle(.plain)
                 }
-            } else {
-                if !saveSummary.isEmpty {
-                    Text(saveSummary).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                if model.isLoading { ProgressView("Searching…") }
+                if let error = model.errorMessage {
+                    Text(error).foregroundStyle(.secondary)
+                    Button("Retry", systemImage: "arrow.clockwise") {
+                        model.request(model.retryRequest)
+                        addRevision += 1
+                    }
                 }
-                if !selection.isEmpty {
-                    Button(
-                        "Remove \(selectedEntries.count)", systemImage: "minus.circle",
-                        role: .destructive
-                    ) { remove(selectedEntries) }
-                    .disabled(!editable)
+                if model.nextStartIndex != nil {
+                    Button("More \(title)", systemImage: "ellipsis") {
+                        model.request(.more)
+                        addRevision += 1
+                    }.disabled(model.isLoading)
                 }
-                Spacer()
-                Button("Refresh", systemImage: "arrow.clockwise") {
-                    operation.run { try await refresh() }
-                }
-                .disabled(connectivity.localOnly)
+            } header: {
+                Text(title)
             }
-        }.padding(16).background(.bar)
+        } else if addCollection != nil, model.loaded {
+            Section { Text("No songs are available here.").foregroundStyle(.secondary) }
+        }
+    }
+
+    private func browseAddCollection(_ item: FoundationItem?) {
+        addCollection = item
+        addModel.clearRetainedData()
+        addRevision = 0
+        addSearchFocused = item == nil
+    }
+
+    @ViewBuilder private var managementFooter: some View {
+        if operation.isPending || !saveSummary.isEmpty || !selection.isEmpty
+            || (!operation.succeeded && operation.message != nil)
+        {
+            HStack(spacing: 12) {
+                if operation.isPending {
+                    ProgressView().controlSize(.small)
+                    Text("Updating playlist…").foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Cancel Request") {
+                        requiresRefresh = true
+                        operation.cancel()
+                    }
+                } else {
+                    if !saveSummary.isEmpty {
+                        Text(saveSummary).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                    }
+                    if !selection.isEmpty {
+                        Button(
+                            "Remove \(selectedEntries.count)", systemImage: "minus.circle",
+                            role: .destructive
+                        ) { remove(selectedEntries) }
+                        .disabled(!editable)
+                    }
+                    Spacer()
+                    if !operation.succeeded, operation.message != nil {
+                        Button("Retry", systemImage: "arrow.clockwise") {
+                            operation.run { try await refresh() }
+                        }
+                        .disabled(connectivity.localOnly)
+                    }
+                }
+            }.padding(16).background(.bar)
+        }
     }
 
     private func saveDetails() {
@@ -595,11 +716,6 @@ struct FoundationPlaylistEditor: View {
             guard !connectivity.localOnly else { throw CancellationError() }
             requiresRefresh = false
         }
-    }
-    private func loadAddSongs(_ offset: Int) async throws -> FoundationPage {
-        let text = addQuery.trimmingCharacters(in: .whitespacesAndNewlines)
-        if text.isEmpty { return try await library.songs(startIndex: offset) }
-        return try await library.search(query: text, kind: .track, startIndex: offset, limit: 50)
     }
     private func addSongs() {
         guard editable, !operation.isPending, !addedSelection.isEmpty else { return }
