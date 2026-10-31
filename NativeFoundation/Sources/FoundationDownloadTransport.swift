@@ -454,6 +454,7 @@ nonisolated enum FoundationNativeDownloadTransport {
                     stage = "conversionCleanup"
                 #endif
                 try await closeConversion(proposal.cleanupRequest, allowsCellular: allowsCellular)
+                guard !worker.failedSession else { throw FoundationDownloadError.cleanup }
                 #if DEBUG
                     if diagnosticEnabled {
                         FoundationJournal.shared.record(
@@ -475,6 +476,23 @@ nonisolated enum FoundationNativeDownloadTransport {
                             "download.native stage=\(stage) primary=\(failure)")
                     }
                 #endif
+                if acquired == nil, worker.failedSession {
+                    // Keep an unverified failed session's authority for scoped recovery.
+                    // Server cleanup has its own bounded lifetime but cannot reclassify
+                    // this as conversionCleanup and discard the pending receipt.
+                    do {
+                        try await closeConversion(
+                            proposal.cleanupRequest, allowsCellular: allowsCellular)
+                    } catch {
+                        #if DEBUG
+                            if diagnosticEnabled {
+                                FoundationJournal.shared.record(
+                                    "download.native stage=conversion.cleanup outcome=failed")
+                            }
+                        #endif
+                    }
+                    throw FoundationDownloadError.cleanup
+                }
                 if let acquired {
                     do {
                         try acquired.removeOwnedPackage()
@@ -796,6 +814,9 @@ nonisolated final class FoundationNativeDownloadDelegate: FoundationNativeDownlo
     private var liveTaskIdentifier: Int?
     private var observedAllocation = false
     private var terminalResult: Result<URL, Error>?
+    // nil = no final callback; true = systemic failure; false = explicit invalidation.
+    private var invalidationFailed: Bool?
+    var failedSession: Bool { lock.withLock { invalidationFailed == true } }
     private let progress: FoundationDownloadTransport.Progress
     private let store: FoundationNativeAllocationStore
     private let backgroundEventsFinished: @Sendable (String) -> Void
@@ -818,9 +839,23 @@ nonisolated final class FoundationNativeDownloadDelegate: FoundationNativeDownlo
         backgroundEventsFinished(store.sessionIdentifier)
     }
 
-    func retire(_ session: AVAssetDownloadURLSession) async throws {
+    func retire(_ session: URLSession) async throws {
         try await withCheckedThrowingContinuation { continuation in
-            lock.withLock { retirement = continuation }
+            let invalidated = lock.withLock { () -> Bool? in
+                if let invalidationFailed { return invalidationFailed }
+                retirement = continuation
+                return nil
+            }
+            // A systemic failure may arrive before the recovery caller attaches.
+            // Never wait for another message from an already-invalid session.
+            if let invalidated {
+                do {
+                    guard !invalidated else { throw FoundationDownloadError.cleanup }
+                    try store.retire()
+                    continuation.resume()
+                } catch { continuation.resume(throwing: FoundationDownloadError.cleanup) }
+                return
+            }
             session.getAllTasks { tasks in
                 for task in tasks { task.cancel() }
                 // Cancellation policy is unchanged. Wait for the cancelled tasks and
@@ -831,25 +866,34 @@ nonisolated final class FoundationNativeDownloadDelegate: FoundationNativeDownlo
     }
 
     func urlSession(_ session: URLSession, didBecomeInvalidWithError error: Error?) {
-        // Both native session owners use finishTasksAndInvalidate after task completion
-        // or explicit task cancellation. This is their final delegate-call boundary.
-        defer {
-            if error == nil { backgroundEventsFinished(store.sessionIdentifier) }
-        }
-        let pending = lock.withLock { () -> CheckedContinuation<Void, Error>? in
+        // Public NSURLSession.h declares this the final session message, including
+        // systemic errors. Terminal delivery is not proof of a successful task,
+        // allocation absence, package eligibility, deletion or retirement.
+        let result = lock.withLock { () -> (Bool, CheckedContinuation<Void, Error>?) in
+            guard invalidationFailed == nil else { return (false, nil) }
+            invalidationFailed = error != nil
             let pending = retirement
             retirement = nil
-            return pending
+            return (true, pending)
         }
-        guard let pending else { return }
+        guard result.0 else { return }
+        defer { backgroundEventsFinished(store.sessionIdentifier) }
+        if error != nil {
+            // Retain the exact receipt. A final session error does not provide the
+            // original live task's no-allocation callback history or cleanup proof.
+            result.1?.resume(throwing: FoundationDownloadError.cleanup)
+            complete(.failure(FoundationDownloadError.cleanup))
+            return
+        }
+        guard let pending = result.1 else { return }
         do {
-            guard error == nil else { throw FoundationDownloadError.cleanup }
             try store.retire()
             pending.resume()
         } catch { pending.resume(throwing: FoundationDownloadError.cleanup) }
     }
 
     func run(_ task: URLSessionTask) async throws -> URL {
+        guard !failedSession else { throw FoundationDownloadError.cleanup }
         // Bind a suspended task durably before cancellation handling can reach it.
         // This is the same path for native acquisition and native-free delegate tests.
         try store.reserve(taskIdentifier: task.taskIdentifier)
@@ -935,6 +979,12 @@ nonisolated final class FoundationNativeDownloadDelegate: FoundationNativeDownlo
                 )
             }
         #endif
+        // Do not let a duplicate/stale task callback manufacture terminal proof after
+        // the session has already failed. The original authority stays untouched.
+        if failedSession {
+            complete(.failure(FoundationDownloadError.cleanup))
+            return
+        }
         // Cold retirement deliberately cannot manufacture terminal-no-allocation proof.
         if lock.withLock({ retirement != nil }) { return }
         #if DEBUG

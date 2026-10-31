@@ -425,16 +425,42 @@ final class FoundationDownloadsTests: XCTestCase {
         let directory = FoundationDownloadStorage.directory(scope: scope, root: storageRoot)
         let gate = DownloadGate()
         let observation = NativeDownloadVerificationFixture()
+        let terminalDelivery = NativeDownloadVerificationFixture()
         let manager = FoundationDownloads(
             scope: scope, library: DownloadsLibrary(tracks: [track]), root: storageRoot,
             monitorConnectivity: false, requestedQuality: { .aac192 },
             systemManagedDownloads: { true },
             nativeTransfer: { _, store, _, _ in
                 observation.recordVerification()
-                try store.reserve(taskIdentifier: 1)
-                try store.beginResuming(taskIdentifier: 1)
-                await gate.wait()
-                throw FoundationDownloadError.cleanup
+                let delegate = FoundationNativeDownloadDelegate(
+                    progress: { _, _ in }, store: store,
+                    backgroundEventsFinished: { incoming in
+                        XCTAssertEqual(incoming, store.sessionIdentifier)
+                        terminalDelivery.recordVerification()
+                    })
+                // A pre-cancelled task cannot issue network requests. The test drives
+                // the actual delegate's run continuation and fatal callback directly.
+                let session = URLSession(configuration: .ephemeral)
+                let task = session.dataTask(
+                    with: URL(string: "https://example.invalid/never-started")!)
+                task.cancel()
+                defer {
+                    session.invalidateAndCancel()
+                    XCTAssertEqual(task.countOfBytesSent, 0)
+                }
+                let failure = Task {
+                    await gate.wait()
+                    delegate.urlSession(
+                        session,
+                        didBecomeInvalidWithError: URLError(.backgroundSessionWasDisconnected))
+                    delegate.urlSession(
+                        session,
+                        didBecomeInvalidWithError: URLError(.backgroundSessionWasDisconnected))
+                }
+                defer { failure.cancel() }
+                _ = try await delegate.run(task)
+                XCTFail("Systemic invalidation returned a successful allocation")
+                throw FoundationDownloadError.incomplete
             },
             nativeRetirement: { _, _ in
                 XCTFail("Live task opened a duplicate recovery session")
@@ -445,6 +471,9 @@ final class FoundationDownloadsTests: XCTestCase {
         try await waitUntilAsync { await gate.started }
         let identifier = try XCTUnwrap(
             FoundationDownloadStorage.load(directory: directory).nativePendingSessions?.first)
+        let store = FoundationNativeAllocationStore(
+            directory: directory, sessionIdentifier: identifier)
+        try await waitUntil { (try? store.load().phase) == .resuming }
         manager.recordBackgroundSessionDrain(identifier)
         XCTAssertTrue(manager.backgroundSessionHasDrained(identifier))
         var completed = false
@@ -460,6 +489,7 @@ final class FoundationDownloadsTests: XCTestCase {
         await gate.resume()
         let admitted = await callback.value
         XCTAssertTrue(admitted)
+        XCTAssertEqual(terminalDelivery.verifications, 1)
         XCTAssertEqual(observation.verifications, 1)
         let saved = try FoundationDownloadStorage.load(directory: directory)
         XCTAssertTrue(saved.nativePendingSessions?.contains(identifier) == true)
@@ -498,6 +528,76 @@ final class FoundationDownloadsTests: XCTestCase {
         XCTAssertEqual(observation.verifications, 2)
         // Merely draining callbacks cannot invent a receipt, retire a file or mark ready.
         XCTAssertFalse(FileManager.default.fileExists(atPath: store.receiptURL.path))
+    }
+
+    func testFatalSessionInvalidationBeforeRunIsLatchedWithoutAllocationOrRetirementProof()
+        async throws
+    {
+        let directory = try root()
+        try FoundationDownloadStorage.prepare(directory)
+        let identifier =
+            "dev.novoluxor.velacanto.offline." + directory.lastPathComponent + "."
+            + UUID().uuidString
+        let store = FoundationNativeAllocationStore(
+            directory: directory, sessionIdentifier: identifier)
+        try store.reserve()
+        let deliveries = NativeDownloadVerificationFixture()
+        let delegate = FoundationNativeDownloadDelegate(
+            progress: { _, _ in }, store: store,
+            backgroundEventsFinished: { _ in deliveries.recordVerification() })
+        let session = URLSession(configuration: .ephemeral)
+        defer { session.invalidateAndCancel() }
+        let task = session.dataTask(with: URL(string: "https://example.invalid/never-started")!)
+        task.cancel()
+        delegate.urlSession(
+            session, didBecomeInvalidWithError: URLError(.backgroundSessionWasDisconnected))
+        delegate.urlSession(session, didBecomeInvalidWithError: URLError(.unknown))
+        XCTAssertEqual(deliveries.verifications, 1)
+        do {
+            _ = try await delegate.run(task)
+            XCTFail("Fatal session resumed its task")
+        } catch { XCTAssertEqual(error as? FoundationDownloadError, .cleanup) }
+        let beforeLateTask = try Data(contentsOf: store.receiptURL)
+        delegate.urlSession(session, task: task, didCompleteWithError: URLError(.cancelled))
+        XCTAssertEqual(try Data(contentsOf: store.receiptURL), beforeLateTask)
+        let receipt = try store.load()
+        XCTAssertTrue(delegate.failedSession)
+        XCTAssertEqual(receipt.phase, .reserved)
+        XCTAssertNil(receipt.nativeURL)
+        XCTAssertNil(receipt.retired)
+        XCTAssertEqual(task.countOfBytesSent, 0)
+    }
+
+    func testFatalSessionInvalidationBeforeColdRetirementPreservesReceiptAndCompletesOnce()
+        async throws
+    {
+        let directory = try root()
+        try FoundationDownloadStorage.prepare(directory)
+        let identifier =
+            "dev.novoluxor.velacanto.offline." + directory.lastPathComponent + "."
+            + UUID().uuidString
+        let store = FoundationNativeAllocationStore(
+            directory: directory, sessionIdentifier: identifier)
+        try store.reserve(taskIdentifier: 1)
+        try store.beginResuming(taskIdentifier: 1)
+        let before = try Data(contentsOf: store.receiptURL)
+        let deliveries = NativeDownloadVerificationFixture()
+        let delegate = FoundationNativeDownloadDelegate(
+            progress: { _, _ in }, store: store,
+            backgroundEventsFinished: { _ in deliveries.recordVerification() })
+        let session = URLSession(configuration: .ephemeral)
+        defer { session.invalidateAndCancel() }
+        delegate.urlSession(
+            session, didBecomeInvalidWithError: URLError(.backgroundSessionInUseByAnotherProcess))
+        delegate.urlSession(session, didBecomeInvalidWithError: URLError(.unknown))
+        do {
+            try await delegate.retire(session)
+            XCTFail("Failed reconnection invented retirement proof")
+        } catch { XCTAssertEqual(error as? FoundationDownloadError, .cleanup) }
+        XCTAssertEqual(deliveries.verifications, 1)
+        XCTAssertEqual(try Data(contentsOf: store.receiptURL), before)
+        XCTAssertEqual(try store.load().phase, .resuming)
+        XCTAssertNil(try store.load().retired)
     }
 
     func testReservedReceiptAndUnknownColdResumingReceiptHaveDifferentRetirementAuthority() throws {
