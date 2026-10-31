@@ -2077,7 +2077,7 @@ final class FoundationRemoteContinuationControllerTests: XCTestCase {
             let ready = expectation(description: "unusable current queue explanation")
             let token = controller.$notice.compactMap { $0 }.prefix(1).sink { _ in ready.fulfill() }
             controller.prepareRemoteContinuation(
-                try CrossClientFixtures.activity(row), library: library)
+                try CrossClientFixtures.activity(row), library: library, selection: .fullQueue)
             await fulfillment(of: [ready], timeout: 5)
             token.cancel()
             XCTAssertEqual(
