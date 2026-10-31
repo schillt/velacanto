@@ -759,13 +759,33 @@ nonisolated enum FoundationNativeDownloadTransport {
             #endif
         }
     ) throws {
+        #if DEBUG
+            enum ProtectionStage: String {
+                case ownership, metadata, validation, set, readback, finalProof
+            }
+            var diagnosticStage = ProtectionStage.ownership
+            var diagnosticClass = ProtectionClass.unavailable
+            func recordFailure(_ error: Error) {
+                if diagnosticEnabled {
+                    FoundationJournal.shared.record(
+                        "download.native stage=protection.metadata substage=\(diagnosticStage.rawValue) outcome=failed class=\(diagnosticClass.rawValue) "
+                            + FoundationNativeDownloadErrorFields.scalars(error))
+                }
+            }
+        #endif
         do {
             typealias Metadata = FoundationManagedPackageMetadata
             try Task.checkCancellation()
             guard let root = resolve(package), Metadata.plain(root) else {
                 throw FoundationDownloadError.nativeProtection
             }
+            #if DEBUG
+                diagnosticStage = .metadata
+            #endif
             let initial = try resources(root)
+            #if DEBUG
+                diagnosticStage = .validation
+            #endif
             func directory(_ data: [URLResourceKey: Any]) -> Bool {
                 data[.isDirectoryKey] as? Bool == true && data[.isSymbolicLinkKey] as? Bool == false
             }
@@ -790,7 +810,13 @@ nonisolated enum FoundationNativeDownloadTransport {
                 var ancestor = url == root ? root : url.deletingLastPathComponent()
                 for _ in 0...url.pathComponents.count {
                     guard let saved = directories[ancestor] else { return false }
+                    #if DEBUG
+                        diagnosticStage = .metadata
+                    #endif
                     let fresh = try resources(ancestor)
+                    #if DEBUG
+                        diagnosticStage = .validation
+                    #endif
                     guard directory(fresh), same(saved, fresh) else { return false }
                     if ancestor == root { return true }
                     ancestor = ancestor.deletingLastPathComponent()
@@ -799,28 +825,41 @@ nonisolated enum FoundationNativeDownloadTransport {
             }
             func unsupported(_ kind: ProtectionClass) throws {
                 #if DEBUG
-                    if diagnosticEnabled {
-                        FoundationJournal.shared.record(
-                            "download.native stage=protection.class outcome=unsupported class=\(kind.rawValue)"
-                        )
-                    }
+                    diagnosticClass = kind
+                    diagnosticStage = .validation
                 #endif
                 throw FoundationDownloadError.nativeProtection
             }
             func strengthen(_ url: URL, isRoot: Bool = false) throws {
                 try Task.checkCancellation()
+                #if DEBUG
+                    diagnosticStage = .ownership
+                #endif
                 guard Metadata.plain(url), isRoot || Metadata.contained(url, in: root),
                     !url.pathComponents.contains(".."), resolve(package) == root
                 else { throw FoundationDownloadError.nativeProtection }
                 guard try ancestorsMatch(url) else {
                     throw FoundationDownloadError.nativeProtection
                 }
+                #if DEBUG
+                    diagnosticStage = .metadata
+                #endif
                 let before = try resources(url)
+                #if DEBUG
+                    diagnosticStage = .validation
+                #endif
                 guard before[.isSymbolicLinkKey] as? Bool == false,
                     directory(before) || before[.isRegularFileKey] as? Bool == true,
                     same(initial, try resources(root)), try ancestorsMatch(url)
                 else { throw FoundationDownloadError.nativeProtection }
+                #if DEBUG
+                    diagnosticStage = .metadata
+                #endif
                 let kind = ProtectionClass(protection: try protection(url))
+                #if DEBUG
+                    diagnosticClass = kind
+                    diagnosticStage = .validation
+                #endif
                 switch kind {
                 case .none:
                     // Only explicit Class D may be strengthened. B/inactive/unknown are
@@ -833,11 +872,27 @@ nonisolated enum FoundationNativeDownloadTransport {
                     }
                     // Protection is metadata: identity/generation checks cannot detect
                     // another owner's intervening class change. Recheck at this gate.
+                    #if DEBUG
+                        diagnosticStage = .metadata
+                    #endif
                     let current = ProtectionClass(protection: try protection(url))
+                    #if DEBUG
+                        diagnosticClass = current
+                        diagnosticStage = .validation
+                    #endif
                     switch current {
                     case .none:
+                        #if DEBUG
+                            diagnosticStage = .set
+                        #endif
                         try setProtection(url)
+                        #if DEBUG
+                            diagnosticStage = .readback
+                        #endif
                         let readback = ProtectionClass(protection: try protection(url))
+                        #if DEBUG
+                            diagnosticClass = readback
+                        #endif
                         guard readback == .untilFirstAuthentication || readback == .complete else {
                             throw FoundationDownloadError.nativeProtection
                         }
@@ -850,6 +905,9 @@ nonisolated enum FoundationNativeDownloadTransport {
                     if !directory(before) { try unsupported(kind) }
                 }
                 try Task.checkCancellation()
+                #if DEBUG
+                    diagnosticStage = .validation
+                #endif
                 guard same(before, try resources(url)), same(initial, try resources(root)),
                     try ancestorsMatch(url), resolve(package) == root
                 else { throw FoundationDownloadError.nativeProtection }
@@ -861,14 +919,23 @@ nonisolated enum FoundationNativeDownloadTransport {
                 guard visited <= 100_000 else { throw FoundationDownloadError.nativeProtection }
                 try strengthen(entry.absoluteURL)
             }
+            #if DEBUG
+                diagnosticStage = .finalProof
+            #endif
             guard !failure.failed, same(initial, try resources(root)), resolve(package) == root
             else {
                 throw FoundationDownloadError.nativeProtection
             }
             try Task.checkCancellation()
         } catch is CancellationError {
+            #if DEBUG
+                recordFailure(CancellationError())
+            #endif
             throw CancellationError()
         } catch {
+            #if DEBUG
+                recordFailure(error)
+            #endif
             throw FoundationDownloadError.nativeProtection
         }
     }
