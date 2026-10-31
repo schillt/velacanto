@@ -1595,6 +1595,30 @@ final class FoundationRemoteContinuationControllerTests: XCTestCase {
         XCTAssertEqual(commands, 0)
     }
 
+    func testSongUserPauseDuringResolutionCancelsWithoutSourcePause() async throws {
+        let gate = CrossClientResourceGate()
+        let transport = CrossClientTransport(songOnly: true)
+        let (controller, player, library) = make(transport, resourceGate: gate)
+        defer {
+            controller.invalidate()
+            player.stop()
+        }
+        try await prepare(controller, library: library, selection: .currentSong)
+        controller.acceptPending()
+        await fulfillment(of: [gate.entered], timeout: 5)
+        player.pause()
+        await gate.release()
+        let noStart = expectation(description: "no start after explicit receiving pause")
+        noStart.isInverted = true
+        let token = player.$state.filter { $0 == .playing }.sink { _ in noStart.fulfill() }
+        await fulfillment(of: [noStart], timeout: 0.2)
+        token.cancel()
+        let commands = await transport.stopCount
+        XCTAssertEqual(commands, 0)
+        XCTAssertNil(controller.notice)
+        XCTAssertFalse(player.wantsPlayback)
+    }
+
     func testUnsupportedSongPauseStillAllowsReceiverStartWithHonestNotice() async throws {
         let transport = CrossClientTransport(supportsControl: false, songOnly: true)
         let (controller, player, library) = make(transport)

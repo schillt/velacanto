@@ -174,8 +174,17 @@ final class FoundationHandoffController: NSObject, ObservableObject, NSUserActiv
             .store(in: &subscriptions)
         player.playbackCommandReceived.sink { [weak self] in self?.intentChanged() }
             .store(in: &subscriptions)
-        player.$wantsPlayback.removeDuplicates().dropFirst().sink { [weak self] _ in
-            self?.intentChanged()
+        player.$wantsPlayback.removeDuplicates().dropFirst().sink { [weak self] wantsPlayback in
+            guard let self else { return }
+            // Resolution/native failure drops intent before publishing .failed. Preserve
+            // its receiving failure notice before retiring the state observation. Explicit
+            // user commands already retire the transfer through playbackCommandReceived.
+            if !wantsPlayback, let transfer = self.remoteTransfer,
+                transfer.generation != nil, !transfer.didStart, self.remoteIsCurrent(transfer)
+            {
+                self.failRemote(transfer, error: FoundationHandoffError.unavailable)
+            }
+            self.intentChanged()
         }.store(in: &subscriptions)
         publishActivity()
     }
@@ -554,6 +563,9 @@ final class FoundationHandoffController: NSObject, ObservableObject, NSUserActiv
     }
 
     func acceptPending() {
+        // Confirmation is consumed synchronously, before authorization suspends. A
+        // repeated activation cannot cancel the same already-accepted remote transfer.
+        if pending == nil, remoteTransfer?.offer != nil { return }
         if let pending, pending.remoteOffer != nil, let transfer = remoteTransfer {
             acceptRemote(pending, transfer: transfer)
             return
