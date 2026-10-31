@@ -162,7 +162,7 @@ struct FoundationPlaylistEditor: View {
 
     var body: some View {
         NavigationStack {
-            managerSurface
+            editorPage
                 #if os(iOS)
                     .navigationTitle("Manage Playlist")
                     .navigationBarTitleDisplayMode(.inline)
@@ -170,9 +170,11 @@ struct FoundationPlaylistEditor: View {
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) {
                         #if os(macOS)
-                            Button("Close", systemImage: "xmark") {
-                                if dirty { confirmDiscard = true } else { dismiss() }
-                            }.disabled(operation.isPending).buttonStyle(.bordered)
+                            if !addingSongs {
+                                Button("Close", systemImage: "xmark") {
+                                    if dirty { confirmDiscard = true } else { dismiss() }
+                                }.disabled(operation.isPending).buttonStyle(.bordered)
+                            }
                         #else
                             Button("Close", systemImage: "xmark") {
                                 if dirty { confirmDiscard = true } else { dismiss() }
@@ -180,13 +182,17 @@ struct FoundationPlaylistEditor: View {
                         #endif
                     }
                     ToolbarItem(placement: .confirmationAction) {
-                        Button("Save", systemImage: "checkmark") { confirmSave = true }
-                            .disabled(!canEditDetails || operation.isPending || !dirty)
-                            #if os(macOS)
-                                .buttonStyle(.borderedProminent)
-                            #else
+                        #if os(macOS)
+                            if !addingSongs {
+                                Button("Save", systemImage: "checkmark") { confirmSave = true }
+                                    .disabled(!canEditDetails || operation.isPending || !dirty)
+                                    .buttonStyle(.borderedProminent)
+                            }
+                        #else
+                            Button("Save", systemImage: "checkmark") { confirmSave = true }
+                                .disabled(!canEditDetails || operation.isPending || !dirty)
                                 .buttonStyle(.glassProminent)
-                            #endif
+                        #endif
                     }
                     #if os(iOS)
                         ToolbarItemGroup(placement: .primaryAction) {
@@ -198,7 +204,13 @@ struct FoundationPlaylistEditor: View {
                         }
                     #endif
                 }
-                .safeAreaInset(edge: .bottom, spacing: 0) { managementFooter }
+                .safeAreaInset(edge: .bottom, spacing: 0) {
+                    #if os(macOS)
+                        if !addingSongs { managementFooter }
+                    #else
+                        managementFooter
+                    #endif
+                }
                 .modifier(FoundationPlaylistFeedback(operation: operation))
                 .confirmationDialog(
                     "Save playlist changes?", isPresented: $confirmSave, titleVisibility: .visible
@@ -235,14 +247,16 @@ struct FoundationPlaylistEditor: View {
                     Button("Keep Editing", role: .cancel) {}
                 }
                 #if os(macOS)
-                    .onDeleteCommand { if editable { remove(selectedEntries) } }
+                    .onDeleteCommand { if !addingSongs && editable { remove(selectedEntries) } }
                 #endif
         }
         .modifier(FoundationPlaylistSheetSize())
         #if os(macOS)
             .background { FoundationPlaylistSheetActivation().frame(width: 0, height: 0) }
         #endif
-        .sheet(isPresented: $addingSongs) { addMusicSheet }
+        #if os(iOS)
+            .sheet(isPresented: $addingSongs) { addMusicSheet }
+        #endif
         .presentationBackground(.ultraThinMaterial)
         .interactiveDismissDisabled(dirty || operation.isPending)
         .onAppear {
@@ -336,6 +350,18 @@ struct FoundationPlaylistEditor: View {
         .accessibilityIdentifier("playlist-manager-delete")
     }
 
+    @ViewBuilder private var editorPage: some View {
+        #if os(macOS)
+            if addingSongs {
+                addMusicSheet
+            } else {
+                managerSurface
+            }
+        #else
+            managerSurface
+        #endif
+    }
+
     private var addMusicSheet: some View {
         VStack(alignment: .leading, spacing: 16) {
             FoundationPlaylistAddSearchHeader(
@@ -383,13 +409,12 @@ struct FoundationPlaylistEditor: View {
         .padding(24)
         #if os(macOS)
             .frame(minWidth: 500, idealWidth: 560, minHeight: 440, idealHeight: 560)
-            .background { FoundationPlaylistSheetActivation().frame(width: 0, height: 0) }
         #else
             .presentationDetents([.large])
             .presentationDragIndicator(.visible)
+            .presentationBackground(.ultraThinMaterial)
+            .interactiveDismissDisabled(operation.isPending)
         #endif
-        .presentationBackground(.ultraThinMaterial)
-        .interactiveDismissDisabled(operation.isPending)
     }
 
     @ViewBuilder private var managerContents: some View {
