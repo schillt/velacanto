@@ -279,7 +279,8 @@ final class FoundationDownloadsTests: XCTestCase {
     private enum RemovalRecoveryFailure: Sendable { case none, verification, publication }
 
     private func removalFailureFixture(
-        failure: RemovalRecoveryFailure = .none, pendingNative: Bool = true
+        failure: RemovalRecoveryFailure = .none, pendingNative: Bool = true,
+        recoveryGate: DownloadGate? = nil
     ) async throws -> (
         manager: FoundationDownloads, directory: URL, storageRoot: URL,
         good: FoundationItem, unknown: FoundationItem, file: URL,
@@ -333,6 +334,7 @@ final class FoundationDownloadsTests: XCTestCase {
             },
             verifyInventoryFiles: { files, directory in
                 checks.recordVerification()
+                if checks.verifications == 3, let recoveryGate { await recoveryGate.wait() }
                 if checks.verifications > 2 {
                     switch failure {
                     case .verification: throw CocoaError(.fileReadNoPermission)
@@ -430,6 +432,36 @@ final class FoundationDownloadsTests: XCTestCase {
         XCTAssertTrue(
             try FoundationDownloadStorage.load(directory: fixture.directory).nativePendingSessions?
                 .contains(fixture.store.sessionIdentifier) == true)
+        fixture.manager.invalidate()
+    }
+
+    func testLeaseReleasedDuringRemovalRecoveryDeletesOnlyVerifiedPendingFileAfterPublication()
+        async throws
+    {
+        let gate = DownloadGate()
+        let fixture = try await removalFailureFixture(recoveryGate: gate)
+        let receipt = try Data(contentsOf: fixture.store.receiptURL)
+        let lease = try await fixture.manager.playbackResource(
+            for: fixture.good, allowsRemoteFallback: false)
+        let removal = Task { await fixture.manager.removeAll() }
+        try await waitUntilAsync { await gate.started }
+        XCTAssertTrue(fixture.manager.isLoading)
+        await lease.release()
+        // The loading guard defers cleanup until verification/publication completes.
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.file.path))
+        XCTAssertEqual(try Data(contentsOf: fixture.store.receiptURL), receipt)
+        await gate.resume()
+        let removed = await removal.value
+        XCTAssertFalse(removed)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.file.path))
+        let saved = try FoundationDownloadStorage.load(directory: fixture.directory)
+        XCTAssertNil(saved.files[fixture.good.id])
+        XCTAssertTrue(
+            saved.nativePendingSessions?.contains(fixture.store.sessionIdentifier) == true)
+        XCTAssertEqual(try Data(contentsOf: fixture.store.receiptURL), receipt)
+        XCTAssertEqual(fixture.transfers.verifications, 0)
+        XCTAssertEqual(fixture.checks.verifications, 4)
+        XCTAssertFalse(fixture.manager.isReady(fixture.good))
         fixture.manager.invalidate()
     }
 

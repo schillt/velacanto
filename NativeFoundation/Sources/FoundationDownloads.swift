@@ -336,6 +336,7 @@ final class FoundationDownloads: ObservableObject {
         let verifier = verifyInventoryFiles
         let epoch = generation
         let pendingNative = manifest.nativePendingSessions ?? []
+        let pendingLeaseDeletions = recoveringRemovalFailure ? pendingDeletion : []
         let retireNative = nativeRetirement
         inventoryTask = Task { [weak self] in
             do {
@@ -375,12 +376,20 @@ final class FoundationDownloads: ObservableObject {
                 if recoveringRemovalFailure {
                     // Destructive cleanup may have partially succeeded. Publish only
                     // freshly verified retained resources before restoring availability.
-                    // Do not run another collector or schedule transfers from recovery.
+                    // Do not run a general collector or schedule transfers from recovery.
                     self.readyFileIDs = Set(self.manifest.files.keys)
                         .intersection(self.retainedTrackIDs)
                         .subtracting(self.quarantinedNativeTrackIDs)
                     try self.save()
                     self.storageUsable = true
+                    // A lease may have released while verification held isLoading.
+                    // Service only its prior deletion intent, with fresh verification
+                    // and the existing per-file ownership/removal checks.
+                    let released = pendingLeaseDeletions.filter {
+                        self.pendingDeletion.contains($0) && (self.leases[$0] ?? 0) == 0
+                            && verified[$0] != nil && !self.quarantinedNativeTrackIDs.contains($0)
+                    }
+                    if !released.isEmpty { self.collectUnusedFiles(only: released) }
                     self.refreshStates()
                     self.refreshBytes()
                     self.artworkRevision &+= 1
@@ -1564,11 +1573,12 @@ final class FoundationDownloads: ObservableObject {
         }
     }
 
-    private func collectUnusedFiles() {
+    private func collectUnusedFiles(only selected: Set<String>? = nil) {
         guard !isLoading else { return }
         let referenced = retainedTrackIDs
         readyFileIDs.formIntersection(referenced)
-        for id in Array(manifest.files.keys) where !referenced.contains(id) {
+        for id in Array(manifest.files.keys)
+        where !referenced.contains(id) && (selected?.contains(id) ?? true) {
             if (leases[id] ?? 0) > 0 {
                 pendingDeletion.insert(id)
                 continue
@@ -1603,7 +1613,7 @@ final class FoundationDownloads: ObservableObject {
                     "Some downloaded files could not be removed. Retry removal or clear downloaded storage."
             }
         }
-        collectUnusedArtwork()
+        if selected == nil { collectUnusedArtwork() }
         do { try save() } catch { reportStorageFailure() }
         refreshBytes()
     }
