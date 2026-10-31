@@ -797,11 +797,24 @@ nonisolated enum FoundationNativeDownloadTransport {
                 }
                 return false
             }
+            func unsupported(_ kind: ProtectionClass) throws {
+                #if DEBUG
+                    if diagnosticEnabled {
+                        FoundationJournal.shared.record(
+                            "download.native stage=protection.class outcome=unsupported class=\(kind.rawValue)"
+                        )
+                    }
+                #endif
+                throw FoundationDownloadError.nativeProtection
+            }
             func strengthen(_ url: URL, isRoot: Bool = false) throws {
                 try Task.checkCancellation()
                 guard Metadata.plain(url), isRoot || Metadata.contained(url, in: root),
                     !url.pathComponents.contains(".."), resolve(package) == root
                 else { throw FoundationDownloadError.nativeProtection }
+                guard try ancestorsMatch(url) else {
+                    throw FoundationDownloadError.nativeProtection
+                }
                 let before = try resources(url)
                 guard before[.isSymbolicLinkKey] as? Bool == false,
                     directory(before) || before[.isRegularFileKey] as? Bool == true,
@@ -818,23 +831,23 @@ nonisolated enum FoundationNativeDownloadTransport {
                     else {
                         throw FoundationDownloadError.nativeProtection
                     }
-                    try setProtection(url)
-                    let readback = ProtectionClass(protection: try protection(url))
-                    guard readback == .untilFirstAuthentication else {
-                        throw FoundationDownloadError.nativeProtection
+                    // Protection is metadata: identity/generation checks cannot detect
+                    // another owner's intervening class change. Recheck at this gate.
+                    let current = ProtectionClass(protection: try protection(url))
+                    switch current {
+                    case .none:
+                        try setProtection(url)
+                        let readback = ProtectionClass(protection: try protection(url))
+                        guard readback == .untilFirstAuthentication || readback == .complete else {
+                            throw FoundationDownloadError.nativeProtection
+                        }
+                    case .complete, .untilFirstAuthentication: break
+                    default:
+                        if !directory(before) { try unsupported(current) }
                     }
                 case .complete, .untilFirstAuthentication: break
                 default:
-                    if !directory(before) {
-                        #if DEBUG
-                            if diagnosticEnabled {
-                                FoundationJournal.shared.record(
-                                    "download.native stage=protection.class outcome=unsupported class=\(kind.rawValue)"
-                                )
-                            }
-                        #endif
-                        throw FoundationDownloadError.nativeProtection
-                    }
+                    if !directory(before) { try unsupported(kind) }
                 }
                 try Task.checkCancellation()
                 guard same(before, try resources(url)), same(initial, try resources(root)),

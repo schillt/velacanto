@@ -681,6 +681,48 @@ final class FoundationDownloadsTests: XCTestCase {
             f.classes[f.leaf.path], "NSFileProtectionCompleteUntilFirstUserAuthentication")
     }
 
+    func testNativeProtectionRechecksChangedClassWithUnchangedResourceIdentity() throws {
+        for changed in [
+            "NSFileProtectionComplete", "NSFileProtectionCompleteUntilFirstUserAuthentication",
+            "NSFileProtectionCompleteUnlessOpen",
+        ] {
+            let f = try NativeProtectionFixture()
+            defer { f.remove() }
+            f.classAtMutationGate = changed
+            if changed == "NSFileProtectionCompleteUnlessOpen" {
+                XCTAssertThrowsError(try f.strengthen()) {
+                    XCTAssertEqual($0 as? FoundationDownloadError, .nativeProtection)
+                }
+            } else {
+                try f.strengthen()
+            }
+            XCTAssertTrue(f.writes.isEmpty)
+            XCTAssertEqual(f.classes[f.leaf.path], changed)
+            XCTAssertEqual(f.leafReads, changed == "NSFileProtectionCompleteUnlessOpen" ? 2 : 3)
+        }
+    }
+
+    func testNativeProtectionAcceptsCompleteFreshReadbackWithoutRefreshingProof() throws {
+        let f = try NativeProtectionFixture()
+        defer { f.remove() }
+        let proof = f.package.bookmark
+        f.failure = .completeReadback
+        try f.strengthen()
+        XCTAssertEqual(f.writes, [f.leaf.path])
+        XCTAssertEqual(f.classes[f.leaf.path], "NSFileProtectionComplete")
+        XCTAssertEqual(f.package.bookmark, proof)
+    }
+
+    func testNativeProtectionChecksChangedAncestorBeforeFirstDescendantRead() throws {
+        let f = try NativeProtectionFixture()
+        defer { f.remove() }
+        f.replaceRootAtResolution = 4  // The first descendant's proof gate.
+        XCTAssertThrowsError(try f.strengthen())
+        XCTAssertEqual(f.resolutions, 4)
+        XCTAssertEqual(f.leafReads, 0)
+        XCTAssertTrue(f.writes.isEmpty)
+    }
+
     func testNativeProtectionPartialFailureNeverPublishesManagerReady() async throws {
         let f = try NativeProtectionFixture()
         defer { f.remove() }
@@ -5120,7 +5162,7 @@ private actor DownloadProgressReporter {
 
 /// Real bounded fixture traversal with injected platform protection metadata. No native cache.
 nonisolated private final class NativeProtectionFixture: @unchecked Sendable {
-    enum Failure: Equatable { case ignored, throwAfterWrite, generation, cancel }
+    enum Failure: Equatable { case ignored, throwAfterWrite, generation, cancel, completeReadback }
     let container: URL
     let root: URL
     let leaf: URL
@@ -5131,7 +5173,9 @@ nonisolated private final class NativeProtectionFixture: @unchecked Sendable {
     var resolutions = 0
     var replaceBeforeWrite = false
     var failure: Failure?
-    private var leafReads = 0
+    var classAtMutationGate: String?
+    var replaceRootAtResolution: Int?
+    private(set) var leafReads = 0
     private var changed = false
 
     init() throws {
@@ -5159,9 +5203,16 @@ nonisolated private final class NativeProtectionFixture: @unchecked Sendable {
             resources: { url in
                 let attrs = try FileManager.default.attributesOfItem(atPath: url.path)
                 let type = attrs[.type] as? FileAttributeType
-                if url.path == self.leaf.path { self.leafReads += 1 }
+                if url.path == self.leaf.path {
+                    self.leafReads += 1
+                    if self.leafReads == 2, let changed = self.classAtMutationGate {
+                        self.classes[url.path] = changed
+                    }
+                }
                 let replacement =
-                    self.replaceBeforeWrite && self.leafReads > 1 && url.path == self.leaf.path
+                    (self.replaceBeforeWrite && self.leafReads > 1 && url.path == self.leaf.path)
+                    || (self.replaceRootAtResolution.map { self.resolutions >= $0 } == true
+                        && url.path == self.root.path)
                 return [
                     .fileResourceIdentifierKey: (url.path + (replacement ? "-replaced" : ""))
                         as NSString,
@@ -5178,6 +5229,9 @@ nonisolated private final class NativeProtectionFixture: @unchecked Sendable {
                 self.writes.append(url.path)
                 if self.failure != .ignored {
                     self.classes[url.path] = "NSFileProtectionCompleteUntilFirstUserAuthentication"
+                }
+                if self.failure == .completeReadback {
+                    self.classes[url.path] = "NSFileProtectionComplete"
                 }
                 if self.failure == .throwAfterWrite { throw CocoaError(.fileWriteUnknown) }
                 if self.failure == .generation { self.changed = true }
