@@ -309,6 +309,33 @@ final class FoundationDownloadTransportTests: XCTestCase {
             XCTFail("Garbage must not be promoted to ready audio")
         } catch { XCTAssertEqual(error as? FoundationDownloadError, .incomplete) }
     }
+    #if DEBUG
+        func testNativeRenditionDiagnosticReportsOnlyBoundedShapeAndRecognizedErrors() {
+            let secret = "https://private.invalid/media?api_key=never-log-this"
+            let underlying = NSError(
+                domain: NSOSStatusErrorDomain, code: -12780,
+                userInfo: [NSLocalizedDescriptionKey: secret, NSFilePathErrorKey: secret])
+            let error = NSError(
+                domain: AVFoundationErrorDomain, code: -11800,
+                userInfo: [NSLocalizedDescriptionKey: secret, NSUnderlyingErrorKey: underlying])
+            let diagnostic = FoundationConvertedDownload.RenditionDiagnostic(
+                stage: .readerInit, readable: false, audioTracks: 1, videoTracks: 0,
+                formats: 100, sawPacket: false)
+            let event = diagnostic.failure(error)
+            XCTAssertEqual(
+                event,
+                "download.native stage=rendition.inspect substage=readerInit outcome=failed readable=no audioTracks=1 videoTracks=0 formats=2 sawPacket=0 domain=AVFoundation code=-11800 underlyingDomain=OSStatus underlyingCode=-12780"
+            )
+            for value in [secret, "private.invalid", "api_key", "never-log-this"] {
+                XCTAssertFalse(event.contains(value))
+            }
+            let unknown = diagnostic.failure(
+                NSError(domain: secret, code: 123, userInfo: [NSLocalizedDescriptionKey: secret]))
+            XCTAssertTrue(
+                unknown.hasSuffix("domain=other code=0 underlyingDomain=other underlyingCode=0"))
+            XCTAssertFalse(unknown.contains(secret))
+        }
+    #endif
 }
 
 final class FoundationDownloadQualityTests: XCTestCase {
