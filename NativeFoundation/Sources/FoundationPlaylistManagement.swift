@@ -106,6 +106,11 @@ struct FoundationPlaylistEditor: View {
     #if os(iOS)
         @State private var phoneKeyboardVisible = false
     #endif
+    @State private var selectingSongs = false
+    #if os(macOS)
+        @State private var macSelectionAnchor: String?
+        @FocusState private var macFocusedOccurrence: String?
+    #endif
     @State private var showingCovers = false
     @State private var coverOpeningID = UUID()
     @State private var preparedCoverOpeningID: UUID?
@@ -230,9 +235,8 @@ struct FoundationPlaylistEditor: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 // Retain the footer host across keyboard transitions; only its extent changes.
-                managementBar
+                phoneActionFooter
                 .frame(height: phoneKeyboardVisible ? 0 : nil)
-                .clipped()
                 .opacity(phoneKeyboardVisible ? 0 : 1)
                 .allowsHitTesting(!phoneKeyboardVisible)
                 .accessibilityHidden(phoneKeyboardVisible)
@@ -486,13 +490,14 @@ struct FoundationPlaylistEditor: View {
                     Spacer()
                     deletePlaylistButton
                         .labelStyle(.iconOnly)
-                        .buttonStyle(.bordered)
+                        .buttonStyle(.glass)
+                        .buttonBorderShape(.circle)
                         .accessibilityLabel("Delete Playlist")
                 }
                 .padding(.horizontal, 24).padding(.vertical, 8)
             }
         #else
-            List(selection: $selection) {
+            List {
                 managerContents
             }
             .reorderContainer(
@@ -573,12 +578,19 @@ struct FoundationPlaylistEditor: View {
         Section {
             Toggle(isOn: Binding(get: { isPublic ?? false }, set: { isPublic = $0 })) {
                 Label("Public Playlist", systemImage: "globe")
+                    .font(.body.weight(.medium))
             }
+            .toggleStyle(.switch)
             .disabled(!canEditDetails || operation.isPending || isPublic == nil)
-            if isPublic == nil {
-                Text("Visibility isn’t available for this playlist.").font(.caption)
-                    .foregroundStyle(.secondary)
-            }
+            Text(
+                isPublic == nil
+                    ? "Visibility isn’t available for this playlist."
+                    : isPublic == true
+                        ? "Other people on your server can discover this playlist."
+                        : "This playlist is private to you and the people you share it with."
+            )
+            .font(.caption).foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
         } header: {
             Text("Visibility")
         }
@@ -618,27 +630,30 @@ struct FoundationPlaylistEditor: View {
             TextField("Find in Playlist", text: $query)
             ForEach(rows) { row in
                 HStack(spacing: 10) {
-                    #if os(macOS)
-                        Button {
-                            if selection.contains(row.entry.mutationID) {
-                                selection.remove(row.entry.mutationID)
-                            } else {
-                                selection.insert(row.entry.mutationID)
+                    #if os(iOS)
+                        if selectingSongs {
+                            Button {
+                                if selection.contains(row.entry.mutationID) {
+                                    selection.remove(row.entry.mutationID)
+                                } else {
+                                    selection.insert(row.entry.mutationID)
+                                }
+                            } label: {
+                                Image(
+                                    systemName: selection.contains(row.entry.mutationID)
+                                        ? "checkmark.circle.fill" : "circle"
+                                )
+                                .foregroundStyle(.tint)
+                                .frame(minWidth: 32, minHeight: 44)
                             }
-                        } label: {
-                            Image(
-                                systemName: selection.contains(row.entry.mutationID)
-                                    ? "checkmark.circle.fill" : "circle"
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Select \(row.entry.item.title)")
+                            .accessibilityValue(
+                                selection.contains(row.entry.mutationID)
+                                    ? "Selected" : "Not selected"
                             )
-                            .foregroundStyle(.tint)
-                            .frame(minWidth: 28, minHeight: 44)
+                            .disabled(!editable || operation.isPending)
                         }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("Select \(row.entry.item.title)")
-                        .accessibilityValue(
-                            selection.contains(row.entry.mutationID) ? "Selected" : "Not selected"
-                        )
-                        .disabled(!editable || operation.isPending)
                     #endif
                     FoundationPlaylistMusicRow(item: row.entry.item, library: library)
                     Image(systemName: "line.3.horizontal").foregroundStyle(.secondary)
@@ -647,6 +662,35 @@ struct FoundationPlaylistEditor: View {
                 }
                 #if os(iOS)
                     .tag(row.entry.mutationID)
+                #else
+                    .padding(.horizontal, 8)
+                    .background(
+                        selection.contains(row.entry.mutationID)
+                            ? Color(nsColor: .unemphasizedSelectedContentBackgroundColor) : .clear,
+                        in: .rect(cornerRadius: 8)
+                    )
+                    .contentShape(Rectangle())
+                    .focusable()
+                    .focused($macFocusedOccurrence, equals: row.entry.mutationID)
+                    .onTapGesture {
+                        let flags = NSEvent.modifierFlags
+                        selectMacOccurrence(
+                            row.entry.mutationID,
+                            extending: flags.contains(.shift), toggling: flags.contains(.command))
+                        macFocusedOccurrence = row.entry.mutationID
+                    }
+                    .onKeyPress(
+                        keys: [.upArrow, .downArrow, .space, "a"], phases: [.down, .repeat]
+                    ) { press in
+                        handleMacSelectionKey(press, occurrence: row.entry.mutationID)
+                    }
+                    .accessibilityAddTraits(
+                        selection.contains(row.entry.mutationID) ? .isSelected : []
+                    )
+                    .accessibilityAction {
+                        selectMacOccurrence(row.entry.mutationID, extending: false, toggling: false)
+                        macFocusedOccurrence = row.entry.mutationID
+                    }
                 #endif
                 .accessibilityIdentifier("playlist-reorder-\(row.id)")
                 .contextMenu {
@@ -675,6 +719,20 @@ struct FoundationPlaylistEditor: View {
             HStack {
                 Label("\(entries.count) Songs", systemImage: "music.note.list")
                 Spacer()
+                #if os(iOS)
+                    Button(
+                        selectingSongs ? "Done Selecting" : "Select",
+                        systemImage: "checkmark.circle"
+                    ) {
+                        selectingSongs.toggle()
+                        if !selectingSongs { selection = [] }
+                    }
+                    .disabled(
+                        operation.isPending
+                            || (!selectingSongs && (!editable || entries.isEmpty))
+                    )
+                    .accessibilityIdentifier("playlist-manager-select-songs")
+                #endif
 
             }
         } footer: {
@@ -701,13 +759,33 @@ struct FoundationPlaylistEditor: View {
     @ViewBuilder private var addSection: some View {
         Group {
             if let collection = addCollection {
-                Button("Back to Search", systemImage: "chevron.left") { browseAddCollection(nil) }
+                #if os(macOS)
+                    HStack(spacing: 10) {
+                        Button {
+                            browseAddCollection(nil)
+                        } label: {
+                            Image(systemName: "chevron.left")
+                        }
+                        .buttonStyle(.borderless)
+                        .accessibilityLabel("Back to Search")
+                        Label(
+                            collection.title,
+                            systemImage: collection.kind == .artist ? "person" : "square.stack"
+                        )
+                        .font(.headline)
+                        Spacer()
+                    }
+                #else
+                    Button("Back to Search", systemImage: "chevron.left") {
+                        browseAddCollection(nil)
+                    }
                     .buttonStyle(.borderless)
-                Label(
-                    collection.title,
-                    systemImage: collection.kind == .artist ? "person" : "square.stack"
-                )
-                .font(.headline)
+                    Label(
+                        collection.title,
+                        systemImage: collection.kind == .artist ? "person" : "square.stack"
+                    )
+                    .font(.headline)
+                #endif
             } else if addSearchTerm.isEmpty {
                 Text("Search your library, then choose songs or open an album or artist.")
                     .font(.subheadline).foregroundStyle(.secondary)
@@ -803,36 +881,49 @@ struct FoundationPlaylistEditor: View {
     }
 
     private var showsManagementFeedback: Bool {
-        operation.isPending || !saveSummary.isEmpty || !selection.isEmpty
+        operation.isPending || !saveSummary.isEmpty
             || (!operation.succeeded && operation.message != nil)
     }
 
     #if os(macOS)
         private var macManagementFooter: some View {
             VStack(spacing: 12) {
-                if showsManagementFeedback { managementFeedback }
-                HStack(spacing: 12) {
-                    Button("Close", systemImage: "xmark") {
-                        if dirty { confirmDiscard = true } else { dismiss() }
-                    }.disabled(operation.isPending).buttonStyle(.bordered)
-                    Button("Save", systemImage: "checkmark") { confirmSave = true }
-                        .disabled(!canEditDetails || operation.isPending || !dirty)
-                        .buttonStyle(.borderedProminent)
-                    Spacer()
-                    Button("Add Songs", systemImage: "plus") { openAddMusicSearch() }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(!editable || operation.isPending)
-                        .accessibilityIdentifier("playlist-manager-add-disclosure")
+                batchRemovalControl
+                VStack(spacing: 12) {
+                    if showsManagementFeedback { managementFeedback }
+                    HStack(spacing: 12) {
+                        Button("Add Songs", systemImage: "plus") { openAddMusicSearch() }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(!editable || operation.isPending)
+                            .accessibilityIdentifier("playlist-manager-add-disclosure")
+                        Spacer()
+                        Button("Save", systemImage: "checkmark") { confirmSave = true }
+                            .disabled(!canEditDetails || operation.isPending || !dirty)
+                            .buttonStyle(.borderedProminent)
+                        Button("Close", systemImage: "xmark") {
+                            if dirty { confirmDiscard = true } else { dismiss() }
+                        }.disabled(operation.isPending).buttonStyle(.bordered)
+                    }
                 }
+                .padding(16)
+                .background(.bar)
             }
-            .padding(16)
-            .background(.bar)
         }
     #endif
 
     private var managementBar: some View {
         VStack(spacing: 12) {
-            if showsManagementFeedback { managementFeedback }
+            if showsManagementFeedback {
+                #if os(macOS)
+                    managementFeedback
+                #else
+                    if operation.isPending || !saveSummary.isEmpty
+                        || (!operation.succeeded && operation.message != nil)
+                    {
+                        managementFeedback
+                    }
+                #endif
+            }
             Button {
                 openAddMusicSearch()
             } label: {
@@ -859,11 +950,36 @@ struct FoundationPlaylistEditor: View {
         #if os(macOS)
             .background(.bar)
         #else
-            .background(.ultraThinMaterial)
+            .background {
+                Rectangle().fill(.ultraThinMaterial)
+                .ignoresSafeArea(.container, edges: .bottom)
+            }
         #endif
     }
 
+    @ViewBuilder private var batchRemovalControl: some View {
+        if !selectedEntries.isEmpty {
+            Button(
+                "Remove \(selectedEntries.count)", systemImage: "minus.circle",
+                role: .destructive
+            ) {
+                remove(selectedEntries)
+            }
+            .buttonStyle(.glass)
+            .controlSize(.large)
+            .disabled(!editable || operation.isPending)
+            .accessibilityIdentifier("playlist-manager-remove-selected")
+        }
+    }
+
     #if os(iOS)
+        private var phoneActionFooter: some View {
+            VStack(spacing: 12) {
+                batchRemovalControl
+                managementBar
+            }
+        }
+
         private func setPhoneKeyboardVisible(_ visible: Bool) {
             var transaction = Transaction(animation: nil)
             transaction.disablesAnimations = true
@@ -902,13 +1018,6 @@ struct FoundationPlaylistEditor: View {
                 if !saveSummary.isEmpty {
                     Text(saveSummary).font(.caption).foregroundStyle(.secondary).lineLimit(2)
                 }
-                if !selection.isEmpty {
-                    Button(
-                        "Remove \(selectedEntries.count)", systemImage: "minus.circle",
-                        role: .destructive
-                    ) { remove(selectedEntries) }
-                    .disabled(!editable)
-                }
                 Spacer()
                 if !operation.succeeded, operation.message != nil {
                     Button("Retry", systemImage: "arrow.clockwise") {
@@ -919,6 +1028,52 @@ struct FoundationPlaylistEditor: View {
             }
         }
     }
+
+    #if os(macOS)
+        private func selectMacOccurrence(_ id: String, extending: Bool, toggling: Bool) {
+            guard editable, !operation.isPending else { return }
+            let ids = rows.map(\.entry.mutationID)
+            guard let index = ids.firstIndex(of: id) else { return }
+            if extending, let anchor = macSelectionAnchor,
+                let anchorIndex = ids.firstIndex(of: anchor)
+            {
+                let range = Set(ids[min(index, anchorIndex)...max(index, anchorIndex)])
+                if toggling { selection.formUnion(range) } else { selection = range }
+            } else if toggling {
+                if !selection.insert(id).inserted { selection.remove(id) }
+                macSelectionAnchor = id
+            } else {
+                selection = [id]
+                macSelectionAnchor = id
+            }
+        }
+
+        private func handleMacSelectionKey(_ press: KeyPress, occurrence: String) -> KeyPress.Result
+        {
+            guard macFocusedOccurrence == occurrence, editable, !operation.isPending else {
+                return .ignored
+            }
+            let ids = rows.map(\.entry.mutationID)
+            guard let index = ids.firstIndex(of: occurrence) else { return .ignored }
+            if press.key == "a", press.modifiers.contains(.command) {
+                selection = Set(ids)
+                macSelectionAnchor = ids.first
+                return .handled
+            }
+            if press.key == .space {
+                selectMacOccurrence(
+                    occurrence, extending: press.modifiers.contains(.shift),
+                    toggling: press.modifiers.contains(.command))
+                return .handled
+            }
+            guard press.key == .upArrow || press.key == .downArrow else { return .ignored }
+            let next = min(max(index + (press.key == .upArrow ? -1 : 1), 0), ids.count - 1)
+            selectMacOccurrence(
+                ids[next], extending: press.modifiers.contains(.shift), toggling: false)
+            macFocusedOccurrence = ids[next]
+            return .handled
+        }
+    #endif
 
     private func prepareCoverChoices() async {
         guard showingCovers, preparedCoverOpeningID != coverOpeningID else { return }

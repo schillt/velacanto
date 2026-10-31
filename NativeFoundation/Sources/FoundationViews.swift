@@ -798,14 +798,6 @@ struct FoundationLibraryView: View {
                 HStack {
                     Text("Playlists")
                     Spacer()
-                    Button("Create Playlist", systemImage: "plus") {
-                        macLibrarySheet = .create
-                    }
-                    .labelStyle(.iconOnly)
-                    .buttonStyle(.borderless)
-                    .help("Create Playlist")
-                    .disabled(connectivity.localOnly || !library.supportsPlaylistManagement)
-                    .accessibilityIdentifier("mac-sidebar-create-playlist")
                 }
             }
             if !downloads.downloadedSongs.isEmpty {
