@@ -647,11 +647,11 @@ final class FoundationDownloadsTests: XCTestCase {
         XCTAssertThrowsError(try f.strengthen())
         XCTAssertTrue(f.writes.isEmpty)
         XCTAssertEqual(try Data(contentsOf: f.outside), Data([9]))
-        try FileManager.default.removeItem(at: f.leaf)
-        try Data([1, 2, 3]).write(to: f.leaf)
-        f.replaceBeforeWrite = true
-        XCTAssertThrowsError(try f.strengthen())
-        XCTAssertTrue(f.writes.isEmpty)
+        let replacement = try NativeProtectionFixture()
+        defer { replacement.remove() }
+        replacement.replaceBeforeWrite = true
+        XCTAssertThrowsError(try replacement.strengthen())
+        XCTAssertTrue(replacement.writes.isEmpty)
     }
 
     func testNativeProtectionRejectsIgnoredSetterAndPartialFailure() throws {
