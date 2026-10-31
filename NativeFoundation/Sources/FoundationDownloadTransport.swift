@@ -953,6 +953,29 @@ nonisolated final class FoundationNativeDownloadDelegate: FoundationNativeDownlo
         pending?.resume(with: result)
     }
 
+    /// Accept Foundation's supplied local-file base representation, without inventing
+    /// a base or reconstructing/canonicalizing a path. Stored URLs remain strict.
+    static func validatedCallbackURL(_ location: URL) throws -> URL {
+        var entry: URL? = location
+        var count = 0
+        while let current = entry {
+            guard count < 8, current.isFileURL,
+                current.scheme?.lowercased() == "file", current.path.hasPrefix("/"),
+                current.host == nil || current.host == ""
+                    || current.host?.lowercased() == "localhost",
+                current.user == nil, current.password == nil,
+                current.query == nil, current.fragment == nil
+            else { throw FoundationDownloadError.cleanup }
+            count += 1
+            entry = current.baseURL
+        }
+        let absolute = location.absoluteURL
+        guard FoundationManagedPackageMetadata.plain(absolute) else {
+            throw FoundationDownloadError.cleanup
+        }
+        return absolute
+    }
+
     func urlSession(
         _ session: URLSession, assetDownloadTask: AVAssetDownloadTask,
         willDownloadTo location: URL
@@ -961,8 +984,19 @@ nonisolated final class FoundationNativeDownloadDelegate: FoundationNativeDownlo
         // cannot later be mistaken for proof that this task never allocated anything.
         lock.withLock { observedAllocation = true }
         do {
-            try store.capture(location, taskIdentifier: assetDownloadTask.taskIdentifier)
-            lock.withLock { self.location = location }
+            let absolute: URL
+            do { absolute = try Self.validatedCallbackURL(location) } catch {
+                #if DEBUG
+                    if FoundationNativeDownloadTransport.diagnosticEnabled {
+                        FoundationJournal.shared.record(
+                            FoundationNativeDownloadErrorFields.capture(
+                                stage: .initialURL, location: location))
+                    }
+                #endif
+                throw error
+            }
+            try store.capture(absolute, taskIdentifier: assetDownloadTask.taskIdentifier)
+            lock.withLock { self.location = absolute }
         } catch {
             lock.withLock { cleanupFailed = true }
             assetDownloadTask.cancel()

@@ -1033,6 +1033,89 @@ final class FoundationDownloadsTests: XCTestCase {
         manager.invalidate()
     }
 
+    func testNativeCallbackAcceptsOnlySuppliedLocalFileBaseResolution() throws {
+        let base = URL(
+            fileURLWithPath: "/private/tmp/com.apple.UserManagedAssets.synthetic/",
+            isDirectory: true)
+        let based = try XCTUnwrap(URL(string: "asset%20one.movpkg", relativeTo: base))
+        XCTAssertNotNil(based.baseURL)
+        let result = try FoundationNativeDownloadDelegate.validatedCallbackURL(based)
+        XCTAssertEqual(result, based.absoluteURL)
+        XCTAssertNil(result.baseURL)
+        XCTAssertTrue(FoundationManagedPackageMetadata.plain(result))
+        // No normalization of the issued spelling or symlink-style prefix is allowed.
+        let issued = try XCTUnwrap(URL(string: "file:///private/tmp/.nofollow/asset%20two.movpkg"))
+        XCTAssertEqual(try FoundationNativeDownloadDelegate.validatedCallbackURL(issued), issued)
+        let localhost = try XCTUnwrap(URL(string: "file://localhost/private/tmp/asset.movpkg"))
+        XCTAssertEqual(
+            try FoundationNativeDownloadDelegate.validatedCallbackURL(localhost),
+            localhost.absoluteURL)
+    }
+
+    func testNativeCallbackRejectsNonlocalOrCredentialedSuppliedComponents() throws {
+        for raw in [
+            "https://foreign.invalid/asset.movpkg", "relative.movpkg", "file:relative.movpkg",
+            "file://foreign.invalid/private/tmp/asset.movpkg",
+            "file://user:password@localhost/private/tmp/asset.movpkg",
+            "file:///private/tmp/asset.movpkg?ApiKey=synthetic",
+            "file:///private/tmp/asset.movpkg#fragment",
+        ] {
+            let invalid = try XCTUnwrap(URL(string: raw))
+            XCTAssertThrowsError(try FoundationNativeDownloadDelegate.validatedCallbackURL(invalid))
+        }
+        // The child itself can hide a base query/fragment. Every supplied base node
+        // must be validated before taking Foundation's absolute resolution.
+        for rawBase in [
+            "https://foreign.invalid/root/", "file://foreign.invalid/private/tmp/root/",
+            "file:///private/tmp/root/?ApiKey=synthetic", "file:///private/tmp/root/#fragment",
+        ] {
+            let base = try XCTUnwrap(URL(string: rawBase))
+            let child = try XCTUnwrap(URL(string: "asset.movpkg", relativeTo: base))
+            XCTAssertNotNil(child.baseURL)
+            XCTAssertThrowsError(try FoundationNativeDownloadDelegate.validatedCallbackURL(child))
+        }
+    }
+
+    func testNormalizedNativeCallbackPinsTheSameAbsoluteURLThroughStoreCapture() throws {
+        let directory = try root()
+        try FoundationDownloadStorage.prepare(directory)
+        let base = directory.appendingPathComponent("synthetic-namespace", isDirectory: true)
+        let supplied = try XCTUnwrap(URL(string: "asset.movpkg", relativeTo: base))
+        let absolute = try FoundationNativeDownloadDelegate.validatedCallbackURL(supplied)
+        try FileManager.default.createDirectory(at: absolute, withIntermediateDirectories: true)
+        let store = FoundationNativeAllocationStore(
+            directory: directory,
+            sessionIdentifier: "dev.novoluxor.velacanto.offline." + directory.lastPathComponent
+                + "." + UUID().uuidString)
+        try store.reserve(taskIdentifier: 7)
+        try store.beginResuming(taskIdentifier: 7)
+        var snapshots: [URL] = []
+        try store.capture(
+            absolute, taskIdentifier: 7,
+            snapshot: { url in
+                XCTAssertNil(url.baseURL)
+                XCTAssertTrue(FoundationManagedPackageMetadata.plain(url))
+                snapshots.append(url)
+                return Data("synthetic pinned snapshot".utf8)
+            },
+            prove: { package in
+                XCTAssertEqual(package.nativeURL, absolute)
+                return true
+            },
+            namespaceProof: { url in
+                XCTAssertEqual(url, absolute)
+                return true
+            })
+        XCTAssertEqual(snapshots, [absolute.deletingLastPathComponent(), absolute])
+        let package = try store.completedPackage(taskIdentifier: 7)
+        XCTAssertEqual(package.nativeURL, absolute)
+        XCTAssertEqual(package.nativeURL, supplied.absoluteURL)
+        XCTAssertNil(package.nativeURL.baseURL)
+        // Durable storage still refuses the raw based representation directly.
+        XCTAssertThrowsError(try store.capture(supplied, taskIdentifier: 7))
+        XCTAssertEqual(try store.completedPackage(taskIdentifier: 7).bookmark, package.bookmark)
+    }
+
     func testNativeDiagnosticFollowupPreservesEarlyURLAndTaskBindingRejection() throws {
         let directory = try root()
         try FoundationDownloadStorage.prepare(directory)
