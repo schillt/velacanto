@@ -3482,6 +3482,7 @@ struct FoundationDetailHero<Controls: View>: View {
     @Environment(\.foundationReduceMotion) private var heroReduceMotion
     @State private var artistMetadata: FoundationArtistBrandingMetadata?
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.foundationRelatedItemSheet) private var relatedItemSheet
     @Environment(\.displayScale) private var artistDisplayScale
     @State private var logoPresentation: FoundationArtistLogoContrast.Presentation = .original
     @State private var artistInputIdentity: String?
@@ -3510,6 +3511,17 @@ struct FoundationDetailHero<Controls: View>: View {
     private var displayedArtistBackdrop: FoundationCurrentArtwork.Result? {
         guard brandedArtist.artworkItem(for: .backdrop) != nil else { return nil }
         return artistBackdrop
+    }
+
+    private func updateArtistTint() {
+        guard item.kind == .artist else { return }
+        if relatedItemSheet, let palette = (displayedArtistBackdrop ?? artistLogo)?.tint {
+            // The existing swatch is bounded for white text. Artist details retain
+            // system appearance, so lift it for the matching dark-on-light surface.
+            tint = colorScheme == .dark ? palette : palette.mix(with: .white, by: 0.84)
+        } else {
+            tint = Color(white: colorScheme == .dark ? 0.12 : 0.96)
+        }
     }
 
     private var brandingInputIdentity: String {
@@ -3674,9 +3686,9 @@ struct FoundationDetailHero<Controls: View>: View {
             } action: {
                 artistHeroSize = $0
             }
-            .onChange(of: colorScheme, initial: true) { _, scheme in
-                if item.kind == .artist { tint = Color(white: scheme == .dark ? 0.12 : 0.96) }
-            }
+            .onChange(of: colorScheme, initial: true) { _, _ in updateArtistTint() }
+            .onChange(of: displayedArtistBackdrop?.revision) { _, _ in updateArtistTint() }
+            .onChange(of: artistLogo?.revision) { _, _ in updateArtistTint() }
             .task(
                 id:
                     "\(artistLogo?.revision.uuidString ?? "none")-\(displayedArtistBackdrop?.revision.uuidString ?? "none")-\(colorScheme)-\(reduceTransparency)-\(colorSchemeContrast)-\(String(describing: logoContrastSurface))"
@@ -4369,9 +4381,8 @@ private struct FoundationDetailPresentation: ViewModifier {
     let followsAppearance: Bool
     let scrollTitle: Bool
     @Environment(\.colorScheme) private var colorScheme
-    @Environment(\.foundationRelatedItemSheet) private var relatedItemSheet
     private var resolvedScheme: ColorScheme {
-        followsAppearance || relatedItemSheet ? colorScheme : .dark
+        followsAppearance ? colorScheme : .dark
     }
     @ViewBuilder func body(content: Content) -> some View {
         if immersive {
@@ -4388,15 +4399,11 @@ private struct FoundationDetailPresentation: ViewModifier {
                 .scrollContentBackground(.hidden)
                 .foundationMacTransportClearance()
                 .background {
-                    if relatedItemSheet {
-                        Rectangle().fill(.background).ignoresSafeArea()
-                    } else {
-                        tint.overlay(
-                            .black.opacity(
-                                followsAppearance ? 0 : (resolvedScheme == .dark ? 0.2 : 0))
-                        )
-                        .ignoresSafeArea()
-                    }
+                    tint.overlay(
+                        .black.opacity(
+                            followsAppearance ? 0 : (resolvedScheme == .dark ? 0.2 : 0))
+                    )
+                    .ignoresSafeArea()
                 }
                 #if os(iOS)
                     .tint(resolvedScheme == .dark ? .white : .black)
