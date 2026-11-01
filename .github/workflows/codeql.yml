@@ -1,0 +1,81 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [alpha, beta, main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    - cron: '23 8 * * 1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codeql-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }}, ${{ matrix.target }})
+    permissions:
+      contents: read
+      security-events: write
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [swift, actions, python]
+        # Main needs a real baseline before its existing scan rule can compare
+        # the release PR. Scan its actual source on beta pushes, without moving it.
+        target: ${{ fromJSON(github.event_name == 'push' && github.ref == 'refs/heads/beta' && '["event","main"]' || '["event"]') }}
+        include:
+          - language: swift
+            os: xcode-27
+            build-mode: manual
+          - language: actions
+            os: ubuntu-latest
+            build-mode: none
+          - language: python
+            os: ubuntu-latest
+            build-mode: none
+    steps:
+      - name: Check out analyzed source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.target == 'main' && 'refs/heads/main' || github.ref }}
+          persist-credentials: false
+
+      - name: Record analyzed commit
+        id: source
+        shell: bash
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Select OS 27 toolchain
+        if: matrix.language == 'swift'
+        shell: bash
+        run: |
+          echo 'DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer' >> "$GITHUB_ENV"
+          /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild -version
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+
+      - name: Build Swift for macOS and iOS
+        if: matrix.language == 'swift'
+        shell: bash
+        run: |
+          ./scripts/build.sh macos
+          ./scripts/build.sh ios-simulator
+
+      - name: Analyze and upload results
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: /language:${{ matrix.language }}
+          ref: ${{ matrix.target == 'main' && 'refs/heads/main' || github.ref }}
+          sha: ${{ steps.source.outputs.sha }}
