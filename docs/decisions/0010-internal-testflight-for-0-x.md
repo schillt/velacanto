@@ -32,3 +32,16 @@ without representing the product as ready for public App Store release.
   compliance, tester access, review, or public release.
 - A failed or superseded internal build does not change the public-release
   roadmap and must retain an explicit disposition in the release record.
+
+## Owner clarification — 2026-10-23
+
+Automatic TestFlight delivery is main-only. Owner-started manual Cloud/TestFlight
+pushes remain separate release actions; existing manual-workflow post-actions
+must not be removed merely because the selected source is alpha. Do not promote
+branches as a delivery workaround or broaden testers/public-release scope.
+
+For the 0.5.0 preview, the owner is handling the manual TestFlight push while
+GitHub cleanup and the failed artwork-fixture checks are investigated separately.
+This is a recorded owner-directed distribution path, not a passing quality result
+or a general waiver of the release gates above. Apple processing and tester
+availability still require actual evidence.

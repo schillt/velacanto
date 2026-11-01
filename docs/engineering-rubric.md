@@ -37,3 +37,9 @@ warning suppression and comments that narrate obvious syntax. Function docs shou
 be concise multiline blocks describing contract and nonobvious ownership or
 cancellation behavior. Keep P3 formatting/proven-unused-code removal separate from
 runtime fixes; flag structural concerns instead of folding them into polish.
+
+For playback, Now Playing and shared loading changes, apply the owner-established
+[playback protection contract](playback-protection.md). Review request admission,
+priority propagation, cancellation and recovery across all consumers, including
+when player code is unchanged. A score or passing build cannot override a silent
+playback/persistent-loading P1 or replace exact-candidate physical acceptance.

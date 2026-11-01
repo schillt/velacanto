@@ -2,8 +2,37 @@ import AVFoundation
 import Combine
 import Foundation
 
+/// Delivery intent and server identity, separate from a queue occurrence. Never log identifiers.
+struct FoundationPlaybackSource: Sendable, Equatable {
+    enum Delivery: String, Sendable { case unknown, localFile, directPreferred, hlsAAC, hlsCopy }
+    let delivery: Delivery
+    var mediaSourceID: String? = nil
+    var serverSessionID: String? = nil
+}
+
+/// A native URL, delivery description and resource-specific retirement action.
+struct FoundationPlaybackResource: Sendable {
+    let url: URL
+    let source: FoundationPlaybackSource
+    let release: @Sendable () async -> Void
+
+    init(
+        url: URL, source: FoundationPlaybackSource? = nil,
+        release: @escaping @Sendable () async -> Void = {}
+    ) {
+        self.url = url
+        self.source = source ?? .init(delivery: url.isFileURL ? .localFile : .unknown)
+        self.release = release
+    }
+}
+
 struct FoundationQueueEntry: Identifiable, Equatable, Sendable {
-    let id = UUID()
+    let id: UUID
+
+    init(id: UUID = UUID(), item: FoundationItem) {
+        self.id = id
+        self.item = item
+    }
     let item: FoundationItem
 }
 
@@ -11,10 +40,145 @@ struct FoundationQueueEntry: Identifiable, Equatable, Sendable {
 final class FoundationPlayer: ObservableObject {
     enum State: String { case idle, loading, paused, waiting, playing, failed, ended }
     enum QueuePosition { case next, last }
+    enum RepeatMode: String, Codable, CaseIterable { case off, all, one }
 
+    @Published private(set) var shuffleEnabled = false
+    @Published private(set) var repeatMode: RepeatMode = .off
+    let sessionChanged = PassthroughSubject<Void, Never>()
+
+    var history: [FoundationQueueEntry] { selectedIndex.map { Array(queue.prefix($0)) } ?? [] }
+    var upcoming: [FoundationQueueEntry] {
+        selectedIndex.map { Array(queue.dropFirst($0 + 1)) } ?? queue
+    }
+    var canAdvance: Bool { !upcoming.isEmpty || (repeatMode == .all && !queue.isEmpty) }
+
+    func setShuffle(_ enabled: Bool) {
+        guard enabled != shuffleEnabled else { return }
+        shuffleEnabled = enabled
+        if enabled {
+            let prefixCount =
+                selectedEntryID.flatMap { id in rawQueue.firstIndex { $0.id == id }.map { $0 + 1 } }
+                ?? 0
+            rawQueue =
+                Array(rawQueue.prefix(prefixCount)) + rawQueue.dropFirst(prefixCount).shuffled()
+        }
+        sessionChanged.send()
+    }
+
+    func setRepeat(_ mode: RepeatMode) {
+        repeatMode = mode
+        sessionChanged.send()
+    }
+
+    func removeUpcoming(_ id: UUID) {
+        guard upcoming.contains(where: { $0.id == id }) else { return }
+        rawQueue.removeAll { $0.id == id }
+        sessionChanged.send()
+    }
+
+    /// IDs are validated against the live upcoming region, rejecting stale drag results.
+    func reorderUpcoming(_ ids: [UUID], before destination: UUID?) {
+        let live = upcoming
+        let sources = Set(ids)
+        guard !ids.isEmpty, sources.count == ids.count,
+            sources.isSubset(of: Set(live.map(\.id))),
+            destination == nil || live.contains(where: { $0.id == destination }),
+            destination.map({ !sources.contains($0) }) ?? true
+        else { return }
+        let moved = live.filter { sources.contains($0.id) }
+        var remaining = live.filter { !sources.contains($0.id) }
+        let insertion =
+            destination.flatMap { target in remaining.firstIndex { $0.id == target } }
+            ?? remaining.endIndex
+        remaining.insert(contentsOf: moved, at: insertion)
+        let liveIDs = Set(live.map(\.id))
+        var reordered = remaining.makeIterator()
+        rawQueue = rawQueue.map { liveIDs.contains($0.id) ? reordered.next()! : $0 }
+        sessionChanged.send()
+    }
+
+    func restoreSession(_ snapshot: FoundationPlaybackSnapshot) {
+        guard snapshot.isValid else { return }
+        discardSelection()
+        selectedEntryID = nil
+        rawQueue = snapshot.entries.map(\.entry)
+        // The saved current occurrence stays selected even when an older alternative copy
+        // is preferred by the browsing projection; restoration must not jump into history.
+        selectedEntryID = rawQueue.first { $0.id == snapshot.selectedEntryID }?.id
+        shuffleEnabled = snapshot.shuffleEnabled
+        repeatMode = snapshot.repeatMode
+        state = selectedEntryID == nil ? .idle : .paused
+        sessionChanged.send()
+    }
+
+    @Published private var rawQueue: [FoundationQueueEntry] = [] {
+        didSet {
+            observeTrackCopies(rawQueue.map(\.item))
+            refreshTrackVisibility()
+        }
+    }
+    private var projectTracks: ([FoundationItem]) -> [FoundationItem] = { $0 }
+    private var observeTrackCopies: ([FoundationItem]) -> Void = { _ in }
     @Published private(set) var queue: [FoundationQueueEntry] = []
-    @Published private(set) var selectedEntryID: UUID?
-    @Published private(set) var state: State = .idle
+    var persistedQueue: [FoundationQueueEntry] { rawQueue }
+
+    func configureTrackProjection(
+        project: @escaping ([FoundationItem]) -> [FoundationItem],
+        observe: @escaping ([FoundationItem]) -> Void = { _ in }
+    ) {
+        projectTracks = project
+        observeTrackCopies = observe
+        observe(rawQueue.map(\.item))
+        refreshTrackVisibility()
+    }
+
+    func refreshTrackVisibility() {
+        let visible = projectedEntries(rawQueue)
+        let visibleIDs = Set(visible.map(\.id))
+        let projection = rawQueue.filter { visibleIDs.contains($0.id) || $0.id == selectedEntryID }
+        if projection != queue { queue = projection }
+    }
+
+    private func projectedEntries(_ entries: [FoundationQueueEntry]) -> [FoundationQueueEntry] {
+        let items = entries.map { entry in
+            var item = entry.item
+            item.playlistEntryID = entry.id.uuidString
+            return item
+        }
+        let ids = Set(projectTracks(items).compactMap(\.playlistEntryID))
+        return entries.filter { ids.contains($0.id.uuidString) }
+    }
+
+    private func visibleSelection(
+        _ requested: FoundationQueueEntry?, in entries: [FoundationQueueEntry]
+    ) -> UUID? {
+        guard let requested else { return nil }
+        if entries.contains(where: { $0.id == requested.id }) { return requested.id }
+        guard let key = FoundationAlbumTrackPolicy.key(for: requested.item) else { return nil }
+        return entries.first { FoundationAlbumTrackPolicy.key(for: $0.item) == key }?.id
+    }
+    @Published private(set) var selectedEntryID: UUID? {
+        didSet { refreshTrackVisibility() }
+    }
+    @Published private(set) var state: State = .idle {
+        didSet { publishPlaybackProtection() }
+    }
+    private var protectionRevision: UInt = 0
+    private var playbackProtectionChanged: ((Bool, UInt) -> Void)?
+
+    func observePlaybackProtection(_ changed: @escaping (Bool, UInt) -> Void) {
+        playbackProtectionChanged = changed
+        publishPlaybackProtection()
+    }
+
+    private func publishPlaybackProtection() {
+        protectionRevision &+= 1
+        let protected =
+            wantsPlayback && state != .failed && state != .ended
+            && (state == .loading || state == .waiting || playTask != nil)
+        playbackProtectionChanged?(protected, protectionRevision)
+    }
+
     @Published private(set) var errorMessage: String?
     @Published private(set) var elapsed: Double = 0
     @Published private(set) var duration: Double = 0
@@ -37,14 +201,30 @@ final class FoundationPlayer: ObservableObject {
             }
         }
     #endif
+    private var reporting: FoundationPlaybackReporting?
+    private var reportingAttempted = false
+    private let reportingAllowed: @MainActor @Sendable () -> Bool
+
+    func invalidateReporting() { reporting?.invalidate() }
+    func suspendReporting() { reporting?.cancelPending() }
+
     private var generation: UInt64 = 0
-    private let resolve: @Sendable (FoundationItem) async throws -> URL
+    private let resolve: @Sendable (FoundationItem) async throws -> FoundationPlaybackResource
+    private var installedResource: FoundationPlaybackResource?
     private let makeItem: (URL) -> AVPlayerItem
     private let activateSession: () async throws -> Void
     private let deactivateSession: () async throws -> Void
-    private(set) var playTask: Task<Void, Never>?
+    private(set) var playTask: Task<Void, Never>? {
+        didSet { publishPlaybackProtection() }
+    }
     private(set) var sessionTask: Task<Void, Never>?
     private var playRequest: UInt64 = 0
+    #if os(iOS)
+        private var sessionRecommendationRevision: UInt64 = 0
+        private var latestSessionRecommendation: AVAudioSession.ResumptionRecommendation?
+        private var pendingSessionResumption:
+            (generation: UInt64, request: UInt64, item: AVPlayerItem)?
+    #endif
     // AVAudioSession is process-wide; retiring account owners must finish before a new owner activates.
     private static var lastSessionOperation: Task<Void, Never>?
     private let startPlayback: (AVPlayer) -> Void
@@ -54,17 +234,29 @@ final class FoundationPlayer: ObservableObject {
     private var itemObservation: NSKeyValueObservation?
     private var notifications: [NSObjectProtocol] = []
     private var timeObserver: Any?
-    @Published private(set) var wantsPlayback = false
+    @Published private(set) var wantsPlayback = false {
+        didSet { publishPlaybackProtection() }
+    }
 
     convenience init(
         library: any FoundationLibrary,
-        makeItem: @escaping (URL) -> AVPlayerItem = { AVPlayerItem(url: $0) }
+        resolveResource: (@Sendable (FoundationItem) async throws -> FoundationPlaybackResource)? =
+            nil,
+        makeItem: @escaping (URL) -> AVPlayerItem = { AVPlayerItem(url: $0) },
+        reportingAllowed: @escaping @MainActor @Sendable () -> Bool = { true }
     ) {
-        self.init(resolve: { try await library.playbackURL(for: $0) }, makeItem: makeItem)
+        self.init(
+            resolve: { try await library.playbackURL(for: $0) },
+            resolveResource: resolveResource ?? { try await library.playbackResource(for: $0) },
+            makeItem: makeItem,
+            reportPlayback: { try await library.reportPlayback($0) },
+            reportingAllowed: reportingAllowed)
     }
 
     init(
         resolve: @escaping @Sendable (FoundationItem) async throws -> URL,
+        resolveResource: (@Sendable (FoundationItem) async throws -> FoundationPlaybackResource)? =
+            nil,
         makeItem: @escaping (URL) -> AVPlayerItem = { AVPlayerItem(url: $0) },
         activateSession: @escaping () async throws -> Void = {
             #if os(iOS)
@@ -83,9 +275,18 @@ final class FoundationPlayer: ObservableObject {
                 else { throw AudioSessionFailure.deactivationDeclined }
             #endif
         },
-        startPlayback: @escaping (AVPlayer) -> Void = { $0.play() }
+        startPlayback: @escaping (AVPlayer) -> Void = { $0.play() },
+        reportPlayback: (@Sendable (FoundationPlaybackReport) async throws -> Void)? = nil,
+        reportingAllowed: @escaping @MainActor @Sendable () -> Bool = { true }
     ) {
-        self.resolve = resolve
+        self.reportingAllowed = reportingAllowed
+        if let reportPlayback {
+            reporting = FoundationPlaybackReporting { event in
+                guard await reportingAllowed() else { return }
+                try await reportPlayback(event)
+            }
+        }
+        self.resolve = resolveResource ?? { FoundationPlaybackResource(url: try await resolve($0)) }
         self.makeItem = makeItem
         self.activateSession = activateSession
         self.startPlayback = startPlayback
@@ -108,6 +309,18 @@ final class FoundationPlayer: ObservableObject {
         ) { [weak self] _ in
             Task { @MainActor [weak self] in self?.refreshTime() }
         }
+        #if DEBUG
+            notifications.append(
+                NotificationCenter.default.addObserver(
+                    forName: AVPlayerItem.newAccessLogEntryNotification, object: nil, queue: .main
+                ) { [weak self] notification in
+                    guard let item = notification.object as? AVPlayerItem else { return }
+                    Task { @MainActor [weak self] in
+                        guard let self, self.nativePlayer.currentItem === item else { return }
+                        self.recordComparisonAccess(item, retiring: false)
+                    }
+                })
+        #endif
         notifications.append(
             NotificationCenter.default.addObserver(
                 forName: AVPlayerItem.didPlayToEndTimeNotification, object: nil, queue: .main
@@ -167,6 +380,19 @@ final class FoundationPlayer: ObservableObject {
                         self?.didDeactivateAudioSession(source: context.source)
                     }
                 })
+            notifications.append(
+                NotificationCenter.default.addObserver(
+                    forName: AVAudioSession.resumptionRecommendationNotification,
+                    object: AVAudioSession.sharedInstance(), queue: .main
+                ) { [weak self] notification in
+                    guard
+                        let context = notification.userInfo?[AVAudioSession.resumptionContextKey]
+                            as? AVAudioSession.ResumptionContext
+                    else { return }
+                    MainActor.assumeIsolated {
+                        self?.didReceiveSessionResumption(context.recommendation)
+                    }
+                })
             #if DEBUG
                 notifications.append(
                     NotificationCenter.default.addObserver(
@@ -198,6 +424,7 @@ final class FoundationPlayer: ObservableObject {
     }
 
     isolated deinit {
+        reporting?.invalidate()
         playTask?.cancel()
         selectionTask?.cancel()
         if let timeObserver { nativePlayer.removeTimeObserver(timeObserver) }
@@ -205,40 +432,77 @@ final class FoundationPlayer: ObservableObject {
         nativePlayer.pause()
         nativePlayer.currentItem?.asset.cancelLoading()
         nativePlayer.replaceCurrentItem(with: nil)
+        if let resource = installedResource { Task { await resource.release() } }
     }
 
     func setQueue(_ items: [FoundationItem], selectedIndex: Int) {
         #if DEBUG
             recordSnapshot("command.setQueue")
         #endif
+        guard items.allSatisfy({ $0.kind == .track }) else { return }
+        if items.isEmpty {
+            discardSelection()
+            selectedEntryID = nil
+            rawQueue = []
+            state = .idle
+            sessionChanged.send()
+            return
+        }
+        guard items.indices.contains(selectedIndex) else { return }
+        // Tracks preceding the tapped row were not selected and must not become history.
+        var replacements = items[selectedIndex...].map { FoundationQueueEntry(item: $0) }
+        observeTrackCopies(items)
+        let requested = replacements[0]
+        // A canonical copy outside this suffix is not part of the new Play request.
+        let selected =
+            visibleSelection(requested, in: projectedEntries(replacements)) ?? requested.id
+        if let index = replacements.firstIndex(where: { $0.id == selected }), index > 0 {
+            // Keep alternate-copy metadata reversible without treating a hidden prefix as played.
+            replacements.insert(replacements.remove(at: index), at: 0)
+        }
+        // A new Play replaces upcoming work, retaining the prior occurrences through current.
+        // Resolve the requested occurrence within the new batch, never against old history.
+        let retained =
+            selectedEntryID.flatMap { id in
+                rawQueue.firstIndex { $0.id == id }.map { Array(rawQueue.prefix($0 + 1)) }
+            } ?? []
+        if shuffleEnabled {
+            let prefixCount = (replacements.firstIndex { $0.id == selected } ?? 0) + 1
+            replacements =
+                Array(replacements.prefix(prefixCount))
+                + replacements.dropFirst(prefixCount).shuffled()
+        }
         discardSelection()
-        queue = items.map { FoundationQueueEntry(item: $0) }
         selectedEntryID = nil
+        rawQueue = retained + replacements
+        // An old alternative copy may win the normal duplicate projection. Keep the explicitly
+        // requested new occurrence visible as current before select validates its identity.
+        selectedEntryID = selected
         state = .idle
-        guard queue.indices.contains(selectedIndex) else { return }
-        select(queue[selectedIndex].id)
+        select(selected)
     }
 
     /// Extend the queue without replacing the selected occurrence or native item.
     func enqueue(_ items: [FoundationItem], position: QueuePosition) {
         guard !items.isEmpty, items.allSatisfy({ $0.kind == .track }) else { return }
-        let entries = items.map { FoundationQueueEntry(item: $0) }
-        let insertion = position == .next ? selectedIndex.map { $0 + 1 } ?? 0 : queue.endIndex
-        queue.insert(contentsOf: entries, at: insertion)
+        observeTrackCopies(items)
+        let entries = projectedEntries(items.map { FoundationQueueEntry(item: $0) })
+        guard !entries.isEmpty else { return }
+        let insertion =
+            position == .next
+            ? selectedEntryID.flatMap { id in rawQueue.firstIndex { $0.id == id }.map { $0 + 1 } }
+                ?? 0
+            : rawQueue.endIndex
+        rawQueue.insert(contentsOf: entries, at: insertion)
         if selectedEntryID == nil { select(entries[0].id) }
+        sessionChanged.send()
     }
 
     /// Move this occurrence, preserving duplicate tracks and the current native selection.
     func moveQueuedEntry(_ id: UUID, position: QueuePosition) {
-        guard id != selectedEntryID, let index = queue.firstIndex(where: { $0.id == id }) else {
-            return
-        }
-        var updated = queue
-        let entry = updated.remove(at: index)
-        let currentIndex = updated.firstIndex { $0.id == selectedEntryID }
-        let insertion = position == .next ? currentIndex.map { $0 + 1 } ?? 0 : updated.endIndex
-        updated.insert(entry, at: insertion)
-        queue = updated
+        guard upcoming.contains(where: { $0.id == id }) else { return }
+        let target = position == .next ? upcoming.first(where: { $0.id != id })?.id : nil
+        reorderUpcoming([id], before: target)
     }
 
     func select(_ id: UUID) {
@@ -251,21 +515,33 @@ final class FoundationPlayer: ObservableObject {
         guard let entry = queue.first(where: { $0.id == id }) else { return }
         discardSelection(retainingNativeItem: retainingEndedItem)
         isInterrupted = false
-        selectedEntryID = id
+        if selectedEntryID != id { selectedEntryID = id }
+        sessionChanged.send()
         wantsPlayback = true
         state = .loading
         let selectionGeneration = generation
         let resolve = resolve
         #if DEBUG
+            comparisonAccessEvents = 0
+            selectionStartedAt = ProcessInfo.processInfo.systemUptime
             recordSnapshot("selection.started")
         #endif
         selectionTask = Task { [weak self] in
             do {
                 try Task.checkCancellation()
-                let url = try await resolve(entry.item)
-                try Task.checkCancellation()
-                guard let self, self.generation == selectionGeneration else { return }
-                let item = self.makeItem(url)
+                let resource = try await resolve(entry.item)
+                guard !Task.isCancelled, let self, self.generation == selectionGeneration else {
+                    await resource.release()
+                    return
+                }
+                // No suspension between accepting the lease and installing its native item.
+                // The old lease remains alive throughout a natural handoff.
+                let previousResource = self.installedResource
+                self.installedResource = resource
+                #if DEBUG
+                    self.comparisonInstalledGeneration = selectionGeneration
+                #endif
+                let item = self.makeItem(resource.url)
                 self.itemObservation = item.observe(\.status, options: [.new]) { [weak self] _, _ in
                     Task { @MainActor [weak self] in self?.refreshNativeState() }
                 }
@@ -273,6 +549,7 @@ final class FoundationPlayer: ObservableObject {
                 self.nativePlayer.replaceCurrentItem(with: item)
                 previousItem?.cancelPendingSeeks()
                 previousItem?.asset.cancelLoading()
+                if let previousResource { Task { await previousResource.release() } }
                 #if DEBUG
                     self.recordSnapshot("item.installed")
                 #endif
@@ -291,8 +568,12 @@ final class FoundationPlayer: ObservableObject {
         #if DEBUG
             recordSnapshot("command.next")
         #endif
-        guard let index = selectedIndex, queue.indices.contains(index + 1) else { return }
-        select(queue[index + 1].id)
+        guard let index = selectedIndex else { return }
+        if queue.indices.contains(index + 1) {
+            select(queue[index + 1].id)
+        } else if repeatMode == .all, let first = queue.first {
+            select(first.id)
+        }
     }
 
     func previous() {
@@ -338,6 +619,10 @@ final class FoundationPlayer: ObservableObject {
                     self.generation == seekGeneration
                 else { return }
                 self.refreshTime()
+                if finished {
+                    self.reporting?.progress(
+                        position: self.elapsed, paused: !self.wantsPlayback, seek: true)
+                }
                 self.playbackPositionChanged.send()
                 #if DEBUG
                     let reached = abs(self.nativePlayer.currentTime().seconds - target.seconds) < 1
@@ -347,6 +632,15 @@ final class FoundationPlayer: ObservableObject {
                 #endif
             }
         }
+    }
+
+    /// A newly selected policy must not leave an old remote asset fetching on cellular.
+    /// Keep the selected queue occurrence; the next explicit Play constructs a fresh asset.
+    func invalidateRemoteItemForPolicyChange() {
+        guard installedResource?.url.isFileURL == false else { return }
+        discardSelection()
+        state = .failed
+        errorMessage = "Streaming settings changed. Play again to use the new connection policy."
     }
 
     func stop() {
@@ -374,6 +668,10 @@ final class FoundationPlayer: ObservableObject {
     /// Requests playback explicitly, retaining the current occurrence when native start was rejected.
     /// Repeated commands during an active start do not reactivate the session or replace the item.
     func play() {
+        play(allowSessionResumption: true)
+    }
+
+    private func play(allowSessionResumption: Bool) {
         isInterrupted = false
         #if DEBUG
             recordSnapshot("command.play")
@@ -401,6 +699,9 @@ final class FoundationPlayer: ObservableObject {
         }
         if wantsPlayback, nativePlayer.rate > 0 { return }
         guard playTask == nil || playTask?.isCancelled == true else { return }
+        #if os(iOS)
+            pendingSessionResumption = nil
+        #endif
         wantsPlayback = true
         playRequest &+= 1
         let request = playRequest
@@ -408,16 +709,31 @@ final class FoundationPlayer: ObservableObject {
         let previous = Self.lastSessionOperation
         let activate = activateSession
         let task = Task { [weak self] in
+            #if DEBUG
+                FoundationTrace.event("audioSession.previous.wait")
+            #endif
             await previous?.value
+            #if DEBUG
+                FoundationTrace.event("audioSession.previous.completed")
+            #endif
             defer {
                 if self?.playRequest == request { self?.playTask = nil }
             }
+            #if os(iOS)
+                let recommendationRevision = self?.sessionRecommendationRevision
+            #endif
             do {
                 try Task.checkCancellation()
                 guard self?.generation == selectionGeneration, self?.wantsPlayback == true else {
                     return
                 }
+                #if DEBUG
+                    FoundationTrace.event("audioSession.activation.started")
+                #endif
                 try await activate()
+                #if DEBUG
+                    FoundationTrace.event("audioSession.activation.completed")
+                #endif
                 try Task.checkCancellation()
                 guard let self, self.generation == selectionGeneration,
                     self.playRequest == request, self.wantsPlayback,
@@ -436,6 +752,28 @@ final class FoundationPlayer: ObservableObject {
                 guard let self, self.generation == selectionGeneration,
                     self.playRequest == request, !Task.isCancelled
                 else { return }
+                #if os(iOS)
+                    let category = Self.sessionActivationCategory(error)
+                    #if DEBUG
+                        let value = error as NSError
+                        let domain = Self.sessionErrorDomain(value.domain)
+                        self.recordSnapshot(
+                            "audioSession.activation.denied domain=\(domain) code=\(value.code) category=\(category)"
+                        )
+                    #endif
+                    if allowSessionResumption, category != "other",
+                        self.wantsPlayback, self.nativePlayer.currentItem === item
+                    {
+                        self.pendingSessionResumption = (selectionGeneration, request, item)
+                        self.state = .waiting
+                        if self.sessionRecommendationRevision != recommendationRevision,
+                            let recommendation = self.latestSessionRecommendation
+                        {
+                            self.applySessionResumption(recommendation)
+                        }
+                        return
+                    }
+                #endif
                 self.fail(.audioSession, error: error)
             }
         }
@@ -449,8 +787,57 @@ final class FoundationPlayer: ObservableObject {
     }
 
     #if os(iOS)
+        /// Only an outstanding, explicitly requested start may consume the system recommendation.
+        /// A second denial is terminal; repeated notifications never form an activation loop.
+        func didReceiveSessionResumption(_ recommendation: AVAudioSession.ResumptionRecommendation)
+        {
+            sessionRecommendationRevision &+= 1
+            latestSessionRecommendation = recommendation
+            applySessionResumption(recommendation)
+        }
+
+        private func applySessionResumption(
+            _ recommendation: AVAudioSession.ResumptionRecommendation
+        ) {
+            guard let pending = pendingSessionResumption else { return }
+            pendingSessionResumption = nil
+            guard recommendation == .shouldResume else {
+                pause()
+                return
+            }
+            guard generation == pending.generation, playRequest == pending.request,
+                wantsPlayback, nativePlayer.currentItem === pending.item,
+                state != .failed, state != .ended
+            else { return }
+            cancelPendingPlay()
+            play(allowSessionResumption: false)
+        }
+
+        static func sessionErrorDomain(_ domain: String) -> String {
+            switch domain {
+            case NSOSStatusErrorDomain: return "osStatus"
+            case "AVAudioSessionErrorDomain": return "audioSession"
+            default: return "other"
+            }
+        }
+
+        static func sessionActivationCategory(_ error: Error) -> String {
+            let value = error as NSError
+            guard sessionErrorDomain(value.domain) != "other" else { return "other" }
+            switch value.code {
+            case AVAudioSession.ErrorCode.siriIsRecording.rawValue: return "siriRecording"
+            case AVAudioSession.ErrorCode.insufficientPriority.rawValue: return "priority"
+            case AVAudioSession.ErrorCode.cannotInterruptOthers.rawValue: return "cannotInterrupt"
+            // Siri can deny a correctly configured background start while finishing its response.
+            // This preserves only the outstanding request; a fresh system recommendation must
+            // authorize the one continuation. The error alone never retries activation.
+            case AVAudioSession.ErrorCode.cannotStartPlaying.rawValue: return "startNotAllowed"
+            default: return "other"
+            }
+        }
+
         /// Applies system inactivity in notification order through the existing pause operation.
-        /// App-requested deactivation is already handled by stop; resumption never starts audio automatically.
+        /// App-requested deactivation is handled by stop; ordinary interruptions never restore old intent.
         func didDeactivateAudioSession(source: AVAudioSession.DeactivationSource) {
             guard source == .system else { return }
             pause()
@@ -474,6 +861,9 @@ final class FoundationPlayer: ObservableObject {
     /// Only an explicit native rejection can end a pending start; transient paused readiness cannot.
     /// Consult current native state so a delayed notification cannot interrupt an already active start.
     private func reconcileRejectedStart() {
+        #if os(iOS)
+            guard pendingSessionResumption == nil else { return }
+        #endif
         // Native start may deliver an earlier rate notification reentrantly. Inspect its final state.
         if isStartingPlayback {
             rejectionDuringStart = true
@@ -492,12 +882,20 @@ final class FoundationPlayer: ObservableObject {
     }
 
     private func cancelPendingPlay() {
+        #if os(iOS)
+            pendingSessionResumption = nil
+        #endif
         playRequest &+= 1
         playTask?.cancel()
         playTask = nil
     }
 
     private func discardSelection(retainingNativeItem: Bool = false) {
+        #if DEBUG
+            if let item = nativePlayer.currentItem { recordComparisonAccess(item, retiring: true) }
+        #endif
+        finishReporting()
+        reportingAttempted = false
         cancelPendingPlay()
         generation &+= 1
         #if DEBUG
@@ -521,6 +919,9 @@ final class FoundationPlayer: ObservableObject {
         nativePlayer.replaceCurrentItem(with: nil)
         oldItem?.cancelPendingSeeks()
         oldItem?.asset.cancelLoading()
+        let resource = installedResource
+        installedResource = nil
+        if let resource { Task { await resource.release() } }
     }
 
     private func refreshNativeState() {
@@ -533,7 +934,10 @@ final class FoundationPlayer: ObservableObject {
             return
         }
         guard let item = nativePlayer.currentItem else {
-            state = selectionTask == nil ? .idle : (wantsPlayback ? .loading : .paused)
+            state =
+                selectionTask != nil
+                ? (wantsPlayback ? .loading : .paused)
+                : (state == .paused && selectedEntryID != nil ? .paused : .idle)
             return
         }
         if nativePlayer.status == .failed {
@@ -544,6 +948,13 @@ final class FoundationPlayer: ObservableObject {
             fail(.nativeItem, error: item.error)
             return
         }
+        #if os(iOS)
+            if pendingSessionResumption != nil, wantsPlayback {
+                state = .waiting
+                refreshTime()
+                return
+            }
+        #endif
         switch nativePlayer.timeControlStatus {
         case .playing: state = .playing
         case .waitingToPlayAtSpecifiedRate: state = .waiting
@@ -551,6 +962,22 @@ final class FoundationPlayer: ObservableObject {
         @unknown default: state = .paused
         }
         refreshTime()
+        if state == .playing, !reportingAttempted,
+            let index = selectedIndex
+        {
+            reportingAttempted = true
+            if reportingAllowed() {
+                reporting?.begin(
+                    itemID: queue[index].item.id, position: elapsed,
+                    source: installedResource?.source)
+            }
+        }
+        reporting?.progress(position: elapsed, paused: !wantsPlayback)
+    }
+
+    private func finishReporting() {
+        let position = nativePlayer.currentTime().seconds
+        reporting?.stop(position: position.isFinite ? max(0, position) : elapsed)
     }
 
     private func refreshTime() {
@@ -559,6 +986,7 @@ final class FoundationPlayer: ObservableObject {
         let length = nativePlayer.currentItem?.duration.seconds ?? 0
         elapsed = seconds.isFinite ? max(0, seconds) : 0
         duration = length.isFinite ? max(0, length) : 0
+        reporting?.progress(position: elapsed, paused: !wantsPlayback)
     }
 
     // Native callback identity is the only end-of-item seam; no simulated transport state.
@@ -568,9 +996,18 @@ final class FoundationPlayer: ObservableObject {
         #if DEBUG
             recordSnapshot("item.ended")
         #endif
-        if let index = selectedIndex, queue.indices.contains(index + 1) {
+        finishReporting()
+        let successor: UUID?
+        if repeatMode == .one {
+            successor = selectedEntryID
+        } else if let index = selectedIndex, queue.indices.contains(index + 1) {
+            successor = queue[index + 1].id
+        } else {
+            successor = repeatMode == .all ? queue.first?.id : nil
+        }
+        if let successor {
             let shouldPlay = wantsPlayback
-            select(queue[index + 1].id, retainingEndedItem: shouldPlay)
+            select(successor, retainingEndedItem: shouldPlay)
             if !shouldPlay { pause() }
         } else {
             wantsPlayback = false
@@ -585,10 +1022,15 @@ final class FoundationPlayer: ObservableObject {
     }
 
     private func fail(_ category: FailureCategory, error: Error?) {
+        finishReporting()
         cancelPendingPlay()
         wantsPlayback = false
         nativePlayer.pause()
         state = .failed
+        if category == .nativeItem || category == .nativePlayer || category == .nativeEnd {
+            itemObservation = nil
+            releaseNativeItem()
+        }
         errorMessage = "Playback failed. Select a track to try again."
         #if DEBUG
             let errorKind: String
@@ -656,6 +1098,32 @@ final class FoundationPlayer: ObservableObject {
     #endif
 
     #if DEBUG
+        private var selectionStartedAt: TimeInterval?
+        private var comparisonAccessEvents = 0
+        private var comparisonInstalledGeneration: UInt64?
+
+        private func recordComparisonAccess(_ item: AVPlayerItem, retiring: Bool) {
+            guard retiring || comparisonAccessEvents < 8 else { return }
+            comparisonAccessEvents += 1
+            let selectedGeneration = comparisonInstalledGeneration ?? generation
+            let method = installedResource?.source.delivery.rawValue ?? "unknown"
+            item.fetchAccessLog { log in
+                guard let event = log?.events.last else { return }
+                let observed: String
+                switch event.playbackType?.uppercased() {
+                case "FILE": observed = "file"
+                case "VOD": observed = "vod"
+                case "LIVE": observed = "live"
+                default: observed = "unknown"
+                }
+                FoundationJournal.shared.record(
+                    "player.comparison.access generation=\(selectedGeneration) requestedDelivery=\(method) "
+                        + "retiring=\(retiring ? 1 : 0) observedType=\(observed) "
+                        + "bytes=\(event.numberOfBytesTransferred) requests=\(event.numberOfMediaRequests) "
+                        + "stalls=\(event.numberOfStalls)")
+            }
+        }
+
         static func rateCategory(_ raw: String?) -> String {
             guard let raw else { return "absent" }
             switch AVPlayer.RateDidChangeReason(rawValue: raw) {
@@ -693,11 +1161,94 @@ final class FoundationPlayer: ObservableObject {
             case nil: reason = "none"
             default: reason = "other"
             }
+            let selectionMs =
+                selectionStartedAt.map {
+                    Int((ProcessInfo.processInfo.systemUptime - $0) * 1000)
+                } ?? -1
+            let delivery = installedResource?.source.delivery.rawValue ?? "unresolved"
             FoundationJournal.shared.record(
                 "player.\(event) generation=\(generation) state=\(state.rawValue) "
-                    + "item=\(itemStatus) control=\(control) wait=\(reason) intent=\(wantsPlayback ? 1 : 0)"
+                    + "item=\(itemStatus) control=\(control) wait=\(reason) intent=\(wantsPlayback ? 1 : 0) "
+                    + "selectionMs=\(selectionMs) requestedDelivery=\(delivery)"
             )
         }
     #endif
 
+}
+
+/// Account-owned metadata only: no credentials, origins, media URLs or playback position.
+struct FoundationPlaybackSnapshot: Codable {
+    struct Reference: Codable {
+        let id: String
+        let title: String
+        let primaryImageTag: String?
+        init(_ value: FoundationItemReference) {
+            id = value.id
+            title = value.title
+            primaryImageTag = value.primaryImageTag
+        }
+        var reference: FoundationItemReference {
+            FoundationItemReference(id: id, title: title, primaryImageTag: primaryImageTag)
+        }
+    }
+    struct Entry: Codable {
+        let id: UUID
+        let itemID: String
+        let title: String
+        let subtitle: String
+        let duration: Double?
+        let primaryImageTag: String?
+        let album: Reference?
+        let artist: Reference?
+        let genres: [Reference]
+        let isFavorite: Bool?
+        let playCount: Int
+        var trackNumber: Int? = nil
+        var discNumber: Int? = nil
+
+        init(_ entry: FoundationQueueEntry) {
+            id = entry.id
+            itemID = entry.item.id
+            title = entry.item.title
+            subtitle = entry.item.subtitle
+            duration = entry.item.duration
+            primaryImageTag = entry.item.primaryImageTag
+            album = entry.item.album.map(Reference.init)
+            artist = entry.item.artist.map(Reference.init)
+            genres = entry.item.genres.map(Reference.init)
+            isFavorite = entry.item.isFavorite
+            playCount = entry.item.playCount
+            trackNumber = entry.item.trackNumber
+            discNumber = entry.item.discNumber
+        }
+
+        var entry: FoundationQueueEntry {
+            FoundationQueueEntry(
+                id: id,
+                item: FoundationItem(
+                    id: itemID, title: title, subtitle: subtitle, kind: .track,
+                    duration: duration, primaryImageTag: primaryImageTag, isFavorite: isFavorite,
+                    album: album?.reference, artist: artist?.reference,
+                    genres: genres.map(\.reference), playCount: playCount,
+                    trackNumber: trackNumber, discNumber: discNumber))
+        }
+    }
+    let version: Int
+    let entries: [Entry]
+    let selectedEntryID: UUID?
+    let shuffleEnabled: Bool
+    let repeatMode: FoundationPlayer.RepeatMode
+
+    @MainActor init(player: FoundationPlayer) {
+        version = 1
+        entries = player.persistedQueue.map(Entry.init)
+        selectedEntryID = player.selectedEntryID
+        shuffleEnabled = player.shuffleEnabled
+        repeatMode = player.repeatMode
+    }
+
+    var isValid: Bool {
+        version == 1 && Set(entries.map(\.id)).count == entries.count
+            && (selectedEntryID == nil || entries.contains { $0.id == selectedEntryID })
+    }
 }

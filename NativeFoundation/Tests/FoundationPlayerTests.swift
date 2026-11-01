@@ -10,6 +10,224 @@ final class FoundationPlayerTests: XCTestCase {
     private let track = FoundationItem(
         id: "synthetic", title: "", subtitle: "", kind: .track, duration: nil)
 
+    func testPlaybackProtectionFollowsLoadingPauseFailureAndStop() async throws {
+        let resources = PlaybackResourceProbe()
+        let player = FoundationPlayer(
+            resolve: { _ in throw URLError(.unknown) },
+            resolveResource: { _ in try await resources.resolve() },
+            makeItem: { _ in AVPlayerItem(asset: AVMutableComposition()) },
+            activateSession: {}, deactivateSession: {}, startPlayback: { _ in })
+        var observed: [(Bool, UInt)] = []
+        player.observePlaybackProtection { observed.append(($0, $1)) }
+        XCTAssertEqual(observed.last?.0, false)
+        player.setQueue([track], selectedIndex: 0)
+        try await resources.waitForCalls(1)
+        XCTAssertEqual(observed.last?.0, true)
+        player.pause()
+        XCTAssertEqual(observed.last?.0, false)
+        await resources.fail(0)
+        await player.selectionTask?.value
+        XCTAssertEqual(observed.last?.0, false)
+        player.stop()
+        XCTAssertEqual(observed.last?.0, false)
+        XCTAssertEqual(observed.map(\.1), observed.map(\.1).sorted())
+    }
+
+    func testStreamingPolicyChangePreservesPendingAndInstalledLocalResource() async throws {
+        let resources = PlaybackResourceProbe()
+        let player = FoundationPlayer(
+            resolve: { _ in throw URLError(.unknown) },
+            resolveResource: { _ in try await resources.resolve() },
+            makeItem: { _ in AVPlayerItem(asset: AVMutableComposition()) },
+            activateSession: {}, deactivateSession: {}, startPlayback: { _ in })
+        player.setQueue([track], selectedIndex: 0)
+        let selection = player.selectionTask
+        try await resources.waitForCalls(1)
+        player.invalidateRemoteItemForPolicyChange()
+        XCTAssertFalse(selection?.isCancelled ?? true)
+        await resources.succeed(0)
+        await selection?.value
+        await player.playTask?.value
+        let item = try XCTUnwrap(player.nativePlayer.currentItem)
+        player.invalidateRemoteItemForPolicyChange()
+        XCTAssertTrue(player.nativePlayer.currentItem === item)
+        XCTAssertNil(player.errorMessage)
+        player.stop()
+        try await resources.waitForReleases(1)
+    }
+
+    func testStreamingPolicyChangeDetachesRemoteItemButRetainsQueueOccurrence() async throws {
+        let resources = PlaybackResourceProbe()
+        let player = FoundationPlayer(
+            resolve: { _ in throw URLError(.unknown) },
+            resolveResource: { _ in try await resources.resolve() },
+            makeItem: { _ in AVPlayerItem(asset: AVMutableComposition()) },
+            activateSession: {}, deactivateSession: {}, startPlayback: { _ in })
+        player.setQueue([track], selectedIndex: 0)
+        let selection = player.selectionTask
+        try await resources.waitForCalls(1)
+        await resources.succeed(0, url: URL(string: "https://example.invalid/audio")!)
+        await selection?.value
+        await player.playTask?.value
+        let selected = player.selectedEntryID
+        player.invalidateRemoteItemForPolicyChange()
+        XCTAssertNil(player.nativePlayer.currentItem)
+        XCTAssertEqual(player.selectedEntryID, selected)
+        XCTAssertEqual(player.queue.count, 1)
+        XCTAssertEqual(player.state, .failed)
+        try await resources.waitForReleases(1)
+        player.play()
+        let retry = player.selectionTask
+        try await resources.waitForCalls(2)
+        await resources.succeed(1)
+        await retry?.value
+        await player.playTask?.value
+        XCTAssertNotNil(player.nativePlayer.currentItem)
+        player.stop()
+        try await resources.waitForReleases(2)
+    }
+
+    func testResourceLeaseSurvivesNaturalHandoffAndReleasesOnceAfterReplacementAndStop()
+        async throws
+    {
+        let resources = PlaybackResourceProbe()
+        let player = FoundationPlayer(
+            resolve: { _ in throw URLError(.unknown) },
+            resolveResource: { _ in try await resources.resolve() },
+            makeItem: { _ in AVPlayerItem(asset: AVMutableComposition()) },
+            activateSession: {}, deactivateSession: {}, startPlayback: { _ in })
+        player.setQueue([track, track], selectedIndex: 0)
+        let first = player.selectionTask
+        try await resources.waitForCalls(1)
+        await resources.succeed(0)
+        await first?.value
+        await player.playTask?.value
+        let oldItem = try XCTUnwrap(player.nativePlayer.currentItem)
+        player.didReachEnd(oldItem)
+        let successor = player.selectionTask
+        try await resources.waitForCalls(2)
+        XCTAssertTrue(player.nativePlayer.currentItem === oldItem)
+        let retained = await resources.releases
+        XCTAssertEqual(retained, [])
+        await resources.succeed(1)
+        await successor?.value
+        await player.playTask?.value
+        try await resources.waitForReleases(1)
+        XCTAssertFalse(player.nativePlayer.currentItem === oldItem)
+        player.stop()
+        player.stop()
+        try await resources.waitForReleases(2)
+        let released = await resources.releases
+        XCTAssertEqual(released.sorted(), [0, 1])
+        XCTAssertNil(player.nativePlayer.currentItem)
+    }
+
+    func testCancelledLateResourceCannotReplaceSelectionAndReleasesItsLease() async throws {
+        let resources = PlaybackResourceProbe()
+        let player = FoundationPlayer(
+            resolve: { _ in throw URLError(.unknown) },
+            resolveResource: { _ in try await resources.resolve() },
+            makeItem: { _ in AVPlayerItem(asset: AVMutableComposition()) },
+            activateSession: {}, deactivateSession: {}, startPlayback: { _ in })
+        player.setQueue([track, track], selectedIndex: 0)
+        let obsolete = player.selectionTask
+        try await resources.waitForCalls(1)
+        player.next()
+        let current = player.selectionTask
+        try await resources.waitForCalls(2)
+        await resources.succeed(1)
+        await current?.value
+        await player.playTask?.value
+        let item = player.nativePlayer.currentItem
+        await resources.succeed(0)
+        await obsolete?.value
+        try await resources.waitForReleases(1)
+        XCTAssertTrue(player.nativePlayer.currentItem === item)
+        let released = await resources.releases
+        XCTAssertEqual(released, [0])
+        player.stop()
+        try await resources.waitForReleases(2)
+        let allReleased = await resources.releases
+        XCTAssertEqual(allReleased.sorted(), [0, 1])
+    }
+
+    func testTeardownReleasesInstalledAndLateResolvingResources() async throws {
+        let resources = PlaybackResourceProbe()
+        var player: FoundationPlayer? = FoundationPlayer(
+            resolve: { _ in throw URLError(.unknown) },
+            resolveResource: { _ in try await resources.resolve() },
+            makeItem: { _ in AVPlayerItem(asset: AVMutableComposition()) },
+            activateSession: {}, deactivateSession: {}, startPlayback: { _ in })
+        player?.setQueue([track, track], selectedIndex: 0)
+        let first = player?.selectionTask
+        try await resources.waitForCalls(1)
+        await resources.succeed(0)
+        await first?.value
+        await player?.playTask?.value
+        player?.didReachEnd(try XCTUnwrap(player?.nativePlayer.currentItem))
+        let pending = player?.selectionTask
+        try await resources.waitForCalls(2)
+        weak let retired = player
+        player = nil
+        XCTAssertNil(retired)
+        try await resources.waitForReleases(1)
+        await resources.succeed(1)
+        await pending?.value
+        try await resources.waitForReleases(2)
+        let released = await resources.releases
+        XCTAssertEqual(released.sorted(), [0, 1])
+    }
+
+    func testNativeFailureDetachesItemBeforeReleasingResource() async throws {
+        let resources = PlaybackResourceProbe()
+        let player = FoundationPlayer(
+            resolve: { _ in throw URLError(.unknown) },
+            resolveResource: { _ in try await resources.resolve() },
+            makeItem: { _ in AVPlayerItem(asset: AVMutableComposition()) },
+            activateSession: {}, deactivateSession: {}, startPlayback: { _ in })
+        player.setQueue([track], selectedIndex: 0)
+        let selection = player.selectionTask
+        try await resources.waitForCalls(1)
+        await resources.succeed(0)
+        await selection?.value
+        await player.playTask?.value
+        let item = try XCTUnwrap(player.nativePlayer.currentItem)
+        NotificationCenter.default.post(
+            name: AVPlayerItem.failedToPlayToEndTimeNotification, object: item)
+        try await resources.waitForReleases(1)
+        XCTAssertNil(player.nativePlayer.currentItem)
+        XCTAssertEqual(player.state, .failed)
+        player.stop()
+        let released = await resources.releases
+        XCTAssertEqual(released, [0])
+    }
+
+    func testFailedNaturalSuccessorReleasesRetainedResource() async throws {
+        let resources = PlaybackResourceProbe()
+        let player = FoundationPlayer(
+            resolve: { _ in throw URLError(.unknown) },
+            resolveResource: { _ in try await resources.resolve() },
+            makeItem: { _ in AVPlayerItem(asset: AVMutableComposition()) },
+            activateSession: {}, deactivateSession: {}, startPlayback: { _ in })
+        player.setQueue([track, track], selectedIndex: 0)
+        let first = player.selectionTask
+        try await resources.waitForCalls(1)
+        await resources.succeed(0)
+        await first?.value
+        await player.playTask?.value
+        player.didReachEnd(try XCTUnwrap(player.nativePlayer.currentItem))
+        let successor = player.selectionTask
+        try await resources.waitForCalls(2)
+        await resources.fail(1)
+        await successor?.value
+        try await resources.waitForReleases(1)
+        XCTAssertEqual(player.state, .failed)
+        XCTAssertNil(player.nativePlayer.currentItem)
+        player.stop()
+        let released = await resources.releases
+        XCTAssertEqual(released, [0])
+    }
+
     #if os(macOS)
         func testPlayerVolumeRejectsNonfiniteClampsAndDoesNotTouchPlaybackOwnership() async throws {
             let resolution = PlayerResolutionProbe()
@@ -118,12 +336,20 @@ final class FoundationPlayerTests: XCTestCase {
             makeItem: { _ in AVPlayerItem(asset: AVMutableComposition()) },
             activateSession: { try await session.run("activate") }, deactivateSession: {},
             startPlayback: { _ in starts += 1 })
+        var protected = false
+        player.observePlaybackProtection {
+            protected = $0
+            _ = $1
+        }
         player.setQueue([track], selectedIndex: 0)
         await session.waitForCalls(1)
         let activation = player.playTask
+        XCTAssertTrue(protected)
         player.pause()
+        XCTAssertFalse(protected)
         await session.finish(0)
         await activation?.value
+        XCTAssertFalse(protected)
         XCTAssertEqual(starts, 0)
         XCTAssertFalse(player.wantsPlayback)
         XCTAssertEqual(player.state, .paused)
@@ -274,6 +500,287 @@ final class FoundationPlayerTests: XCTestCase {
             XCTAssertFalse(player.wantsPlayback)
             player.stop()
             await player.sessionTask?.value
+        }
+    #endif
+
+    #if os(iOS)
+        private func sessionDenialPlayer(_ probe: SessionDenialProbe) -> FoundationPlayer {
+            FoundationPlayer(
+                resolve: { _ in URL(fileURLWithPath: "/synthetic") },
+                makeItem: { _ in AVPlayerItem(asset: AVMutableComposition()) },
+                activateSession: { try probe.activate() }, deactivateSession: {},
+                startPlayback: { _ in probe.starts += 1 })
+        }
+
+        private func finishSessionSelection(_ player: FoundationPlayer) async {
+            await player.selectionTask?.value
+            await player.playTask?.value
+        }
+
+        func testTemporarySessionDenialResumesSameItemOnceAndRetainsProtection() async throws {
+            let probe = SessionDenialProbe()
+            let player = sessionDenialPlayer(probe)
+            var protected = false
+            player.observePlaybackProtection { value, _ in protected = value }
+            player.setQueue([track], selectedIndex: 0)
+            await finishSessionSelection(player)
+            let item = try XCTUnwrap(player.nativePlayer.currentItem)
+            let occurrence = player.selectedEntryID
+            XCTAssertEqual(player.state, .waiting)
+            XCTAssertTrue(player.wantsPlayback)
+            XCTAssertTrue(protected)
+            XCTAssertNil(player.errorMessage)
+            player.didReceiveSessionResumption(.shouldResume)
+            player.didReceiveSessionResumption(.shouldResume)
+            await player.playTask?.value
+            XCTAssertEqual(probe.calls, 2)
+            XCTAssertEqual(probe.starts, 1)
+            XCTAssertEqual(player.selectedEntryID, occurrence)
+            XCTAssertTrue(player.nativePlayer.currentItem === item)
+            player.stop()
+            await player.sessionTask?.value
+        }
+
+        func testSessionRecommendationCannotRevivePausedStoppedOrReplacedSelection() async {
+            for action in 0..<3 {
+                let probe = SessionDenialProbe()
+                let player = sessionDenialPlayer(probe)
+                player.setQueue([track, track], selectedIndex: 0)
+                await finishSessionSelection(player)
+                if action == 0 { player.pause() }
+                if action == 1 { player.stop() }
+                if action == 2 {
+                    player.next()
+                    await finishSessionSelection(player)
+                }
+                let calls = probe.calls
+                let starts = probe.starts
+                player.didReceiveSessionResumption(.shouldResume)
+                await player.playTask?.value
+                XCTAssertEqual(probe.calls, calls)
+                XCTAssertEqual(probe.starts, starts)
+                if action != 2 { XCTAssertFalse(player.wantsPlayback) }
+                player.stop()
+                await player.sessionTask?.value
+            }
+        }
+
+        func testSecondTemporarySessionDenialIsTerminalUntilFreshExplicitPlay() async {
+            let probe = SessionDenialProbe()
+            probe.denials = 2
+            let player = sessionDenialPlayer(probe)
+            player.setQueue([track], selectedIndex: 0)
+            await finishSessionSelection(player)
+            player.didReceiveSessionResumption(.shouldResume)
+            await player.playTask?.value
+            XCTAssertEqual(player.state, .failed)
+            player.didReceiveSessionResumption(.shouldResume)
+            await player.playTask?.value
+            XCTAssertEqual(probe.calls, 2)
+            XCTAssertEqual(probe.starts, 0)
+            player.play()
+            await finishSessionSelection(player)
+            XCTAssertEqual(probe.calls, 3)
+            XCTAssertEqual(probe.starts, 1)
+            player.stop()
+            await player.sessionTask?.value
+        }
+
+        func testDeniedAlbumStartWaitsForFreshRecommendationAndResumesInstalledOccurrence()
+            async
+            throws
+        {
+            let probe = SessionDenialProbe()
+            probe.error = NSError(
+                domain: NSOSStatusErrorDomain,
+                code: AVAudioSession.ErrorCode.cannotStartPlaying.rawValue)
+            let player = sessionDenialPlayer(probe)
+            // A prior recommendation cannot authorize this album's later start.
+            player.didReceiveSessionResumption(.shouldResume)
+            player.setQueue([track, track, track], selectedIndex: 0)
+            await finishSessionSelection(player)
+            let item = try XCTUnwrap(player.nativePlayer.currentItem)
+            let occurrence = player.selectedEntryID
+            XCTAssertEqual(player.state, .waiting)
+            XCTAssertTrue(player.wantsPlayback)
+            XCTAssertNil(player.errorMessage)
+            XCTAssertEqual(probe.calls, 1)
+            XCTAssertEqual(probe.starts, 0)
+            player.didReceiveSessionResumption(.shouldResume)
+            await player.playTask?.value
+            XCTAssertEqual(probe.calls, 2)
+            XCTAssertEqual(probe.starts, 1)
+            XCTAssertEqual(player.selectedEntryID, occurrence)
+            XCTAssertTrue(player.nativePlayer.currentItem === item)
+            XCTAssertEqual(player.queue.count, 3)
+            player.didReceiveSessionResumption(.shouldResume)
+            XCTAssertEqual(probe.calls, 2)
+            player.stop()
+            await player.sessionTask?.value
+        }
+
+        func testStartNotAllowedRecommendationHonorsCancellationAndSecondDenial() async {
+            for action in 0..<5 {
+                let probe = SessionDenialProbe()
+                probe.error = NSError(
+                    domain: NSOSStatusErrorDomain,
+                    code: AVAudioSession.ErrorCode.cannotStartPlaying.rawValue)
+                probe.denials = 2
+                let player = sessionDenialPlayer(probe)
+                player.setQueue([track, track], selectedIndex: 0)
+                await finishSessionSelection(player)
+                if action == 0 { player.pause() }
+                if action == 1 { player.stop() }
+                if action == 2 {
+                    player.next()
+                    await finishSessionSelection(player)
+                    player.pause()
+                }
+                if action == 3 { player.didReceiveSessionResumption(.shouldNotResume) }
+                let calls = probe.calls
+                player.didReceiveSessionResumption(.shouldResume)
+                await player.playTask?.value
+                if action == 4 {
+                    XCTAssertEqual(probe.calls, calls + 1)
+                    XCTAssertEqual(player.state, .failed)
+                } else {
+                    XCTAssertEqual(probe.calls, calls)
+                    XCTAssertFalse(player.wantsPlayback)
+                }
+                player.didReceiveSessionResumption(.shouldResume)
+                XCTAssertEqual(probe.starts, 0)
+                player.stop()
+                await player.sessionTask?.value
+            }
+        }
+
+        func testUnknownSessionErrorsAndWrongDomainAreTerminal() async {
+            for error in [
+                NSError(
+                    domain: NSOSStatusErrorDomain,
+                    code: AVAudioSession.ErrorCode.mediaServicesFailed.rawValue),
+                NSError(
+                    domain: "synthetic-private-domain",
+                    code: AVAudioSession.ErrorCode.cannotInterruptOthers.rawValue),
+                NSError(
+                    domain: "synthetic-private-domain",
+                    code: AVAudioSession.ErrorCode.cannotStartPlaying.rawValue),
+            ] {
+                let probe = SessionDenialProbe()
+                probe.error = error
+                let player = sessionDenialPlayer(probe)
+                player.setQueue([track], selectedIndex: 0)
+                await finishSessionSelection(player)
+                XCTAssertEqual(player.state, .failed)
+                player.didReceiveSessionResumption(.shouldResume)
+                await player.playTask?.value
+                XCTAssertEqual(probe.calls, 1)
+                player.stop()
+                await player.sessionTask?.value
+            }
+        }
+
+        func testOldRecommendationDoesNotAuthorizeNewDenialAndSuppressionCancelsIt() async {
+            let probe = SessionDenialProbe()
+            let player = sessionDenialPlayer(probe)
+            player.didReceiveSessionResumption(.shouldResume)
+            player.setQueue([track], selectedIndex: 0)
+            await finishSessionSelection(player)
+            XCTAssertEqual(player.state, .waiting)
+            XCTAssertEqual(probe.calls, 1)
+            player.didReceiveSessionResumption(.shouldNotResume)
+            player.didReceiveSessionResumption(.shouldResume)
+            await player.playTask?.value
+            XCTAssertFalse(player.wantsPlayback)
+            XCTAssertEqual(probe.calls, 1)
+            player.stop()
+            await player.sessionTask?.value
+        }
+
+        func testRecommendationDuringActivationIsAppliedAfterTemporaryDenial() async {
+            let probe = SessionDenialProbe()
+            let player = sessionDenialPlayer(probe)
+            probe.beforeDenial = { [weak player] in
+                player?.didReceiveSessionResumption(.shouldResume)
+            }
+            player.setQueue([track], selectedIndex: 0)
+            await finishSessionSelection(player)
+            await player.playTask?.value
+            XCTAssertEqual(probe.calls, 2)
+            XCTAssertEqual(probe.starts, 1)
+            player.stop()
+            await player.sessionTask?.value
+        }
+
+        func testTemporaryActivationResultAfterPauseOrReplacementCannotRestoreOldRequest() async {
+            for replace in [false, true] {
+                let activation = SessionOperationProbe()
+                var starts = 0
+                var calls = 0
+                let player = FoundationPlayer(
+                    resolve: { _ in URL(fileURLWithPath: "/synthetic") },
+                    makeItem: { _ in AVPlayerItem(asset: AVMutableComposition()) },
+                    activateSession: {
+                        calls += 1
+                        if calls == 1 {
+                            try await activation.run("activate")
+                            throw NSError(
+                                domain: NSOSStatusErrorDomain,
+                                code: AVAudioSession.ErrorCode.siriIsRecording.rawValue)
+                        }
+                    }, deactivateSession: {}, startPlayback: { _ in starts += 1 })
+                player.setQueue([track, track], selectedIndex: 0)
+                await activation.waitForCalls(1)
+                let obsolete = player.playTask
+                if replace { player.next() } else { player.pause() }
+                player.didReceiveSessionResumption(.shouldResume)
+                await activation.finish(0)
+                await obsolete?.value
+                await finishSessionSelection(player)
+                XCTAssertNotEqual(player.state, .failed)
+                XCTAssertEqual(starts, replace ? 1 : 0)
+                XCTAssertEqual(calls, replace ? 2 : 1)
+                player.stop()
+                await player.sessionTask?.value
+            }
+        }
+
+        func testNativeFailureWhileSessionDeferredRemainsTerminal() async throws {
+            let probe = SessionDenialProbe()
+            let player = sessionDenialPlayer(probe)
+            player.setQueue([track], selectedIndex: 0)
+            await finishSessionSelection(player)
+            let item = try XCTUnwrap(player.nativePlayer.currentItem)
+            let failed = expectation(description: "Native item failed")
+            let subscription = player.$state.filter { $0 == .failed }.first().sink { _ in
+                failed.fulfill()
+            }
+            NotificationCenter.default.post(
+                name: AVPlayerItem.failedToPlayToEndTimeNotification, object: item)
+            await fulfillment(of: [failed], timeout: 2)
+            subscription.cancel()
+            player.didReceiveSessionResumption(.shouldResume)
+            await player.playTask?.value
+            XCTAssertEqual(player.state, .failed)
+            XCTAssertEqual(probe.calls, 1)
+            XCTAssertEqual(probe.starts, 0)
+            XCTAssertNil(player.nativePlayer.currentItem)
+            player.stop()
+            await player.sessionTask?.value
+        }
+
+        func testSessionErrorDiagnosticsAllowOnlyKnownDomainAndCategory() {
+            for code in [
+                AVAudioSession.ErrorCode.siriIsRecording,
+                .insufficientPriority, .cannotInterruptOthers, .cannotStartPlaying,
+            ] {
+                for domain in [NSOSStatusErrorDomain, "AVAudioSessionErrorDomain"] {
+                    XCTAssertNotEqual(
+                        FoundationPlayer.sessionActivationCategory(
+                            NSError(domain: domain, code: code.rawValue)), "other")
+                }
+            }
+            XCTAssertEqual(FoundationPlayer.sessionErrorDomain("private-value"), "other")
         }
     #endif
 
@@ -944,6 +1451,383 @@ final class FoundationPlayerTests: XCTestCase {
         XCTAssertEqual(count, 2)
         player.stop()
     }
+    func testReplacementPreservesHistoryAndCurrentButDiscardsOldUpcoming() async {
+        let player = FoundationPlayer(resolve: { _ in throw CancellationError() })
+        let items = (0..<5).map {
+            FoundationItem(
+                id: "synthetic-\($0)", title: "", subtitle: "", kind: .track, duration: nil)
+        }
+        player.enqueue(Array(items.prefix(3)), position: .last)
+        player.select(player.queue[1].id)
+        await player.selectionTask?.value
+        let old = player.persistedQueue
+        player.setQueue(Array(items.suffix(2)), selectedIndex: 0)
+        await player.selectionTask?.value
+        XCTAssertEqual(player.history, Array(old.prefix(2)))
+        XCTAssertEqual(
+            player.queue.map(\.item.id), [items[0], items[1], items[3], items[4]].map(\.id))
+        XCTAssertEqual(player.upcoming.map(\.item.id), [items[4].id])
+        XCTAssertFalse(player.queue.contains { $0.id == old[2].id })
+        player.previous()
+        XCTAssertEqual(player.selectedEntryID, old[1].id)
+        await player.selectionTask?.value
+        player.stop()
+    }
+
+    func testReplacementOfIdenticalTrackCreatesOccurrenceAndRoundTripsHistory() async {
+        let player = FoundationPlayer(resolve: { _ in throw CancellationError() })
+        player.setQueue([track], selectedIndex: 0)
+        await player.selectionTask?.value
+        let first = player.selectedEntryID
+        player.setQueue([track], selectedIndex: 0)
+        await player.selectionTask?.value
+        XCTAssertEqual(player.queue.count, 2)
+        XCTAssertEqual(player.history.first?.id, first)
+        XCTAssertNotEqual(player.selectedEntryID, first)
+        let restored = FoundationPlayer(resolve: { _ in throw CancellationError() })
+        restored.restoreSession(FoundationPlaybackSnapshot(player: player))
+        XCTAssertEqual(restored.persistedQueue, player.persistedQueue)
+        XCTAssertEqual(restored.history, player.history)
+        XCTAssertEqual(restored.selectedEntryID, player.selectedEntryID)
+        XCTAssertEqual(restored.state, .paused)
+        XCTAssertNil(restored.selectionTask)
+        player.stop()
+    }
+
+    func testReplacementSelectsNewOccurrenceWhenHistoryContainsAlternativeCopy() async {
+        let player = FoundationPlayer(resolve: { _ in throw CancellationError() })
+        player.configureTrackProjection {
+            FoundationAlbumTrackPolicy.visibleTracks($0, showDuplicates: false)
+        }
+        var original = track
+        original.title = "Synthetic track"
+        original.trackNumber = 1
+        original.album = FoundationItemReference(id: "album", title: "")
+        var alternative = FoundationItem(
+            id: "alternative", title: original.title, subtitle: "", kind: .track, duration: nil)
+        alternative.trackNumber = original.trackNumber
+        alternative.album = original.album
+        player.setQueue([original], selectedIndex: 0)
+        await player.selectionTask?.value
+        let prior = player.selectedEntryID
+        player.setQueue([alternative], selectedIndex: 0)
+        await player.selectionTask?.value
+        XCTAssertEqual(player.persistedQueue.map(\.item.id), [original.id, alternative.id])
+        XCTAssertEqual(player.history.first?.id, prior)
+        XCTAssertEqual(
+            player.queue.first { $0.id == player.selectedEntryID }?.item.id, alternative.id)
+        XCTAssertNotEqual(player.selectedEntryID, prior)
+        let restored = FoundationPlayer(resolve: { _ in throw CancellationError() })
+        restored.configureTrackProjection {
+            FoundationAlbumTrackPolicy.visibleTracks($0, showDuplicates: false)
+        }
+        restored.restoreSession(FoundationPlaybackSnapshot(player: player))
+        XCTAssertEqual(restored.selectedEntryID, player.selectedEntryID)
+        XCTAssertEqual(restored.persistedQueue, player.persistedQueue)
+        XCTAssertEqual(
+            restored.queue.first { $0.id == restored.selectedEntryID }?.item.id, alternative.id)
+        XCTAssertNil(restored.selectionTask)
+        player.stop()
+    }
+
+    func testReplacementWithShuffleKeepsNewSelectionIndexAndRetainedPrefix() async {
+        let player = FoundationPlayer(resolve: { _ in throw CancellationError() })
+        player.enqueue([track, track, track], position: .last)
+        player.select(player.queue[1].id)
+        await player.selectionTask?.value
+        let retained = Array(player.persistedQueue.prefix(2))
+        player.setShuffle(true)
+        let items = (0..<5).map {
+            FoundationItem(id: "new-\($0)", title: "", subtitle: "", kind: .track, duration: nil)
+        }
+        player.setQueue(items, selectedIndex: 2)
+        await player.selectionTask?.value
+        XCTAssertEqual(Array(player.persistedQueue.prefix(2)), retained)
+        XCTAssertEqual(
+            Array(player.queue.dropFirst(2).prefix(1)).map(\.item.id), [items[2].id])
+        XCTAssertEqual(player.history, retained)
+        XCTAssertEqual(player.queue.first { $0.id == player.selectedEntryID }?.item.id, items[2].id)
+        XCTAssertEqual(Set(player.upcoming.map(\.item.id)), Set(items.suffix(2).map(\.id)))
+        player.stop()
+    }
+
+    func testTappedThirdTrackDoesNotInventHistoryForInitialOrReplacementPlay() async {
+        for shuffled in [false, true] {
+            for replacing in [false, true] {
+                let player = FoundationPlayer(resolve: { _ in throw CancellationError() })
+                var retained: [FoundationQueueEntry] = []
+                if replacing {
+                    player.enqueue([track, track, track], position: .last)
+                    player.select(player.queue[1].id)
+                    await player.selectionTask?.value
+                    retained = Array(player.persistedQueue.prefix(2))
+                }
+                player.setShuffle(shuffled)
+                let album = (1...5).map {
+                    FoundationItem(
+                        id: "album-\($0)", title: "", subtitle: "", kind: .track, duration: nil)
+                }
+                player.setQueue(album, selectedIndex: 2)
+                await player.selectionTask?.value
+                XCTAssertEqual(player.history, retained)
+                XCTAssertEqual(player.persistedQueue.count, retained.count + 3)
+                XCTAssertEqual(
+                    player.queue.first { $0.id == player.selectedEntryID }?.item.id, album[2].id)
+                XCTAssertEqual(Set(player.upcoming.map(\.item.id)), Set(album.suffix(2).map(\.id)))
+                XCTAssertTrue(
+                    Set(player.persistedQueue.map(\.item.id)).isDisjoint(
+                        with: Set(album.prefix(2).map(\.id))))
+                if !shuffled {
+                    XCTAssertEqual(player.upcoming.map(\.item.id), album.suffix(2).map(\.id))
+                }
+                player.previous()
+                XCTAssertEqual(player.selectedEntryID, retained.last?.id ?? player.queue.first?.id)
+                await player.selectionTask?.value
+                player.stop()
+            }
+        }
+    }
+
+    func testInvalidNonemptyReplacementLeavesPendingSelectionUntouchedAndEmptyClears() async {
+        let resolver = PlayerResolutionProbe()
+        let player = player(resolver)
+        player.setQueue([track], selectedIndex: 0)
+        let pending = player.selectionTask
+        await resolver.waitForCalls(1)
+        let original = player.persistedQueue
+        let selected = player.selectedEntryID
+        player.setQueue([track], selectedIndex: 1)
+        player.setQueue([track], selectedIndex: -1)
+        player.setQueue(
+            [
+                FoundationItem(id: "album", title: "", subtitle: "", kind: .album, duration: nil)
+            ], selectedIndex: 0)
+        XCTAssertEqual(player.persistedQueue, original)
+        XCTAssertEqual(player.selectedEntryID, selected)
+        XCTAssertFalse(pending?.isCancelled ?? true)
+        player.setQueue([], selectedIndex: 0)
+        XCTAssertTrue(pending?.isCancelled ?? false)
+        XCTAssertTrue(player.persistedQueue.isEmpty)
+        XCTAssertNil(player.selectedEntryID)
+        XCTAssertEqual(player.state, .idle)
+        await resolver.succeed(0)
+        await pending?.value
+        XCTAssertNil(player.nativePlayer.currentItem)
+        player.stop()
+    }
+
+    func testUpcomingEditsPreserveCurrentHistoryDuplicatesAndRejectStaleDrag() async throws {
+        let resolver = PlayerResolutionProbe()
+        let player = FoundationPlayer(resolve: { _ in try await resolver.resolve() })
+        player.enqueue(Array(repeating: track, count: 6), position: .last)
+        player.select(player.queue[2].id)
+        let selection = player.selectionTask
+        try await resolver.waitForCalls(1, timeout: .seconds(5))
+        let original = player.queue
+        player.removeUpcoming(original[0].id)
+        player.moveQueuedEntry(original[1].id, position: .last)
+        player.reorderUpcoming([original[2].id], before: nil)
+        XCTAssertEqual(player.queue, original)
+        player.reorderUpcoming([original[4].id, original[5].id], before: original[3].id)
+        XCTAssertEqual(player.queue.map(\.id), [0, 1, 2, 4, 5, 3].map { original[$0].id })
+        XCTAssertEqual(player.selectedEntryID, original[2].id)
+        XCTAssertFalse(selection?.isCancelled ?? true)
+        player.removeUpcoming(original[4].id)
+        let edited = player.queue
+        player.reorderUpcoming([original[4].id], before: nil)
+        XCTAssertEqual(player.queue, edited)
+        XCTAssertEqual(Set(player.queue.map(\.id)).count, 5)
+        await resolver.fail(0)
+        await selection?.value
+    }
+
+    func testShuffleKeepsCurrentHistoryAndDisablingKeepsExplicitOrder() async {
+        let player = FoundationPlayer(resolve: { _ in throw CancellationError() })
+        player.enqueue(Array(repeating: track, count: 8), position: .last)
+        player.select(player.queue[2].id)
+        let prefix = Array(player.queue.prefix(3))
+        let upcomingIDs = Set(player.upcoming.map(\.id))
+        player.setShuffle(true)
+        XCTAssertEqual(Array(player.queue.prefix(3)), prefix)
+        XCTAssertEqual(Set(player.upcoming.map(\.id)), upcomingIDs)
+        let moved = player.upcoming[0].id
+        player.reorderUpcoming([moved], before: nil)
+        let explicitOrder = player.queue
+        player.setShuffle(false)
+        XCTAssertEqual(player.queue, explicitOrder)
+        await player.selectionTask?.value
+    }
+
+    func testSessionRoundTripRestoresPausedWithoutResolvingOrPosition() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = FoundationPlayer(resolve: { _ in throw CancellationError() })
+        var contextualTrack = track
+        contextualTrack.album = FoundationItemReference(id: "synthetic-album", title: "Album")
+        contextualTrack.artist = FoundationItemReference(id: "synthetic-artist", title: "Artist")
+        contextualTrack.genres = [FoundationItemReference(id: "synthetic-genre", title: "Genre")]
+        contextualTrack.isFavorite = true
+        contextualTrack.playCount = 2
+        source.enqueue([contextualTrack, contextualTrack, contextualTrack], position: .last)
+        source.select(source.queue[1].id)
+        source.setShuffle(true)
+        source.setRepeat(.all)
+        await source.selectionTask?.value
+        let store = FoundationPlaybackSessionStore(scope: "synthetic-a", root: root)
+        XCTAssertTrue(store.save(FoundationPlaybackSnapshot(player: source)))
+        let values = try store.file.resourceValues(forKeys: [.isExcludedFromBackupKey])
+        XCTAssertEqual(values.isExcludedFromBackup, true)
+        let attributes = try FileManager.default.attributesOfItem(atPath: store.file.path)
+        XCTAssertEqual((attributes[.posixPermissions] as? NSNumber)?.intValue, 0o600)
+        XCTAssertNil(
+            try FoundationPlaybackSessionStore(scope: "synthetic-b", root: root).load())
+        let snapshot = try XCTUnwrap(try store.load())
+        let resolver = PlayerResolutionProbe()
+        var activationCalls = 0
+        let restored = FoundationPlayer(
+            resolve: { _ in try await resolver.resolve() },
+            makeItem: { _ in AVPlayerItem(asset: AVMutableComposition()) },
+            activateSession: { activationCalls += 1 }, deactivateSession: {},
+            startPlayback: { _ in })
+        restored.restoreSession(snapshot)
+        XCTAssertEqual(restored.queue, source.queue)
+        XCTAssertEqual(restored.selectedEntryID, source.selectedEntryID)
+        XCTAssertEqual(restored.repeatMode, .all)
+        XCTAssertTrue(restored.shuffleEnabled)
+        XCTAssertEqual(restored.state, .paused)
+        XCTAssertFalse(restored.wantsPlayback)
+        XCTAssertNil(restored.selectionTask)
+        XCTAssertNil(restored.nativePlayer.currentItem)
+        XCTAssertEqual(restored.elapsed, 0)
+        XCTAssertEqual(activationCalls, 0)
+        let callsBeforePlay = await resolver.count
+        XCTAssertEqual(callsBeforePlay, 0)
+        restored.play()
+        let selection = restored.selectionTask
+        try await resolver.waitForCalls(1, timeout: .seconds(5))
+        await resolver.succeed(0)
+        await selection?.value
+        await restored.playTask?.value
+        XCTAssertEqual(restored.selectedEntryID, snapshot.selectedEntryID)
+        XCTAssertEqual(restored.elapsed, 0)
+        XCTAssertEqual(activationCalls, 1)
+        restored.stop()
+        XCTAssertTrue(
+            FoundationPlaybackSessionStore.clear(retaining: "synthetic-a", root: root))
+        XCTAssertNotNil(try store.load())
+        XCTAssertTrue(FoundationPlaybackSessionStore.clear(root: root))
+        XCTAssertNil(try store.load())
+    }
+
+    func testMalformedSessionAndOldAccountMetadataAreRejectedOrCleared() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let player = FoundationPlayer(resolve: { _ in throw CancellationError() })
+        player.setQueue([track, track], selectedIndex: 0)
+        await player.selectionTask?.value
+        let snapshot = FoundationPlaybackSnapshot(player: player)
+        let data = try JSONEncoder().encode(snapshot)
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        var entries = try XCTUnwrap(object["entries"] as? [[String: Any]])
+        entries[1]["id"] = entries[0]["id"]
+        object["entries"] = entries
+        let store = FoundationPlaybackSessionStore(scope: "synthetic-a", root: root)
+        XCTAssertTrue(store.save(snapshot))
+        try JSONSerialization.data(withJSONObject: object).write(to: store.file, options: .atomic)
+        XCTAssertThrowsError(try store.load())
+        try Data("invalid".utf8).write(to: store.file, options: .atomic)
+        XCTAssertThrowsError(try store.load())
+        XCTAssertTrue(store.save(snapshot))
+        XCTAssertTrue(
+            FoundationPlaybackSessionStore.clear(retaining: "synthetic-b", root: root))
+        XCTAssertNil(try store.load())
+    }
+
+    func testSessionCleanupFailurePreventsSignInRequest() async {
+        var authenticationCalls = 0
+        do {
+            _ = try await FoundationSignInPolicy.authenticate(
+                clearPins: { true }, clearPlaybackSessions: { false },
+                signIn: {
+                    authenticationCalls += 1
+                    throw CancellationError()
+                })
+            XCTFail("Cleanup failure must prevent authentication")
+        } catch {
+            XCTAssertTrue(error is FoundationPlaybackSessionStore.StorageError)
+        }
+        XCTAssertEqual(authenticationCalls, 0)
+    }
+
+    func testPendingResolutionWithoutNativeItemRetainsLoadingAndPausedIntent() async throws {
+        let resolver = PlayerResolutionProbe()
+        let player = FoundationPlayer(resolve: { _ in try await resolver.resolve() })
+        player.setQueue([track], selectedIndex: 0)
+        let selection = player.selectionTask
+        try await resolver.waitForCalls(1, timeout: .seconds(5))
+        XCTAssertNil(player.nativePlayer.currentItem)
+        XCTAssertEqual(player.state, .loading)
+        player.pause()
+        XCTAssertEqual(player.state, .paused)
+        player.play()
+        XCTAssertEqual(player.state, .loading)
+        XCTAssertFalse(selection?.isCancelled ?? true)
+        await resolver.fail(0)
+        await selection?.value
+    }
+
+    func testSessionStorageFailuresAreTruthful() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try Data().write(to: root)
+        let player = FoundationPlayer(resolve: { _ in throw CancellationError() })
+        let store = FoundationPlaybackSessionStore(scope: "synthetic", root: root)
+        XCTAssertFalse(store.save(FoundationPlaybackSnapshot(player: player)))
+        XCTAssertFalse(FoundationPlaybackSessionStore.clear(root: root))
+    }
+
+    func testRepeatOneUsesSameOccurrenceAtNaturalEndButNextAdvancesAndAllWraps() async throws {
+        let resolver = PlayerResolutionProbe()
+        let player = FoundationPlayer(
+            resolve: { _ in try await resolver.resolve() },
+            makeItem: { _ in AVPlayerItem(asset: AVMutableComposition()) },
+            activateSession: {}, deactivateSession: {}, startPlayback: { _ in })
+        player.setQueue([track, track], selectedIndex: 0)
+        let first = player.selectedEntryID
+        let initial = player.selectionTask
+        try await resolver.waitForCalls(1, timeout: .seconds(5))
+        await resolver.succeed(0)
+        await initial?.value
+        await player.playTask?.value
+        player.setRepeat(.one)
+        player.didReachEnd(try XCTUnwrap(player.nativePlayer.currentItem))
+        let repeated = player.selectionTask
+        try await resolver.waitForCalls(2, timeout: .seconds(5))
+        XCTAssertEqual(player.selectedEntryID, first)
+        await resolver.succeed(1)
+        await repeated?.value
+        await player.playTask?.value
+        player.next()
+        let second = player.selectionTask
+        try await resolver.waitForCalls(3, timeout: .seconds(5))
+        XCTAssertNotEqual(player.selectedEntryID, first)
+        await resolver.succeed(2)
+        await second?.value
+        await player.playTask?.value
+        player.setRepeat(.all)
+        XCTAssertTrue(player.canAdvance)
+        player.didReachEnd(try XCTUnwrap(player.nativePlayer.currentItem))
+        let wrapped = player.selectionTask
+        try await resolver.waitForCalls(4, timeout: .seconds(5))
+        XCTAssertEqual(player.selectedEntryID, first)
+        await resolver.succeed(3)
+        await wrapped?.value
+        await player.playTask?.value
+        player.stop()
+    }
+
 }
 
 private actor PlayerResolutionProbe {
@@ -964,6 +1848,17 @@ private actor PlayerResolutionProbe {
     func waitForCalls(_ target: Int) async {
         if count >= target { return }
         await withCheckedContinuation { waiters.append((target, $0)) }
+    }
+
+    private struct WaitTimeout: Error {}
+
+    func waitForCalls(_ target: Int, timeout: Duration) async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        while count < target {
+            guard clock.now < deadline else { throw WaitTimeout() }
+            try await Task.sleep(for: .milliseconds(10))
+        }
     }
 
     func succeed(_ index: Int) {
@@ -1063,3 +1958,69 @@ enum FoundationTestTones {
         return data
     }
 }
+
+/// A deliberately cancellation-insensitive resolver exercises late lease ownership.
+private actor PlaybackResourceProbe {
+    private var calls = 0
+    private var pending: [Int: CheckedContinuation<FoundationPlaybackResource, Error>] = [:]
+    private(set) var releases: [Int] = []
+
+    func resolve() async throws -> FoundationPlaybackResource {
+        let index = calls
+        calls += 1
+        return try await withCheckedThrowingContinuation { pending[index] = $0 }
+    }
+
+    func succeed(_ index: Int, url: URL = URL(fileURLWithPath: "/synthetic")) {
+        pending.removeValue(forKey: index)?.resume(
+            returning: FoundationPlaybackResource(url: url) {
+                await self.recordRelease(index)
+            })
+    }
+
+    func fail(_ index: Int) {
+        pending.removeValue(forKey: index)?.resume(throwing: URLError(.cannotOpenFile))
+    }
+
+    private func recordRelease(_ index: Int) { releases.append(index) }
+
+    func waitForCalls(_ count: Int) async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(5))
+        while calls < count {
+            guard clock.now < deadline else { throw URLError(.timedOut) }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+    }
+
+    func waitForReleases(_ count: Int) async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(5))
+        while releases.count < count {
+            guard clock.now < deadline else { throw URLError(.timedOut) }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+    }
+}
+
+#if os(iOS)
+    @MainActor
+    private final class SessionDenialProbe {
+        var calls = 0
+        var starts = 0
+        var denials = 1
+        var beforeDenial: (() -> Void)?
+        var error = NSError(
+            domain: NSOSStatusErrorDomain,
+            code: AVAudioSession.ErrorCode.cannotInterruptOthers.rawValue)
+
+        func activate() throws {
+            calls += 1
+            if denials > 0 {
+                denials -= 1
+                beforeDenial?()
+                throw error
+            }
+        }
+    }
+#endif

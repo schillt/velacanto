@@ -2,27 +2,34 @@ import Combine
 import Foundation
 import ImageIO
 import NowPlaying
+import SwiftUI
 
 /// One account-owned result serves the current player and system artwork requests.
 @MainActor
 final class FoundationCurrentArtwork: ObservableObject {
-    struct Result {
+    nonisolated struct Result: Sendable {
         let id: UUID
+        /// Display publication changes on a decode while the system artwork identity stays stable.
+        let revision = UUID()
         let data: Data
         let image: CGImage
+        let tint: Color
     }
     private struct Key: Equatable {
         let account: UUID
         let item: String
+        let kind: FoundationItem.Kind
         let tag: String?
     }
-    static let maximumBytes = 2 * 1_024 * 1_024
-    static let requestedPixels = 640
+    nonisolated static let maximumBytes = 2 * 1_024 * 1_024
+    nonisolated static let requestedPixels = 640
     @Published private(set) var result: Result?
     private(set) var updateTask: Task<Void, Never>?
     private(set) var loadTask: Task<Void, Never>?
     private let player: FoundationPlayer
     private let load: @Sendable (FoundationItem) async throws -> Data?
+    private let prepareRetry: @Sendable (FoundationItem) async -> Void
+    private let cachedLoad: @Sendable (FoundationItem) async throws -> Data?
     private let account = UUID()
     private var key: Key?
     private var artworkID: UUID?
@@ -30,10 +37,16 @@ final class FoundationCurrentArtwork: ObservableObject {
     private var subscriptions: Set<AnyCancellable> = []
     private var isLive = true
 
-    init(player: FoundationPlayer, load: @escaping @Sendable (FoundationItem) async throws -> Data?)
-    {
+    init(
+        player: FoundationPlayer,
+        cachedLoad: @escaping @Sendable (FoundationItem) async throws -> Data? = { _ in nil },
+        prepareRetry: @escaping @Sendable (FoundationItem) async -> Void = { _ in },
+        load: @escaping @Sendable (FoundationItem) async throws -> Data?
+    ) {
         self.player = player
         self.load = load
+        self.cachedLoad = cachedLoad
+        self.prepareRetry = prepareRetry
         Publishers.Merge(
             player.$queue.map { _ in () },
             player.$selectedEntryID.removeDuplicates().map { _ in () }
@@ -60,51 +73,105 @@ final class FoundationCurrentArtwork: ObservableObject {
         let imageItem = item.catalogArtworkItem
         guard imageItem.kind != .track else { return nil }
         return Key(
-            account: account, item: imageItem.id,
-            tag: imageItem.primaryImageTag.flatMap { $0.isEmpty ? nil : $0 })
+            account: account, item: imageItem.id, kind: imageItem.kind,
+            tag: imageItem.primaryImageTag.flatMap { $0.isEmpty ? nil : $0 }
+                ?? (key?.item == imageItem.id && key?.kind == imageItem.kind ? key?.tag : nil))
     }
 
-    private func refreshSelection() {
+    func refreshRetainedArtwork() {
+        refreshSelection(force: true)
+    }
+
+    /// Opening Now Playing or a successful explicit connectivity retry is a recovery boundary.
+    func retryMissingArtwork() {
+        guard result == nil, loadTask == nil else { return }
+        refreshSelection(force: true, retry: true)
+    }
+
+    private func refreshSelection(force: Bool = false, retry: Bool = false) {
         guard isLive else { return }
         let item = player.queue.first { $0.id == player.selectedEntryID }?.item
         let nextKey = item.flatMap(identity)
-        guard nextKey != key else { return }
+        guard force || nextKey != key else { return }
         generation &+= 1
         loadTask?.cancel()
         loadTask = nil
+        let sameIdentity = nextKey == key
         key = nextKey
-        artworkID = nextKey == nil ? nil : UUID()
-        result = nil
+        if !sameIdentity {
+            artworkID = nextKey == nil ? nil : UUID()
+            result = nil
+        }
         guard let artworkID, let item else { return }
         let requestGeneration = generation
         let load = load
+        let cachedLoad = cachedLoad
+        let prepareRetry = prepareRetry
         let imageItem = item.catalogArtworkItem
         loadTask = Task { [weak self] in
             do {
                 try Task.checkCancellation()
+                if retry { await prepareRetry(imageItem) }
+                try Task.checkCancellation()
+                if let cached = try? await cachedLoad(imageItem) {
+                    let preview = await Task.detached(priority: .utility) {
+                        Self.decode(cached, id: artworkID)
+                    }.value
+                    try Task.checkCancellation()
+                    guard let self, self.isLive, self.generation == requestGeneration else {
+                        return
+                    }
+                    if let preview { self.install(preview) }
+                }
                 let data: Data?
                 #if DEBUG
                     data = try await FoundationTrace.$context.withValue(
                         .init(origin: .nowPlaying, page: .nowPlayingArtwork)
-                    ) { try await load(imageItem) }
+                    ) {
+                        try await FoundationRequestIntent.$isPlayback.withValue(true) {
+                            try await load(imageItem)
+                        }
+                    }
                 #else
-                    data = try await load(imageItem)
+                    data = try await FoundationRequestIntent.$isPlayback.withValue(true) {
+                        try await load(imageItem)
+                    }
                 #endif
                 try Task.checkCancellation()
                 guard let self, self.isLive, self.generation == requestGeneration else { return }
-                self.result = data.flatMap { Self.decode($0, id: artworkID) }
+                let decoded = await Task.detached(priority: .utility) {
+                    data.flatMap { Self.decode($0, id: artworkID) }
+                }.value
+                try Task.checkCancellation()
+                guard self.isLive, self.generation == requestGeneration else { return }
+                if let decoded { self.install(decoded) }
                 self.loadTask = nil
             } catch {
                 guard let self, self.isLive, self.generation == requestGeneration else { return }
                 self.loadTask = nil
-                // Artwork is optional. Keep this identity completed until selection changes.
+                // Keep usable artwork; explicit refresh can retry this identity.
             }
         }
     }
 
+    private func install(_ candidate: Result) {
+        if let result, result.id == candidate.id,
+            max(result.image.width, result.image.height)
+                > max(candidate.image.width, candidate.image.height)
+        {
+            return
+        }
+        result = candidate
+    }
+
     /// Reject oversized input before decoding; retain at most one bounded image and payload.
-    static func decode(_ data: Data, id: UUID = UUID()) -> Result? {
-        guard !data.isEmpty, data.count <= maximumBytes,
+    nonisolated static func decode(
+        _ data: Data, id: UUID = UUID(), maximumPixels: Int = requestedPixels
+    )
+        -> Result?
+    {
+        guard maximumPixels > 0, maximumPixels <= 2048,
+            !data.isEmpty, data.count <= maximumBytes,
             let source = CGImageSourceCreateWithData(
                 data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
             CGImageSourceGetCount(source) == 1,
@@ -117,11 +184,13 @@ final class FoundationCurrentArtwork: ObservableObject {
                 [
                     kCGImageSourceCreateThumbnailFromImageAlways: true,
                     kCGImageSourceCreateThumbnailWithTransform: true,
-                    kCGImageSourceThumbnailMaxPixelSize: requestedPixels,
+                    kCGImageSourceThumbnailMaxPixelSize: maximumPixels,
                     kCGImageSourceShouldCacheImmediately: true,
                 ] as CFDictionary)
         else { return nil }
-        return Result(id: id, data: data, image: image)
+        return Result(
+            id: id, data: data, image: image,
+            tint: FoundationCatalogArtwork.sampledColor(for: image) ?? Color(white: 0.12))
     }
 
     func result(for item: FoundationItem) -> Result? {
@@ -159,7 +228,7 @@ final class FoundationCurrentArtwork: ObservableObject {
         guard isLive, key == currentSelectionKey, artworkID == id else {
             throw ArtworkRepresentation.ArtworkRepresentationError.noRepresentationAvailable
         }
-        return loadTask
+        return result == nil ? loadTask : nil
     }
 
     private var currentSelectionKey: Key? {

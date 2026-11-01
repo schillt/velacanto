@@ -57,3 +57,41 @@ queue and local-file operations remain unavailable until separately approved.
 Each new control layer must demonstrate necessity; deletion is preferred when
 it preserves behavior. Earlier date-based delivery plans no longer establish
 acceptance. No reliability percentages are inferred from small successful runs.
+
+## Scoped amendment — artist detail reuse (2026-10-14)
+
+The owner approved bounded account-owned reuse after review identified duplicate
+artist detail requests from branding, overview and favorite observation. One
+32-entry, 60-second memory memo now coalesces those identical reads; failures are
+not cached. Incoming image revisions and favorite mutations revoke stale reuse
+without interrupting existing branding/overview consumers. Last-consumer exit and
+account retirement cancel outstanding work. Existing transport, artwork admission,
+player ownership and explicit retry remain authoritative; this does not authorize
+a general request scheduler or automatic retry layer. Artist songs receive initial
+loading priority over optional metadata. Existing shimmer remains by owner choice.
+
+## Scoped amendment — playback and Now Playing protection (2026-10-14)
+
+The owner authorized implementing protection after reporting silent playback with
+continuous loading alongside incomplete expanded-player artwork. Only playback
+and Now Playing receive preferential admission. Artist, Album, Home, New, Library,
+Search and playlist browsing remain equal, with bounded parallel loading and
+independent publication of completed sections. Cache hits do not wait for network
+admission. Requests required to fulfill an explicit Play action are playback work.
+
+The scope permits account-owned admission at existing catalog/artwork boundaries,
+driven by existing playback state, and current-artwork recovery corrections. Audio
+delivery remains owned by AVPlayer and never waits for an artwork/catalog permit.
+Protection constrains new browsing work during startup/buffering without cancelling
+all useful requests or introducing an indefinite browsing blackout. Cancellation
+and account retirement must release queued demand safely.
+
+This exception does not authorize a replacement player, transport, watchdog,
+automatic retry loop or revival of legacy managers. Successful unit tests/builds
+do not establish the cause of the reported silent spinner or prove physical audio
+recovery. The exact candidate requires playback-under-load acceptance separately.
+
+The durable behavior, implementation limits, review gates and lessons from
+Alpha182 are specified in [Playback and Now Playing protection](../playback-protection.md).
+The owner reports initial testing passes; this is an acceptance checkpoint, not
+proof of the earlier stall's root cause or exhaustive route/background validation.

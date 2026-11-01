@@ -108,6 +108,8 @@ struct FoundationLyricsView: View {
     let library: any FoundationLibrary
     @ObservedObject var player: FoundationPlayer
     @ObservedObject var model: FoundationLyricsModel
+    // Sidebar glass follows appearance; artwork-backed presentations retain light text.
+    var followsAppearance = false
     @State private var retry = 0
 
     var body: some View {
@@ -130,7 +132,8 @@ struct FoundationLyricsView: View {
             case .loaded(let lyrics):
                 if lyrics.hasTiming {
                     FoundationTimedLyricsView(
-                        lyrics: lyrics, entryID: entryID, player: player, isActive: model.isActive)
+                        lyrics: lyrics, entryID: entryID, player: player, isActive: model.isActive,
+                        followsAppearance: followsAppearance)
                 } else {
                     ScrollView {
                         Text(lyrics.text)
@@ -145,6 +148,7 @@ struct FoundationLyricsView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .foregroundStyle(followsAppearance ? Color.primary : Color.white)
         .disabled(!model.isActive)
         .allowsHitTesting(model.isActive)
         .accessibilityHidden(!model.isActive)
@@ -164,6 +168,7 @@ private struct FoundationTimedLyricsView: View {
     let entryID: UUID
     @ObservedObject var player: FoundationPlayer
     let isActive: Bool
+    let followsAppearance: Bool
     @State private var followsPlayback = true
     @State private var scrollIsIdle = true
     @State private var interaction = 0
@@ -183,7 +188,7 @@ private struct FoundationTimedLyricsView: View {
         let activeLine = activeLine
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 12) {
+                LazyVStack(alignment: .leading, spacing: 16) {
                     ForEach(lyrics.lines) { line in
                         let target = lyrics.seekTarget(
                             lineID: line.id, entryID: entryID,
@@ -211,6 +216,8 @@ private struct FoundationTimedLyricsView: View {
                 .padding(.vertical)
                 .padding(.horizontal, 24)
             }
+            // Follow near the top, below the existing fade, on both platforms.
+            .contentMargins(.top, FoundationPlayerContentFade.edgeHeight, for: .scrollContent)
             .mask { FoundationPlayerContentFade() }
             .onScrollPhaseChange { _, phase in
                 scrollIsIdle = phase == .idle
@@ -225,23 +232,23 @@ private struct FoundationTimedLyricsView: View {
                 followsPlayback = true
                 if let currentLine = self.activeLine {
                     withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.25)) {
-                        proxy.scrollTo(currentLine, anchor: .center)
+                        proxy.scrollTo(currentLine, anchor: .top)
                     }
                 }
             }
             .onChange(of: activeLine, initial: true) { _, line in
                 guard followsPlayback, !voiceOver, let line else { return }
                 withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.25)) {
-                    proxy.scrollTo(line, anchor: .center)
+                    proxy.scrollTo(line, anchor: .top)
                 }
             }
-            .overlay(alignment: .top) {
+            .overlay(alignment: .bottom) {
                 if !followsPlayback || voiceOver {
                     Button("Follow current lyric") {
                         followsPlayback = true
                         if let activeLine {
                             withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.25)) {
-                                proxy.scrollTo(activeLine, anchor: .center)
+                                proxy.scrollTo(activeLine, anchor: .top)
                             }
                         }
                     }
@@ -249,7 +256,7 @@ private struct FoundationTimedLyricsView: View {
                     .buttonBorderShape(.capsule)
                     .controlSize(.large)
                     .padding(.horizontal, 24)
-                    .padding(.top, 12)
+                    .padding(.bottom, 12)
                 }
             }
         }
@@ -258,19 +265,24 @@ private struct FoundationTimedLyricsView: View {
     private func row(_ line: FoundationLyrics.Line, isCurrent: Bool) -> some View {
         Text(line.text.isEmpty ? " " : line.text)
             .font(.system(.title2, design: .default, weight: isCurrent ? .bold : .semibold))
-            .foregroundStyle(Color.white.opacity(isCurrent ? 1 : 0.85))
+            .lineSpacing(4)
+            .foregroundStyle(
+                (followsAppearance ? Color.primary : Color.white).opacity(isCurrent ? 1 : 0.5)
+            )
             .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
     }
 }
 
 struct FoundationPlayerContentFade: View {
+    static let edgeHeight: CGFloat = 24
+
     var body: some View {
         VStack(spacing: 0) {
             LinearGradient(colors: [.clear, .white], startPoint: .top, endPoint: .bottom)
-                .frame(height: 24)
+                .frame(height: Self.edgeHeight)
             Rectangle().fill(.white)
             LinearGradient(colors: [.white, .clear], startPoint: .top, endPoint: .bottom)
-                .frame(height: 24)
+                .frame(height: Self.edgeHeight)
         }
     }
 }
