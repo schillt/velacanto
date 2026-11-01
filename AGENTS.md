@@ -91,11 +91,14 @@ credentials. Keep the stronger native Handoff safeguards intact.
 Validate server/user/source ownership and server permissions before async results
 or mutations. Do not weaken file protection to make tests pass. No new player,
 retry/polling/watchdog framework, hidden whole-catalog scan or unrelated provider.
-Ordinary builds keep pin sync unconfigured. On 2026-10-27 the owner explicitly
-authorized the reviewed container and development signing for iPhone/Mac pin-sync
-testing. Use the dedicated Development entitlements and explicit container build
-setting; preserve runtime opt-in, existing identities and the default-off ordinary
-build. Production schema deployment and workflow changes remain separate.
+Debug and UITesting keep pin sync unconfigured unless explicitly overridden for
+Development testing. On 2026-10-31 the owner authorized Production pin-sync setup;
+the schema was deployed and verified in CloudKit Console. Release now selects the
+existing Production entitlements and container so Xcode Cloud's native archive
+actions include the accepted feature without a separate script opt-in. Preserve
+runtime opt-in and all existing identities. Actual distribution signing and
+TestFlight smoke verification still require the resulting artifact. Do not start
+a build or upload until the owner requests it.
 
 The repository is public. Stage explicit reviewed paths, never broad `git add .`
 or `git add -A`. Keep credentials, private server/media/account/device details,
