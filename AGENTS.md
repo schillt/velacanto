@@ -16,8 +16,8 @@ canonical distribution naming remains VelaCanto. Publisher documentation uses
 
 Read [the current checkpoint](docs/0.6.0-alpha-checkpoint.md),
 [the agent handoff](docs/0.6.0-agent-handoff.md), and the nested app guide first.
-Build233 source, signing, installation and verification limits are recorded in
-the checkpoint and relative-path runtime manifest. A source tree or green unit gate
+Build309 source, signing, installation and verification limits are recorded in
+the checkpoint; older manifests remain historical evidence. A source tree or green unit gate
 alone does not establish physical acceptance or distribution readiness.
 
 ## Branches and publication
@@ -26,9 +26,11 @@ Preserve GitHub `alpha`, `beta` and `main`. Never delete, rename, replace,
 force-push or rewrite them. Task branches and worktrees remain local; do not
 publish `codex/*` or other temporary branch refs.
 
-The owner authorized one reviewed usable stopping-point integration to GitHub
-`alpha`, after installing that exact build on the Mac and iPhone and including
-current documentation and handoff reports. This is not standing permission for
+On 2026-10-31 the owner accepted the current stopping point, carried remaining
+feature refinements into future builds, and authorized distribution preparation,
+security review and a reviewed non-force push to GitHub `alpha`. Build309 is installed
+on Mac and iPhone; include current documentation and handoff reports. The owner
+will handle TestFlight afterward. This is not standing permission for
 future publication, beta/main promotion, tags, releases, TestFlight or App Store
 submission. Revalidate current alpha before a normal non-force publication and
 preserve beta/main heads. Stop on a protection rejection; do not weaken a rule or
