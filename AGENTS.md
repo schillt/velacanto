@@ -28,6 +28,15 @@ active development until its disposition is known.
 
 ## Scope and efficient execution
 
+Through the v1 release, prioritize architecture stability and maintainability,
+including reliability and bounded ownership cleanup. Measured performance and
+UI/UX improvements are a close second: faster loading, smoother animations and
+transitions, and clear, actionable errors and status. Give new features lower
+priority until v1. Preserve accepted behavior, existing safeguards and issue
+acceptance; reprioritization does not silently close, defer or remove milestone
+items. Continue authorized active investigations and raise material scope decisions
+with the owner.
+
 Read the selected issue before editing. Execute clear requests without a separate
 planning exchange for every small refinement. Batch related visual changes into
 one reviewable candidate with a short platform-specific checklist. Separate product
