@@ -39,11 +39,41 @@ crash or lifecycle evidence before another speculative change. Prove the smalles
 supported public-API path before promising parity with Apple's own apps. Preserve
 failed evidence; do not assume a platform, network or scheduling cause.
 
-Reuse existing Implementation, Acceptance and Auditor assignments when present.
-Keep file ownership explicit and integrate serially. Use bounded parallel workers
-only for distinct independent scope; do not create extra chats or review passes
-for routine patches. One coordinator owns Xcode, simulators and physical devices.
-No historical worker reservation carries into this round automatically.
+## Project coordination and issue ownership
+
+The GitHub Project board is the source of truth for development tracking across
+turns. At the start of work, read the live board and the selected issue, including
+its latest comments. Reconcile status with actual work: queued work is Todo,
+active implementation or investigation is In Progress, and Done requires the
+issue's actual acceptance and authorized disposition. Planning alone is not active
+implementation. Do not silently close an issue, mark unverified work complete or
+move unrelated items just to clear a board. Owner direction and live issue contracts
+continue to govern scope and acceptance.
+
+Every feature, bug fix or issue being worked on has a named implementation-owner
+subagent. The main agent acts as coordinator: assign issue scope and file ownership,
+manage dependencies, integrate and audit the resulting work, coordinate validation,
+update the board and issue comments, report to the owner and request feedback on
+material choices or acceptance. Do not have the coordinator replace the implementation
+owner. Reuse existing Implementation, Acceptance and Auditor assignments when present;
+use bounded parallel workers only for independent scope, keep integration serial and
+avoid unnecessary review passes. If a required subagent is unavailable, report that
+limitation rather than silently bypassing this ownership model. One coordinator
+controls the serialized Xcode, simulator and physical-device lane; delegated execution
+must not overlap it. No historical worker reservation carries into a new round.
+
+For each active issue, the coordinator keeps the Project item current and posts a
+sanitized issue comment when work starts, at meaningful progress or handoff points,
+and when it completes, pauses or is blocked. If new feature or bug work lacks an
+issue, create or identify its issue and add it to the Project before tracking progress.
+Comments state the assigned scope, local candidate or published SHA where applicable,
+actual checks and platform, limitations, blockers and next action; distinguish local
+work from published source and unperformed acceptance. Read back remote writes. Keep
+credentials, private server/media/account/device information, raw logs, signed
+artifacts and private evidence out of the public Project and comments. If GitHub or
+Project access prevents an update, report the precise gap and reconcile it when
+access is restored. Status and tracking updates are authorized; they do not authorize
+source publication, release promotion, distribution or device resets.
 
 Run focused tests for changed behavior, then the applicable integrated iOS/macOS
 build and package checks. Reuse scoped acceptance unless a changed path or new
