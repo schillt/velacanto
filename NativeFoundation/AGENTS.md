@@ -33,3 +33,26 @@ Do not infer audibility, server behavior, accessibility, CarPlay or Apple delive
 from compilation. Preserve data/privacy protections. Production pin sync is owner
 accepted; normal iCloud lag alone is not an open app defect or new retry assignment.
 No publication, distribution or device reset is implied by a source assignment.
+
+## Native implementation review
+
+Apply the root engineering standards to the changed native path; do not turn this
+checklist into a blanket rewrite or a requirement to repeat unaffected acceptance.
+
+- Keep view-owned state private and distinguish owned state from injected models.
+  Give a view the state it reads; investigate broad observation and expensive
+  derived work when measuring updates rather than mandating an observation rewrite.
+- Use stable item identity for unique catalog entries and stable occurrence identity
+  for repeated queue/playlist entries. Position is selection/order information, not
+  the identity of a mutable row. Verify deletion, reorder and replacement behavior
+  where a change affects retained state, focus or animations.
+- Keep storage and projection work from delaying interaction or playback. Inspect
+  main-actor execution and measure realistic workloads; preserve persistence and
+  account-lifetime ordering when moving work to a narrow storage/worker boundary.
+- Prefer native controls and supported public APIs. Preserve accessibility labels,
+  focus and keyboard/touch behavior, Dynamic Type and reduced-motion/transparency
+  settings in changed UI. Errors and loading/empty/offline states must tell the
+  user what happened and the available next action.
+- Keep synthetic fixtures isolated from real credentials, data and system services.
+  Check critical regression tests' target/scheme membership and applicable Mac/iOS
+  execution. Verify DEBUG-only fixtures remain excluded from the Release artifact.

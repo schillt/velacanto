@@ -48,6 +48,65 @@ crash or lifecycle evidence before another speculative change. Prove the smalles
 supported public-API path before promising parity with Apple's own apps. Preserve
 failed evidence; do not assume a platform, network or scheduling cause.
 
+## Engineering standards through v1
+
+Treat correctness, data preservation and understandable ownership as release
+requirements. For the current 0.7 round, first address the demonstrated synthetic
+reauthentication data-preservation failures under #219/#203, coordinating #30/#179;
+physical impact remains unverified. Keep bounded test reliability #201 and
+playback-URL privacy #25 urgent. Use reliable tests to enable focused ownership
+cleanup, then measure and improve performance and UI/accessibility. New feature
+work remains lower priority. Do not infer that this ordering completes, discards
+or expands any existing issue, or that a code-review score is release acceptance.
+
+Before changing a path, identify its owner, affected invariants, failure outcome
+and smallest meaningful verification. Prefer cohesive functions and concrete,
+narrow boundaries over shared mutable state, duplicated lifecycle wiring or a new
+generic framework. Refactor around a demonstrated responsibility or change risk;
+file length, naming style or a preferred architecture alone does not justify a
+rewrite. Keep unrelated cleanup out of the candidate.
+
+For authentication, replacement and deletion, separate preparation from the point
+at which ownership or durable state changes. Preserve current data while an
+operation is pending, fails or is cancelled; destructive cleanup needs the
+applicable authenticated scope and user intent. Preserve successful sign-out's
+explicit cleanup contract and pending-upgrade quarantine. Validate identity before
+irreversible work, not only after an await. Return structured partial outcomes
+where callers need them; never convert incomplete cleanup into reported success.
+
+Give tasks, subscriptions, permits, continuations, files and playback leases an
+explicit lifetime owner. Define cancellation and retirement ordering, reject stale
+results, and drain or release held work where the contract requires completion.
+Cancelling a task is not proof its resources have retired. Keep sharing and
+cancellation scoped so one consumer cannot cancel another consumer's valid work.
+Bound input size, parsing, queued demand, concurrency and retained storage; test
+relevant limits and failure paths without weakening playback protection.
+
+Keep potentially expensive I/O, encoding, decoding and catalog projection out of
+UI-critical execution where evidence justifies it. An async function or Task does
+not itself move work off the main actor. Measure the actual path before choosing
+an optimization; preserve serialization, write ordering, durability, account scope
+and cancellation when changing execution context. Do not replace a measured cost
+with speculative caching, retries, polling or background infrastructure.
+
+Use deterministic event/condition acknowledgements with elapsed-time deadlines in
+async tests. A yield count is not a time bound. Release held operations on success,
+failure, timeout and cancellation; preserve strict assertions and original failed
+evidence. For a critical regression, verify that its test is included in the
+applicable scheme and quality entry point, not just present in the source tree.
+Keep compiler and formatting checks strict; do not grow a debt baseline, suppress
+warnings, skip a failure or lengthen all deadlines to obtain a pass. Repair the
+owned findings or record an explicit owner disposition for unrelated blockers.
+
+For each changed behavior, run proportionate focused checks and applicable
+integration/package checks on the exact candidate. Report source observations,
+synthetic tests, measured runtime results and physical acceptance separately.
+Performance evidence names the artifact/configuration, workload and comparable
+before/after result; absence of a measurement is not proof of speed or a diagnosed
+cause. Review user-visible errors for an honest state and useful next action,
+without exposing implementation details or private data. Carry these standards
+into each milestone through v1 using existing issues before creating duplicates.
+
 ## Project coordination and issue ownership
 
 The GitHub Project board is the source of truth for development tracking across
