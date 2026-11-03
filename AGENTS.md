@@ -53,11 +53,12 @@ failed evidence; do not assume a platform, network or scheduling cause.
 The GitHub Project board is the source of truth for development tracking across
 turns. At the start of work, read the live board and the selected issue, including
 its latest comments. Reconcile status with actual work: queued work is Todo,
-active implementation or investigation is In Progress, and Done requires the
-issue's actual acceptance and authorized disposition. Planning alone is not active
-implementation. Do not silently close an issue, mark unverified work complete or
-move unrelated items just to clear a board. Owner direction and live issue contracts
-continue to govern scope and acceptance.
+active implementation or investigation is In Progress, review-ready work with
+supporting evidence is Ready for Review, and Done requires actual acceptance and
+owner approval or explicit disposition. Planning alone is not active implementation.
+Do not silently close an issue, mark unverified work complete or move unrelated
+items just to clear a board. Owner direction and live issue contracts continue to
+govern scope and acceptance.
 
 Every feature, bug fix or issue being worked on has a named implementation-owner
 subagent. The main agent acts as coordinator: assign issue scope and file ownership,
@@ -71,6 +72,15 @@ limitation rather than silently bypassing this ownership model. One coordinator
 controls the serialized Xcode, simulator and physical-device lane; delegated execution
 must not overlap it. No historical worker reservation carries into a new round.
 
+When work is ready for owner review, present a concrete candidate with its scope,
+source identity, checks, remaining gaps and any requested acceptance; distinguish
+implementation completion from owner approval. Move the issue to Ready for Review
+and keep it open while approval is pending. The owner can approve it or return it for
+revision: move it back to In Progress, route feedback to its implementation owner,
+coordinate the revision and proportionate revalidation, update tracking, and present
+the revised candidate again. Do not infer approval or publication permission from
+elapsed time, passing tests, or board status.
+
 For each active issue, the coordinator keeps the Project item current and posts a
 sanitized issue comment when work starts, at meaningful progress or handoff points,
 and when it completes, pauses or is blocked. If new feature or bug work lacks an
@@ -81,8 +91,13 @@ work from published source and unperformed acceptance. Read back remote writes. 
 credentials, private server/media/account/device information, raw logs, signed
 artifacts and private evidence out of the public Project and comments. If GitHub or
 Project access prevents an update, report the precise gap and reconcile it when
-access is restored. Status and tracking updates are authorized; they do not authorize
-source publication, release promotion, distribution or device resets.
+access is restored. Use the GitHub Project's status update function for concise,
+sanitized project-level summaries at meaningful milestones, blockers, decisions,
+review handoffs and revisions; do not substitute these for issue comments or post
+routine unchanged updates. Describe progress, next actions and owner decisions needed,
+including the status and limits of acceptance. Read back updates and use the actual
+available status options. Status and tracking updates are authorized; they do not
+authorize source publication, release promotion, distribution or device resets.
 
 Run focused tests for changed behavior, then the applicable integrated iOS/macOS
 build and package checks. Reuse scoped acceptance unless a changed path or new
