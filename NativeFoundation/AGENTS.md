@@ -23,8 +23,12 @@ Keep DEBUG fixtures/probes out of Release. Verify identity, privacy manifest,
 Handoff registration, encryption declaration and diagnostic exclusion on the exact
 applicable package. A false ITSAppUsesNonExemptEncryption value is metadata.
 
-Use one serialized native lane and existing authorized devices/simulators. Run
-proportionate affected tests/builds; retain failures and exact source evidence.
+Follow the root project coordination and issue ownership instructions: a named
+subagent owns each native issue implementation, while the main agent coordinates,
+keeps the GitHub Project and issue comments current, and reports to the owner.
+Use one coordinator-controlled serialized native lane and existing authorized
+devices/simulators. Run proportionate affected tests/builds; retain failures and
+exact source evidence.
 Do not infer audibility, server behavior, accessibility, CarPlay or Apple delivery
 from compilation. Preserve data/privacy protections. Production pin sync is owner
 accepted; normal iCloud lag alone is not an open app defect or new retry assignment.
