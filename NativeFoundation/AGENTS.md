@@ -1,35 +1,31 @@
 # Maintained native app
 
 Read the root [agent instructions](../AGENTS.md), current
-[checkpoint](../docs/0.6.0-alpha-checkpoint.md) and
-[handoff](../docs/0.6.0-agent-handoff.md). Current owner instructions supersede
-historical 0.3/0.4/0.5 exclusions and old guide approvals.
+[0.7.0 handoff](../docs/0.7.0-agent-handoff.md) and
+[playback protection](../docs/playback-protection.md). Older checkpoint exclusions
+and worker assignments do not override current owner direction.
 
-The project and scheme are VelacantoFoundation. Keep the existing targets,
-application/storage identities and iOS/macOS shared model boundaries. The
-current checkpoint is 0.6 development, not a completed 0.6 release.
+The project/scheme are VelacantoFoundation. Keep existing targets, application,
+Keychain/storage identities and iOS/macOS shared model boundaries. The accepted
+0.6 baseline remains intact; 0.7 preparation has not changed runtime/version/build.
 
 One player owns playback/queue intent, native items and activation. Existing
 Handoff owns continuation. Shared catalog/actions remain source/account scoped.
-Do not add a second player, broad coordinator, retry/polling layer or hidden
-catalog scan. Local catalog records remain read-only metadata; do not silently
-turn them into playback, downloads, favorites or playlist mutations.
+Do not add a second player, broad coordinator, retry/polling layer or hidden scan.
+Local catalog groundwork stays distinct from working offline Jellyfin downloads.
 
-Home must retain its natural viewport/translucency. Shared measured end spacing
-must clear the expanded navigation/player across affected panes. Test actual List
-row height and automatic expansion, midscroll underlap, upward scrolling, late
-content and related-sheet isolation; geometric unit tests alone are insufficient.
-Continue Listening uses the existing media card only for another eligible device,
-with metadata/progress, instruction action and presentation-only dismissal.
+Retain natural viewports/translucency and end-of-content player clearance. Test
+changed keyboard/focus, sheet and pointer/touch behavior in its actual platform.
+Preserve the single remote Continue Listening card, unified song/queue action,
+presentation-only dismissal and existing source-stop guards.
 
-Keep DEBUG fixtures, probes and detailed diagnostics out of Release. Verify
-identity, privacy manifest, Handoff registration, encryption declaration and
-absence of diagnostic implementation in each exact signed package. A false
-ITSAppUsesNonExemptEncryption value is build metadata, not legal advice.
+Keep DEBUG fixtures/probes out of Release. Verify identity, privacy manifest,
+Handoff registration, encryption declaration and diagnostic exclusion on the exact
+applicable package. A false ITSAppUsesNonExemptEncryption value is metadata.
 
-Use the coordinator's single native lane and existing authorized devices. Run
-focused tests, combined regressions and the relevant native/physical checks;
-record original failures and current source hashes. Do not infer audible/server,
-CarPlay, touch/pointer or accessibility acceptance from compilation. Preserve
-privacy protections and fail clearly when unavailable instead of weakening them.
-No source publication, distribution or device reset is implied by an assignment.
+Use one serialized native lane and existing authorized devices/simulators. Run
+proportionate affected tests/builds; retain failures and exact source evidence.
+Do not infer audibility, server behavior, accessibility, CarPlay or Apple delivery
+from compilation. Preserve data/privacy protections. Production pin sync is owner
+accepted; normal iCloud lag alone is not an open app defect or new retry assignment.
+No publication, distribution or device reset is implied by a source assignment.

@@ -1,35 +1,48 @@
 # VelaCanto roadmap
 
-Current scope comes from the owner's instructions, [live0.6 milestone](https://github.com/schillt/velacanto/milestone/9), issue contracts and [Development Project](https://github.com/users/schillt/projects/1). No future milestone has a committed date.
+Development is now **0.7.0**. The [live milestone](https://github.com/schillt/velacanto/milestone/7),
+selected issue's latest contract/comments and current owner instructions govern
+scope. Start with the [current handoff](0.7.0-agent-handoff.md). No date is committed.
 
-The installed local checkpoint is **0.6.0(233)** with runtime source in `5718da7`.
-Read the [checkpoint](0.6.0-alpha-checkpoint.md), [all30 current issue statuses](0.6.0-issue-status.md)
-and [agent handoff](0.6.0-agent-handoff.md). Source, scoped tests, local installation,
-physical acceptance, publication and Apple distribution are separate states.
+## Accepted baseline
 
-## Current0.6 work
+The accepted 0.6 development runtime is build309, source
+`5adcf3a9fb4c8e3e66bb78d1742e56090f6ea91a`; 0.6 alpha source/configuration was
+published through `90a74144471e36558599b57c298fc546b519b057`. The owner accepted
+Production pin sync on November 2, 2026, including remaining iCloud delivery lag.
+No app-controlled sync defect is currently reported. Preserve accepted queue,
+playlist, lyrics, offline playback, browsing and continuity behavior. Read the
+[historical checkpoint](0.6.0-alpha-checkpoint.md) for exact evidence limits.
 
-- Complete playlist management/reorder and shared-feature/native UX parity on iOS/Mac.
-- Accept CarPlay automatic Now Playing, supported audio-category browse/Siri and origin-aware exit flow. The navigation-only keyboard approach was removed; native acceptance remains.
-- Finish shared bottom clearance/underlap, system-aware related/overview sheets, queue/lyrics, loading, favorites, metadata, genres and desktop interaction/scrolling.
-- Finish native folder access and local/Jellyfin catalog composition acceptance. Resolve missing proposed Mac capabilities before claiming native folder access works.
-- Complete cross-device continuation: native Handoff is installed with scoped positive owner feedback; the remote card's guide-preference failure remains. Browser continuation is a separate excluded prototype.
-- Investigate system Settings storage management. Existing Profile bulk management remains until a proven supported replacement; isolated proof is not production functionality.
-- Complete physical/server/network/account/privacy/accessibility and exact-candidate gates. Optional pin sync remains off/unconfigured; broader Siri scope and standalone-artist inclusion need explicit decisions.
+## 0.7 execution order
 
-All30 milestone issues remain open. The status matrix names evidence and next action
-for each; an implementation estimate is not a release completion percentage.
+1. Start with bounded async test synchronization #201; make missing events fail
+   promptly with cleanup, without production changes or weaker assertions.
+2. Address playback-URL privacy #25 and account/sign-out/pin cleanup #30/#179.
+   Preserve working delivery and demonstrate a supported approach before transport
+   changes. Coordinate #203 ownership work after the relevant baseline is reliable.
+3. Measure Mac scrolling/artwork/large-library behavior #24/#14/#137 and playback
+   stalls/compatibility #15/#155/#47. Investigate Mac AirPlay #212 and CarPlay #209
+   against actual hardware; document external limits honestly.
+4. Complete targeted lifecycle, continuity and reporting checks #213/#215/#216,
+   affected accessibility #22, and conditional native-download budget work #214.
+5. Use bounded maintainability work #168/#54/#200/#204/#202/#203 where it supports
+   demonstrated needs. Retain #46 search, #112/#115 local-library groundwork,
+   #157 artist classification and #111 animated-art evaluation in the existing
+   milestone; do not silently expand the first batch or promise unsupported APIs.
 
-## Later work and existing release gates
+The handoff inventories every open 0.7 item. Production-sync investigation #218
+is closed by owner disposition; ordinary iCloud lag alone does not reopen it.
 
-Token-bearing URL elimination #25 is explicitly0.7. Measured maintainability,
-accessibility/performance and ownership/fixture refactors remain in their existing
-later milestones. Additional casting #17 was declined and closed not-planned.
-Other-provider scope is not restored by this roadmap.
+## Later milestones and distribution
 
-Older0.5 distribution/provenance gates #63/#149/#169 remain separately open.
-The installed development checkpoint establishes neither TestFlight availability
-nor promotion readiness. No beta/main promotion, tag, upload or submission is
-implied. Private Project fields remain unaudited with the current tool access;
-reconcile them through an authenticated Project-capable session before claiming
-board/release disposition complete. Detailed older records remain historical.
+Keep existing 0.8 session/operational scope, 0.9 stabilization #27, 1.0 release
+operations/policy #28/#29 and Post-1.0 provider/account backlog in their live buckets.
+No new provider, multi-account expansion or public launch is implied by 0.7 setup.
+
+Main contains the older accepted 0.5 candidate through PR #217; beta/main are not
+automatically advanced with alpha. Exact-source hosted checks, archive/export,
+Apple processing and per-platform availability stay distinct. Historical artifact
+provenance/acceptance #63/#149/#169 remains open under its own scope; do not repeat
+accepted 0.6 basics solely to satisfy an old checkbox. The Swift CodeQL exception
+in PR #217 was candidate-specific and is not a standing waiver.

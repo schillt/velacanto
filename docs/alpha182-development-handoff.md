@@ -1,5 +1,7 @@
 # Alpha182 development handoff
 
+> Historical build182 handoff; not an active assignment or current publication authority. Current work starts in [0.7.0](0.7.0-agent-handoff.md).
+
 Owner-authorized alpha publication, 2026-10-14. Next owner: development chat and
 workspace maintainer. No separate issue or promotion PR was created for this
 publication.

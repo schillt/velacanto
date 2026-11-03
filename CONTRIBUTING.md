@@ -1,20 +1,18 @@
 # Contributing to VelaCanto
 
-Read [current instructions](AGENTS.md), the [native source guide](NativeFoundation/AGENTS.md),
-the [checkpoint](docs/0.6.0-alpha-checkpoint.md), and the live
-[0.6 milestone](https://github.com/schillt/velacanto/milestone/9).
-Develop in a local non-synchronized checkout. Agree on bounded file ownership with
-the integration maintainer before parallel work; only one agent owns native
-builds, simulators or physical installation at a time.
+Read [AGENTS.md](AGENTS.md), the [native guide](NativeFoundation/AGENTS.md),
+[current 0.7.0 handoff](docs/0.7.0-agent-handoff.md) and selected issue's latest
+contract/comments in the [live milestone](https://github.com/schillt/velacanto/milestone/7).
+Use a clean non-synchronized local checkout/worktree; preserve older dirty work.
 
-Return focused changes and exact verification scope to the maintainer. Use the
-existing build/test scripts and preserve failing evidence. Keep source simple and
-bounded, retain the native player and account isolation, and distinguish implemented
-behavior from rendered acceptance and actual device results. See the current
-[agent handoff](docs/0.6.0-agent-handoff.md) for commands and unfinished gates.
+Keep changes focused, file ownership explicit and native builds/devices serialized.
+Batch related UI refinements and verify the changed workflow. Diagnose repeat
+failures before another speculative fix. Reuse accepted evidence; retain original
+failures, strict assertions and bounded deadlines. Only playback/Now Playing receive
+priority; optional content must not block audio. Preserve one player and account isolation.
 
-Never commit credentials, signing profiles, generated Cloud registration, private
-server/media data, raw traces or device receipts. Temporary branches remain local.
-The current owner authorized one reviewed usable checkpoint to GitHub alpha after
-installation. Beta/main promotion, tags and TestFlight/App Store distribution need
-separate direct authorization. Preserve all permanent branch heads.
+Return exact base/final source, paths, tests, platform acceptance, known gaps and
+next owner. Reconcile active handoffs after authorized publication/readback.
+Do not commit credentials, profiles, private origins/media/device details or traces.
+Task refs stay local; future source publication and distribution require their own
+owner authority. See [development workflow](docs/development-workflow.md).

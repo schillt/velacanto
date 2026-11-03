@@ -1,11 +1,9 @@
 # Development and promotion workflow
 
-Current owner instructions in [AGENTS.md](../AGENTS.md) and the
-[0.6 checkpoint](0.6.0-alpha-checkpoint.md) take precedence over historical
-workflow notes below. The current authorization is one reviewed alpha source
-checkpoint after exact build/install verification; final fields remain pending.
-
-Historical workflow recorded 2026-10-10:
+Use [AGENTS.md](../AGENTS.md), the [current 0.7.0 handoff](0.7.0-agent-handoff.md)
+and live issue contracts. The November 2 preparation permits documentation and
+tracking publication now; future implementation publication, promotion and delivery
+retain their separately scoped owner authority. Preserve all permanent branch heads.
 
 Develop and test in isolated local branches/worktrees. Temporary development
 branches stay local; their names do not create a GitHub publication requirement.

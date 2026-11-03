@@ -1,20 +1,18 @@
 # VelaCanto
 
-VelaCanto is a native Jellyfin music app for iPhone, iPad and Mac. Development is
-working toward **0.6**, including shared iOS/macOS feature parity, playlist and
-CarPlay refinement, native continuity, consistent UI/loading and maintainability.
+VelaCanto is a native Jellyfin music app for iPhone, iPad and Mac.
+Development is entering **0.7.0**, focused on reliability, privacy, measured
+performance and platform polish while preserving the accepted 0.6 experience.
 
-The current local alpha checkpoint is **0.6.0 (233)**, signed and installed on Mac
-and iPhone, with runtime source published in `5718da7`. Read the
-[checkpoint](docs/0.6.0-alpha-checkpoint.md) for verification limits and the
-[30-issue status matrix](docs/0.6.0-issue-status.md) for remaining work. Native UI
-failures/skips remain open; this is not a completed0.6 release or TestFlight
-availability record.
+Start with the [0.7.0 agent handoff](docs/0.7.0-agent-handoff.md),
+[live milestone](https://github.com/schillt/velacanto/milestone/7),
+[roadmap](docs/roadmap.md) and [instructions](AGENTS.md). The previous development
+baseline is **0.6.0 (309)**; its exact checks remain in the
+[historical checkpoint](docs/0.6.0-alpha-checkpoint.md). Production pin sync is
+owner accepted as of November 2, 2026; residual iCloud lag is an accepted limitation.
+Preparation has not changed app code, versions or installed applications.
 
-Use the [live milestone](https://github.com/schillt/velacanto/milestone/9),
-[current agent handoff](docs/0.6.0-agent-handoff.md), and [instructions](AGENTS.md)
-for current scope. Older release documents retain evidence for their own builds.
-The product spelling is **VelaCanto**; legal publisher drafts use **NovoLuxor**.
+The product spelling is **VelaCanto**; publisher drafts use **NovoLuxor**.
 
 ## Current experience
 
@@ -44,9 +42,10 @@ source encoding; unsupported formats may require server conversion.
 Basic Siri/system media commands are supported. This release makes no Apple
 Intelligence, natural-language catalog playback or on-device AI claim. Lyrics,
 recommendations, permissions and transcoding depend on the server/library. Jellyfin
-is the only implemented provider. Pins are local per installation; favorites are
-server-backed. Native HLS offline downloads are not implemented: converted downloads
-are verified AAC/M4A files, distinct from HLS streaming.
+is the only implemented provider. Pins remain local unless optional iCloud sync is enabled; favorites are server-backed.
+The optional native system-managed download route has scoped AAC acceptance and
+Apple-managed media labels; broader format/storage-pressure coverage remains open.
+Original/AAC file downloads remain distinct from online HLS streaming.
 
 Mac credentials now use the Data Protection Keychain. The first upgrade can require
 a fresh sign-in; legacy credential items are never read, migrated or deleted. Local
@@ -62,9 +61,9 @@ For the previous accepted scope, read [release notes](docs/0.5.0-release-notes.m
 
 | Branch | Purpose / recorded checkpoint |
 | --- | --- |
-| `alpha` | Permanent development branch; initial integration base `bf1af68`. See the current checkpoint for publication status. |
-| `beta` | Permanent validation branch; v0.5 merged through PR #205 at8d69179. |
-| `main` | Previously accepted preview promoted through PR #190; not automatically advanced with alpha. |
+| `alpha` | Permanent development branch; accepted 0.6 baseline plus current 0.7 preparation. Resolve the live head before work. |
+| `beta` | Permanent validation branch; recorded 0.5 candidate `192ab0c`. |
+| `main` | Older 0.5 candidate promoted through PR #217 at `e45a190`; not automatically advanced with alpha. |
 
 “Alpha Preview” describes this release's maturity; it does not create or promote a
 `preview` branch. Historical branches/tags remain evidence. Develop locally, publish
@@ -108,6 +107,9 @@ Unsigned builds and simulator results do not establish audibility, signed
 provisioning, accessibility or Apple distribution acceptance.
 
 ## Release and architecture references
+
+- [Current 0.7.0 handoff](docs/0.7.0-agent-handoff.md)
+- [Historical 0.6.0 checkpoint](docs/0.6.0-alpha-checkpoint.md)
 
 - [0.5.0 acceptance and deferred work](docs/0.5.0-acceptance.md)
 - [0.5.0 release notes](docs/0.5.0-release-notes.md)
