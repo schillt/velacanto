@@ -18,8 +18,13 @@ VelaCanto; local validation may use VelaCanto Alpha. Publisher documentation use
 
 At startup, verify live `alpha`, the checkout/branch/full SHA and dirty state. Keep
 installed runtime, published source and Apple distribution identities separate.
-Preserve older dirty/unpublished work; use a clean non-synchronized local checkout
-or isolated worktree for the selected issue. Do not develop inside iCloud folders.
+Use a clean non-synchronized local checkout or isolated worktree for the selected
+issue. Do not develop inside iCloud folders. At closeout, inspect committed, staged,
+unstaged, untracked and ignored content; integrate useful work, retain only necessary
+unique evidence, discard superseded material and remove obsolete checkouts under
+the owner's cleanup authority. Leave retained development checkouts clean. Do not
+carry dirty or redundant checkouts between rounds; protect unreviewed work during
+active development until its disposition is known.
 
 ## Scope and efficient execution
 

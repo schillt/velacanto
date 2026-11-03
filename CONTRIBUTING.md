@@ -3,7 +3,9 @@
 Read [AGENTS.md](AGENTS.md), the [native guide](NativeFoundation/AGENTS.md),
 [current 0.7.0 handoff](docs/0.7.0-agent-handoff.md) and selected issue's latest
 contract/comments in the [live milestone](https://github.com/schillt/velacanto/milestone/7).
-Use a clean non-synchronized local checkout/worktree; preserve older dirty work.
+Use a clean non-synchronized local checkout/worktree. Audit work at closeout,
+retain only needed changes/evidence and remove obsolete checkouts under owner
+cleanup authority. Do not carry dirty or redundant checkouts between rounds.
 
 Keep changes focused, file ownership explicit and native builds/devices serialized.
 Batch related UI refinements and verify the changed workflow. Diagnose repeat
