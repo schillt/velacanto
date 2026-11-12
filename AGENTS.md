@@ -53,8 +53,9 @@ failed evidence; do not assume a platform, network or scheduling cause.
 Treat correctness, data preservation and understandable ownership as release
 requirements. For the current 0.7 round, first address the demonstrated synthetic
 reauthentication data-preservation failures under #219/#203, coordinating #30/#179;
-physical impact remains unverified. Keep bounded test reliability #201 and
-playback-URL privacy #25 urgent. Use reliable tests to enable focused ownership
+physical impact remains unverified. Keep bounded test reliability #201 urgent. Owner deferred unfinished
+playback-URL privacy #25 to 0.9.0 on 2026-11-12; preserve its documented
+operational redaction and retention guidance. Use reliable tests to enable focused ownership
 cleanup, then measure and improve performance and UI/accessibility. New feature
 work remains lower priority. Do not infer that this ordering completes, discards
 or expands any existing issue, or that a code-review score is release acceptance.
