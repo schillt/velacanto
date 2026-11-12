@@ -2,7 +2,7 @@
 
 ## Owner-approved 0.7 scope — 2026-11-12
 
-The native 0.7.0 goal is a reliable internal TestFlight candidate for iOS/iPadOS and macOS. Prioritize correctness, sign-out, playback, maintainability, measured performance and accessibility; retain search #46, artist inclusion #157, CarPlay #209, widget #227, Live Activities evaluation #228 and animated-art evaluation #111. Include iPhone Duo adaptive support under #22. No release date is committed.
+The native 0.7.0 goal is a reliable internal TestFlight candidate for iOS/iPadOS and macOS. Prioritize correctness, sign-out, playback, maintainability, measured performance and accessibility; retain search #46, artist inclusion #157, CarPlay #209, widget #227, Live Activities evaluation #228, animated-art evaluation #111 and implementation #231 for Now Playing and detail views. Include iPhone Duo adaptive support under #22. No release date is committed.
 
 Local-library work #112/#115 is deferred to 0.8.0. Playback URL credential elimination #25 is deferred to 0.9.0 and remains unfinished; operational log redaction/retention guidance still applies. The browser client is a separate workstream. Reconcile active Project tracking and apply the milestone disposition and separate publication/distribution gates in the current handoff. This section supersedes conflicting historical scope below.
 
