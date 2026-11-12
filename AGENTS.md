@@ -26,6 +26,10 @@ the owner's cleanup authority. Leave retained development checkouts clean. Do no
 carry dirty or redundant checkouts between rounds; protect unreviewed work during
 active development until its disposition is known.
 
+## Owner-approved hosted simulator exception — 2026-11-12
+
+Local VelaCanto iOS testing continues to use the uniquely owned `Velacanto Test Sim`. For the GitHub-hosted `xcode-27` quality job only, the existing workflow may use its uniquely selected available iOS 27.0 iPhone Air. This is a scoped hosted exception, not permission to use another project's local simulator. A prior quality job's metadata identified the GitHub Actions runner group and `xcode-27` label; GitHub documents that label as a hosted image. Verify the actual runner and destination for the exact authorized run; CI environment variables alone do not establish ownership. No hosted run is authorized by this documentation.
+
 ## Scope and efficient execution
 
 Through the v1 release, prioritize architecture stability and maintainability,
