@@ -117,6 +117,15 @@ actor FoundationCatalogComposition {
         var state: State = .idle
         var items: [FoundationItem] = []
         var nextStartIndex: Int? = 0
+        var isSeededSearch = false
+        var searchCoverageIncomplete = false
+        var fallbackCursor: FoundationSearchResolver.FallbackCursor?
+        var seedOverflowCount = 0
+        var hasMore: Bool {
+            seedOverflowCount > 0 || nextStartIndex != nil || fallbackCursor != nil
+        }
+        /// Only identities from the most recent provider read, never from a reused seed.
+        var freshKeys: Set<FoundationCatalogItemKey> = []
     }
     struct Page: Sendable {
         let page: FoundationPage
@@ -125,6 +134,9 @@ actor FoundationCatalogComposition {
     private struct Slot {
         var snapshot: Snapshot
         var generation: UInt = 0
+        /// Only non-provider rows in an admitted search seed may overlap later pages.
+        var supplementalKeys: Set<FoundationCatalogItemKey> = []
+        var seedOverflow: [FoundationItem] = []
     }
     private let order: [FoundationCatalogSource]
     private var slots: [FoundationCatalogSource: Slot]
@@ -159,6 +171,8 @@ actor FoundationCatalogComposition {
         guard var slot = slots[source] else { throw Failure.invalidSource }
         slot.generation &+= 1
         slot.snapshot = .init(source: source)
+        slot.supplementalKeys.removeAll()
+        slot.seedOverflow.removeAll()
         slots[source] = slot
     }
 
@@ -168,11 +182,81 @@ actor FoundationCatalogComposition {
         slots.removeValue(forKey: source)
     }
 
+    /// Admit an already resolved first search snapshot once, retaining the provider cursor.
+    func seedSearch(
+        _ source: FoundationCatalogSource, page: FoundationPage, supplementalIDs: Set<String>,
+        fallbackCursor: FoundationSearchResolver.FallbackCursor? = nil,
+        incompleteCoverage: Bool = false
+    ) throws {
+        guard var slot = slots[source], source.kind == .jellyfin,
+            slot.snapshot.state == .idle, slot.snapshot.nextStartIndex == 0
+        else { throw Failure.unavailable }
+        guard page.items.count <= Self.itemLimit else { throw Failure.invalidPage }
+        // The overview snapshot may span several presentation pages. Validate
+        // every retained row before atomically admitting any of its membership.
+        var items: [FoundationItem] = []
+        for offset in stride(from: 0, to: page.items.count, by: Self.pageLimit) {
+            items += try Self.validate(
+                .init(
+                    page: .init(
+                        items: Array(
+                            page.items[offset..<min(offset + Self.pageLimit, page.items.count)]),
+                        nextStartIndex: nil)), source: source, cursor: 0)
+        }
+        guard page.nextStartIndex.map({ $0 > 0 && $0 <= Self.itemLimit }) ?? true else {
+            throw Failure.invalidPage
+        }
+        let keys = try items.map { try $0.catalogKey() }
+        guard Set(keys).count == keys.count,
+            items.allSatisfy({ $0.kind == .track }),
+            supplementalIDs.isSubset(of: Set(items.map(\.id))),
+            fallbackCursor.map({
+                !$0.term.isEmpty && $0.nextStartIndex > 0
+                    && $0.nextStartIndex <= Self.itemLimit
+            }) ?? true
+        else { throw Failure.invalidPage }
+        slot.supplementalKeys = Set(
+            zip(items, keys).compactMap {
+                supplementalIDs.contains($0.0.id) ? $0.1 : nil
+            })
+        slot.snapshot.items = Array(items.prefix(Self.pageLimit))
+        slot.seedOverflow = Array(items.dropFirst(Self.pageLimit))
+        slot.snapshot.seedOverflowCount = slot.seedOverflow.count
+        slot.snapshot.nextStartIndex = page.nextStartIndex
+        slot.snapshot.fallbackCursor = fallbackCursor
+        slot.snapshot.isSeededSearch = true
+        slot.snapshot.searchCoverageIncomplete = incompleteCoverage
+        slot.snapshot.state = items.isEmpty ? .empty : .ready
+        slots[source] = slot
+    }
+
+    /// One explicit demand reveals one retained page without a provider read.
+    /// Cancellation is checked before committing; reset/retirement removes this
+    /// slot and its immutable overflow together with the other search cursors.
+    func loadSeedOverflow(_ source: FoundationCatalogSource) throws {
+        try Task.checkCancellation()
+        guard var slot = slots[source], slot.snapshot.state != .loading,
+            slot.snapshot.isSeededSearch, !slot.seedOverflow.isEmpty
+        else { throw Failure.unavailable }
+        let page = Array(slot.seedOverflow.prefix(Self.pageLimit))
+        guard slot.snapshot.items.count + page.count <= Self.itemLimit else {
+            throw Failure.invalidPage
+        }
+        slot.generation &+= 1
+        slot.snapshot.items += page
+        slot.seedOverflow.removeFirst(page.count)
+        slot.snapshot.seedOverflowCount = slot.seedOverflow.count
+        slot.snapshot.freshKeys = []
+        slot.snapshot.state = .ready
+        slots[source] = slot
+    }
+
     func load(
         _ source: FoundationCatalogSource,
         fetch: @Sendable (Int) async throws -> Page
     ) async throws {
         guard var slot = slots[source], slot.snapshot.state != .loading,
+            slot.seedOverflow.isEmpty,
             let cursor = slot.snapshot.nextStartIndex
         else { throw Failure.unavailable }
         slot.generation &+= 1
@@ -189,12 +273,81 @@ actor FoundationCatalogComposition {
             let previous = current.snapshot.items
             let previousKeys = try Set(previous.map { try $0.catalogKey() })
             let newKeys = try items.map { try $0.catalogKey() }
+            let repeated = previousKeys.intersection(newKeys)
             guard Set(newKeys).count == newKeys.count,
-                previousKeys.isDisjoint(with: newKeys),
-                previous.count + items.count <= Self.itemLimit
+                repeated.isSubset(of: current.supplementalKeys),
+                previous.count + items.count - repeated.count <= Self.itemLimit
             else { throw Failure.invalidPage }
-            current.snapshot.items.append(contentsOf: items)
+            var combined = previous
+            let offsets = Dictionary(
+                uniqueKeysWithValues: try previous.enumerated().map {
+                    (try $0.element.catalogKey(), $0.offset)
+                })
+            for (item, key) in zip(items, newKeys) {
+                if let index = offsets[key] {
+                    combined[index] = item
+                    current.supplementalKeys.remove(key)
+                } else {
+                    combined.append(item)
+                }
+            }
+            current.snapshot.items = combined
             current.snapshot.nextStartIndex = result.page.nextStartIndex
+            current.snapshot.freshKeys = Set(newKeys)
+            current.snapshot.state =
+                result.state == .ready && current.snapshot.items.isEmpty
+                ? .empty : result.state
+            slots[source] = current
+        } catch {
+            guard var current = slots[source], current.generation == generation else {
+                throw Failure.stale
+            }
+            current.snapshot.state =
+                error is CancellationError
+                ? (current.snapshot.items.isEmpty ? .idle : .partial) : .failed
+            slots[source] = current
+            throw error
+        }
+    }
+
+    /// Continue the fallback stream independently, after the original stream is exhausted.
+    func loadSearchFallback(
+        _ source: FoundationCatalogSource, query: String,
+        fetch: @Sendable (Int) async throws -> Page
+    ) async throws {
+        guard var slot = slots[source], slot.snapshot.state != .loading,
+            slot.snapshot.isSeededSearch, slot.seedOverflow.isEmpty,
+            slot.snapshot.nextStartIndex == nil,
+            let fallback = slot.snapshot.fallbackCursor
+        else { throw Failure.unavailable }
+        slot.generation &+= 1
+        let generation = slot.generation
+        slot.snapshot.state = .loading
+        slots[source] = slot
+        do {
+            let result = try await fetch(fallback.nextStartIndex)
+            try Task.checkCancellation()
+            guard var current = slots[source], current.generation == generation,
+                current.snapshot.fallbackCursor == fallback
+            else { throw Failure.stale }
+            let items = try Self.validate(result, source: source, cursor: fallback.nextStartIndex)
+            guard items.allSatisfy({ $0.kind == .track }) else { throw Failure.invalidItem }
+            let previousKeys = try Set(current.snapshot.items.map { try $0.catalogKey() })
+            let keys = try items.map { try $0.catalogKey() }
+            guard Set(keys).count == keys.count else { throw Failure.invalidPage }
+            let newItems = zip(items, keys).filter {
+                !previousKeys.contains($0.1)
+                    && FoundationSearchResolver.titleScore($0.0.title, query: query) >= 60
+            }
+            guard current.snapshot.items.count + newItems.count <= Self.itemLimit else {
+                throw Failure.invalidPage
+            }
+            current.snapshot.items.append(
+                contentsOf: FoundationSearchResolver.ranked(newItems.map(\.0), query: query))
+            current.snapshot.freshKeys = Set(newItems.map(\.1))
+            current.snapshot.fallbackCursor = result.page.nextStartIndex.map {
+                .init(term: fallback.term, nextStartIndex: $0)
+            }
             current.snapshot.state =
                 result.state == .ready && current.snapshot.items.isEmpty
                 ? .empty : result.state

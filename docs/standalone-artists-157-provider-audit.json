@@ -76,5 +76,77 @@
     "if_owner_accepts_provider_limitation": "Explicitly replan implementation and live acceptance to v0.7.0 with recorded provider dependency, remove from v0.6.0 and update active Project tracking consistently. Proposal only; no milestone or tracking changes made.",
     "if_required_for_v0_6": "Keep release blocked on #157 until a bounded eligible classification can be implemented and accepted. Do not broaden the feature silently."
   },
-  "provider_scope_limit": "Official server v10.11.6 source inspected. No real server version queried; this is not an exhaustive proof across every supported server release or plugin. A future documented role-aware endpoint requires separate validation before adoption."
+  "provider_scope_limit": "Official server v10.11.6 source inspected. No real server version queried; this is not an exhaustive proof across every supported server release or plugin. A future documented role-aware endpoint requires separate validation before adoption.",
+  "current_0_7_review": {
+    "date": "2026-11-14",
+    "authority": "Live #157 body and latest owner comments read; historical fields above retain their original source/evidence scope.",
+    "outcome": "Owner accepted completion of the 0.7 provider/policy evaluation through the issue's documented-limitation criterion. No standalone supplementation or universal classification capability is implemented or claimed.",
+    "current_policy": "Library, artist Search and alphabetical artist pages share the AlbumArtists identity set. Primary standalone-only credits absent from that set may be omitted. Missing counts remain unknown; zero album counts are not proof of standalone status. Equal names do not merge distinct provider IDs.",
+    "provider_review": [
+      {
+        "source": "https://github.com/jellyfin/jellyfin/blob/v12.4/Jellyfin.Api/Controllers/PersonsController.cs",
+        "finding": "GetPersons accepts personTypes/excludePersonTypes and bounded paging; no trustworthy primary-standalone versus featured-only predicate is established by those role filters."
+      },
+      {
+        "source": "https://github.com/jellyfin/jellyfin/blob/v12.4/MediaBrowser.Providers/MediaInfo/AudioFileProber.cs",
+        "finding": "Standard music handling assigns AlbumArtist to album-artist tags and Artist to every performer; this path supplies no primary-versus-featured distinction."
+      },
+      {
+        "source": "https://github.com/jellyfin/jellyfin/blob/v12.4/Jellyfin.Api/Controllers/ArtistsController.cs",
+        "finding": "GetArtists and GetAlbumArtists remain implemented compatibility endpoints marked obsolete in favor of GetPersons. That replacement does not itself resolve the missing semantic distinction."
+      }
+    ],
+    "request_budget": {
+      "scope": "Static shared adapter contract, not measured latency, UI-wide total traffic or live-server acceptance. Authentication, artwork and unrelated catalog requests are outside these artist-query counts.",
+      "cold_library_page": "One GET /Artists/AlbumArtists per requested page, limit 50, provider-relative startIndex, SortName ascending, user and selected-library scope; no per-artist classification requests.",
+      "artist_search_page": "One GET /Artists/AlbumArtists per nonempty requested search page, trimmed searchTerm and limit 1...50. Blank query or invalid page input sends no request.",
+      "warm_repeated_adapter_call": "The adapter does not memoize artist pages: one repeated uncached Library/Search page call still makes one bounded GET. A caller using an existing valid page cache can avoid the adapter request; a universal zero-request warm result is not claimed.",
+      "alphabet_page": "One bounded artist page after capability verification. The account-shared capability check uses two one-row probe requests once while its verified result is retained; later verified pages do not repeat the probe. No whole-catalog walk is added.",
+      "failure": "A failed artist page does not retry or scan automatically. A later separately requested page/read remains independent.",
+      "retention": "Existing account-owned catalog page cache remains unchanged: 32 pages, 200 items per page, 256 KiB per entry and 2 MiB total. No standalone artist index or cache is introduced."
+    },
+    "current_code": [
+      "NativeFoundation/Sources/FoundationLibrary.swift:1804-1813 alphabet path;1849-1856 artist Search;2103-2139 albumArtists shared query",
+      "NativeFoundation/Sources/FoundationCatalogPageCache.swift:7-11 existing cache limits"
+    ],
+    "focused_selectors": [
+      "FoundationLibraryTests/testLibraryAndSearchPreserveAlbumArtistIdentityWithoutInferringFromCounts",
+      "FoundationLibraryTests/testArtistPagesAndSelectedArtistAlbumsUseExplicitSinglePageRequests",
+      "FoundationLibraryTests/testInvalidArtistScopeAndNegativeArtistPageStartNoTransport",
+      "FoundationLibraryTests/testArtistPageFailureDoesNotRetryAndLaterAlbumReadSucceeds",
+      "FoundationLibraryTests/testAlphabetWindowsAreBoundedScopedRelativeAndShareOneCapabilityRequest"
+    ],
+    "verification_status": {
+      "source": "All five existing focused methods remain in FoundationLibraryTests.swift; no new mirror tests or production source edits.",
+      "normal_host_membership": "All five identifiers are present in retained Mac and Duo final-normal runtime enumeration inventories (including disabled inventory outside each original selection). Discovery is not execution; those artifacts predate later changes and are not the final candidate.",
+      "retained_normal_inventory_root": "Private retained normal-host enumeration records; exact paths remain in private verification manifest",
+      "full_core_scope": "These five selectors are absent from retained final-full Mac/Duo isolated result trees. The full isolated suite does not establish their execution.",
+      "current_focused_execution": "All five named existing artist/query methods qualified individually on the frozen current normal Mac host: 1/1 passed per selection, zero failures/skips/structured runtime warnings/legacy warnings, all result exports and postguards passed. The separate mixed nine-selector timeout is not used as passing evidence. Duo focused execution was not performed or claimed; no further native checks are required for this owner-accepted #157 disposition.",
+      "real_library": "On installed 0.7.0 (322), the owner reported Pass for choosing an artist in Library Artists, finding it through Search, opening both and confirming the expected artist/albums without duplicate entries. Platform was unspecified. This is a scoped real-library report, not a both-platform physical pass, universal catalog classification or standalone-inclusion result. No private artist/server/account data is recorded.",
+      "qualified_mac_artist_query_execution": {
+        "platform": "macOS 27.3 arm64, normal app-hosted XCTest",
+        "source_manifest_sha256": "df406d60d6daaae21bee7a5ffddf5d158fc17c24560d2f95260908e78ca54e55",
+        "prelaunch_report_sha256": "ac1335620b60b256940da8f8aa3b7ed9b4131ae27491bc913065482aee4b3508",
+        "methods": [
+          "FoundationLibraryTests/testLibraryAndSearchPreserveAlbumArtistIdentityWithoutInferringFromCounts",
+          "FoundationLibraryTests/testArtistPagesAndSelectedArtistAlbumsUseExplicitSinglePageRequests",
+          "FoundationLibraryTests/testInvalidArtistScopeAndNegativeArtistPageStartNoTransport",
+          "FoundationLibraryTests/testArtistPageFailureDoesNotRetryAndLaterAlbumReadSucceeds",
+          "FoundationLibraryTests/testAlphabetWindowsAreBoundedScopedRelativeAndShareOneCapabilityRequest"
+        ],
+        "individual_results": "Five separate selections, each exactly one intended method passed once; no other methods in those result trees. Strict qualification/postguards passed.",
+        "source_scope": "Artist adapter and FoundationLibraryTests bytes match active source at readback; private host confinement and later unrelated changes retain their own scope. This is not whole-candidate or physical/server acceptance.",
+        "evidence_location": "Private current normal-host individual result records; exact paths and hashes remain in private verification manifest.",
+        "mixed_timeout": "Separate mixed nine-selector timeout and its failure artifacts remain preserved; it is not substituted for the five individual results."
+      }
+    },
+    "remaining_acceptance": "None for the owner-accepted 0.7 documented provider-limit evaluation. Actual standalone supplementation remains unsupported. Any future implementation requires trustworthy bounded provider semantics and its own acceptance; no name/count heuristic, per-artist classification reads or whole-catalog scan is authorized by this disposition.",
+    "owner_disposition": {
+      "date": "2026-11-14",
+      "instruction": "Accept, comment and close #157",
+      "accepted_scope": "Documented provider-limitation branch of the existing issue contract, composed official API review, bounded query/mapping evidence and the scoped installed322 real-library report. This resolves the evaluation without claiming standalone inclusion implemented.",
+      "platform_limits": "Five focused Mac methods passed; Duo focused execution is not claimed. The owner real-library report did not specify a platform. No universal physical/server or whole-release pass is inferred.",
+      "historical_evidence": "Original audit fields and old open/remaining statements above remain historical records of their own source/checkpoint; this current owner disposition supersedes them for 0.7 acceptance."
+    }
+  }
 }

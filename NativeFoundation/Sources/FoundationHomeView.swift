@@ -793,7 +793,7 @@ private struct FoundationHomeGenreShelf: View {
                     }.scrollTargetLayout()
                 }
                 .scrollTargetBehavior(.viewAligned)
-                .scrollIndicators(.hidden)
+                .foundationHorizontalScrollIndicators()
                 .foundationMacShelfUnderlap()
             } else if isActive, !connectivity.localOnly, !songs.hasConnectionIssue,
                 songs.errorMessage == nil, songs.isLoading || !songs.loaded
@@ -954,39 +954,44 @@ private struct FoundationHomeShelf: View {
                             .scrollTargetLayout()
                         }
                         .scrollTargetBehavior(.viewAligned)
-                        .scrollIndicators(.hidden)
+                        .foundationHorizontalScrollIndicators()
                         .foundationMacShelfUnderlap()
                         .accessibilityLabel("Recently Played carousel")
                     }
                 } else if !displayedItems.isEmpty {
                     ScrollView(.horizontal) {
                         LazyHStack(alignment: .top, spacing: 16) {
-                            ForEach(
-                                Array(displayedItems.prefix(previewLimit).enumerated()),
-                                id: \.offset
-                            ) {
-                                _, item in
+                            ForEach(catalogRows.prefix(previewLimit)) { row in
+                                let item = row.item
                                 if isFavorites {
                                     FoundationCollectionCard(
                                         item: item, library: library, player: player,
                                         isActive: isActive && isVisible,
-                                        open: { openedItem = item },
-                                        navigate: { openedItem = $0 }
+                                        open: { openCatalogItem(row.id) },
+                                        navigate: { navigateCatalogItem($0, from: row.id) },
+                                        canPerform: { _ in
+                                            FoundationLibraryIndexSelection.admits(
+                                                row.item, current: currentCatalogItem(row.id)?.item)
+                                        }
                                     )
                                     .frame(width: dynamicTypeSize.isAccessibilitySize ? 240 : 160)
                                 } else {
                                     FoundationAlbumShelfCard(
                                         item: item, library: library, player: player,
                                         isActive: isActive && isVisible,
-                                        open: { openedItem = item },
-                                        navigate: { openedItem = $0 })
+                                        open: { openCatalogItem(row.id) },
+                                        navigate: { navigateCatalogItem($0, from: row.id) },
+                                        canPerform: { _ in
+                                            FoundationLibraryIndexSelection.admits(
+                                                row.item, current: currentCatalogItem(row.id)?.item)
+                                        })
                                 }
                             }
                         }.scrollTargetLayout()
                     }
                     .scrollTargetBehavior(.viewAligned)
-                    .scrollIndicators(.hidden)
-                    .modifier(FoundationHomeShelfBoundary(contained: isFavorites))
+                    .foundationHorizontalScrollIndicators()
+                    .foundationMacShelfUnderlap()
                     #if DEBUG && os(iOS) && targetEnvironment(simulator)
                         .modifier(FoundationRemoteListeningShelfUIProbe(isFavorites: isFavorites))
                     #endif
@@ -1015,12 +1020,14 @@ private struct FoundationHomeShelf: View {
                     Text(
                         model.nextStartIndex == nil
                             ? "No items yet."
-                            : "No matches in this page. Open the full list to load more."
+                            : "No matches in the items checked. Open the full list to continue browsing."
                     ).foregroundStyle(.secondary)
                 }
             }
         }
         .onAppear {
+            // History and collection shelves list entities, never listening events or memberships.
+            model.configureCatalogPagination()
             isVisible = true
             #if DEBUG
                 FoundationTrace.event("ui origin=home appeared")
@@ -1082,14 +1089,15 @@ private struct FoundationHomeShelf: View {
 
     private var recentRows: some View {
         ForEach(
-            Array(displayedItems.prefix(previewLimit).enumerated()).filter {
-                !connectivity.localOnly || downloads.isReady($0.element)
-            }, id: \.offset
-        ) { index, item in
+            catalogRows.prefix(previewLimit).filter {
+                !connectivity.localOnly || downloads.isReady($0.item)
+            }
+        ) { row in
+            let item = row.item
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 4) {
                     Button {
-                        playRecent(index)
+                        playRecent(row.id)
                     } label: {
                         HStack(spacing: 10) {
                             homeArtwork(
@@ -1104,7 +1112,7 @@ private struct FoundationHomeShelf: View {
                     }.buttonStyle(.plain)
                     FoundationDownloadBadge(item: item)
                     Menu {
-                        recentMenu(item, index: index)
+                        recentMenu(row)
                     } label: {
                         Image(systemName: "ellipsis").foregroundStyle(.primary)
                             .frame(width: 44, height: 44)
@@ -1118,23 +1126,57 @@ private struct FoundationHomeShelf: View {
                 }
             }
             .frame(width: usesVerticalRecentRows ? nil : 276)
-            .contextMenu { recentMenu(item, index: index) }
+            .contextMenu { recentMenu(row) }
         }
     }
 
-    private func playRecent(_ index: Int) {
-        guard
+    private var catalogRows: [FoundationLibraryIndexSelection.PositionedItem] {
+        guard model.hasUniqueCatalogIdentity else { return [] }
+        return FoundationLibraryIndexSelection.positionedItems(displayedItems, actions: actions)
+    }
+
+    private func currentCatalogItem(_ id: FoundationLibraryIndexSelection.Identity)
+        -> FoundationLibraryIndexSelection.Match?
+    {
+        guard isActive, isVisible else { return nil }
+        return FoundationLibraryIndexSelection.resolve(id, in: displayedItems, actions: actions)
+    }
+
+    private func openCatalogItem(_ id: FoundationLibraryIndexSelection.Identity) {
+        guard let match = currentCatalogItem(id) else { return }
+        openedItem = match.item
+    }
+
+    private func navigateCatalogItem(
+        _ target: FoundationItem, from id: FoundationLibraryIndexSelection.Identity
+    ) {
+        guard isActive, isVisible,
+            let item = FoundationLibraryIndexSelection.relatedDestination(
+                target, from: id, in: displayedItems, actions: actions)
+        else { return }
+        openedItem = item
+    }
+
+    private func playRecent(_ id: FoundationLibraryIndexSelection.Identity) {
+        let items = displayedItems
+        guard isActive, isVisible,
+            let match = FoundationLibraryIndexSelection.resolve(id, in: items, actions: actions),
             let selection = FoundationTrackQueueSelection(
-                in: displayedItems, selecting: index,
+                in: items, selecting: match.sourceIndex,
                 isAvailable: { !connectivity.localOnly || downloads.isReady($0) })
         else { return }
         player.setQueue(selection.items, selectedIndex: selection.index)
     }
 
-    private func recentMenu(_ item: FoundationItem, index: Int) -> some View {
+    private func recentMenu(_ row: FoundationLibraryIndexSelection.PositionedItem) -> some View {
         FoundationItemMenu(
-            item: item, actions: actions, initialFavorite: item.isFavorite,
-            play: { playRecent(index) }, player: player, navigate: { openedItem = $0 })
+            item: row.item, actions: actions, initialFavorite: row.item.isFavorite,
+            play: { playRecent(row.id) }, player: player,
+            navigate: { navigateCatalogItem($0, from: row.id) },
+            canPerform: { _ in
+                FoundationLibraryIndexSelection.admits(
+                    row.item, current: currentCatalogItem(row.id)?.item)
+            })
     }
 
 }
@@ -1147,15 +1189,4 @@ private struct FoundationHomeShelf: View {
     return FoundationCatalogArtwork(
         item: artworkItem, library: library, isActive: isActive, size: size
     ).id(artworkItem.id + (artworkItem.primaryImageTag ?? ""))
-}
-
-private struct FoundationHomeShelfBoundary: ViewModifier {
-    let contained: Bool
-    @ViewBuilder func body(content: Content) -> some View {
-        if contained {
-            content.foundationMacContainedShelf()
-        } else {
-            content.foundationMacShelfUnderlap()
-        }
-    }
 }

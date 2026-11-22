@@ -1,8 +1,8 @@
 # VelaCanto roadmap
 
-## Owner-approved 0.7 scope — 2026-11-12
+## Owner-approved 0.7 scope — updated 2026-11-21
 
-The native 0.7.0 goal is a reliable internal TestFlight candidate for iOS/iPadOS and macOS. Prioritize correctness, sign-out, playback, maintainability, measured performance and accessibility; retain search #46, artist inclusion #157, CarPlay #209, widget #227, Live Activities evaluation #228, animated-art evaluation #111 and implementation #231 for animated album artwork in Now Playing and album detail views. Include iPhone Duo adaptive support under #22. No release date is committed.
+The native 0.7.0 goal is a reliable internal TestFlight candidate for iOS/iPadOS and macOS. Prioritize correctness, sign-out, playback, maintainability, measured performance and accessibility; retain search #46 and iPhone Duo adaptive support under #22. Artist policy #157, widget #227 and system-media evaluation #228 have owner-accepted dispositions. CarPlay implementation is retained, with physical verification explicitly moved to 0.8.0 under #209. The owner deferred animated artwork and every aspect of its integration on November 21: #231 is future work in 0.8.0, and the 0.7 candidate preserves static artwork only. The accepted #111 evaluation does not authorize animation integration. The owner requested a one-hour closeout, while explicitly retaining #15/#30/#214/#215/#216 acceptance in 0.7; the deadline does not mark missing evidence passed.
 
 Local-library work #112/#115 is deferred to 0.8.0. Playback URL credential elimination #25 is deferred to 0.9.0 and remains unfinished; operational log redaction/retention guidance still applies. The browser client is a separate workstream. Reconcile active Project tracking and apply the milestone disposition and separate publication/distribution gates in the current handoff. This section supersedes conflicting historical scope below.
 
@@ -22,23 +22,27 @@ playlist, lyrics, offline playback, browsing and continuity behavior. Read the
 
 ## 0.7 execution order
 
-1. Start with bounded async test synchronization #201; make missing events fail
-   promptly with cleanup, without production changes or weaker assertions.
-2. Address playback-URL privacy #25 and account/sign-out/pin cleanup #30/#179.
-   Preserve working delivery and demonstrate a supported approach before transport
-   changes. Coordinate #203 ownership work after the relevant baseline is reliable.
-3. Measure Mac scrolling/artwork/large-library behavior #24/#14/#137 and playback
-   stalls/compatibility #15/#155/#47. Investigate Mac AirPlay #212 and CarPlay #209
-   against actual hardware; document external limits honestly.
-4. Complete targeted lifecycle, continuity and reporting checks #213/#215/#216,
-   affected accessibility #22, and conditional native-download budget work #214.
-5. Use bounded maintainability work #168/#54/#200/#204/#202/#203 where it supports
-   demonstrated needs. Retain #46 search, #112/#115 local-library groundwork,
-   #157 artist classification and #111 animated-art evaluation in the existing
-   milestone; do not silently expand the first batch or promise unsupported APIs.
+1. Verify live alpha, issue contracts and retained source/evidence before serial
+   integration. Preserve scoped accepted repairs, and reconcile current tracking
+   without treating a previous build or test count as release acceptance.
+2. Complete sign-out and Keychain verification #30; bounded async and UI checks
+   #201/#204; critical gate coverage #220; and native download validation #214
+   with the owner-accepted in-flight storage limitation documented.
+3. Complete the existing playback, reporting, continuity, performance, artwork,
+   accessibility and Mac acceptance contracts #15/#47/#155/#213/#215/#216 and
+   #14/#22/#24/#137/#168. Include iPhone Duo adaptive support under #22.
+4. Complete discovery #46 against its acceptance criteria. Preserve the accepted
+   #157 provider-limit disposition, widget #227 and system-media evaluation #228.
+   Keep CarPlay's deferred physical verification under #209 in 0.8.0. Exclude
+   deferred animation #231 from 0.7, preserving its unfinished work separately.
+5. Prepare the exact 0.7 candidate for internal TestFlight on iOS/iPadOS and Mac;
+   complete #63/#149/#169, the milestone disposition gate, applicable tests and
+   separately authorized signing, hosted, promotion and distribution steps.
 
-The handoff inventories every open 0.7 item. Production-sync investigation #218
-is closed by owner disposition; ordinary iCloud lag alone does not reopen it.
+#112/#115 local-library work remains deferred to 0.8.0; #25 playback-URL privacy
+remains unfinished and deferred to 0.9.0. General keyboard navigation remains
+post-v1 under #226 except for a specific mandatory release repair. Production pin
+sync is accepted; ordinary iCloud delivery lag alone does not reopen #198/#218.
 
 ## Later milestones and distribution
 

@@ -95,32 +95,52 @@ final class FoundationLocalLibraryModelTests: XCTestCase {
 
     private actor HeldScan {
         private var started = false
-        private var startWaiter: CheckedContinuation<Void, Never>?
+        private var released = false
         private var finishWaiter: CheckedContinuation<Void, Never>?
 
         func run() async {
-            await withCheckedContinuation { continuation in
-                finishWaiter = continuation
-                started = true
-                startWaiter?.resume()
-                startWaiter = nil
-            }
+            started = true
+            guard !released else { return }
+            await withCheckedContinuation { finishWaiter = $0 }
         }
 
-        func waitForStart() async {
-            if started { return }
-            await withCheckedContinuation { startWaiter = $0 }
+        func waitForStart() async -> Bool {
+            let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+            while !started && !Task.isCancelled && ContinuousClock.now < deadline {
+                try? await Task.sleep(for: .milliseconds(10))
+            }
+            return started && !Task.isCancelled
         }
 
         func finish() {
+            released = true
             finishWaiter?.resume()
             finishWaiter = nil
         }
     }
 
+    private func waitForScanTask(
+        _ task: Task<Void, Never>, gate: HeldScan, name: String
+    ) async -> Bool {
+        let finished = XCTestExpectation(description: name)
+        let observer = Task {
+            await task.value
+            finished.fulfill()
+        }
+        guard await XCTWaiter.fulfillment(of: [finished], timeout: 5) == .completed else {
+            task.cancel()
+            await gate.finish()
+            observer.cancel()
+            XCTFail("\(name) did not finish within 5 seconds")
+            return false
+        }
+        return true
+    }
+
     func testCancelRetainsPublishedCacheAndRejectsSuccessfulLateScan() async throws {
         let root = try fixture()
-        defer { try? FileManager.default.removeItem(at: root) }
+        var rootSafeToRemove = true
+        defer { if rootSafeToRemove { try? FileManager.default.removeItem(at: root) } }
         let gate = HeldScan()
         let source = FoundationLocalSource(
             storage: root.appendingPathComponent("private"), makeBookmark: { _ in Data([1]) },
@@ -133,19 +153,29 @@ final class FoundationLocalLibraryModelTests: XCTestCase {
         await model.restore().value
         let cached = model.catalog
         let refresh = model.refresh()
-        await gate.waitForStart()
+        rootSafeToRemove = false
+        guard await gate.waitForStart() else {
+            model.cancel()
+            await gate.finish()
+            XCTFail("Local scan did not enter its hold within 5 seconds")
+            return
+        }
         XCTAssertEqual(model.activity, .refreshing)
         model.cancel()
         await gate.finish()
-        await refresh.value
+        guard await waitForScanTask(refresh, gate: gate, name: "local scan refresh") else {
+            return
+        }
         XCTAssertEqual(model.catalog, cached)
         XCTAssertNil(model.activity)
         XCTAssertNotNil(model.errorMessage)
+        rootSafeToRemove = true
     }
 
     func testForgetDuringScanPreventsLatePublicationAndPreservesMusic() async throws {
         let root = try fixture()
-        defer { try? FileManager.default.removeItem(at: root) }
+        var rootSafeToRemove = true
+        defer { if rootSafeToRemove { try? FileManager.default.removeItem(at: root) } }
         let music = root.appendingPathComponent("music.mp3")
         try Data([9]).write(to: music)
         let gate = HeldScan()
@@ -159,15 +189,27 @@ final class FoundationLocalLibraryModelTests: XCTestCase {
         let model = FoundationLocalLibraryModel(source: source)
         await model.restore().value
         let refresh = model.refresh()
-        await gate.waitForStart()
-        await model.forget().value
+        rootSafeToRemove = false
+        guard await gate.waitForStart() else {
+            model.cancel()
+            await gate.finish()
+            XCTFail("Local scan did not enter its hold within 5 seconds")
+            return
+        }
+        let forget = model.forget()
+        guard await waitForScanTask(forget, gate: gate, name: "local library forget") else {
+            return
+        }
         await gate.finish()
-        await refresh.value
+        guard await waitForScanTask(refresh, gate: gate, name: "local scan refresh") else {
+            return
+        }
         let selected = try await source.selection()
         XCTAssertNil(selected)
         XCTAssertNil(model.catalog)
         XCTAssertNil(model.activity)
         XCTAssertEqual(try Data(contentsOf: music), Data([9]))
+        rootSafeToRemove = true
     }
 
     func testCorruptAuthorizationCanBeExplicitlyForgottenWithoutSilentReset() async throws {

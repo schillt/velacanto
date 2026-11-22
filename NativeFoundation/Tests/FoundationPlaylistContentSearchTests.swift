@@ -1,7 +1,41 @@
+import Combine
 import Foundation
 import XCTest
 
 @testable import VelacantoFoundation
+
+/// Observes the captured production task, including bounded failure cleanup.
+/// Cancellation cannot force arbitrary production work to terminate.
+@MainActor
+private func requirePlaylistTask<Success: Sendable, Failure: Error>(
+    _ task: Task<Success, Failure>, context: String,
+    stopOnCancellation: Bool = true, cleanup: @MainActor () async -> Void
+) async -> Bool {
+    var returnedAt: ContinuousClock.Instant?
+    let observer = Task {
+        _ = await task.result
+        returnedAt = .now
+    }
+    let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+    while returnedAt == nil, ContinuousClock.now < deadline,
+        !stopOnCancellation || !Task.isCancelled
+    {
+        await Task.yield()
+    }
+    if let returnedAt, returnedAt <= deadline, !stopOnCancellation || !Task.isCancelled {
+        return true
+    }
+    task.cancel()
+    await cleanup()
+    let cleanupDeadline = ContinuousClock.now.advanced(by: .seconds(5))
+    while returnedAt == nil, ContinuousClock.now < cleanupDeadline { await Task.yield() }
+    observer.cancel()
+    XCTFail("Timed out or cancelled waiting for \(context)")
+    if !(returnedAt.map { $0 <= cleanupDeadline } ?? false) {
+        XCTFail("Captured task did not return during cleanup: \(context)")
+    }
+    return false
+}
 
 final class FoundationPlaylistContentSearchTests: XCTestCase {
     func testContextMatchesOnlySelectedKindsAndActualRelationshipIDs() {
@@ -154,7 +188,8 @@ final class FoundationPlaylistContentSearchTests: XCTestCase {
     }
 
     func testCancelledNoncooperativeMembershipReadCannotPublishOrContinue() async {
-        let gate = PlaylistContentGate()
+        let entered = expectation(description: "playlist membership read entered")
+        let gate = PlaylistMembershipAcknowledgementGate(entered: entered)
         let task = Task {
             try await FoundationPlaylistContentSearch.resolve(
                 context: .init(trackIDs: ["selected"]), startIndex: 0,
@@ -170,15 +205,48 @@ final class FoundationPlaylistContentSearchTests: XCTestCase {
                     return .init(items: [Self.item("selected", kind: .track)], nextStartIndex: nil)
                 })
         }
-        while !(await gate.started) { await Task.yield() }
+        let result = await XCTWaiter.fulfillment(of: [entered], timeout: 5)
+        guard result == .completed, !Task.isCancelled else {
+            XCTFail("Timed out or cancelled waiting for playlist membership read to enter")
+            task.cancel()
+            await gate.close()
+            guard
+                await requirePlaylistTask(
+                    task, context: "task completion", cleanup: { await gate.close() })
+            else { return }
+            _ = try? await task.value
+            return
+        }
         task.cancel()
         await gate.release()
         do {
+            guard
+                await requirePlaylistTask(
+                    task, context: "task completion", cleanup: { await gate.close() })
+            else { return }
             _ = try await task.value
             XCTFail("Cancelled membership read returned a result")
         } catch { XCTAssertTrue(error is CancellationError) }
         let calls = await gate.calls
         XCTAssertEqual(calls, 1)
+    }
+
+    func testMissingMembershipEntryTimesOutAndDrainsHeldAndLateWork() async {
+        let entered = expectation(description: "deliberately missing playlist membership entry")
+        let gate = PlaylistMembershipAcknowledgementGate(entered: entered)
+        let task = Task { await gate.wait(announce: false) }
+        let result = await XCTWaiter.fulfillment(of: [entered], timeout: 0.1)
+        XCTAssertEqual(result, .timedOut, "Missing membership entry must time out")
+        let held = await gate.waiting
+        XCTAssertTrue(held, "Timeout must exercise a held membership read")
+        task.cancel()
+        await gate.close()
+        await task.value
+        let stillHeld = await gate.waiting
+        XCTAssertFalse(stillHeld, "Timeout cleanup must drain the membership read")
+        await gate.wait()
+        let lateHeld = await gate.waiting
+        XCTAssertFalse(lateHeld, "A read starting after cleanup must not become stranded")
     }
 
     func testEmptyContextDoesNotReadAndInvalidRequestsFailBeforeNetwork() async throws {
@@ -404,7 +472,8 @@ final class FoundationPlaylistContentSearchTests: XCTestCase {
 
     @MainActor
     func testLookupCancellationRejectsLateNoncooperativeResultAndKeepsSeed() async {
-        let gate = PlaylistContentGate()
+        let entered = expectation(description: "playlist lookup held read entered")
+        let gate = PlaylistMembershipAcknowledgementGate(entered: entered)
         let seedItem = Self.item("seed", kind: .playlist)
         let library = FoundationJellyfinLibrary(
             session: .init(
@@ -428,9 +497,21 @@ final class FoundationPlaylistContentSearchTests: XCTestCase {
         let task = Task {
             await model.load(context: .init(trackIDs: [Self.id(2)]), library: library)
         }
-        while !(await gate.started) { await Task.yield() }
+        guard
+            await waitForPlaylistEntry(
+                entered, gate: gate, model: model, task: task
+            )
+        else { return }
         model.cancel()
         await gate.release()
+        guard
+            await requirePlaylistTask(
+                task, context: "task completion",
+                cleanup: {
+                    model.cancel()
+                    await gate.close()
+                })
+        else { return }
         _ = await task.value
         XCTAssertEqual(model.items, [seedItem])
         XCTAssertEqual(model.cursor, cursor)
@@ -674,7 +755,8 @@ final class FoundationPlaylistContentSearchTests: XCTestCase {
 
     @MainActor
     func testVisibleSearchCancellationRejectsOldQueryAndDoesNotStartNextBatch() async {
-        let gate = PlaylistContentGate()
+        let entered = expectation(description: "playlist lookup held read entered")
+        let gate = PlaylistMembershipAcknowledgementGate(entered: entered)
         let library = AutomaticPlaylistLibrary { context, _ in
             if context.trackIDs.contains("old-query") { await gate.wait() }
             return .init(
@@ -686,11 +768,23 @@ final class FoundationPlaylistContentSearchTests: XCTestCase {
         let task = Task {
             await old.searchWhileVisible(context: .init(trackIDs: ["old-query"]), library: library)
         }
-        while !(await gate.started) { await Task.yield() }
+        guard
+            await waitForPlaylistEntry(
+                entered, gate: gate, model: old, task: task
+            )
+        else { return }
         // Navigation, query replacement and Offline Mode all invalidate this same owner.
         old.cancel()
         task.cancel()
         await gate.release()
+        guard
+            await requirePlaylistTask(
+                task, context: "task completion",
+                cleanup: {
+                    old.cancel()
+                    await gate.close()
+                })
+        else { return }
         await task.value
         XCTAssertTrue(old.items.isEmpty)
         XCTAssertEqual(old.cursor?.candidateOffset, 0)
@@ -716,6 +810,30 @@ final class FoundationPlaylistContentSearchTests: XCTestCase {
     }
 
     @MainActor
+    private func waitForPlaylistEntry<Value: Sendable>(
+        _ entered: XCTestExpectation, gate: PlaylistMembershipAcknowledgementGate,
+        model: FoundationPlaylistLookupModel, task: Task<Value, Never>?
+    ) async -> Bool {
+        let result = await XCTWaiter.fulfillment(of: [entered], timeout: 5)
+        guard result == .completed, !Task.isCancelled else {
+            XCTFail("Timed out or cancelled waiting for \(entered.expectationDescription)")
+            model.cancel()
+            task?.cancel()
+            await gate.close()
+            if let task {
+                _ = await requirePlaylistTask(
+                    task, context: "playlist entry cleanup", stopOnCancellation: false,
+                    cleanup: {
+                        model.cancel()
+                        await gate.close()
+                    })
+            }
+            return false
+        }
+        return true
+    }
+
+    @MainActor
     private static func automaticModel(limits: FoundationCatalogBudget = .init())
         -> FoundationPlaylistLookupModel
     {
@@ -729,7 +847,8 @@ final class FoundationPlaylistContentSearchTests: XCTestCase {
     @MainActor
     func testVisibleClientsHandOverHeldPageInEitherOrderWithoutDuplicateReads() async {
         for registerSuccessorFirst in [false, true] {
-            let gate = PlaylistContentGate()
+            let entered = expectation(description: "playlist lookup held read entered")
+            let gate = PlaylistMembershipAcknowledgementGate(entered: entered)
             let library = AutomaticPlaylistLibrary { _, cursor in
                 if cursor.candidateOffset == 0 {
                     await gate.wait()
@@ -746,7 +865,17 @@ final class FoundationPlaylistContentSearchTests: XCTestCase {
             let full = UUID()
             let context = FoundationMusicSearchContext(trackIDs: ["opalite"])
             let producer = model.registerVisible(inline, context: context, library: library)
-            while !(await gate.started) { await Task.yield() }
+            guard let producer else {
+                model.cancel()
+                await gate.close()
+                XCTFail("Visible playlist hold has no actual owned producer task")
+                return
+            }
+            guard
+                await waitForPlaylistEntry(
+                    entered, gate: gate, model: model, task: producer
+                )
+            else { return }
             if registerSuccessorFirst {
                 model.registerVisible(full, context: context, library: library)
                 model.releaseVisible(inline)
@@ -755,7 +884,15 @@ final class FoundationPlaylistContentSearchTests: XCTestCase {
                 model.registerVisible(full, context: context, library: library)
             }
             await gate.release()
-            await producer?.value
+            guard
+                await requirePlaylistTask(
+                    producer, context: "visible playlist completion",
+                    cleanup: {
+                        model.cancel()
+                        await gate.close()
+                    })
+            else { return }
+            await producer.value
             XCTAssertEqual(model.items.map(\.id), ["day-drive"])
             XCTAssertNil(model.cursor)
             XCTAssertNil(model.error)
@@ -767,7 +904,8 @@ final class FoundationPlaylistContentSearchTests: XCTestCase {
 
     @MainActor
     func testLastVisibleClientLeavingCancelsAndRejectsLatePageWithoutContinuation() async {
-        let gate = PlaylistContentGate()
+        let entered = expectation(description: "playlist lookup held read entered")
+        let gate = PlaylistMembershipAcknowledgementGate(entered: entered)
         let library = AutomaticPlaylistLibrary { _, _ in
             await gate.wait()
             return .init(
@@ -778,11 +916,49 @@ final class FoundationPlaylistContentSearchTests: XCTestCase {
         let client = UUID()
         let producer = model.registerVisible(
             client, context: .init(trackIDs: ["opalite"]), library: library)
-        while !(await gate.started) { await Task.yield() }
+        guard let producer else {
+            model.cancel()
+            await gate.close()
+            XCTFail("Visible playlist hold has no actual owned producer task")
+            return
+        }
+        guard
+            await waitForPlaylistEntry(
+                entered, gate: gate, model: model, task: producer
+            )
+        else { return }
+        XCTAssertTrue(model.searching, "Held visible lookup must be searching before release")
+        let stopped = expectation(description: "last visible client cancellation reached model")
+        let observer = model.$searching.dropFirst().filter { !$0 }.sink { _ in stopped.fulfill() }
         model.releaseVisible(client)
-        while model.searching { await Task.yield() }
+        let result = await XCTWaiter.fulfillment(of: [stopped], timeout: 5)
+        observer.cancel()
+        guard result == .completed, !Task.isCancelled else {
+            XCTFail("Timed out or cancelled waiting for last visible client cancellation")
+            model.cancel()
+            producer.cancel()
+            await gate.close()
+            guard
+                await requirePlaylistTask(
+                    producer, context: "visible playlist completion",
+                    cleanup: {
+                        model.cancel()
+                        await gate.close()
+                    })
+            else { return }
+            await producer.value
+            return
+        }
         await gate.release()
-        await producer?.value
+        guard
+            await requirePlaylistTask(
+                producer, context: "visible playlist completion",
+                cleanup: {
+                    model.cancel()
+                    await gate.close()
+                })
+        else { return }
+        await producer.value
         XCTAssertTrue(model.items.isEmpty)
         XCTAssertEqual(model.cursor?.candidateOffset, 0)
         let reads = await library.calls
@@ -941,18 +1117,38 @@ private actor PlaylistRetryResponses {
     }
 }
 
-private actor PlaylistContentGate {
-    private var continuation: CheckedContinuation<Void, Never>?
-    var started = false
+/// A held membership read with a bounded observer and release-before-entry cleanup.
+private actor PlaylistMembershipAcknowledgementGate {
+    private let entered: XCTestExpectation
+    private var continuation: [CheckedContinuation<Void, Never>] = []
+    private var closed = false
+    private var announced = false
     var calls = 0
-    func wait() async {
+    var waiting: Bool { !continuation.isEmpty }
+
+    init(entered: XCTestExpectation) { self.entered = entered }
+
+    func wait(announce: Bool = true) async {
+        guard !closed else { return }
         calls += 1
-        started = true
-        await withCheckedContinuation { continuation = $0 }
+        await withCheckedContinuation { continuation in
+            self.continuation.append(continuation)
+            if announce, !announced {
+                announced = true
+                entered.fulfill()
+            }
+        }
     }
+
     func release() {
-        continuation?.resume()
-        continuation = nil
+        let pending = continuation
+        continuation.removeAll()
+        for continuation in pending { continuation.resume() }
+    }
+
+    func close() {
+        closed = true
+        release()
     }
 }
 

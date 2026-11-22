@@ -7,6 +7,23 @@ import XCTest
 
 @MainActor
 final class FoundationOfflinePolicyTests: XCTestCase {
+    private func waitForRetry(_ task: Task<Void, Never>, connectivity: FoundationConnectivity)
+        async -> Bool
+    {
+        let finished = XCTestExpectation(description: "connectivity retry returned")
+        let observer = Task {
+            await task.value
+            finished.fulfill()
+        }
+        guard await XCTWaiter.fulfillment(of: [finished], timeout: 5) == .completed else {
+            task.cancel()
+            connectivity.invalidate()
+            observer.cancel()
+            XCTFail("Connectivity retry did not return within 5 seconds")
+            return false
+        }
+        return true
+    }
     func testOfflineModePersistsWithoutChangingCellularPolicies() throws {
         let name = "FoundationOfflineModeTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
@@ -40,19 +57,26 @@ final class FoundationOfflinePolicyTests: XCTestCase {
     }
 
     func testManualOfflineModeRejectsLateOnlineRetryPublication() async {
-        let started = expectation(description: "retry began")
+        let started = XCTestExpectation(description: "retry began")
         let (release, continuation) = AsyncStream<Void>.makeStream()
+        defer { continuation.finish() }
         let connectivity = FoundationConnectivity(monitorConnectivity: false) {
             started.fulfill()
             for await _ in release { break }
         }
         connectivity.update(status: .available, wifiOrWired: true, cellular: false)
         let retry = Task { await connectivity.retryOnline() }
-        await fulfillment(of: [started], timeout: 2)
+        guard await XCTWaiter.fulfillment(of: [started], timeout: 2) == .completed else {
+            retry.cancel()
+            connectivity.invalidate()
+            continuation.finish()
+            XCTFail("Connectivity retry did not begin within 2 seconds")
+            return
+        }
         connectivity.setOfflineMode(true)
         continuation.yield(())
         continuation.finish()
-        await retry.value
+        guard await waitForRetry(retry, connectivity: connectivity) else { return }
         XCTAssertTrue(connectivity.localOnly)
         XCTAssertFalse(connectivity.isConnected)
         XCTAssertEqual(connectivity.successfulRetryRevision, 0)
@@ -231,15 +255,22 @@ final class FoundationOfflinePolicyTests: XCTestCase {
     }
 
     func testAutoCostObservationDoesNotDiscardSuccessfulExplicitRetry() async {
-        let started = expectation(description: "explicit retry started")
+        let started = XCTestExpectation(description: "explicit retry started")
         let (release, continuation) = AsyncStream<Void>.makeStream()
+        defer { continuation.finish() }
         let connectivity = FoundationConnectivity(monitorConnectivity: false) {
             started.fulfill()
             for await _ in release { break }
         }
         connectivity.update(status: .available, wifiOrWired: true, cellular: false)
         let retry = Task { await connectivity.retryOnline() }
-        await fulfillment(of: [started], timeout: 2)
+        guard await XCTWaiter.fulfillment(of: [started], timeout: 2) == .completed else {
+            retry.cancel()
+            connectivity.invalidate()
+            continuation.finish()
+            XCTFail("Connectivity retry did not begin within 2 seconds")
+            return
+        }
         connectivity.update(
             status: .available, wifiOrWired: true, cellular: false,
             expensive: true, constrained: true)
@@ -247,7 +278,7 @@ final class FoundationOfflinePolicyTests: XCTestCase {
             FoundationStreamingQuality.auto.resolved(for: connectivity.streamingPath), .aac128)
         continuation.yield(())
         continuation.finish()
-        await retry.value
+        guard await waitForRetry(retry, connectivity: connectivity) else { return }
         XCTAssertEqual(connectivity.successfulRetryRevision, 1)
         XCTAssertFalse(connectivity.isRetrying)
         connectivity.invalidate()

@@ -48,4 +48,4 @@ jobs:
           PYTHON
 
       - name: Run quality checks
-        run: ./scripts/build.sh pr
+        run: ./scripts/build.sh pr-hosted

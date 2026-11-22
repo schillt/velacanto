@@ -188,6 +188,58 @@ final class FoundationPlaylistMetadataTests: XCTestCase {
         let invalidWrites = await invalid.writes()
         XCTAssertTrue(invalidWrites.isEmpty)
     }
+
+    func testPermissionRevocationBeforeFirstMetadataWritePreservesStateAndStops() async throws {
+        let server = PlaylistMetadataServer(id: id, userID: userID, revokeMetadataWrite: true)
+        let backend = library(server)
+        let before = try await backend.playlistDetails(id: id)
+        XCTAssertTrue(before.permissions.canEdit)
+        do {
+            _ = try await backend.updatePlaylistDetails(
+                id: id, name: "Requested name", overview: "Requested overview", isPublic: false)
+            XCTFail("A forbidden write must not report a successful update")
+        } catch { XCTAssertEqual(error as? FoundationPlaylistMetadataError, .partialUpdate) }
+        let followups = await server.postRejectionRequestCount()
+        XCTAssertEqual(
+            followups, 0, "A forbidden mutation must not trigger a retry or later request")
+        let after = try await backend.playlistDetails(id: id)
+        XCTAssertEqual(after.item.title, before.item.title)
+        XCTAssertEqual(after.overview, before.overview)
+        XCTAssertEqual(after.isPublic, before.isPublic)
+        XCTAssertFalse(after.permissions.canEdit)
+        XCTAssertFalse(after.canEditOverview)
+        XCTAssertFalse(after.canEditCover)
+        let writes = await server.writes()
+        XCTAssertEqual(writes.map { $0.url?.path }, ["/jf/Items/" + id])
+        let rejected = await server.rejectedWritePaths()
+        XCTAssertEqual(rejected, ["/jf/Items/" + id])
+    }
+
+    func testPermissionRevocationAtSharingPreservesSavedMetadataAndStops() async throws {
+        let server = PlaylistMetadataServer(id: id, userID: userID, revokeSharingWrite: true)
+        let backend = library(server)
+        let before = try await backend.playlistDetails(id: id)
+        XCTAssertTrue(before.permissions.canEdit)
+        do {
+            _ = try await backend.updatePlaylistDetails(
+                id: id, name: "Saved name", overview: "Saved overview", isPublic: false)
+            XCTFail("A forbidden sharing write must not report a complete update")
+        } catch { XCTAssertEqual(error as? FoundationPlaylistMetadataError, .partialUpdate) }
+        let followups = await server.postRejectionRequestCount()
+        XCTAssertEqual(
+            followups, 0, "A forbidden mutation must not trigger a retry or later request")
+        let after = try await backend.playlistDetails(id: id)
+        XCTAssertEqual(after.item.title, "Saved name")
+        XCTAssertEqual(after.overview, "Saved overview")
+        XCTAssertEqual(after.isPublic, before.isPublic)
+        XCTAssertFalse(after.permissions.canEdit)
+        XCTAssertFalse(after.canEditOverview)
+        XCTAssertFalse(after.canEditCover)
+        let writes = await server.writes()
+        XCTAssertEqual(writes.map { $0.url?.path }, ["/jf/Items/" + id, "/jf/Playlists/" + id])
+        let rejected = await server.rejectedWritePaths()
+        XCTAssertEqual(rejected, ["/jf/Playlists/" + id])
+    }
 }
 
 private actor PlaylistMetadataServer {
@@ -200,6 +252,11 @@ private actor PlaylistMetadataServer {
     let refreshImage: Bool
     let concurrentEdit: Bool
     let foreignPermission: Bool
+    let revokeMetadataWrite: Bool
+    let revokeSharingWrite: Bool
+    private var permissionRevoked = false
+    private var rejectedPaths: [String] = []
+    private var requestsAfterRejection = 0
     private var name = "Before"
     private var overview = "Old overview"
     private var isPublic = true
@@ -208,7 +265,8 @@ private actor PlaylistMetadataServer {
     init(
         id: String, userID: String, administrator: Bool = true, sharingVisible: Bool = true,
         failSharing: Bool = false, cancelAfterMetadata: Bool = false, refreshImage: Bool = true,
-        concurrentEdit: Bool = false, foreignPermission: Bool = false
+        concurrentEdit: Bool = false, foreignPermission: Bool = false,
+        revokeMetadataWrite: Bool = false, revokeSharingWrite: Bool = false
     ) {
         self.id = id
         self.userID = userID
@@ -219,17 +277,29 @@ private actor PlaylistMetadataServer {
         self.refreshImage = refreshImage
         self.concurrentEdit = concurrentEdit
         self.foreignPermission = foreignPermission
+        self.revokeMetadataWrite = revokeMetadataWrite
+        self.revokeSharingWrite = revokeSharingWrite
     }
     func writes() -> [URLRequest] { requests.filter { $0.httpMethod == "POST" } }
     func publicValue() -> Bool { isPublic }
+    func rejectedWritePaths() -> [String] { rejectedPaths }
+    func postRejectionRequestCount() -> Int { requestsAfterRejection }
     func savedOverview() -> String { overview }
     func respond(_ request: URLRequest) throws -> (Data, URLResponse) {
+        if permissionRevoked { requestsAfterRejection += 1 }
         requests.append(request)
         let path = request.url!.path
         var value: [String: Any] = [:]
         var status = 200
         if request.httpMethod == "POST" {
-            if path.hasSuffix("/Images/Primary") {
+            let revoke =
+                (revokeMetadataWrite && path == "/jf/Items/" + id)
+                || (revokeSharingWrite && path == "/jf/Playlists/" + id)
+            if revoke {
+                permissionRevoked = true
+                rejectedPaths.append(path)
+                status = 403
+            } else if path.hasSuffix("/Images/Primary") {
                 if refreshImage { imageTag = "after" }
             } else if path == "/jf/Items/" + id {
                 let body =
@@ -260,7 +330,7 @@ private actor PlaylistMetadataServer {
                 "ImageTags": ["Primary": imageTag],
             ]
         } else if path == "/jf/Playlists/" + id {
-            value = ["ItemIds": [], "Shares": [["UserId": userID, "CanEdit": true]]]
+            value = ["ItemIds": [], "Shares": [["UserId": userID, "CanEdit": !permissionRevoked]]]
             if sharingVisible { value["OpenAccess"] = isPublic }
         } else if path == "/jf/Users/Me" {
             value = [
@@ -272,7 +342,7 @@ private actor PlaylistMetadataServer {
                 ],
             ]
         } else if path == "/jf/Playlists/" + id + "/Users/" + userID {
-            value = ["UserId": foreignPermission ? id : userID, "CanEdit": true]
+            value = ["UserId": foreignPermission ? id : userID, "CanEdit": !permissionRevoked]
         } else {
             throw FoundationLibraryError.invalidResponse
         }

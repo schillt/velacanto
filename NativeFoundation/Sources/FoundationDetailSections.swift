@@ -215,6 +215,7 @@ struct FoundationOverviewSheet: View {
 /// Reuses catalog ownership and cards; each optional shelf fails independently.
 struct FoundationRelatedSection<Card: View>: View {
     @Environment(\.foundationReduceMotion) private var reduceMotion
+    @Environment(\.scenePhase) private var scenePhase
     @EnvironmentObject private var downloads: FoundationDownloads
     @EnvironmentObject private var actions: FoundationLibraryActions
     @EnvironmentObject private var connectivity: FoundationConnectivity
@@ -223,9 +224,14 @@ struct FoundationRelatedSection<Card: View>: View {
     var twoRows = false
     var priority: TaskPriority = .userInitiated
     let loader: (Int) async throws -> FoundationPage
-    @ViewBuilder let card: (FoundationItem) -> Card
+    @ViewBuilder let card:
+        (
+            FoundationItem, @escaping @MainActor @Sendable () -> FoundationItem?
+        ) -> Card
     @StateObject private var model = FoundationBrowseModel()
     @State private var revision = 0
+    @State private var isVisible = false
+    @State private var pageDemand = FoundationCatalogPageDemand()
 
     private var displayedItems: [FoundationItem] {
         connectivity.localOnly ? downloads.itemsWithDownloadedMusic(in: model.items) : model.items
@@ -238,25 +244,36 @@ struct FoundationRelatedSection<Card: View>: View {
             if showsInitialPlaceholder || !displayedItems.isEmpty || showsError {
                 Text(title).font(.title2.bold()).padding(.horizontal)
             }
-            if !displayedItems.isEmpty {
+            if !displayedItems.isEmpty || (model.hasMorePages && !connectivity.localOnly) {
                 ScrollView(.horizontal) {
-                    LazyHStack(alignment: .top, spacing: 16) {
-                        let rows = twoRows ? 2 : 1
-                        ForEach(0..<((displayedItems.count + rows - 1) / rows), id: \.self) {
-                            column in
-                            VStack(alignment: .leading, spacing: 20) {
-                                ForEach(
-                                    column * rows..<min(column * rows + rows, displayedItems.count),
-                                    id: \.self
-                                ) { index in
-                                    card(displayedItems[index]).frame(width: 150)
-                                }
+                    Group {
+                        if twoRows {
+                            LazyHGrid(
+                                rows: [
+                                    GridItem(.flexible(), spacing: 20, alignment: .top),
+                                    GridItem(.flexible(), spacing: 20, alignment: .top),
+                                ], alignment: .top, spacing: 16
+                            ) {
+                                relatedCards
+                            }
+                        } else {
+                            LazyHStack(alignment: .top, spacing: 16) {
+                                relatedCards
                             }
                         }
                     }.foundationCarouselContentPadding()
-                }.scrollIndicators(.hidden)
-                    .foundationMacShelfUnderlap(horizontalInset: 0)
-                    .transition(.opacity)
+                }
+                .onScrollPhaseChange { _, phase in
+                    pageDemand.scrollPhaseChanged(
+                        to: phase, footerVisible: pageDemand.footerVisible,
+                        active: isActive && isVisible && scenePhase == .active,
+                        allowsNetwork: !connectivity.localOnly,
+                        isLoading: model.isLoading, hasError: model.errorMessage != nil)
+                }
+                .scrollBounceBehavior(.always, axes: .horizontal)
+                .foundationHorizontalScrollIndicators()
+                .foundationMacShelfUnderlap(horizontalInset: 0)
+                .transition(.opacity)
             }
             if model.hasConnectionIssue {
                 FoundationOfflineNotice().padding(.horizontal)
@@ -271,18 +288,18 @@ struct FoundationRelatedSection<Card: View>: View {
                     if twoRows { FoundationLoadingPlaceholder(layout: .albumShelf) }
                 }.padding(.horizontal)
             }
-            if model.nextStartIndex != nil, !connectivity.localOnly {
-                Button("Load more") { request(.more) }.disabled(
-                    model.isLoading || connectivity.localOnly
-                ).padding(
-                    .horizontal)
-            }
         }
         .padding(
             .vertical,
             showsInitialPlaceholder || !displayedItems.isEmpty || showsError ? 12 : 0
         )
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: displayedItems.isEmpty)
+        .onAppear {
+            // Similar/appearance shelves contain catalog entities, not memberships.
+            model.configureCatalogPagination()
+            isVisible = true
+        }
+        .onDisappear { isVisible = false }
         .onChange(of: connectivity.successfulRetryRevision) { _, _ in
             model.request(.refresh)
             revision += 1
@@ -293,6 +310,36 @@ struct FoundationRelatedSection<Card: View>: View {
                 ifActive: isActive && !connectivity.localOnly, waitForInitialLoad: true,
                 using: loader)
         }
+    }
+
+    @ViewBuilder private var relatedCards: some View {
+        ForEach(catalogRows) { row in
+            card(row.item, { currentItem(row.id) }).frame(width: 150)
+        }
+        if model.hasMorePages, !connectivity.localOnly {
+            FoundationPaginationFooter(
+                demand: $pageDemand, isLoading: model.isLoading,
+                isEnabled: isActive && isVisible && scenePhase == .active,
+                hasError: model.errorMessage != nil, showsScrollHint: displayedItems.isEmpty
+            ) {
+                await model.loadNextVisiblePage(
+                    ifActive: { isActive && isVisible && scenePhase == .active },
+                    allowsNetwork: { !connectivity.localOnly }, using: loader)
+            }
+            .frame(width: 150).frame(minHeight: 44)
+            .id(model.catalogIdentityContext)
+        }
+    }
+
+    private var catalogRows: [FoundationLibraryIndexSelection.PositionedItem] {
+        guard model.hasUniqueCatalogIdentity else { return [] }
+        return FoundationLibraryIndexSelection.positionedItems(displayedItems, actions: actions)
+    }
+
+    private func currentItem(_ id: FoundationLibraryIndexSelection.Identity) -> FoundationItem? {
+        guard isActive, isVisible else { return nil }
+        return FoundationLibraryIndexSelection.resolve(id, in: displayedItems, actions: actions)?
+            .item
     }
 
     private var showsInitialPlaceholder: Bool {
@@ -320,6 +367,7 @@ struct FoundationArtistSuggestedSongs: View {
     @StateObject private var model = FoundationBrowseModel(
         refreshInterval: 30 * 60, usesCachedFreshness: true)
     @State private var revision = 0
+    @State private var isVisible = false
 
     private var displayedItems: [FoundationItem] {
         connectivity.localOnly ? downloads.itemsWithDownloadedMusic(in: model.items) : model.items
@@ -334,25 +382,33 @@ struct FoundationArtistSuggestedSongs: View {
             }
             if !displayedItems.isEmpty {
                 ScrollView(.horizontal) {
-                    LazyHStack(alignment: .top, spacing: 20) {
-                        ForEach(0..<((displayedItems.count + 1) / 2), id: \.self) { column in
-                            VStack(alignment: .leading, spacing: 16) {
-                                ForEach(
-                                    column * 2..<min(column * 2 + 2, displayedItems.count),
-                                    id: \.self
-                                ) { index in
-                                    FoundationLibraryItemRow(
-                                        item: displayedItems[index], library: library,
-                                        isActive: isActive,
-                                        open: {}, play: { play(index) }, player: player,
-                                        showsTrackArtwork: true, navigate: navigate,
-                                        currentPageKind: .artist,
-                                        subtitleOverride: displayedItems[index].album?.title ?? "")
+                    LazyHGrid(
+                        rows: [
+                            GridItem(.flexible(), spacing: 16, alignment: .top),
+                            GridItem(.flexible(), spacing: 16, alignment: .top),
+                        ], alignment: .top, spacing: 20
+                    ) {
+                        ForEach(
+                            FoundationLibraryIndexSelection.positionedItems(
+                                displayedItems, actions: actions)
+                        ) { row in
+                            FoundationLibraryItemRow(
+                                item: row.item, library: library,
+                                isActive: isActive && isVisible,
+                                open: {}, play: { play(row.id) }, player: player,
+                                showsTrackArtwork: true,
+                                navigate: { navigateRelated($0, from: row.id) },
+                                currentPageKind: .artist,
+                                subtitleOverride: row.item.album?.title ?? "",
+                                canPerform: { _ in
+                                    FoundationLibraryIndexSelection.admits(
+                                        row.item, current: currentItem(row.id))
                                 }
-                            }.frame(width: 300)
+                            )
+                            .frame(width: 300)
                         }
                     }.foundationCarouselContentPadding()
-                }.scrollIndicators(.hidden)
+                }.foundationHorizontalScrollIndicators()
                     .foundationMacShelfUnderlap(horizontalInset: 0)
                     .transition(.opacity)
             }
@@ -376,6 +432,8 @@ struct FoundationArtistSuggestedSongs: View {
             showsInitialPlaceholder || !displayedItems.isEmpty || showsError ? 12 : 0
         )
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: displayedItems.isEmpty)
+        .onAppear { isVisible = true }
+        .onDisappear { isVisible = false }
         .onChange(of: connectivity.successfulRetryRevision) { _, _ in
             model.request(.refresh)
             revision += 1
@@ -400,10 +458,28 @@ struct FoundationArtistSuggestedSongs: View {
         isActive && !connectivity.localOnly && !model.loaded && model.errorMessage == nil
     }
 
-    private func play(_ index: Int) {
-        guard
+    private func currentItem(_ id: FoundationLibraryIndexSelection.Identity) -> FoundationItem? {
+        guard isActive, isVisible else { return nil }
+        return FoundationLibraryIndexSelection.resolve(id, in: displayedItems, actions: actions)?
+            .item
+    }
+
+    private func navigateRelated(
+        _ target: FoundationItem, from id: FoundationLibraryIndexSelection.Identity
+    ) {
+        guard isActive, isVisible,
+            let item = FoundationLibraryIndexSelection.relatedDestination(
+                target, from: id, in: displayedItems, actions: actions)
+        else { return }
+        navigate(item)
+    }
+
+    private func play(_ id: FoundationLibraryIndexSelection.Identity) {
+        let items = displayedItems
+        guard isActive, isVisible,
+            let match = FoundationLibraryIndexSelection.resolve(id, in: items, actions: actions),
             let selection = FoundationTrackQueueSelection(
-                in: displayedItems, selecting: index,
+                in: items, selecting: match.sourceIndex,
                 isAvailable: { !connectivity.localOnly || downloads.isReady($0) })
         else { return }
         player.setQueue(selection.items, selectedIndex: selection.index)
@@ -593,3 +669,126 @@ extension View {
         }
     }
 #endif
+
+/// Album reading coordinates are measured from content, never inferred from image aspect ratio.
+struct FoundationAlbumBackdropProfile {
+    struct Stop {
+        let location: CGFloat
+        let opacity: Double
+    }
+    let imageSide: CGFloat
+    let height: CGFloat
+    let readingStart: CGFloat
+    let readingEnd: CGFloat
+    let imageFadeStart: CGFloat
+
+    init(imageSide: CGFloat, height: CGFloat, controlsBottom: CGFloat?, readingTop: CGFloat?) {
+        self.imageSide = imageSide.isFinite && imageSide > 0 ? imageSide : 1
+        self.height = height.isFinite && height > 0 ? height : 1
+        let controls = controlsBottom.flatMap { $0.isFinite ? $0 : nil }
+        let reading = readingTop.flatMap { $0.isFinite ? $0 : nil }
+        readingStart = min(self.height, max(0, controls ?? 0))
+        if let controls, controls > 0 {
+            if let reading {
+                readingEnd = min(self.height, max(readingStart, reading))
+            } else {
+                readingEnd = min(self.height, readingStart + max(48, self.height * 0.16))
+            }
+        } else {
+            // Missing or scrolled-off controls mean reading content already fills the viewport.
+            readingEnd = readingStart
+        }
+        imageFadeStart = min(max(0, controls ?? 0), self.imageSide * 0.55)
+    }
+
+    func readingAmount(at y: CGFloat) -> Double {
+        guard y.isFinite, readingEnd > readingStart else { return 1 }
+        return FoundationArtistBackdropProfile.eased(
+            Double(y), from: Double(readingStart), to: Double(readingEnd))
+    }
+
+    func imageOpacity(at y: CGFloat) -> Double {
+        guard y.isFinite else { return 0 }
+        return 1
+            - FoundationArtistBackdropProfile.eased(
+                Double(y), from: Double(imageFadeStart), to: Double(imageSide))
+    }
+
+    var readingStops: [Stop] {
+        stops(from: readingStart, to: readingEnd, extent: height, opacity: readingAmount)
+    }
+
+    var imageStops: [Stop] {
+        stops(from: imageFadeStart, to: imageSide, extent: imageSide, opacity: imageOpacity)
+    }
+
+    var neutralStops: [Stop] {
+        readingStops.map { stop in
+            // Follow the smooth reading ramp without a darker intermediate band.
+            // Keep the established lower-page contrast rather than peaking then brightening.
+            return Stop(location: stop.location, opacity: 0.1 + stop.opacity * 0.1)
+        }
+    }
+
+    private func stops(
+        from start: CGFloat, to end: CGFloat, extent: CGFloat,
+        opacity: (CGFloat) -> Double
+    ) -> [Stop] {
+        let positions = Set(
+            [CGFloat.zero, extent]
+                + (0...12).map {
+                    start + (end - start) * CGFloat($0) / 12
+                })
+        return positions.sorted().map {
+            Stop(location: $0 / extent, opacity: min(1, max(0, opacity($0))))
+        }
+    }
+}
+
+struct FoundationAlbumReadingBoundsKey: Hashable {
+    enum Role: Hashable { case controls, tracks }
+    let itemID: String
+    let role: Role
+}
+
+struct FoundationAlbumReadingBoundsPreference: PreferenceKey {
+    static let defaultValue: [FoundationAlbumReadingBoundsKey: Anchor<CGRect>] = [:]
+    static func reduce(
+        value: inout [FoundationAlbumReadingBoundsKey: Anchor<CGRect>],
+        nextValue: () -> [FoundationAlbumReadingBoundsKey: Anchor<CGRect>]
+    ) {
+        value.merge(nextValue(), uniquingKeysWith: { _, latest in latest })
+    }
+}
+
+/// One continuous diffusion surface under album content; the caller preserves hero clarity.
+/// Read the effective collection appearance, including its immersive override.
+struct FoundationAlbumContentBacking: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.colorSchemeContrast) private var contrast
+    @Environment(\.foundationReduceTransparency) private var reduceTransparency
+
+    private var surface: AnyShapeStyle {
+        if reduceTransparency { return AnyShapeStyle(.background) }
+        return contrast == .increased
+            ? AnyShapeStyle(.thinMaterial) : AnyShapeStyle(.ultraThinMaterial)
+    }
+
+    private var scrimOpacity: Double {
+        if reduceTransparency { return 0 }
+        if contrast == .increased { return colorScheme == .dark ? 0.16 : 0.10 }
+        return colorScheme == .dark ? 0.08 : 0.04
+    }
+
+    var body: some View {
+        Rectangle()
+            .fill(surface)
+            .overlay {
+                (colorScheme == .dark ? Color.black : Color.white).opacity(scrimOpacity)
+            }
+            // Extend only decoration beneath native top/bottom chrome, within this detail column.
+            .ignoresSafeArea(.container, edges: [.top, .bottom])
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+    }
+}

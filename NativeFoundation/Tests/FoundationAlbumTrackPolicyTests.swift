@@ -183,11 +183,24 @@ final class FoundationAlbumTrackPolicyTests: XCTestCase {
         model.installSnapshot([copy, first])
         XCTAssertEqual(model.rawItems, [copy, first])
         XCTAssertEqual(model.items, [first])
+        func waitForItems(_ expected: [FoundationItem]) async throws -> Bool {
+            let deadline = ContinuousClock.now.advanced(by: .seconds(3))
+            while model.items != expected, ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(5))
+            }
+            return model.items == expected
+        }
         preferences.setShowDuplicateAlbumTracks(true)
-        await Task.yield()
+        guard try await waitForItems([copy, first]) else {
+            XCTFail("Duplicate album tracks were not shown within 3 seconds")
+            return
+        }
         XCTAssertEqual(model.items, [copy, first])
         preferences.setShowDuplicateAlbumTracks(false)
-        await Task.yield()
+        guard try await waitForItems([first]) else {
+            XCTFail("Duplicate album tracks were not hidden within 3 seconds")
+            return
+        }
         XCTAssertEqual(model.items, [first])
         XCTAssertEqual(actions.visibleTracks([copy], isAvailable: { $0.id == copy.id }), [copy])
         actions.configureTrackAvailability { $0.id == copy.id }

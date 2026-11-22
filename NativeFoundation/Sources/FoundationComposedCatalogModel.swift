@@ -59,8 +59,17 @@ final class FoundationComposedCatalogModel {
     @ObservationIgnored private weak var actions: FoundationLibraryActions?
     @ObservationIgnored private let allowsNetwork: @MainActor () -> Bool
     @ObservationIgnored private let offlineJellyfinItems: @MainActor () -> [FoundationItem]
+    @ObservationIgnored private let offlineReadyTracks: @MainActor () -> [FoundationItem]
+    @ObservationIgnored private let offlineSearch: FoundationSearchResolver.Search?
     @ObservationIgnored private let isCurrent: @MainActor (Context) -> Bool
     private var active = false
+    @ObservationIgnored private var remoteFavoriteRead: FoundationLibraryActions.FavoriteRead?
+    @ObservationIgnored private var suspendedSearchTask: Task<Void, Never>?
+    private var searchSuspended = false
+    var isSearchContext: Bool {
+        if case .search = context.query { return true }
+        return false
+    }
     private var intentGeneration: UInt = 0
     private var published: [SourceSection] = []
     private var selectedDetail: Detail?
@@ -68,6 +77,7 @@ final class FoundationComposedCatalogModel {
     private var detailFailureSource: FoundationCatalogSource?
     private var detailFailureRevision: UInt?
     @ObservationIgnored private var remoteBinding: FoundationCatalogFetchBinding?
+    @ObservationIgnored private var initialSearchSeed: FoundationCatalogSearchSeed?
     @ObservationIgnored private var localBinding: FoundationCatalogFetchBinding?
     @ObservationIgnored private var localBindingSource: FoundationCatalogSource?
     @ObservationIgnored private var remoteTask: Task<Void, Never>?
@@ -77,13 +87,19 @@ final class FoundationComposedCatalogModel {
     private var localGeneration: UInt = 0
     private var detailGeneration: UInt = 0
     private var capturedLocalRevision: UInt?
+    private(set) var searchRelatedCoverageIncomplete = false
+    private var refreshSearchRelations = false
+    private(set) var hasSearchFallback = false
 
     init(
         ownerID: UUID, query: FoundationCatalogQuery, jellyfin: FoundationJellyfinLibrary?,
         localLibrary: FoundationLocalLibraryModel,
         actions: FoundationLibraryActions? = nil,
+        initialSearchSeed: FoundationCatalogSearchSeed? = nil,
         allowsNetwork: @escaping @MainActor () -> Bool = { true },
         offlineJellyfinItems: @escaping @MainActor () -> [FoundationItem] = { [] },
+        offlineReadyTracks: @escaping @MainActor () -> [FoundationItem] = { [] },
+        offlineSearch: FoundationSearchResolver.Search? = nil,
         isCurrent: @escaping @MainActor (Context) -> Bool
     ) throws {
         let query = try query.normalized()
@@ -93,8 +109,11 @@ final class FoundationComposedCatalogModel {
         self.jellyfin = jellyfin
         self.localLibrary = localLibrary
         self.actions = actions
+        self.initialSearchSeed = initialSearchSeed
         self.allowsNetwork = allowsNetwork
         self.offlineJellyfinItems = offlineJellyfinItems
+        self.offlineReadyTracks = offlineReadyTracks
+        self.offlineSearch = offlineSearch
         self.isCurrent = isCurrent
     }
 
@@ -114,9 +133,10 @@ final class FoundationComposedCatalogModel {
     var sections: [SourceSection] {
         guard active, isCurrent(context) else { return [] }
         return published.filter {
-            $0.id.kind != .local
-                || ($0.localRevision == localLibrary.presentationRevision
-                    && localLibrary.activity == nil)
+            ($0.id.kind != .jellyfin || filter != .local)
+                && ($0.id.kind != .local
+                    || ($0.localRevision == localLibrary.presentationRevision
+                        && localLibrary.activity == nil))
         }
     }
     var detail: Detail? {
@@ -180,9 +200,57 @@ final class FoundationComposedCatalogModel {
     func activate() {
         guard !active, isCurrent(context) else { return }
         active = true
+        if searchSuspended, let binding = remoteBinding {
+            searchSuspended = false
+            let drained = suspendedSearchTask
+            suspendedSearchTask = nil
+            let generation = remoteGeneration
+            remoteTask = Task { [weak self] in
+                await drained?.value
+                let snapshots = await binding.snapshots()
+                guard let self, current(.jellyfin, generation, nil),
+                    let snapshot = snapshots.first(where: { $0.source.kind == .jellyfin })
+                else { return }
+                let rows = snapshot.items.compactMap { item -> Row? in
+                    guard let key = try? item.catalogKey() else { return nil }
+                    return Row(id: key, title: item.title, subtitle: item.subtitle, item: item)
+                }
+                let fresh = rows.filter { snapshot.freshKeys.contains($0.id) }.map(\.item)
+                if let actions {
+                    if let read = remoteFavoriteRead {
+                        actions.observeFavorites(in: fresh, read: read)
+                    }
+                    actions.observeTrackCopies(fresh)
+                }
+                hasSearchFallback = snapshot.fallbackCursor != nil
+                let capped =
+                    rows.count >= FoundationCatalogComposition.itemLimit && snapshot.hasMore
+                replace(
+                    .init(
+                        id: snapshot.source, state: snapshot.state, rows: rows,
+                        hasMore: snapshot.hasMore && !capped,
+                        limitReached: capped,
+                        failed: snapshot.state == .failed, localRevision: nil))
+                finish(.jellyfin)
+            }
+            synchronizeLocalRevision()
+            return
+        }
+        searchSuspended = false
+        let seed = initialSearchSeed
+        hasSearchFallback = seed?.fallbackCursor != nil
+        if filter != .local { initialSearchSeed = nil }
+        if case .search(_, .track) = context.query, filter != .local, allowsNetwork() {
+            // A fresh provider-only page does not reproduce overview relationship/fuzzy rows.
+            searchRelatedCoverageIncomplete = seed == nil
+        } else {
+            searchRelatedCoverageIncomplete = false
+        }
         if filter != .local, let jellyfin {
             remoteBinding = try? FoundationCatalogFetchBinding(
-                query: context.query, jellyfin: jellyfin, local: nil, localID: nil)
+                query: context.query, jellyfin: jellyfin, local: nil, localID: nil,
+                searchSeed: allowsNetwork() ? seed : nil,
+                refreshSearchRelations: refreshSearchRelations)
             _ = startLoad(.jellyfin)
         }
         synchronizeLocalRevision()
@@ -191,7 +259,7 @@ final class FoundationComposedCatalogModel {
     func setFilter(_ next: Filter, activate: Bool = true) {
         guard next != filter else { return }
         let wasActive = active
-        invalidate()
+        if isSearchContext { suspendSearch() } else { invalidate() }
         filter = next
         if wasActive && activate { self.activate() }
     }
@@ -201,6 +269,7 @@ final class FoundationComposedCatalogModel {
     func refresh() async {
         guard active, isCurrent(context) else { return }
         invalidate()
+        refreshSearchRelations = isSearchContext && allowsNetwork()
         activate()
         let remote = remoteTask
         let local = localTask
@@ -208,8 +277,42 @@ final class FoundationComposedCatalogModel {
         await local?.value
     }
 
+    /// Source choice is presentation, not a new search lifetime. Keep committed
+    /// remote membership/cursors while cancelling and draining inactive work.
+    /// Native and composed presenters page independently within the same query.
+    func suspendSearch() {
+        guard isSearchContext else {
+            invalidate()
+            return
+        }
+        guard active else { return }
+        active = false
+        searchSuspended = remoteBinding != nil
+        intentGeneration &+= 1
+        remoteGeneration &+= 1
+        localGeneration &+= 1
+        detailGeneration &+= 1
+        remoteTask?.cancel()
+        suspendedSearchTask = remoteTask ?? suspendedSearchTask
+        remoteTask = nil
+        localTask?.cancel()
+        localTask = nil
+        detailTask?.cancel()
+        detailTask = nil
+        selectedDetail = nil
+        detailFailed = false
+        published.removeAll { $0.id.kind == .local }
+        retireLocal()
+        capturedLocalRevision = nil
+    }
+
     /// Removes presentation and cancels tasks before any asynchronous retirement.
     func invalidate() {
+        refreshSearchRelations = false
+        suspendedSearchTask?.cancel()
+        suspendedSearchTask = nil
+        remoteFavoriteRead = nil
+        searchSuspended = false
         active = false
         intentGeneration &+= 1
         remoteGeneration &+= 1
@@ -292,6 +395,12 @@ final class FoundationComposedCatalogModel {
             let source = try? FoundationCatalogSource.jellyfin(
                 scope: jellyfin.catalogAccountIdentity)
         else { return }
+        if case .search(let text, .track) = context.query, let offlineSearch {
+            remoteTask?.cancel()
+            remoteTask = nil
+            startOfflineSearch(text, source: source, search: offlineSearch)
+            return
+        }
         intentGeneration &+= 1
         let items = offlineJellyfinItems()
         let bounded = items.prefix(FoundationCatalogComposition.itemLimit)
@@ -317,8 +426,9 @@ final class FoundationComposedCatalogModel {
     private func startLoad(_ kind: FoundationCatalogSource.Kind) -> Task<Void, Never>? {
         guard active, isCurrent(context) else { return nil }
         if kind == .jellyfin, !allowsNetwork() {
+            if let remoteTask { return remoteTask }
             refreshOfflineJellyfin()
-            return nil
+            return remoteTask
         }
         if kind == .jellyfin, let remoteTask { return remoteTask }
         if kind == .local, let localTask { return localTask }
@@ -354,6 +464,7 @@ final class FoundationComposedCatalogModel {
         section.failed = false
         replace(section)
         let favoriteRead = kind == .jellyfin ? actions?.beginFavoriteRead() : nil
+        if kind == .jellyfin { remoteFavoriteRead = favoriteRead }
         let previousKeys = Set(section.rows.map(\.id))
         let task = Task { [weak self] in
             do {
@@ -372,14 +483,22 @@ final class FoundationComposedCatalogModel {
                     finish(kind)
                     return
                 }
+                if kind == .jellyfin, case .search(_, .track) = context.query {
+                    searchRelatedCoverageIncomplete =
+                        !snapshot.isSeededSearch
+                        || snapshot.searchCoverageIncomplete
+                }
                 let rows = snapshot.items.compactMap { item -> Row? in
                     guard let key = try? item.catalogKey() else { return nil }
                     return Row(id: key, title: item.title, subtitle: item.subtitle, item: item)
                 }
                 if kind == .jellyfin, let favoriteRead {
-                    let freshItems = rows.filter { !previousKeys.contains($0.id) }.map(\.item)
+                    let freshItems = rows.filter { snapshot.freshKeys.contains($0.id) }.map(\.item)
                     actions?.observeFavorites(in: freshItems, read: favoriteRead)
-                    actions?.observeTrackCopies(freshItems)
+                    let trackCopies = rows.filter {
+                        snapshot.freshKeys.contains($0.id) || !previousKeys.contains($0.id)
+                    }.map(\.item)
+                    actions?.observeTrackCopies(trackCopies)
                 }
                 var state = snapshot.state
                 if kind == .local {
@@ -389,13 +508,14 @@ final class FoundationComposedCatalogModel {
                     default: break
                     }
                 }
+                if kind == .jellyfin { hasSearchFallback = snapshot.fallbackCursor != nil }
                 let capped =
                     rows.count >= FoundationCatalogComposition.itemLimit
-                    && snapshot.nextStartIndex != nil
+                    && snapshot.hasMore
                 replace(
                     .init(
                         id: source, state: state, rows: rows,
-                        hasMore: snapshot.nextStartIndex != nil && !capped, limitReached: capped,
+                        hasMore: snapshot.hasMore && !capped, limitReached: capped,
                         localRevision: revision))
                 finish(kind)
             } catch {
@@ -408,6 +528,76 @@ final class FoundationComposedCatalogModel {
         }
         if kind == .jellyfin { remoteTask = task } else { localTask = task }
         return task
+    }
+
+    /// Re-resolve only the current query against verified downloads; no server read is started.
+    private func startOfflineSearch(
+        _ query: String, source: FoundationCatalogSource,
+        search: @escaping FoundationSearchResolver.Search
+    ) {
+        guard active, isCurrent(context), !allowsNetwork() else { return }
+        intentGeneration &+= 1
+        remoteGeneration &+= 1
+        let generation = remoteGeneration
+        var section =
+            published.first { $0.id == source }
+            ?? .init(
+                id: source, state: .idle, rows: [], hasMore: false, limitReached: false,
+                localRevision: nil)
+        section.state = .loading
+        section.failed = false
+        section.rows = []
+        replace(section)
+        let task = Task { [weak self] in
+            do {
+                let result = try await FoundationSearchResolver(localSearch: search)
+                    .resolveDirect(query: query, kind: .track)
+                guard let self, current(.jellyfin, generation, nil), !allowsNetwork() else {
+                    return
+                }
+                if let error = result.section.error { throw error }
+                // Reproject against the current ready inventory, not the earlier search snapshot.
+                let currentItems = offlineReadyTracks().filter {
+                    $0.kind == .track && ($0.catalogSource == nil || $0.catalogSource == source)
+                        && ([$0.album, $0.artist].compactMap { $0 } + $0.genres).allSatisfy {
+                            $0.catalogSource == nil || $0.catalogSource == source
+                        }
+                }
+                var currentByID: [String: FoundationItem] = [:]
+                for item in currentItems where currentByID[item.id] == nil {
+                    currentByID[item.id] = item
+                }
+                let rows = result.section.page.items.compactMap { item -> Row? in
+                    guard item.kind == .track,
+                        item.catalogSource == nil || item.catalogSource == source,
+                        let current = currentByID[item.id],
+                        let key = try? current.catalogKey(legacyJellyfinSource: source),
+                        key.source == source
+                    else { return nil }
+                    var scoped = current
+                    scoped.catalogSource = source
+                    return .init(
+                        id: key, title: current.title, subtitle: current.subtitle, item: scoped)
+                }
+                let incomplete =
+                    !result.failures.isEmpty || result.fallbackHasMore
+                    || result.section.page.nextStartIndex != nil
+                searchRelatedCoverageIncomplete = incomplete
+                replace(
+                    .init(
+                        id: source, state: incomplete ? .partial : (rows.isEmpty ? .empty : .ready),
+                        rows: rows, hasMore: false, limitReached: false, localRevision: nil))
+                finish(.jellyfin)
+            } catch {
+                guard let self, current(.jellyfin, generation, nil), !allowsNetwork() else {
+                    return
+                }
+                searchRelatedCoverageIncomplete = true
+                fail(source, revision: nil)
+                finish(.jellyfin)
+            }
+        }
+        remoteTask = task
     }
 
     private func current(
@@ -525,7 +715,13 @@ final class FoundationComposedCatalogLifetime {
             owner?.invalidate()
             owner = next
         }
-        if isActive { next.activate() } else { next.invalidate() }
+        if isActive {
+            next.activate()
+        } else if next.isSearchContext {
+            next.suspendSearch()
+        } else {
+            next.invalidate()
+        }
     }
 
     func end() {

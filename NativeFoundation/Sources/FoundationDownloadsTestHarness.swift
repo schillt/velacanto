@@ -143,6 +143,11 @@
                     Button("Queue fixture playlist") {
                         fixture.downloads.download(fixture.playlist)
                     }
+                    if ProcessInfo.processInfo.arguments.contains("-fixtureTrackedPlaylistRoute") {
+                        FoundationTrackedPlaylistFixtureRoute(
+                            playlistID: fixture.playlist.id, library: fixture.library,
+                            player: fixture.player)
+                    }
                     NavigationLink("Downloads") {
                         FoundationDownloadsView(library: fixture.library, player: fixture.player)
                     }
@@ -208,6 +213,7 @@
                 }
             }
             .frame(height: 44)
+            .dynamicTypeSize(.medium)
             .sheet(isPresented: $showingFixtureControls) {
                 NavigationStack {
                     ScrollView {
@@ -334,6 +340,26 @@
     }
 
     /// Observe policy and connectivity owners directly so synthetic toggles follow external updates.
+    /// The downloaded-only index intentionally omits collections without playable files.
+    /// This synthetic route opens the same tracked owner through the real detail view.
+    private struct FoundationTrackedPlaylistFixtureRoute: View {
+        @EnvironmentObject private var downloads: FoundationDownloads
+        let playlistID: String
+        let library: any FoundationLibrary
+        let player: FoundationPlayer
+
+        var body: some View {
+            if let owner = downloads.owners.first(where: {
+                $0.item.id == playlistID && $0.item.kind == .playlist
+            }) {
+                NavigationLink("Open tracked fixture playlist") {
+                    FoundationItemDestination(
+                        item: owner.item, library: library, player: player, isActive: true)
+                }
+            }
+        }
+    }
+
     private struct FoundationDownloadUIControls: View {
         @ObservedObject var downloads: FoundationDownloads
         @ObservedObject var connectivity: FoundationConnectivity
@@ -425,6 +451,7 @@
         @State private var failedOnce = false
         @State private var notice: String?
         @StateObject private var delayedResponse = FoundationDelayedAuthenticationResponse()
+        @State private var completionButtonInvocations = 0
 
         private var delayedAuthentication: Bool {
             ProcessInfo.processInfo.arguments.contains("-fixtureDelayedAuth")
@@ -448,13 +475,6 @@
                 } else {
                     VStack {
                         if let notice { Text(notice) }
-                        if delayedAuthentication {
-                            Button("Complete delayed authentication") { delayedResponse.complete() }
-                                .disabled(!delayedResponse.isWaiting)
-                            if delayedResponse.wasDelivered {
-                                Text("Delayed authentication response delivered")
-                            }
-                        }
                         FoundationSignInView { url, username, password in
                             if ProcessInfo.processInfo.arguments.contains(
                                 "-fixtureUnreachableServer")
@@ -481,6 +501,27 @@
                             return {
                                 notice = nil
                                 signedIn = true
+                            }
+                        }
+                        .safeAreaInset(edge: .bottom) {
+                            if delayedAuthentication {
+                                VStack {
+                                    Button {
+                                        completionButtonInvocations += 1
+                                        delayedResponse.complete()
+                                    } label: {
+                                        Text("Complete delayed authentication")
+                                            .frame(minHeight: 44)
+                                    }
+                                    .accessibilityValue(
+                                        "invocations \(completionButtonInvocations)"
+                                    )
+                                    .disabled(!delayedResponse.isWaiting)
+                                    if delayedResponse.wasDelivered {
+                                        Text("Delayed authentication response delivered")
+                                    }
+                                }
+                                .padding(.horizontal)
                             }
                         }
                     }
@@ -1395,6 +1436,32 @@
         func search(query: String, kind: FoundationItem.Kind, startIndex: Int, limit: Int)
             async throws -> FoundationPage
         {
+            if ProcessInfo.processInfo.arguments.contains("-fixtureBoundedSearchCoverage") {
+                if kind == .track {
+                    catalogRequests[
+                        "bounded-track-\(query.lowercased())-\(startIndex)", default: 0
+                    ] += 1
+                }
+                if kind == .track, query == "zor", startIndex == 50 {
+                    // One explicit continuation reveals the first visible close match.
+                    return .init(
+                        items: [
+                            FoundationItem(
+                                id: "bounded-search-match", title: "Zorlan",
+                                subtitle: "Synthetic continuation",
+                                kind: .track, duration: nil)
+                        ], nextStartIndex: nil)
+                }
+                guard kind == .track, query == "zor", startIndex == 0 else {
+                    return .init(items: [], nextStartIndex: nil)
+                }
+                let items = (0..<50).map { index in
+                    FoundationItem(
+                        id: "bounded-search-\(index)", title: "Zor filler \(index)",
+                        subtitle: "Synthetic", kind: .track, duration: nil)
+                }
+                return .init(items: Array(items.prefix(limit)), nextStartIndex: 50)
+            }
             if ProcessInfo.processInfo.arguments.contains("-fixtureProgressivePlaylistSearch") {
                 let items =
                     query.localizedStandardContains("Opalite")
@@ -1979,23 +2046,6 @@
             value.merge(nextValue(), uniquingKeysWith: { _, newer in newer })
         }
     }
-    struct FoundationChromeUIFooterProbe: ViewModifier {
-        @Environment(\.foundationChromeUIContext) private var context
-        func body(content: Content) -> some View {
-            if FoundationChromeUIScrollProbe.enabled, !context.isEmpty {
-                content.background {
-                    GeometryReader { proxy in
-                        Color.clear.preference(
-                            key: FoundationChromeUIFooterFrames.self,
-                            value: [context: proxy.frame(in: .global)])
-                    }
-                }
-            } else {
-                content
-            }
-        }
-    }
-
     /// Synthetic metrics only. No inset, offset, margin, delegate or player mutation.
     struct FoundationChromeUIScrollProbe: ViewModifier {
         static var enabled: Bool {

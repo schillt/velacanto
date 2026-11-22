@@ -75,6 +75,11 @@ final class FoundationHandoffController: NSObject, ObservableObject, NSUserActiv
     }
     private var remoteTransfer: RemoteTransfer?
     private var remoteTask: Task<Void, Never>?
+    #if DEBUG
+        /// Read-only snapshot for held-phase tests; callers retain the real task
+        /// before retirement clears this owner's reference.
+        var remoteTaskForTesting: Task<Void, Never>? { remoteTask }
+    #endif
     private var remoteObservation: AnyCancellable?
 
     private struct Context {
@@ -568,7 +573,8 @@ final class FoundationHandoffController: NSObject, ObservableObject, NSUserActiv
                     #if DEBUG
                         diagnosticStage = .confirmation
                         do {
-                            confirmed = try await transfer.library.confirmRemoteContinuationStopped(fresh)
+                            confirmed = try await transfer.library.confirmRemoteContinuationStopped(
+                                fresh)
                             transfer.diagnostic(
                                 .confirmation, outcome: confirmed ? .confirmed : .unconfirmed)
                         } catch {
@@ -589,7 +595,8 @@ final class FoundationHandoffController: NSObject, ObservableObject, NSUserActiv
             guard !Task.isCancelled, let self, self.remoteIsCurrent(transfer) else { return }
             self.retireRemote()
             if !confirmed {
-                self.notice = expected.selection == .currentSong
+                self.notice =
+                    expected.selection == .currentSong
                     ? "This song started here, but pausing the original player was not confirmed. Pause it there if needed; its other queued songs stay there."
                     : "Playback started here, but the original player may still be playing. Stop it there if needed."
             }
@@ -1178,75 +1185,77 @@ final class FoundationHandoffController: NSObject, ObservableObject, NSUserActiv
 }
 
 #if DEBUG
-  /// Fixed scalars only. No source identity, position, URL or error description.
-  nonisolated enum FoundationRemoteContinuationDiagnostic {
-    enum Stage: String {
-      case accepted, nativeStart, postRefresh, sourceRecheck, command, result, confirmation, withheld, retired
-    }
-    enum Outcome: String {
-      case validated, observed, attempted, success, confirmed, unconfirmed, failed, finished
-    }
-    struct PostRefresh {
-      let afterRefreshPresent: Bool
-      let receiverPlaying: Bool
-      let networkAllowed: Bool
-      let supportsControl: Bool
-      let selectionCanControl: Bool
-    }
-    static var enabled: Bool {
-      ProcessInfo.processInfo.arguments.contains("-diagnosticRemoteContinuation")
-    }
-    static func fields(
-      _ stage: Stage, outcome: Outcome, selection: FoundationRemoteContinuationSelection,
-      failedAt: Stage? = nil, error: Error? = nil, postRefresh: PostRefresh? = nil
-    ) -> String {
-      var result =
-        "remote-continuation stage=\(stage.rawValue) outcome=\(outcome.rawValue)"
-        + " command=\(selection == .currentSong ? "Pause" : "Stop")"
-      if let failedAt { result += " failedAt=\(failedAt.rawValue)" }
-      if let flags = postRefresh {
-        result += " afterRefreshPresent=\(flags.afterRefreshPresent ? 1 : 0)"
-          + " receiverPlaying=\(flags.receiverPlaying ? 1 : 0)"
-          + " networkAllowed=\(flags.networkAllowed ? 1 : 0)"
-          + " supportsControl=\(flags.supportsControl ? 1 : 0)"
-          + " selectionCanControl=\(flags.selectionCanControl ? 1 : 0)"
-      }
-      if let error {
-        let native = error as NSError
-        func scalar(_ error: NSError) -> String {
-          let domain: String
-          switch error.domain {
-          case NSURLErrorDomain: domain = "url"
-          case "AVFoundationErrorDomain": domain = "av"
-          case NSOSStatusErrorDomain: domain = "osstatus"
-          case NSCocoaErrorDomain: domain = "cocoa"
-          case NSPOSIXErrorDomain: domain = "posix"
-          default: domain = "other"
-          }
-          return "\(domain):\(domain == "other" ? 0 : error.code)"
+    /// Fixed scalars only. No source identity, position, URL or error description.
+    nonisolated enum FoundationRemoteContinuationDiagnostic {
+        enum Stage: String {
+            case accepted, nativeStart, postRefresh, sourceRecheck, command, result, confirmation,
+                withheld, retired
         }
-        result += " error=\(scalar(native))"
-        if let application = error as? FoundationHandoffError {
-          let reason: String
-          switch application {
-          case .unsupported: reason = "unsupported"
-          case .invalid: reason = "invalid"
-          case .expired: reason = "expired"
-          case .differentAccount: reason = "differentAccount"
-          case .tooLarge: reason = "tooLarge"
-          case .unavailable: reason = "unavailable"
-          case .changed: reason = "changed"
-          case .interrupted: reason = "interrupted"
-          case .positionUnavailable: reason = "positionUnavailable"
-          case .queueUnavailable: reason = "queueUnavailable"
-          }
-          result += " reason=\(reason)"
+        enum Outcome: String {
+            case validated, observed, attempted, success, confirmed, unconfirmed, failed, finished
         }
-        if let underlying = native.userInfo[NSUnderlyingErrorKey] as? NSError {
-          result += " underlying=\(scalar(underlying))"
+        struct PostRefresh {
+            let afterRefreshPresent: Bool
+            let receiverPlaying: Bool
+            let networkAllowed: Bool
+            let supportsControl: Bool
+            let selectionCanControl: Bool
         }
-      }
-      return result
+        static var enabled: Bool {
+            ProcessInfo.processInfo.arguments.contains("-diagnosticRemoteContinuation")
+        }
+        static func fields(
+            _ stage: Stage, outcome: Outcome, selection: FoundationRemoteContinuationSelection,
+            failedAt: Stage? = nil, error: Error? = nil, postRefresh: PostRefresh? = nil
+        ) -> String {
+            var result =
+                "remote-continuation stage=\(stage.rawValue) outcome=\(outcome.rawValue)"
+                + " command=\(selection == .currentSong ? "Pause" : "Stop")"
+            if let failedAt { result += " failedAt=\(failedAt.rawValue)" }
+            if let flags = postRefresh {
+                result +=
+                    " afterRefreshPresent=\(flags.afterRefreshPresent ? 1 : 0)"
+                    + " receiverPlaying=\(flags.receiverPlaying ? 1 : 0)"
+                    + " networkAllowed=\(flags.networkAllowed ? 1 : 0)"
+                    + " supportsControl=\(flags.supportsControl ? 1 : 0)"
+                    + " selectionCanControl=\(flags.selectionCanControl ? 1 : 0)"
+            }
+            if let error {
+                let native = error as NSError
+                func scalar(_ error: NSError) -> String {
+                    let domain: String
+                    switch error.domain {
+                    case NSURLErrorDomain: domain = "url"
+                    case "AVFoundationErrorDomain": domain = "av"
+                    case NSOSStatusErrorDomain: domain = "osstatus"
+                    case NSCocoaErrorDomain: domain = "cocoa"
+                    case NSPOSIXErrorDomain: domain = "posix"
+                    default: domain = "other"
+                    }
+                    return "\(domain):\(domain == "other" ? 0 : error.code)"
+                }
+                result += " error=\(scalar(native))"
+                if let application = error as? FoundationHandoffError {
+                    let reason: String
+                    switch application {
+                    case .unsupported: reason = "unsupported"
+                    case .invalid: reason = "invalid"
+                    case .expired: reason = "expired"
+                    case .differentAccount: reason = "differentAccount"
+                    case .tooLarge: reason = "tooLarge"
+                    case .unavailable: reason = "unavailable"
+                    case .changed: reason = "changed"
+                    case .interrupted: reason = "interrupted"
+                    case .positionUnavailable: reason = "positionUnavailable"
+                    case .queueUnavailable: reason = "queueUnavailable"
+                    }
+                    result += " reason=\(reason)"
+                }
+                if let underlying = native.userInfo[NSUnderlyingErrorKey] as? NSError {
+                    result += " underlying=\(scalar(underlying))"
+                }
+            }
+            return result
+        }
     }
-  }
 #endif

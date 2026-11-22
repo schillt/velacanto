@@ -14,10 +14,25 @@ import XCTest
 
 @MainActor
 final class FoundationDownloadsTests: XCTestCase {
+    private let rootRetention = DownloadFixtureRootRetention()
+    // Keep exact owners alive so a receipt cannot be inherited by a reused object ID.
+    private var clearedFixtureOwners: [FoundationDownloads] = []
+
+    private func clearFixtureOwner(_ manager: FoundationDownloads) async -> Bool {
+        if clearedFixtureOwners.contains(where: { $0 === manager }) { return true }
+        guard await manager.clearAccount() else { return false }
+        clearedFixtureOwners.append(manager)
+        return true
+    }
+
     private func root() throws -> URL {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-        addTeardownBlock { try? FileManager.default.removeItem(at: url) }
+        let retention = rootRetention
+        addTeardownBlock {
+            guard !(await retention.isRetained) else { return }
+            try? FileManager.default.removeItem(at: url)
+        }
         return url
     }
 
@@ -44,6 +59,28 @@ final class FoundationDownloadsTests: XCTestCase {
         XCTAssertTrue(settled, "Download work did not settle before the deadline")
     }
 
+    private struct FixtureWorkTimeout: Error, CustomStringConvertible {
+        let description: String
+    }
+
+    private func waitForFixtureWork(
+        _ name: String, manager: FoundationDownloads,
+        work: @escaping @MainActor () async -> Void
+    ) async throws {
+        let finished = XCTestExpectation(description: name)
+        let task = Task {
+            await work()
+            finished.fulfill()
+        }
+        guard await XCTWaiter.fulfillment(of: [finished], timeout: 5) == .completed else {
+            manager.invalidate()
+            task.cancel()
+            await rootRetention.retain()
+            throw FixtureWorkTimeout(
+                description: "\(name) did not finish within 5 seconds; fixture retained")
+        }
+    }
+
     private func artworkData(width: Int = 1024, height: Int = 512) throws -> Data {
         let context = try XCTUnwrap(
             CGContext(
@@ -66,6 +103,43 @@ final class FoundationDownloadsTests: XCTestCase {
         var track = item(id)
         track.album = .init(id: "album", title: "Synthetic album", primaryImageTag: tag)
         return track
+    }
+
+    private func drainDownloadFixture(
+        _ manager: FoundationDownloads, gate: DownloadGate,
+        expectsProtectedReceiptRetention: Bool = false
+    ) async throws {
+        await gate.resume()
+        if expectsProtectedReceiptRetention { await rootRetention.retain() }
+        try await waitForFixtureWork("download fixture owner drain", manager: manager) {
+            let cleared = await self.clearFixtureOwner(manager)
+            if expectsProtectedReceiptRetention {
+                XCTAssertFalse(cleared, "Ambiguous native receipt must refuse cleanup")
+                return
+            }
+            guard cleared else {
+                await self.rootRetention.retain()
+                XCTFail("Download fixture owner refused cleanup; fixture retained")
+                return
+            }
+        }
+    }
+
+    private func waitForExternalFixtureTask<Value: Sendable>(
+        _ task: Task<Value, Never>, name: String
+    ) async throws {
+        let finished = XCTestExpectation(description: name)
+        let observer = Task {
+            _ = await task.value
+            finished.fulfill()
+        }
+        guard await XCTWaiter.fulfillment(of: [finished], timeout: 5) == .completed else {
+            task.cancel()
+            observer.cancel()
+            await rootRetention.retain()
+            throw FixtureWorkTimeout(
+                description: "\(name) did not finish within 5 seconds; fixture retained")
+        }
     }
 
     private var transfer: FoundationDownloads.Transfer {
@@ -284,6 +358,61 @@ final class FoundationDownloadsTests: XCTestCase {
             downloads.errorMessage,
             FoundationDownloadError.originalSystemManagementUnavailable.errorDescription)
         downloads.invalidate()
+    }
+
+    func testNativeOutOfSpaceFailurePersistsPausedIntentWithoutFalseReady() async throws {
+        // Inject an error; this does not fill storage or exercise an AVAssetDownloadTask.
+        let storageRoot = try root()
+        let scope = "synthetic-native-space-failure"
+        let track = item("native-space-failure")
+        let library = DownloadsLibrary(tracks: [track])
+        let manager = FoundationDownloads(
+            scope: scope, library: library, root: storageRoot,
+            transfer: { _, _, _, _ in XCTFail("Native failure must not fall back to Original") },
+            monitorConnectivity: false,
+            convertedTransfer: { _, _, _, _ in
+                XCTFail("Native failure must not fall back to converted file transport")
+                throw FoundationDownloadError.response
+            },
+            requestedQuality: { .aac192 }, systemManagedDownloads: { true },
+            nativeTransfer: { proposal, _, _, progress in
+                XCTAssertEqual(proposal.plan.quality, .aac192)
+                progress(1024, nil)
+                throw CocoaError(.fileWriteOutOfSpace)
+            })
+        defer { manager.invalidate() }
+        manager.updateConnectivity(isAllowed: true)
+        manager.download(track)
+        try await waitUntil { manager.owners.first?.state == .failed }
+        guard manager.owners.first?.state == .failed else { return }
+        XCTAssertFalse(manager.isReady(track))
+        XCTAssertNil(manager.owners.first?.activeTrackProgress)
+        XCTAssertEqual(
+            manager.errorMessage,
+            "The download could not finish. Check connectivity and available storage, then retry.")
+        let directory = FoundationDownloadStorage.directory(scope: scope, root: storageRoot)
+        let saved = try FoundationDownloadStorage.load(directory: directory)
+        XCTAssertNil(saved.files[track.id])
+        XCTAssertEqual(saved.owners.first?.requestedQuality, .aac192)
+        XCTAssertEqual(saved.owners.first?.systemManaged, true)
+        XCTAssertEqual(saved.owners.first?.paused, true)
+        XCTAssertTrue(saved.nativePendingSessions?.isEmpty ?? true)
+        manager.invalidate()
+
+        let restored = FoundationDownloads(
+            scope: scope, library: library, root: storageRoot,
+            transfer: { _, _, _, _ in throw FoundationDownloadError.response },
+            monitorConnectivity: false, requestedQuality: { .aac320 },
+            nativeTransfer: { _, _, _, _ in throw FoundationDownloadError.response })
+        defer { restored.invalidate() }
+        try await waitUntil { !restored.isLoading }
+        guard !restored.isLoading else { return }
+        restored.updateConnectivity(isAllowed: true)
+        // This checks the restored state now; it does not prove future non-reacquisition.
+        XCTAssertFalse(restored.isReady(track))
+        XCTAssertEqual(restored.owners.first?.state, .cancelled)
+        XCTAssertEqual(restored.owners.first?.requestedQuality, .aac192)
+        XCTAssertEqual(restored.owners.first?.systemManaged, true)
     }
 
     func testPrivateReceiptBindingRejectsCopiedContentAtWrongResource() throws {
@@ -589,13 +718,38 @@ final class FoundationDownloadsTests: XCTestCase {
         let lease = try await fixture.manager.playbackResource(
             for: fixture.good, allowsRemoteFallback: false)
         let removal = Task { await fixture.manager.removeAll() }
-        try await waitUntilAsync { await gate.started }
+        guard await gate.waitForStart() else {
+            removal.cancel()
+            await gate.resume()
+            await lease.release()
+            do {
+                try await waitForExternalFixtureTask(removal, name: "abandoned removal")
+                try await drainDownloadFixture(
+                    fixture.manager, gate: gate, expectsProtectedReceiptRetention: true)
+            } catch { XCTFail("Download fixture cleanup did not drain: \(error)") }
+            XCTFail("Download fixture gate did not enter within 3 seconds")
+            return
+        }
+        addTeardownBlock { @MainActor in
+            removal.cancel()
+            await gate.resume()
+            await lease.release()
+            try await self.waitForExternalFixtureTask(removal, name: "removal teardown")
+            try await self.drainDownloadFixture(
+                fixture.manager, gate: gate, expectsProtectedReceiptRetention: true)
+        }
         XCTAssertTrue(fixture.manager.isLoading)
         await lease.release()
         // The loading guard defers cleanup until verification/publication completes.
         XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.file.path))
         XCTAssertEqual(try Data(contentsOf: fixture.store.receiptURL), receipt)
         await gate.resume()
+        try await waitForFixtureWork(
+            "held testLeaseReleasedDuringRemovalRecoveryDeletesOnlyVerifiedPendingFileAfterPublication completion",
+            manager: fixture.manager
+        ) {
+            _ = await removal.value
+        }
         let removed = await removal.value
         XCTAssertFalse(removed)
         XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.file.path))
@@ -979,11 +1133,17 @@ final class FoundationDownloadsTests: XCTestCase {
 
     func testAnnouncementAllowsAbsentTargetAndFirstSuccessfulCompletionSealsOnce() async throws {
         let f = try firstCompletionFixture()
+        let run = Task { try await f.delegate.run(f.task) }
+        let completionState = NativeCompletionFixtureState()
+        addTeardownBlock { @MainActor in
+            try await self.waitForNativeCompletion(
+                run, delegate: f.delegate, session: f.session, state: completionState)
+        }
         defer {
+            run.cancel()
             f.delegate.activateDelegateQueue()
             f.session.invalidateAndCancel()
         }
-        let run = Task { try await f.delegate.run(f.task) }
         try await waitUntil { (try? f.store.load().phase) == .resuming }
         XCTAssertFalse(FileManager.default.fileExists(atPath: f.proof.target.path))
         try f.delegate.recordAnnouncement(f.proof.target, session: f.session, task: f.task)
@@ -994,6 +1154,8 @@ final class FoundationDownloadsTests: XCTestCase {
         let parentPin = try f.store.load().namespaceBookmark
         try f.proof.materialize()  // Parent generation changes legitimately across child creation.
         f.delegate.urlSession(f.session, task: f.task, didCompleteWithError: nil)
+        try await waitForNativeCompletion(
+            run, delegate: f.delegate, session: f.session, state: completionState)
         let result = try await run.value
         XCTAssertEqual(result, f.proof.target)
         let sealed = try f.store.completedPackage(taskIdentifier: f.task.taskIdentifier)
@@ -1009,12 +1171,18 @@ final class FoundationDownloadsTests: XCTestCase {
     func testFirstCompletionRejectsForeignSessionAndTaskBeforeTargetAccess() async throws {
         let f = try firstCompletionFixture()
         let foreignSession = URLSession(configuration: .ephemeral)
+        let run = Task { try await f.delegate.run(f.task) }
+        let completionState = NativeCompletionFixtureState()
+        addTeardownBlock { @MainActor in
+            try await self.waitForNativeCompletion(
+                run, delegate: f.delegate, session: f.session, state: completionState)
+        }
         defer {
+            run.cancel()
             f.delegate.activateDelegateQueue()
             f.session.invalidateAndCancel()
             foreignSession.invalidateAndCancel()
         }
-        let run = Task { try await f.delegate.run(f.task) }
         try await waitUntil { (try? f.store.load().phase) == .resuming }
         try f.delegate.recordAnnouncement(f.proof.target, session: f.session, task: f.task)
         let foreignTask = f.session.dataTask(
@@ -1026,22 +1194,32 @@ final class FoundationDownloadsTests: XCTestCase {
         XCTAssertNil(try f.store.load().completionAttempted)
         try f.proof.materialize()
         f.delegate.urlSession(f.session, task: f.task, didCompleteWithError: nil)
+        try await waitForNativeCompletion(
+            run, delegate: f.delegate, session: f.session, state: completionState)
         _ = try await run.value
         XCTAssertEqual(f.proof.packageSnapshots, 1)
     }
 
     func testFirstCompletionRejectsNamespaceReplacementBeforeAnyTargetRead() async throws {
         let f = try firstCompletionFixture()
+        let run = Task { try await f.delegate.run(f.task) }
+        let completionState = NativeCompletionFixtureState()
+        addTeardownBlock { @MainActor in
+            try await self.waitForNativeCompletion(
+                run, delegate: f.delegate, session: f.session, state: completionState)
+        }
         defer {
+            run.cancel()
             f.delegate.activateDelegateQueue()
             f.session.invalidateAndCancel()
         }
-        let run = Task { try await f.delegate.run(f.task) }
         try await waitUntil { (try? f.store.load().phase) == .resuming }
         try f.delegate.recordAnnouncement(f.proof.target, session: f.session, task: f.task)
         try f.proof.materialize()
         f.proof.replaceParent()
         f.delegate.urlSession(f.session, task: f.task, didCompleteWithError: nil)
+        try await waitForNativeCompletion(
+            run, delegate: f.delegate, session: f.session, state: completionState)
         do {
             _ = try await run.value
             XCTFail("Replacement parent sealed")
@@ -1056,16 +1234,24 @@ final class FoundationDownloadsTests: XCTestCase {
 
     func testFailedFirstCompletionCannotResnapshotThroughDuplicateOrColdOwner() async throws {
         let f = try firstCompletionFixture()
+        let run = Task { try await f.delegate.run(f.task) }
+        let completionState = NativeCompletionFixtureState()
+        addTeardownBlock { @MainActor in
+            try await self.waitForNativeCompletion(
+                run, delegate: f.delegate, session: f.session, state: completionState)
+        }
         defer {
+            run.cancel()
             f.delegate.activateDelegateQueue()
             f.session.invalidateAndCancel()
         }
-        let run = Task { try await f.delegate.run(f.task) }
         try await waitUntil { (try? f.store.load().phase) == .resuming }
         try f.delegate.recordAnnouncement(f.proof.target, session: f.session, task: f.task)
         try f.proof.materialize()
         f.proof.failPackageSnapshot()
         f.delegate.urlSession(f.session, task: f.task, didCompleteWithError: nil)
+        try await waitForNativeCompletion(
+            run, delegate: f.delegate, session: f.session, state: completionState)
         do {
             _ = try await run.value
             XCTFail("Failed bookmark sealed")
@@ -1092,16 +1278,24 @@ final class FoundationDownloadsTests: XCTestCase {
         async throws
     {
         let f = try firstCompletionFixture()
+        let run = Task { try await f.delegate.run(f.task) }
+        let completionState = NativeCompletionFixtureState()
+        addTeardownBlock { @MainActor in
+            try await self.waitForNativeCompletion(
+                run, delegate: f.delegate, session: f.session, state: completionState)
+        }
         defer {
+            run.cancel()
             f.delegate.activateDelegateQueue()
             f.session.invalidateAndCancel()
         }
-        let run = Task { try await f.delegate.run(f.task) }
         try await waitUntil { (try? f.store.load().phase) == .resuming }
         try f.delegate.recordAnnouncement(f.proof.target, session: f.session, task: f.task)
         try f.proof.materialize()
         f.proof.changeTargetDuringSnapshot()
         f.delegate.urlSession(f.session, task: f.task, didCompleteWithError: nil)
+        try await waitForNativeCompletion(
+            run, delegate: f.delegate, session: f.session, state: completionState)
         do {
             _ = try await run.value
             XCTFail("Changing resource identity sealed")
@@ -1118,11 +1312,17 @@ final class FoundationDownloadsTests: XCTestCase {
     func testCancelledFatalAndRetiredAcquisitionsCannotCreateFirstCompletionProof() async throws {
         for mode in 0..<3 {
             let f = try firstCompletionFixture()
+            let run = Task { try await f.delegate.run(f.task) }
+            let completionState = NativeCompletionFixtureState()
+            addTeardownBlock { @MainActor in
+                try await self.waitForNativeCompletion(
+                    run, delegate: f.delegate, session: f.session, state: completionState)
+            }
             defer {
+                run.cancel()
                 f.delegate.activateDelegateQueue()
                 f.session.invalidateAndCancel()
             }
-            let run = Task { try await f.delegate.run(f.task) }
             try await waitUntil { (try? f.store.load().phase) == .resuming }
             try f.delegate.recordAnnouncement(f.proof.target, session: f.session, task: f.task)
             if mode == 0 { run.cancel() }
@@ -1137,6 +1337,8 @@ final class FoundationDownloadsTests: XCTestCase {
                 try JSONSerialization.data(withJSONObject: receipt).write(to: f.store.receiptURL)
             }
             f.delegate.urlSession(f.session, task: f.task, didCompleteWithError: nil)
+            try await waitForNativeCompletion(
+                run, delegate: f.delegate, session: f.session, state: completionState)
             do {
                 _ = try await run.value
                 XCTFail("Ineligible acquisition sealed")
@@ -1144,6 +1346,32 @@ final class FoundationDownloadsTests: XCTestCase {
             XCTAssertEqual(f.proof.targetReads, 0)
             XCTAssertEqual(f.proof.packageSnapshots, 0)
             XCTAssertNil(try f.store.load().package)
+        }
+    }
+
+    private final class NativeCompletionFixtureState {
+        var timedOut = false
+    }
+
+    private func waitForNativeCompletion(
+        _ task: Task<URL, Error>, delegate: FoundationNativeDownloadDelegate, session: URLSession,
+        state: NativeCompletionFixtureState
+    ) async throws {
+        guard !state.timedOut else { return }
+        let returned = XCTestExpectation(description: "native fixture completion returned")
+        let observer = Task {
+            _ = await task.result
+            returned.fulfill()
+        }
+        guard await XCTWaiter.fulfillment(of: [returned], timeout: 5) == .completed else {
+            state.timedOut = true
+            task.cancel()
+            delegate.activateDelegateQueue()
+            session.invalidateAndCancel()
+            observer.cancel()
+            await rootRetention.retain()
+            throw FixtureWorkTimeout(
+                description: "Native completion did not return in 5 seconds; fixture retained")
         }
     }
 
@@ -1381,7 +1609,20 @@ final class FoundationDownloadsTests: XCTestCase {
                 XCTFail("Cancelled task succeeded")
             } catch { observation.finish() }
         }
-        try await waitUntilAsync { await gate.started }
+        guard await gate.waitForStart() else {
+            operation.cancel()
+            await gate.resume()
+            do {
+                try await waitForExternalFixtureTask(operation, name: "abandoned native operation")
+            } catch { XCTFail("Download fixture cleanup did not drain: \(error)") }
+            XCTFail("Download fixture gate did not enter within 3 seconds")
+            return
+        }
+        addTeardownBlock { @MainActor in
+            operation.cancel()
+            await gate.resume()
+            try await self.waitForExternalFixtureTask(operation, name: "native operation teardown")
+        }
         operation.cancel()  // Already cancelled before run attaches/resumes its URLSession task.
         await gate.resume()
         try await waitUntil { observation.finished }
@@ -1471,7 +1712,16 @@ final class FoundationDownloadsTests: XCTestCase {
                 }
                 return identifiers
             })
-        try await waitUntilAsync { await gate.started }
+        guard await gate.waitForStart() else {
+            do { try await drainDownloadFixture(manager, gate: gate) } catch {
+                XCTFail("Download fixture cleanup did not drain: \(error)")
+            }
+            XCTFail("Download fixture gate did not enter within 3 seconds")
+            return
+        }
+        addTeardownBlock { @MainActor in
+            try await self.drainDownloadFixture(manager, gate: gate)
+        }
         var completed = false
         let callback = Task {
             let admitted = await manager.reconcileBackgroundSession(identifier)
@@ -1483,8 +1733,14 @@ final class FoundationDownloadsTests: XCTestCase {
         XCTAssertFalse(completed)
         XCTAssertEqual(observation.verifications, 1)
         await gate.resume()
+        try await waitForFixtureWork(
+            "held testBackgroundEventsReuseExistingInventoryWithoutOpeningAnotherNativeSession completion",
+            manager: manager
+        ) {
+            _ = await callback.value
+        }
         let admitted = await callback.value
-        XCTAssertTrue(admitted)
+        XCTAssertFalse(admitted)
         XCTAssertEqual(observation.verifications, 1)
         XCTAssertEqual(try store.load().retired, true)
         XCTAssertTrue(
@@ -1494,16 +1750,20 @@ final class FoundationDownloadsTests: XCTestCase {
         XCTAssertFalse(historical)
         manager.recordBackgroundSessionDrain(identifier)
         let alreadyDrainedHistorical = await manager.reconcileBackgroundSession(identifier)
-        XCTAssertFalse(alreadyDrainedHistorical)
+        XCTAssertTrue(alreadyDrainedHistorical)
         manager.invalidate()
     }
 
     func testBackgroundEventsWaitForLiveAcquisitionWithoutCancellingOrDuplicatingIt() async throws {
-        let storageRoot = try root()
+        let storageRoot = FileManager.default.temporaryDirectory.appendingPathComponent(
+            UUID().uuidString)
+        try FileManager.default.createDirectory(at: storageRoot, withIntermediateDirectories: true)
+        // This fixture deliberately leaves an ambiguous native receipt. Retain its
+        // protected store after owned work returns; no synthetic finality is invented.
         let scope = "background-live-acquisition"
         let track = item("live-native")
         let directory = FoundationDownloadStorage.directory(scope: scope, root: storageRoot)
-        let gate = DownloadGate()
+        let gate = OneShotDownloadGate()
         let observation = NativeDownloadVerificationFixture()
         let terminalDelivery = NativeDownloadVerificationFixture()
         let manager = FoundationDownloads(
@@ -1533,6 +1793,7 @@ final class FoundationDownloadsTests: XCTestCase {
                 }
                 let failure = Task {
                     await gate.wait()
+                    delegate.urlSessionDidFinishEvents(forBackgroundURLSession: session)
                     delegate.urlSession(
                         session,
                         didBecomeInvalidWithError: URLError(.backgroundSessionWasDisconnected))
@@ -1540,54 +1801,192 @@ final class FoundationDownloadsTests: XCTestCase {
                         session,
                         didBecomeInvalidWithError: URLError(.backgroundSessionWasDisconnected))
                 }
-                defer { failure.cancel() }
-                _ = try await delegate.run(task)
-                XCTFail("Systemic invalidation returned a successful allocation")
-                throw FoundationDownloadError.incomplete
+                do {
+                    _ = try await delegate.run(task)
+                    await failure.value
+                    XCTFail("Systemic invalidation returned a successful allocation")
+                    throw FoundationDownloadError.incomplete
+                } catch {
+                    await failure.value
+                    throw error
+                }
             },
             nativeRetirement: { _, _ in
                 XCTFail("Live task opened a duplicate recovery session")
                 return []
             })
-        manager.updateConnectivity(isAllowed: true)
-        manager.download(track)
-        try await waitUntilAsync { await gate.started }
-        let identifier = try XCTUnwrap(
-            FoundationDownloadStorage.load(directory: directory).nativePendingSessions?.first)
-        let store = FoundationNativeAllocationStore(
-            directory: directory, sessionIdentifier: identifier)
-        try await waitUntil { (try? store.load().phase) == .resuming }
-        manager.recordBackgroundSessionDrain(identifier)
-        XCTAssertTrue(manager.backgroundSessionHasDrained(identifier))
-        var completed = false
-        let callback = Task {
-            let admitted = await manager.reconcileBackgroundSession(identifier)
-            completed = true
-            return admitted
+        var callback: Task<Bool, Never>?
+        var drainAttempted = false
+        func drainOwnedWork() async -> Bool {
+            guard !drainAttempted else { return false }
+            drainAttempted = true
+            let finished = XCTestExpectation(description: "live acquisition fixture drained")
+            let drain = Task {
+                let cleared = await manager.clearAccount()
+                if let callback { _ = await callback.value }
+                finished.fulfill()
+                return cleared
+            }
+            let result = await XCTWaiter.fulfillment(of: [finished], timeout: 5)
+            guard result == .completed else {
+                drain.cancel()
+                return false
+            }
+            let cleared = await drain.value
+            XCTAssertFalse(cleared, "Ambiguous live acquisition receipt must refuse cleanup")
+            await rootRetention.retain()
+            guard !cleared else { return false }
+            return true
         }
-        await Task.yield()
-        XCTAssertFalse(completed)
-        XCTAssertEqual(observation.verifications, 1)
-        XCTAssertFalse(manager.isReady(track))
-        await gate.resume()
-        let admitted = await callback.value
-        XCTAssertTrue(admitted)
-        XCTAssertEqual(terminalDelivery.verifications, 1)
-        XCTAssertEqual(observation.verifications, 1)
-        let saved = try FoundationDownloadStorage.load(directory: directory)
-        XCTAssertTrue(saved.nativePendingSessions?.contains(identifier) == true)
-        XCTAssertEqual(saved.owners.first?.paused, true)
-        XCTAssertEqual(manager.owners.first?.state, .failed)
-        let retained = try FoundationNativeAllocationStore(
-            directory: directory, sessionIdentifier: identifier
-        ).load()
-        XCTAssertEqual(retained.phase, .resuming)
-        XCTAssertNil(retained.retired)
-        XCTAssertFalse(manager.isReady(track))
-        manager.invalidate()
+        do {
+            manager.updateConnectivity(isAllowed: true)
+            manager.download(track)
+            try await waitUntilAsync { await gate.started }
+            let identifier = try XCTUnwrap(
+                FoundationDownloadStorage.load(directory: directory).nativePendingSessions?.first)
+            let store = FoundationNativeAllocationStore(
+                directory: directory, sessionIdentifier: identifier)
+            try await waitUntil { (try? store.load().phase) == .resuming }
+            manager.recordBackgroundSessionDrain(identifier)
+            XCTAssertTrue(manager.backgroundSessionHasDrained(identifier))
+            guard manager.backgroundSessionHasDrained(identifier) else { throw CancellationError() }
+            #if DEBUG
+                let joinEntered = XCTestExpectation(description: "live session join registered")
+                let functionReturned = XCTestExpectation(
+                    description: "background reconcile returned")
+                var joinTime: ContinuousClock.Instant?
+                var functionReturnTime: ContinuousClock.Instant?
+                var joinCount = 0
+                var returnCount = 0
+                manager.backgroundSessionJoinEnteredForTesting = { incoming, instant in
+                    guard incoming == identifier else { return }
+                    joinCount += 1
+                    if joinTime == nil {
+                        joinTime = instant
+                        joinEntered.fulfill()
+                    }
+                }
+                manager.backgroundSessionReconcileReturnedForTesting = { incoming, instant in
+                    guard incoming == identifier else { return }
+                    returnCount += 1
+                    if functionReturnTime == nil {
+                        functionReturnTime = instant
+                        functionReturned.fulfill()
+                    }
+                }
+                defer {
+                    manager.backgroundSessionJoinEnteredForTesting = nil
+                    manager.backgroundSessionReconcileReturnedForTesting = nil
+                }
+                func retireObservedCallback() async {
+                    callback?.cancel()
+                    await gate.resume()
+                    manager.invalidate()
+                    if !drainAttempted { _ = await drainOwnedWork() }
+                }
+            #endif
+            var completed = false
+            let callbackTask = Task {
+                let admitted = await manager.reconcileBackgroundSession(identifier)
+                completed = true
+                return admitted
+            }
+            callback = callbackTask
+            #if DEBUG
+                guard await XCTWaiter.fulfillment(of: [joinEntered], timeout: 5) == .completed
+                else {
+                    await retireObservedCallback()
+                    XCTFail(
+                        "Live background callback did not register its session join within 5 seconds"
+                    )
+                    return
+                }
+                XCTAssertEqual(joinCount, 1)
+                guard functionReturnTime == nil else {
+                    await retireObservedCallback()
+                    XCTFail("The actual reconcile function returned while acquisition was held")
+                    return
+                }
+            #else
+                await Task.yield()
+            #endif
+            XCTAssertFalse(completed)
+            XCTAssertEqual(observation.verifications, 1)
+            XCTAssertFalse(manager.isReady(track))
+            guard !completed, observation.verifications == 1, !manager.isReady(track)
+            else { throw CancellationError() }
+            await gate.resume()
+            #if DEBUG
+                guard await XCTWaiter.fulfillment(of: [functionReturned], timeout: 5) == .completed
+                else {
+                    await retireObservedCallback()
+                    XCTFail(
+                        "Live background reconcile did not acknowledge its function return within 5 seconds"
+                    )
+                    return
+                }
+                guard let releasedAt = await gate.releasedAtForTesting,
+                    let joinedAt = joinTime, let returnedAt = functionReturnTime
+                else {
+                    await retireObservedCallback()
+                    XCTFail("Missing actual session join/release/return receipts")
+                    return
+                }
+                XCTAssertLessThanOrEqual(joinedAt, releasedAt)
+                XCTAssertGreaterThanOrEqual(
+                    returnedAt, releasedAt,
+                    "The actual reconcile function returned before the held producer was released")
+                XCTAssertEqual(returnCount, 1)
+            #endif
+            let completedEvent = XCTestExpectation(description: "live background callback returned")
+            var admitted: Bool?
+            let callbackObserver = Task {
+                admitted = await callbackTask.value
+                completedEvent.fulfill()
+            }
+            let callbackResult = await XCTWaiter.fulfillment(of: [completedEvent], timeout: 5)
+            guard callbackResult == .completed else {
+                callbackObserver.cancel()
+                callbackTask.cancel()
+                XCTFail("Live background callback did not finish; fixture retained")
+                throw CancellationError()
+            }
+            XCTAssertEqual(admitted, false)
+            XCTAssertEqual(terminalDelivery.verifications, 1)
+            XCTAssertEqual(observation.verifications, 1)
+            let saved = try FoundationDownloadStorage.load(directory: directory)
+            XCTAssertTrue(saved.nativePendingSessions?.contains(identifier) == true)
+            XCTAssertEqual(saved.owners.first?.paused, true)
+            XCTAssertEqual(manager.owners.first?.state, .failed)
+            let retained = try FoundationNativeAllocationStore(
+                directory: directory, sessionIdentifier: identifier
+            ).load()
+            XCTAssertEqual(retained.phase, .resuming)
+            XCTAssertNil(retained.retired)
+            XCTAssertFalse(manager.isReady(track))
+            guard admitted == false, terminalDelivery.verifications == 1,
+                observation.verifications == 1,
+                saved.nativePendingSessions?.contains(identifier) == true,
+                saved.owners.first?.paused == true,
+                manager.owners.first?.state == .failed, retained.phase == .resuming,
+                retained.retired == nil, !manager.isReady(track)
+            else { throw CancellationError() }
+            manager.invalidate()
+            guard await drainOwnedWork() else {
+                XCTFail("Live acquisition did not drain; fixture retained")
+                throw CancellationError()
+            }
+        } catch {
+            await gate.resume()
+            manager.invalidate()
+            if !drainAttempted, !(await drainOwnedWork()) {
+                XCTFail("Live acquisition did not drain after failure; fixture retained")
+            }
+            throw error
+        }
     }
 
-    func testNativeBackgroundDelegateForwardsEventDrainAtBothEstablishedSessionBoundaries() throws {
+    func testNativeBackgroundDelegateForwardsOnlyActualEventDrain() throws {
         let directory = try root()
         let identifier =
             "dev.novoluxor.velacanto.offline." + directory.lastPathComponent + "."
@@ -1606,9 +2005,9 @@ final class FoundationDownloadsTests: XCTestCase {
         delegate.urlSessionDidFinishEvents(forBackgroundURLSession: session)
         XCTAssertEqual(observation.verifications, 1)
         delegate.urlSession(session, didBecomeInvalidWithError: nil)
-        XCTAssertEqual(observation.verifications, 2)
+        XCTAssertEqual(observation.verifications, 1)
         delegate.urlSession(session, didBecomeInvalidWithError: URLError(.unknown))
-        XCTAssertEqual(observation.verifications, 2)
+        XCTAssertEqual(observation.verifications, 1)
         // Merely draining callbacks cannot invent a receipt, retire a file or mark ready.
         XCTAssertFalse(FileManager.default.fileExists(atPath: store.receiptURL.path))
     }
@@ -1632,6 +2031,9 @@ final class FoundationDownloadsTests: XCTestCase {
         defer { session.invalidateAndCancel() }
         let task = session.dataTask(with: URL(string: "https://example.invalid/never-started")!)
         task.cancel()
+        XCTAssertEqual(deliveries.verifications, 0)
+        delegate.urlSessionDidFinishEvents(forBackgroundURLSession: session)
+        XCTAssertEqual(deliveries.verifications, 1)
         delegate.urlSession(
             session, didBecomeInvalidWithError: URLError(.backgroundSessionWasDisconnected))
         delegate.urlSession(session, didBecomeInvalidWithError: URLError(.unknown))
@@ -1670,13 +2072,22 @@ final class FoundationDownloadsTests: XCTestCase {
             backgroundEventsFinished: { _ in deliveries.recordVerification() })
         let session = URLSession(configuration: .ephemeral)
         defer { session.invalidateAndCancel() }
+        XCTAssertEqual(deliveries.verifications, 0)
+        delegate.urlSessionDidFinishEvents(forBackgroundURLSession: session)
         delegate.urlSession(
             session, didBecomeInvalidWithError: URLError(.backgroundSessionInUseByAnotherProcess))
         delegate.urlSession(session, didBecomeInvalidWithError: URLError(.unknown))
+        let retirementChecks = NativeDownloadVerificationFixture()
         do {
-            try await delegate.retire(session)
+            try await delegate.retire(
+                session,
+                mayRetire: {
+                    retirementChecks.recordVerification()
+                    return true
+                })
             XCTFail("Failed reconnection invented retirement proof")
         } catch { XCTAssertEqual(error as? FoundationDownloadError, .cleanup) }
+        XCTAssertEqual(retirementChecks.verifications, 0)
         XCTAssertEqual(deliveries.verifications, 1)
         XCTAssertEqual(try Data(contentsOf: store.receiptURL), before)
         XCTAssertEqual(try store.load().phase, .resuming)
@@ -1969,6 +2380,9 @@ final class FoundationDownloadsTests: XCTestCase {
             + UUID().uuidString
         let store = FoundationNativeAllocationStore(
             directory: directory, sessionIdentifier: session, trackID: "track")
+        try store.reserve()
+        try store.beginCreating()
+        try store.bindCreatedTask(taskIdentifier: 8)
         let target = directory.appendingPathComponent("synthetic.movpkg", isDirectory: true)
         try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
         try store.capture(
@@ -2250,7 +2664,16 @@ final class FoundationDownloadsTests: XCTestCase {
             requestedQuality: { quality })
         manager.updateConnectivity(isAllowed: true)
         manager.download(track)
-        try await waitUntilAsync { await gate.started }
+        guard await gate.waitForStart() else {
+            do { try await drainDownloadFixture(manager, gate: gate) } catch {
+                XCTFail("Download fixture cleanup did not drain: \(error)")
+            }
+            XCTFail("Download fixture gate did not enter within 3 seconds")
+            return
+        }
+        addTeardownBlock { @MainActor in
+            try await self.drainDownloadFixture(manager, gate: gate)
+        }
         manager.cancel(ownerID: "track:" + track.id)
         quality = .aac320
         await gate.resume()
@@ -2261,29 +2684,56 @@ final class FoundationDownloadsTests: XCTestCase {
         XCTAssertEqual(manager.owners.first?.requestedQuality, .aac192)
         let qualities = await library.requestedQualities
         XCTAssertTrue(qualities.allSatisfy { $0 == .aac192 })
-        _ = await manager.clearAccount()
+        _ = await clearFixtureOwner(manager)
     }
 
     func testRetiredAccountRejectsLateConvertedCompletionAndRemovesStagedBytes() async throws {
         let root = try root()
         let track = item("late-converted")
-        let gate = DownloadGate()
+        let gate = OneShotDownloadGate()
+        let cancelled = XCTestExpectation(description: "converted transfer cancelled on retirement")
+        let finished = XCTestExpectation(description: "converted account cleanup finished")
         let manager = FoundationDownloads(
             scope: "late-converted", library: DownloadsLibrary(tracks: [track]), root: root,
             monitorConnectivity: false,
             convertedTransfer: { proposal, target, cellular, progress in
-                await gate.wait()  // Deliberately ignores cancellation to emulate a late result.
+                await withTaskCancellationHandler {
+                    // Deliberately ignores cancellation to emulate a late result.
+                    await gate.wait()
+                } onCancel: {
+                    cancelled.fulfill()
+                }
                 return try await Self.syntheticConvertedTransfer(
                     proposal, target, cellular, progress)
             }, requestedQuality: { .aac128 })
         manager.updateConnectivity(isAllowed: true)
         manager.download(track)
-        try await waitUntilAsync { await gate.started }
-        let cleanup = Task { await manager.clearAccount() }
-        for _ in 0..<10 { await Task.yield() }
+        guard await gate.waitForStart() else {
+            manager.invalidate()
+            await gate.resume()
+            XCTFail("Download transfer did not enter its hold within 3 seconds")
+            return
+        }
+        var removed: Bool?
+        let cleanup = Task {
+            removed = await manager.clearAccount()
+            finished.fulfill()
+        }
+        guard await XCTWaiter.fulfillment(of: [cancelled], timeout: 5) == .completed else {
+            manager.invalidate()
+            cleanup.cancel()
+            await gate.resume()
+            XCTFail("Converted transfer was not cancelled by account retirement within 5 seconds")
+            return
+        }
+        XCTAssertNil(removed, "Cleanup must wait for the held transfer")
         await gate.resume()
-        let removed = await cleanup.value
-        XCTAssertTrue(removed)
+        guard await XCTWaiter.fulfillment(of: [finished], timeout: 5) == .completed else {
+            cleanup.cancel()
+            XCTFail("Converted download cleanup did not finish within 5 seconds")
+            return
+        }
+        XCTAssertEqual(removed, true)
         XCTAssertFalse(manager.isReady(track))
         XCTAssertTrue(manager.owners.isEmpty)
         let directory = FoundationDownloadStorage.directory(scope: "late-converted", root: root)
@@ -2483,11 +2933,22 @@ final class FoundationDownloadsTests: XCTestCase {
                 monitorConnectivity: false)
             manager.updateConnectivity(isAllowed: true)
             manager.download(ready)
-            try await waitUntilAsync { await gate.started }
+            guard await gate.waitForStart() else {
+                do { try await drainDownloadFixture(manager, gate: gate) } catch {
+                    XCTFail("Download fixture cleanup did not drain: \(error)")
+                }
+                XCTFail("Download fixture gate did not enter within 3 seconds")
+                return
+            }
+            addTeardownBlock { @MainActor in
+                try await self.drainDownloadFixture(manager, gate: gate)
+            }
             XCTAssertTrue(manager.isReady(ready), "Optional preparation must not delay ready files")
             if retire { manager.invalidate() } else { manager.updateConnectivity(isAllowed: false) }
             await gate.resume()
-            await manager.waitForCurrentReconciliationForTesting()
+            try await waitForFixtureWork("held reconciliation", manager: manager) {
+                await manager.waitForCurrentReconciliationForTesting()
+            }
             XCTAssertTrue(manager.downloadedPlaylists.isEmpty)
             XCTAssertTrue(manager.knownCollectionTracks(for: target).isEmpty)
             let stored = try FoundationDownloadStorage.load(
@@ -2495,7 +2956,7 @@ final class FoundationDownloadsTests: XCTestCase {
             XCTAssertTrue(
                 stored.collections?.isEmpty ?? true,
                 "A retired response must not write membership to disk")
-            _ = await manager.clearAccount()
+            _ = await clearFixtureOwner(manager)
         }
     }
 
@@ -2520,9 +2981,20 @@ final class FoundationDownloadsTests: XCTestCase {
         XCTAssertFalse(canonical.isRetainedSnapshot)
         manager.updateConnectivity(isAllowed: true)
         manager.download(ready)
-        try await waitUntilAsync { await gate.started }
+        guard await gate.waitForStart() else {
+            do { try await drainDownloadFixture(manager, gate: gate) } catch {
+                XCTFail("Download fixture cleanup did not drain: \(error)")
+            }
+            XCTFail("Download fixture gate did not enter within 3 seconds")
+            return
+        }
+        addTeardownBlock { @MainActor in
+            try await self.drainDownloadFixture(manager, gate: gate)
+        }
         await gate.resume()
-        await manager.waitForCurrentReconciliationForTesting()
+        try await waitForFixtureWork("held reconciliation", manager: manager) {
+            await manager.waitForCurrentReconciliationForTesting()
+        }
         XCTAssertEqual(canonical.rawItems.map(\.id), [ready.id, ready.id])
         XCTAssertEqual(manager.availability(for: target), .ready)
         XCTAssertEqual(
@@ -2536,7 +3008,15 @@ final class FoundationDownloadsTests: XCTestCase {
             monitorConnectivity: false)
         try await waitUntil { !restored.isLoading }
         XCTAssertEqual(restored.browseTracks(for: target).map(\.id), [ready.id, ready.id])
-        _ = await restored.clearAccount()
+        #if DEBUG
+            try await waitForFixtureWork("restored preparation owner retirement", manager: restored)
+            {
+                await restored.retireOwnedFixtureTasksForTesting()
+            }
+            _ = await clearFixtureOwner(manager)
+        #else
+            _ = await clearFixtureOwner(restored)
+        #endif
     }
 
     func testNewOrIndependentlyChangedCanonicalPageWinsPendingPreparation() async throws {
@@ -2559,11 +3039,22 @@ final class FoundationDownloadsTests: XCTestCase {
             }
             manager.updateConnectivity(isAllowed: true)
             manager.download(ready)
-            try await waitUntilAsync { await gate.started }
+            guard await gate.waitForStart() else {
+                do { try await drainDownloadFixture(manager, gate: gate) } catch {
+                    XCTFail("Download fixture cleanup did not drain: \(error)")
+                }
+                XCTFail("Download fixture gate did not enter within 3 seconds")
+                return
+            }
+            addTeardownBlock { @MainActor in
+                try await self.drainDownloadFixture(manager, gate: gate)
+            }
             let current = manager.collectionModel(for: target)
             await current.load(.refresh) { _ in .init(items: [ready, ready], nextStartIndex: nil) }
             await gate.resume()
-            await manager.waitForCurrentReconciliationForTesting()
+            try await waitForFixtureWork("held reconciliation", manager: manager) {
+                await manager.waitForCurrentReconciliationForTesting()
+            }
             XCTAssertEqual(current.rawItems.map(\.id), [ready.id, ready.id])
             XCTAssertEqual(
                 manager.knownCollectionTracks(for: target).map(\.id), [ready.id, ready.id])
@@ -2576,7 +3067,7 @@ final class FoundationDownloadsTests: XCTestCase {
                 stored.collections?.isEmpty ?? true,
                 "An older preparation must not persist over a newly opened or independently changed page"
             )
-            _ = await manager.clearAccount()
+            _ = await clearFixtureOwner(manager)
         }
     }
 
@@ -2592,13 +3083,24 @@ final class FoundationDownloadsTests: XCTestCase {
             monitorConnectivity: false)
         manager.updateConnectivity(isAllowed: true)
         manager.download(ready)
-        try await waitUntilAsync { await gate.started }
+        guard await gate.waitForStart() else {
+            do { try await drainDownloadFixture(manager, gate: gate) } catch {
+                XCTFail("Download fixture cleanup did not drain: \(error)")
+            }
+            XCTFail("Download fixture gate did not enter within 3 seconds")
+            return
+        }
+        addTeardownBlock { @MainActor in
+            try await self.drainDownloadFixture(manager, gate: gate)
+        }
         manager.rememberCollection(target, tracks: [ready, ready], complete: true)
         await gate.resume()
-        await manager.waitForCurrentReconciliationForTesting()
+        try await waitForFixtureWork("held reconciliation", manager: manager) {
+            await manager.waitForCurrentReconciliationForTesting()
+        }
         XCTAssertEqual(manager.knownCollectionTracks(for: target).map(\.id), [ready.id, ready.id])
         XCTAssertEqual(manager.downloadedPlaylists.map(\.id), [target.id])
-        _ = await manager.clearAccount()
+        _ = await clearFixtureOwner(manager)
     }
 
     func testAutomaticPlaylistPreparationReportsCandidateBudgetWithoutFalseCompletion() async throws
@@ -2808,7 +3310,7 @@ final class FoundationDownloadsTests: XCTestCase {
     {
         let first = item("first")
         let second = item("second")
-        let gate = DownloadGate()
+        let gate = OneShotDownloadGate()
         let reporter = DownloadProgressReporter()
         let manager = FoundationDownloads(
             scope: "fixture", library: DownloadsLibrary(tracks: [first, second]), root: try root(),
@@ -2822,24 +3324,77 @@ final class FoundationDownloadsTests: XCTestCase {
         manager.updateConnectivity(isAllowed: true)
         manager.download(playlist)
         XCTAssertEqual(manager.transferOwner(for: playlist)?.state, .queued)
-        try await waitUntilAsync { await gate.started }
+        guard await gate.waitForStart() else {
+            manager.invalidate()
+            await gate.resume()
+            XCTFail("Download transfer did not enter its hold within 3 seconds")
+            return
+        }
         XCTAssertEqual(manager.transferOwner(for: first)?.activeTrackID, "first")
         XCTAssertNil(manager.transferOwner(for: first)?.activeTrackProgress)
         XCTAssertEqual(manager.transferOwner(for: second)?.activeTrackID, "first")
+        // Establish a non-nil value so its return to nil acknowledges the unknown-total callback.
+        func waitForProgress(_ value: Double?) async -> Bool {
+            let deadline = ContinuousClock.now.advanced(by: .seconds(3))
+            while manager.transferOwner(for: first)?.activeTrackProgress != value,
+                !Task.isCancelled, ContinuousClock.now < deadline
+            {
+                try? await Task.sleep(for: .milliseconds(5))
+            }
+            return !Task.isCancelled
+                && manager.transferOwner(for: first)?.activeTrackProgress == value
+        }
+        await reporter.report(5, 20)
+        guard await waitForProgress(0.25) else {
+            manager.invalidate()
+            await gate.resume()
+            XCTFail("Known transfer progress did not arrive within 3 seconds")
+            return
+        }
         await reporter.report(5, nil)
-        for _ in 0..<10 { await Task.yield() }
+        guard await waitForProgress(nil) else {
+            manager.invalidate()
+            await gate.resume()
+            XCTFail("Unknown transfer progress did not arrive within 3 seconds")
+            return
+        }
         XCTAssertNil(manager.transferOwner(for: first)?.activeTrackProgress)
         await reporter.report(5, 20)
-        try await waitUntil { manager.transferOwner(for: first)?.activeTrackProgress == 0.25 }
+        guard await waitForProgress(0.25) else {
+            manager.invalidate()
+            await gate.resume()
+            XCTFail("Repeated transfer progress did not arrive within 3 seconds")
+            return
+        }
         // Cancelling a different queued owner must not revoke the active owner's progress callbacks.
         manager.download(second)
         XCTAssertEqual(manager.transferOwner(for: second)?.state, .queued)
         manager.cancel(ownerID: "track:second")
         await reporter.report(10, 20)
-        try await waitUntil { manager.transferOwner(for: first)?.activeTrackProgress == 0.5 }
+        guard await waitForProgress(0.5) else {
+            manager.invalidate()
+            await gate.resume()
+            XCTFail("Advanced transfer progress did not arrive within 3 seconds")
+            return
+        }
         manager.cancel(ownerID: "playlist:playlist")
-        await reporter.report(20, 20)
-        for _ in 0..<10 { await Task.yield() }
+        #if DEBUG
+            let staleCallbackSettled = XCTestExpectation(
+                description: "stale progress callback settled")
+            manager.progressCallbackSettledForTesting = { staleCallbackSettled.fulfill() }
+            defer { manager.progressCallbackSettledForTesting = nil }
+            await reporter.report(20, 20)
+            guard await XCTWaiter.fulfillment(of: [staleCallbackSettled], timeout: 3) == .completed
+            else {
+                manager.invalidate()
+                await gate.resume()
+                XCTFail("Cancelled progress callback did not settle within 3 seconds")
+                return
+            }
+        #else
+            await reporter.report(20, 20)
+            for _ in 0..<10 { await Task.yield() }
+        #endif
         XCTAssertNil(manager.transferOwner(for: first)?.activeTrackID)
         XCTAssertNil(manager.transferOwner(for: first)?.activeTrackProgress)
         XCTAssertEqual(manager.transferOwner(for: first)?.state, .cancelled)
@@ -2873,31 +3428,73 @@ final class FoundationDownloadsTests: XCTestCase {
         _ = await manager.clearAccount()
     }
 
+    @MainActor
+    private final class LeaseCleanupObservation {
+        let finished = XCTestExpectation(description: "download cleanup finished")
+        let premature: XCTestExpectation = {
+            let event = XCTestExpectation(description: "cleanup while second lease is held")
+            event.isInverted = true
+            return event
+        }()
+        var observingSecondLease = false
+        private(set) var result: Bool?
+
+        func record(_ value: Bool) {
+            result = value
+            if observingSecondLease { premature.fulfill() }
+            finished.fulfill()
+        }
+    }
+
     func testAccountCleanupWaitsForAllPlaybackLeasesBeforeReportingSuccess() async throws {
         let track = item("track")
         let directory = try root()
         let account = FoundationDownloadStorage.directory(scope: "fixture", root: directory)
+        let leaseEntered = XCTestExpectation(description: "download cleanup entered lease wait")
+        let observation = LeaseCleanupObservation()
         let manager = FoundationDownloads(
             scope: "fixture", library: DownloadsLibrary(tracks: [track]), root: directory,
-            transfer: transfer, monitorConnectivity: false)
+            transfer: transfer, monitorConnectivity: false,
+            leaseWaitStarted: { leaseEntered.fulfill() })
         manager.updateConnectivity(isAllowed: true)
         manager.download(track)
         try await waitUntil { manager.isReady(track) }
         let first = try await manager.playbackResource(for: track)
         let second = try await manager.playbackResource(for: track)
-        var result: Bool?
-        let cleanup = Task { result = await manager.clearAccount(waitForPlayback: true) }
-        // The account is retired immediately, while native items still own both files leases.
-        for _ in 0..<20 { await Task.yield() }
-        XCTAssertNil(result)
+        let cleanup = Task {
+            let result = await manager.clearAccount(waitForPlayback: true)
+            observation.record(result)
+        }
+        guard await XCTWaiter.fulfillment(of: [leaseEntered], timeout: 5) == .completed else {
+            cleanup.cancel()
+            await first.release()
+            await second.release()
+            XCTFail("Download cleanup did not enter lease wait within 5 seconds")
+            return
+        }
+        // The account is retired while native items still own both file leases.
+        XCTAssertNil(observation.result)
         XCTAssertTrue(FileManager.default.fileExists(atPath: first.url.path))
+        observation.observingSecondLease = true
         await first.release()
-        for _ in 0..<20 { await Task.yield() }
-        XCTAssertNil(result)
+        let heldResult = await XCTWaiter.fulfillment(of: [observation.premature], timeout: 0.2)
+        observation.observingSecondLease = false
+        guard heldResult == .completed && observation.result == nil else {
+            cleanup.cancel()
+            await second.release()
+            XCTFail("Download cleanup finished while the second lease was still held")
+            return
+        }
+        XCTAssertNil(observation.result)
         XCTAssertTrue(FileManager.default.fileExists(atPath: second.url.path))
         await second.release()
-        await cleanup.value
-        XCTAssertEqual(result, true)
+        guard await XCTWaiter.fulfillment(of: [observation.finished], timeout: 5) == .completed
+        else {
+            cleanup.cancel()
+            XCTFail("Download cleanup did not finish after lease release within 5 seconds")
+            return
+        }
+        XCTAssertEqual(observation.result, true)
         XCTAssertFalse(FileManager.default.fileExists(atPath: account.path))
         XCTAssertTrue(manager.owners.isEmpty)
         XCTAssertEqual(manager.storageBytes, 0)
@@ -2907,18 +3504,34 @@ final class FoundationDownloadsTests: XCTestCase {
         let track = item("track")
         let directory = try root()
         let account = FoundationDownloadStorage.directory(scope: "fixture", root: directory)
+        let leaseEntered = XCTestExpectation(description: "download cleanup entered lease wait")
+        let cleanupFinished = XCTestExpectation(description: "download cleanup finished")
         let manager = FoundationDownloads(
             scope: "fixture", library: DownloadsLibrary(tracks: [track]), root: directory,
-            transfer: transfer, monitorConnectivity: false)
+            transfer: transfer, monitorConnectivity: false,
+            leaseWaitStarted: { leaseEntered.fulfill() })
         manager.updateConnectivity(isAllowed: true)
         manager.download(track)
         try await waitUntil { manager.isReady(track) }
         let resource = try await manager.playbackResource(for: track)
-        let cleanup = Task { await manager.clearAccount(waitForPlayback: true) }
-        for _ in 0..<20 { await Task.yield() }
+        var cleared: Bool?
+        let cleanup = Task {
+            cleared = await manager.clearAccount(waitForPlayback: true)
+            cleanupFinished.fulfill()
+        }
+        guard await XCTWaiter.fulfillment(of: [leaseEntered], timeout: 5) == .completed else {
+            cleanup.cancel()
+            await resource.release()
+            XCTFail("Download cleanup did not enter lease wait within 5 seconds")
+            return
+        }
         cleanup.cancel()
-        let cleared = await cleanup.value
-        XCTAssertFalse(cleared)
+        guard await XCTWaiter.fulfillment(of: [cleanupFinished], timeout: 5) == .completed else {
+            await resource.release()
+            XCTFail("Cancelled download cleanup did not finish within 5 seconds")
+            return
+        }
+        XCTAssertEqual(cleared, false)
         XCTAssertTrue(FileManager.default.fileExists(atPath: resource.url.path))
         await resource.release()
         XCTAssertFalse(FileManager.default.fileExists(atPath: account.path))
@@ -2928,19 +3541,33 @@ final class FoundationDownloadsTests: XCTestCase {
         let track = item("track")
         let directory = try root()
         let account = FoundationDownloadStorage.directory(scope: "fixture", root: directory)
+        let leaseEntered = XCTestExpectation(description: "download cleanup entered lease wait")
+        let cleanupFinished = XCTestExpectation(description: "download cleanup finished")
         let manager = FoundationDownloads(
             scope: "fixture", library: DownloadsLibrary(tracks: [track]), root: directory,
-            transfer: transfer, monitorConnectivity: false)
+            transfer: transfer, monitorConnectivity: false,
+            leaseWaitStarted: { leaseEntered.fulfill() })
         manager.updateConnectivity(isAllowed: true)
         manager.download(track)
         try await waitUntil { manager.isReady(track) }
         let resource = try await manager.playbackResource(for: track)
-        let cleanup = Task { await manager.clearAccount(waitForPlayback: true) }
-        for _ in 0..<20 { await Task.yield() }
+        let cleanup = Task {
+            _ = await manager.clearAccount(waitForPlayback: true)
+            cleanupFinished.fulfill()
+        }
+        guard await XCTWaiter.fulfillment(of: [leaseEntered], timeout: 5) == .completed else {
+            cleanup.cancel()
+            await resource.release()
+            XCTFail("Download cleanup did not enter lease wait within 5 seconds")
+            return
+        }
         cleanup.cancel()
         // Deliberately release before joining cleanup, unlike the retained-lease cancellation case.
         await resource.release()
-        _ = await cleanup.value
+        guard await XCTWaiter.fulfillment(of: [cleanupFinished], timeout: 5) == .completed else {
+            XCTFail("Racing download cleanup did not finish within 5 seconds")
+            return
+        }
         XCTAssertFalse(FileManager.default.fileExists(atPath: account.path))
     }
 
@@ -2975,6 +3602,45 @@ final class FoundationDownloadsTests: XCTestCase {
         try await waitUntil { manager.errorMessage != nil }
         XCTAssertEqual(manager.owners.first?.tracks.map(\.id), ["track", "track"])
         XCTAssertTrue(manager.isReady(track))
+        _ = await manager.clearAccount()
+    }
+
+    func testOfflineTrackRevisionFollowsOwnerMetadataAndMembershipWithoutReadyIDChanges()
+        async throws
+    {
+        let track = item("track")
+        let playlist = item("playlist", kind: .playlist)
+        let library = DownloadsLibrary(tracks: [track])
+        let manager = FoundationDownloads(
+            scope: "fixture", library: library, root: try root(), transfer: transfer,
+            monitorConnectivity: false)
+        manager.updateConnectivity(isAllowed: true)
+        manager.download(playlist)
+        manager.download(track)
+        try await waitUntil {
+            manager.owners.count == 2 && manager.owners.allSatisfy { $0.state == .ready }
+        }
+        let readyRevision = manager.verifiedReadyRevision
+        let beforeMetadata = manager.offlineTrackCatalogRevision
+        var updated = track
+        updated.title = "Updated synthetic title"
+        await library.setTracks([updated])
+        manager.reconcilePlaylists()
+        try await waitUntil {
+            manager.owners.first(where: { $0.id == "playlist:playlist" })?.tracks.first?.title
+                == updated.title
+        }
+        XCTAssertEqual(manager.verifiedReadyRevision, readyRevision)
+        XCTAssertGreaterThan(manager.offlineTrackCatalogRevision, beforeMetadata)
+        XCTAssertEqual(manager.downloadedSongs.first?.title, updated.title)
+
+        let beforeStateOnly = manager.offlineTrackCatalogRevision
+        manager.cancel(ownerID: "track:track")
+        XCTAssertEqual(manager.offlineTrackCatalogRevision, beforeStateOnly)
+        manager.remove(ownerID: "playlist:playlist")
+        XCTAssertEqual(manager.verifiedReadyRevision, readyRevision)
+        XCTAssertGreaterThan(manager.offlineTrackCatalogRevision, beforeStateOnly)
+        XCTAssertEqual(manager.downloadedSongs.first?.title, track.title)
         _ = await manager.clearAccount()
     }
 
@@ -3158,7 +3824,7 @@ final class FoundationDownloadsTests: XCTestCase {
 
     func testLateTransferAfterAccountInvalidationCannotPublish() async throws {
         let track = item("track")
-        let gate = DownloadGate()
+        let gate = OneShotDownloadGate()
         let manager = FoundationDownloads(
             scope: "fixture", library: DownloadsLibrary(tracks: [track]), root: try root(),
             transfer: { _, destination, _, _ in
@@ -3167,14 +3833,17 @@ final class FoundationDownloadsTests: XCTestCase {
             }, monitorConnectivity: false)
         manager.updateConnectivity(isAllowed: true)
         manager.download(track)
-        try await waitUntil { manager.owners.first?.state == .downloading }
-        // Ensure the transfer reached its suspension seam, then invalidate its account.
-        let deadline = ContinuousClock.now.advanced(by: .seconds(3))
-        while !(await gate.started), ContinuousClock.now < deadline {
-            try await Task.sleep(for: .milliseconds(5))
+        // The producer must be held before retirement, with a downloading owner.
+        guard await gate.waitForStart() else {
+            manager.invalidate()
+            await gate.resume()
+            XCTFail("Transfer did not start within 3 seconds")
+            return
         }
-        guard await gate.started else {
-            XCTFail("Transfer did not start")
+        guard manager.owners.first?.state == .downloading else {
+            manager.invalidate()
+            await gate.resume()
+            XCTFail("Held transfer did not have a downloading owner")
             return
         }
         manager.invalidate()
@@ -3488,7 +4157,16 @@ final class FoundationDownloadsTests: XCTestCase {
             let gate = DownloadGate()
             await library.setPermissionGate(gate)
             manager.reconcilePlaylists()
-            try await waitUntilAsync { await gate.started }
+            guard await gate.waitForStart() else {
+                do { try await drainDownloadFixture(manager, gate: gate) } catch {
+                    XCTFail("Download fixture cleanup did not drain: \(error)")
+                }
+                XCTFail("Download fixture gate did not enter within 3 seconds")
+                return
+            }
+            addTeardownBlock { @MainActor in
+                try await self.drainDownloadFixture(manager, gate: gate)
+            }
             manager.remove(ownerID: "playlist:" + playlist.id)
             await library.setTracks([newTrack])
             manager.download(playlist)
@@ -3504,7 +4182,9 @@ final class FoundationDownloadsTests: XCTestCase {
 
             // Join actual reconciliation, without a sleep or synthetic publication callback.
             await gate.resume()
-            await manager.waitForCurrentReconciliationForTesting()
+            try await waitForFixtureWork("held reconciliation", manager: manager) {
+                await manager.waitForCurrentReconciliationForTesting()
+            }
             XCTAssertEqual(manager.owners.first?.tracks.map(\.id), [newTrack.id])
             XCTAssertEqual(canonical.items.map(\.id), [newTrack.id])
             XCTAssertEqual(manager.knownCollectionTracks(for: playlist).map(\.id), [newTrack.id])
@@ -3512,7 +4192,7 @@ final class FoundationDownloadsTests: XCTestCase {
             XCTAssertTrue(FileManager.default.fileExists(atPath: newFile.path))
             let requestedTracks = await library.downloadSourceIDs
             XCTAssertEqual(requestedTracks, [oldTrack.id, newTrack.id])
-            _ = await manager.clearAccount()
+            _ = await clearFixtureOwner(manager)
         }
         func testExplicitPlaylistReacquisitionRejectsOlderReconciliationSnapshot() async throws {
             let oldTrack = item("old-owner-track")
@@ -3532,7 +4212,16 @@ final class FoundationDownloadsTests: XCTestCase {
             let gate = DownloadGate()
             await library.setPermissionGate(gate)
             manager.reconcilePlaylists()
-            try await waitUntilAsync { await gate.started }
+            guard await gate.waitForStart() else {
+                do { try await drainDownloadFixture(manager, gate: gate) } catch {
+                    XCTFail("Download fixture cleanup did not drain: \(error)")
+                }
+                XCTFail("Download fixture gate did not enter within 3 seconds")
+                return
+            }
+            addTeardownBlock { @MainActor in
+                try await self.drainDownloadFixture(manager, gate: gate)
+            }
             await library.setTracks([newTrack])
             // The same retained owner receives a newer explicit Download Again intent.
             manager.downloadAgain(playlist)
@@ -3548,7 +4237,9 @@ final class FoundationDownloadsTests: XCTestCase {
 
             // Join actual reconciliation, without a sleep or synthetic publication callback.
             await gate.resume()
-            await manager.waitForCurrentReconciliationForTesting()
+            try await waitForFixtureWork("held reconciliation", manager: manager) {
+                await manager.waitForCurrentReconciliationForTesting()
+            }
             XCTAssertEqual(manager.owners.first?.tracks.map(\.id), [newTrack.id])
             XCTAssertEqual(canonical.items.map(\.id), [newTrack.id])
             XCTAssertEqual(manager.knownCollectionTracks(for: playlist).map(\.id), [newTrack.id])
@@ -3556,7 +4247,7 @@ final class FoundationDownloadsTests: XCTestCase {
             XCTAssertTrue(FileManager.default.fileExists(atPath: newFile.path))
             let requestedTracks = await library.downloadSourceIDs
             XCTAssertEqual(requestedTracks, [oldTrack.id, newTrack.id])
-            _ = await manager.clearAccount()
+            _ = await clearFixtureOwner(manager)
         }
         func testFailedExplicitPlaylistReacquisitionPreservesCurrentReconciliation() async throws {
             let directory = try root()
@@ -3579,7 +4270,16 @@ final class FoundationDownloadsTests: XCTestCase {
             let gate = DownloadGate()
             await library.setPermissionGate(gate)
             manager.reconcilePlaylists()
-            try await waitUntilAsync { await gate.started }
+            guard await gate.waitForStart() else {
+                do { try await drainDownloadFixture(manager, gate: gate) } catch {
+                    XCTFail("Download fixture cleanup did not drain: \(error)")
+                }
+                XCTFail("Download fixture gate did not enter within 3 seconds")
+                return
+            }
+            addTeardownBlock { @MainActor in
+                try await self.drainDownloadFixture(manager, gate: gate)
+            }
 
             // C's newer explicit intent cannot commit because its real manifest save fails.
             await library.setTracks([rejected])
@@ -3598,7 +4298,9 @@ final class FoundationDownloadsTests: XCTestCase {
             try saved.write(to: target)
 
             await gate.resume()
-            await manager.waitForCurrentReconciliationForTesting()
+            try await waitForFixtureWork("held reconciliation", manager: manager) {
+                await manager.waitForCurrentReconciliationForTesting()
+            }
             try await waitUntil { manager.isReady(refreshed) }
             XCTAssertEqual(manager.owners.first?.tracks.map(\.id), [refreshed.id])
             XCTAssertEqual(canonical.items.map(\.id), [refreshed.id])
@@ -3610,7 +4312,7 @@ final class FoundationDownloadsTests: XCTestCase {
             XCTAssertFalse(manager.isReady(rejected))
             let requestedTracks = await library.downloadSourceIDs
             XCTAssertEqual(requestedTracks, [first.id, refreshed.id])
-            _ = await manager.clearAccount()
+            _ = await clearFixtureOwner(manager)
         }
     #endif
 
@@ -3731,7 +4433,9 @@ final class FoundationDownloadsTests: XCTestCase {
         try await waitUntil { !restored.isLoading }
         restored.updateConnectivity(isAllowed: true)
         restored.reconcilePlaylists()
-        for _ in 0..<30 { await Task.yield() }
+        try await waitForFixtureWork("restored playlist reconciliation", manager: restored) {
+            await restored.waitForCurrentReconciliationForTesting()
+        }
         XCTAssertFalse(restored.isReady(first))
         XCTAssertEqual(restored.browseTracks(for: playlist).map(\.id), ["second"])
         restored.downloadAgain(first)
@@ -3825,12 +4529,19 @@ final class FoundationDownloadsTests: XCTestCase {
         let directory = try root()
         let track = item("track")
         let playlist = item("playlist", kind: .playlist)
+        let transferWitness = DownloadTransferWitness()
+        let fixtureTransfer = transfer
         let manager = FoundationDownloads(
             scope: "fixture", library: DownloadsLibrary(tracks: [track, track]), root: directory,
-            transfer: transfer, monitorConnectivity: false)
+            transfer: { source, destination, cellular, progress in
+                await transferWitness.record()
+                try await fixtureTransfer(source, destination, cellular, progress)
+            }, monitorConnectivity: false)
         manager.updateConnectivity(isAllowed: true)
         manager.download(playlist)
         try await waitUntil { manager.owners.first?.state == .ready }
+        let initialTransferCount = await transferWitness.count
+        XCTAssertEqual(initialTransferCount, 1)
         manager.updateConnectivity(isAllowed: false)
         let target = FoundationDownloadStorage.directory(scope: "fixture", root: directory)
             .appendingPathComponent("manifest.json")
@@ -3854,7 +4565,23 @@ final class FoundationDownloadsTests: XCTestCase {
         try FileManager.default.removeItem(at: target)
         try excluded.write(to: target)
         manager.updateConnectivity(isAllowed: true)
-        for _ in 0..<30 { await Task.yield() }
+        #if DEBUG
+            let deadline = ContinuousClock.now.advanced(by: .seconds(3))
+            while !manager.downloadWorkSettledForTesting, !Task.isCancelled,
+                ContinuousClock.now < deadline
+            {
+                try? await Task.sleep(for: .milliseconds(5))
+            }
+            guard !Task.isCancelled, manager.downloadWorkSettledForTesting else {
+                manager.invalidate()
+                XCTFail("Redownload reconciliation did not settle within 3 seconds")
+                return
+            }
+        #else
+            for _ in 0..<30 { await Task.yield() }
+        #endif
+        let finalTransferCount = await transferWitness.count
+        XCTAssertEqual(finalTransferCount, initialTransferCount)
         XCTAssertFalse(manager.isReady(track))
         _ = await manager.clearAccount()
     }
@@ -3870,14 +4597,23 @@ final class FoundationDownloadsTests: XCTestCase {
             }, monitorConnectivity: false)
         manager.updateConnectivity(isAllowed: true)
         manager.download(item("playlist", kind: .playlist))
-        try await waitUntilAsync { await gate.started }
+        guard await gate.waitForStart() else {
+            do { try await drainDownloadFixture(manager, gate: gate) } catch {
+                XCTFail("Download fixture cleanup did not drain: \(error)")
+            }
+            XCTFail("Download fixture gate did not enter within 3 seconds")
+            return
+        }
+        addTeardownBlock { @MainActor in
+            try await self.drainDownloadFixture(manager, gate: gate)
+        }
         manager.removeTrack(track)
         await gate.resume()
         try await waitUntil { manager.owners.first?.state == .ready }
         XCTAssertFalse(manager.isReady(track))
         XCTAssertEqual(manager.owners.first?.tracks.count, 2)
         XCTAssertTrue(manager.downloadedSongs.isEmpty)
-        _ = await manager.clearAccount()
+        _ = await clearFixtureOwner(manager)
     }
 
     #if DEBUG
@@ -4119,12 +4855,17 @@ final class FoundationDownloadsTests: XCTestCase {
             manager.owners.first?.tracks.first?.album?.primaryImageTag == "second"
         }
         try await waitUntilAsync { await library.artworkPolicies.count >= 2 }
-        await manager.artworkTask?.value
+        try await waitForFixtureWork("changed artwork request", manager: manager) {
+            await manager.artworkTask?.value
+        }
         XCTAssertTrue(manager.isReady(changed))
         let fallback = await manager.retainedArtwork(for: changed)
         XCTAssertEqual(fallback, oldImage)
         manager.reconcilePlaylists()
-        for _ in 0..<30 { await Task.yield() }
+        try await waitForFixtureWork("artwork retry reconciliation", manager: manager) {
+            await manager.waitForCurrentReconciliationForTesting()
+            await manager.artworkTask?.value
+        }
         let policies = await library.artworkPolicies
         XCTAssertEqual(policies.count, 2)
         _ = await manager.clearAccount()
@@ -4157,13 +4898,28 @@ final class FoundationDownloadsTests: XCTestCase {
         let changed = artworkTrack("track", tag: "second")
         await library.setTracks([changed])
         manager.reconcilePlaylists()
-        try await waitUntilAsync { await gate.started }
+        guard await gate.waitForStart() else {
+            do { try await drainDownloadFixture(manager, gate: gate) } catch {
+                XCTFail("Download fixture cleanup did not drain: \(error)")
+            }
+            XCTFail("Download fixture gate did not enter within 3 seconds")
+            return
+        }
+        addTeardownBlock { @MainActor in
+            try await self.drainDownloadFixture(manager, gate: gate)
+        }
         let task = manager.artworkTask
         let target = account.appendingPathComponent("manifest.json")
         let saved = try Data(contentsOf: target)
         try FileManager.default.removeItem(at: target)
         try FileManager.default.createDirectory(at: target, withIntermediateDirectories: false)
         await gate.resume()
+        try await waitForFixtureWork(
+            "held testFailedArtworkPublicationKeepsPreviousFileAndRemovesStagedReplacement completion",
+            manager: manager
+        ) {
+            _ = await task?.value
+        }
         await task?.value
         XCTAssertEqual(manager.artworkRevision, revision)
         let retained = await manager.retainedArtwork(for: changed)
@@ -4176,7 +4932,7 @@ final class FoundationDownloadsTests: XCTestCase {
         let restored = try FoundationDownloadStorage.load(directory: account)
         XCTAssertEqual(
             restored.artwork?.values.first?.file.name, oldManifest.artwork?.values.first?.file.name)
-        _ = await manager.clearAccount()
+        _ = await clearFixtureOwner(manager)
     }
 
     func testRemovedArtworkReferenceRejectsLateOptionalResponse() async throws {
@@ -4190,18 +4946,33 @@ final class FoundationDownloadsTests: XCTestCase {
             monitorConnectivity: false)
         manager.updateConnectivity(isAllowed: true)
         manager.download(track)
-        try await waitUntilAsync { await gate.started }
+        guard await gate.waitForStart() else {
+            do { try await drainDownloadFixture(manager, gate: gate) } catch {
+                XCTFail("Download fixture cleanup did not drain: \(error)")
+            }
+            XCTFail("Download fixture gate did not enter within 3 seconds")
+            return
+        }
+        addTeardownBlock { @MainActor in
+            try await self.drainDownloadFixture(manager, gate: gate)
+        }
         // A held artwork response does not imply the separate audio transfer committed.
         try await waitUntil(timeout: .seconds(15)) { manager.isReady(track) }
         XCTAssertTrue(manager.isReady(track))
         let task = manager.artworkTask
         manager.removeTrack(track)
         await gate.resume()
+        try await waitForFixtureWork(
+            "held testRemovedArtworkReferenceRejectsLateOptionalResponse completion",
+            manager: manager
+        ) {
+            _ = await task?.value
+        }
         await task?.value
         XCTAssertEqual(manager.artworkBytes, 0)
         let data = await manager.retainedArtwork(for: track)
         XCTAssertNil(data)
-        _ = await manager.clearAccount()
+        _ = await clearFixtureOwner(manager)
     }
 
     func testAutoStreamingDoesNotSampleQualityOrNetworkForRetainedLocalPlayback() async throws {
@@ -4725,7 +5496,16 @@ final class FoundationDownloadsTests: XCTestCase {
         await library.setPlaylistGate(gate)
         await library.setTracks([first, excluded, added])
         manager.downloadAgain(playlist)
-        try await waitUntilAsync { await gate.started }
+        guard await gate.waitForStart() else {
+            do { try await drainDownloadFixture(manager, gate: gate) } catch {
+                XCTFail("Download fixture cleanup did not drain: \(error)")
+            }
+            XCTFail("Download fixture gate did not enter within 3 seconds")
+            return
+        }
+        addTeardownBlock { @MainActor in
+            try await self.drainDownloadFixture(manager, gate: gate)
+        }
         let account = FoundationDownloadStorage.directory(scope: "fixture", root: directory)
         let target = account.appendingPathComponent("manifest.json")
         let saved = try Data(contentsOf: target)
@@ -4741,7 +5521,7 @@ final class FoundationDownloadsTests: XCTestCase {
         try saved.write(to: target)
         manager.retry(ownerID: "playlist:playlist")
         try await waitUntil { manager.isReady(excluded) && manager.isReady(added) }
-        _ = await manager.clearAccount()
+        _ = await clearFixtureOwner(manager)
     }
 
     func testLaterTrackRemovalCancelsPendingReacquisitionAndPreservesNewestExclusion() async throws
@@ -4758,13 +5538,22 @@ final class FoundationDownloadsTests: XCTestCase {
         let gate = DownloadGate()
         await library.setPlaylistGate(gate)
         manager.downloadAgain(playlist)
-        try await waitUntilAsync { await gate.started }
+        guard await gate.waitForStart() else {
+            do { try await drainDownloadFixture(manager, gate: gate) } catch {
+                XCTFail("Download fixture cleanup did not drain: \(error)")
+            }
+            XCTFail("Download fixture gate did not enter within 3 seconds")
+            return
+        }
+        addTeardownBlock { @MainActor in
+            try await self.drainDownloadFixture(manager, gate: gate)
+        }
         manager.removeTrack(track)
         await gate.resume()
         try await waitUntil { manager.owners.first?.state == .ready }
         XCTAssertFalse(manager.isReady(track))
         XCTAssertEqual(manager.knownCollectionTracks(for: playlist).map(\.id), ["track", "track"])
-        _ = await manager.clearAccount()
+        _ = await clearFixtureOwner(manager)
     }
 
     func testExplicitReacquisitionReusesVerifiedLeasedFileWithoutReplacement() async throws {
@@ -4810,7 +5599,18 @@ final class FoundationDownloadsTests: XCTestCase {
         let lease = try await manager.playbackResource(for: track)
         manager.removeTrack(track)
         manager.downloadAgain(playlist)
-        try await waitUntilAsync { await gate.started }
+        guard await gate.waitForStart() else {
+            await lease.release()
+            do { try await drainDownloadFixture(manager, gate: gate) } catch {
+                XCTFail("Download fixture cleanup did not drain: \(error)")
+            }
+            XCTFail("Download fixture gate did not enter within 3 seconds")
+            return
+        }
+        addTeardownBlock { @MainActor in
+            await lease.release()
+            try await self.drainDownloadFixture(manager, gate: gate)
+        }
         await lease.release()
         XCTAssertFalse(FileManager.default.fileExists(atPath: lease.url.path))
         await gate.resume()
@@ -4819,7 +5619,7 @@ final class FoundationDownloadsTests: XCTestCase {
         XCTAssertNotEqual(replacement.url, lease.url)
         XCTAssertTrue(FileManager.default.fileExists(atPath: replacement.url.path))
         await replacement.release()
-        _ = await manager.clearAccount()
+        _ = await clearFixtureOwner(manager)
     }
 
     func testCollectionTransferProjectionUsesCurrentPreferenceAndKeepsCanonicalOccurrences()
@@ -4898,6 +5698,149 @@ final class FoundationDownloadsTests: XCTestCase {
         showDuplicates = true
         XCTAssertEqual(manager.downloadedSongs.map(\.id), ["first", "alternate"])
         _ = await manager.clearAccount()
+    }
+
+    /// Load real verified fixture files while retaining distinct metadata occurrences per owner.
+    private func catalogFixture(
+        owners: [(FoundationItem, [FoundationItem])], ready: [FoundationItem],
+        projectTracks: @escaping @MainActor ([FoundationItem], String?) -> [FoundationItem] = {
+            items, _ in items
+        }
+    ) async throws -> FoundationDownloads {
+        let directory = try root()
+        let account = FoundationDownloadStorage.directory(scope: "fixture", root: directory)
+        try FoundationDownloadStorage.prepare(account)
+        var manifest = FoundationDownloadManifest()
+        manifest.owners = owners.map { owner, tracks in
+            .init(
+                id: "\(owner.kind.rawValue):\(owner.id)",
+                item: FoundationStoredDownloadItem(owner),
+                tracks: tracks.map(FoundationStoredDownloadItem.init),
+                paused: true, expanded: true)
+        }
+        for track in ready {
+            let file = account.appendingPathComponent("\(track.id).mp3")
+            let data = Data("synthetic audio".utf8)
+            try data.write(to: file)
+            manifest.files[track.id] = .init(
+                name: file.lastPathComponent, bytes: Int64(data.count),
+                digest: try FoundationDownloadStorage.digest(file))
+        }
+        try FoundationDownloadStorage.save(manifest, directory: account)
+        let manager = FoundationDownloads(
+            scope: "fixture", library: DownloadsLibrary(tracks: []), root: directory,
+            transfer: transfer, monitorConnectivity: false, projectTracks: projectTracks)
+        addTeardownBlock { @MainActor in
+            let cleared = await self.clearFixtureOwner(manager)
+            XCTAssertTrue(cleared, "Catalog fixture account cleanup must finish")
+        }
+        try await waitUntil { !manager.isLoading }
+        XCTAssertNil(manager.errorMessage)
+        return manager
+    }
+
+    func testLocalCatalogKeepsFirstOccurrenceWithinEachRawMembershipGroup() async throws {
+        var sharedA = item("shared")
+        sharedA.title = "A occurrence"
+        sharedA.album = .init(id: "album-a", title: "Album A")
+        sharedA.artist = .init(id: "artist-a", title: "Artist A")
+        var sharedB = sharedA
+        sharedB.title = "B first occurrence"
+        sharedB.album = .init(id: "album-b", title: "Album B")
+        sharedB.artist = .init(id: "artist-b", title: "Artist B")
+        var laterB = sharedB
+        laterB.title = "B later occurrence"
+        var seedB = item("seed-b")
+        seedB.title = "B seed"
+        seedB.album = sharedB.album
+        seedB.artist = sharedB.artist
+        var projections: [(String?, [FoundationItem])] = []
+        let manager = try await catalogFixture(
+            owners: [
+                (item("first", kind: .playlist), [sharedA]),
+                (item("second", kind: .playlist), [sharedB, seedB]),
+                (item("third", kind: .playlist), [laterB]),
+            ], ready: [sharedA, seedB],
+            projectTracks: { tracks, albumID in
+                projections.append((albumID, tracks))
+                return tracks
+            })
+        projections.removeAll()
+        XCTAssertEqual(manager.localCatalogItems(kind: .album).map(\.id), ["album-a", "album-b"])
+        let groupB = try XCTUnwrap(projections.first { $0.0 == "album-b" }?.1)
+        XCTAssertEqual(groupB.map(\.id), ["shared", "seed-b"])
+        XCTAssertEqual(groupB.map(\.title), ["B first occurrence", "B seed"])
+        XCTAssertTrue(
+            projections.contains {
+                $0.0 == nil && $0.1.map(\.title) == ["B first occurrence", "B seed"]
+            }, "Artist membership must also classify raw occurrences before deduplicating IDs")
+        XCTAssertEqual(
+            manager.localCatalogItems(kind: .artist).map(\.id), ["artist-a", "artist-b"])
+        XCTAssertTrue(manager.localSearchItems(query: "Album B").contains { $0.id == "album-b" })
+        XCTAssertEqual(manager.owners[2].tracks.first?.title, "B later occurrence")
+        _ = await clearFixtureOwner(manager)
+    }
+
+    func testLocalCatalogPreservesExplicitRememberedAndLoadedMembershipPrecedence() async throws {
+        let album = item("album", kind: .album)
+        var ready = item("ready")
+        ready.album = .init(id: album.id, title: "Album")
+        let remote = item("remote")
+        let manager = try await catalogFixture(
+            owners: [
+                (item("playlist", kind: .playlist), [ready]),
+                (album, [remote]),
+            ], ready: [ready])
+        // A derived ready song cannot override an explicit album's unavailable membership.
+        XCTAssertEqual(manager.knownCollectionTracks(for: album).map(\.id), ["remote"])
+        XCTAssertTrue(manager.localCatalogItems(kind: .album).isEmpty)
+        manager.rememberCollection(album, tracks: [ready], complete: true)
+        XCTAssertEqual(manager.localCatalogItems(kind: .album).map(\.id), [album.id])
+        let model = manager.collectionModel(for: album)
+        await model.load(.refresh) { _ in .init(items: [remote], nextStartIndex: nil) }
+        XCTAssertTrue(manager.localCatalogItems(kind: .album).isEmpty)
+        await model.load(.refresh) { _ in .init(items: [ready], nextStartIndex: nil) }
+        XCTAssertEqual(manager.localCatalogItems(kind: .album).map(\.id), [album.id])
+        manager.removeTrack(ready)
+        XCTAssertTrue(manager.localCatalogItems(kind: .album).isEmpty)
+        _ = await clearFixtureOwner(manager)
+        XCTAssertTrue(manager.localCatalogItems().isEmpty)
+    }
+
+    func testLocalCatalogUsesActionsVisibilityWithDerivedAlbumContext() async throws {
+        var remote = item("remote")
+        remote.title = "Same song"
+        remote.trackNumber = 1
+        var ready = item("ready")
+        ready.title = remote.title
+        ready.trackNumber = remote.trackNumber
+        ready.album = .init(id: "album", title: "Album")
+        var showDuplicates = false
+        let actions = FoundationLibraryActions(
+            sourceScope: "catalog-fixture", read: { _ in nil }, write: { _, _ in },
+            showDuplicateAlbumTracks: { showDuplicates }, mutateFavorite: { _, _ in })
+        var albumProjections: [[String]] = []
+        let manager = try await catalogFixture(
+            owners: [(item("playlist", kind: .playlist), [remote, ready])], ready: [ready],
+            projectTracks: { tracks, albumID in
+                let visible = actions.visibleTracks(
+                    tracks, albumID: albumID, isAvailable: { $0.id == "ready" })
+                if albumID == "album" { albumProjections.append(visible.map(\.id)) }
+                return visible
+            })
+        let album = item("album", kind: .album)
+        // A loaded canonical album supplies context even for an occurrence lacking album metadata.
+        await manager.collectionModel(for: album).load(.refresh) { _ in
+            .init(items: [remote, ready], nextStartIndex: nil)
+        }
+        XCTAssertEqual(manager.localCatalogItems(kind: .album).map(\.id), [album.id])
+        XCTAssertEqual(albumProjections.last, ["ready"])
+        showDuplicates = true
+        XCTAssertEqual(manager.localCatalogItems(kind: .album).map(\.id), [album.id])
+        XCTAssertEqual(albumProjections.last, ["remote", "ready"])
+        XCTAssertEqual(manager.owners.first?.tracks.map(\.id), ["remote", "ready"])
+        _ = await clearFixtureOwner(manager)
+        actions.invalidate()
     }
 
     func testManifestContainsNoTransientRequestSecretsAndScopesAreOpaque() async throws {
@@ -5163,18 +6106,59 @@ nonisolated private final class NativeDownloadVerificationFixture: @unchecked Se
     func finish() { lock.withLock { isFinished = true } }
 }
 
-private actor DownloadGate {
+private actor OneShotDownloadGate {
     private var continuation: CheckedContinuation<Void, Never>?
+    private var released = false
+    #if DEBUG
+        private(set) var releasedAtForTesting: ContinuousClock.Instant?
+    #endif
     private(set) var started = false
+
     func wait() async {
-        await withCheckedContinuation { continuation in
-            self.continuation = continuation
-            started = true
-        }
+        started = true
+        if released { return }
+        await withCheckedContinuation { continuation = $0 }
     }
+
+    func waitForStart() async -> Bool {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(3))
+        while !started && !Task.isCancelled && ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        return started && !Task.isCancelled
+    }
+
     func resume() {
+        released = true
+        #if DEBUG
+            if releasedAtForTesting == nil { releasedAtForTesting = .now }
+        #endif
         continuation?.resume()
         continuation = nil
+    }
+}
+
+private actor DownloadGate {
+    private var continuations: [CheckedContinuation<Void, Never>] = []
+    private var released = false
+    private(set) var started = false
+    func wait() async {
+        started = true
+        guard !released else { return }
+        await withCheckedContinuation { continuations.append($0) }
+    }
+    func waitForStart() async -> Bool {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(3))
+        while !started && !Task.isCancelled && ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        return started && !Task.isCancelled
+    }
+    func resume() {
+        released = true
+        let pending = continuations
+        continuations.removeAll()
+        for continuation in pending { continuation.resume() }
     }
 }
 
@@ -5462,4 +6446,14 @@ nonisolated private final class NativeProtectionFixture: @unchecked Sendable {
                 if self.failure == .cancel { withUnsafeCurrentTask { $0?.cancel() } }
             })
     }
+}
+
+private actor DownloadTransferWitness {
+    private(set) var count = 0
+    func record() { count += 1 }
+}
+
+private actor DownloadFixtureRootRetention {
+    private(set) var isRetained = false
+    func retain() { isRetained = true }
 }

@@ -848,7 +848,10 @@ private struct FoundationLicensesView: View {
 
         var body: some View {
             Group {
-                if model.library == nil || model.requiresSignIn || model.settingsShowsSignIn {
+                if model.isCleaningDownloads {
+                    FoundationAccountCleanupProgress(takingLonger: model.cleanupTakingLonger)
+                } else if model.library == nil || model.requiresSignIn || model.settingsShowsSignIn
+                {
                     FoundationSignInView(model: model)
                 } else if let library = model.library, let downloads = model.downloads,
                     let connectivity = model.connectivity

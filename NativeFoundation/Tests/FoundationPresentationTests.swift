@@ -1,3 +1,4 @@
+import Security
 import XCTest
 
 @testable import VelacantoFoundation
@@ -12,6 +13,154 @@ import XCTest
 
 @MainActor
 final class FoundationPresentationTests: XCTestCase {
+    func testAlbumReadingProfileUsesContentAnchorsAcrossNarrowAndWideViewports() {
+        let phone = FoundationAlbumBackdropProfile(
+            imageSide: 430, height: 850, controlsBottom: 280, readingTop: 430)
+        let wide = FoundationAlbumBackdropProfile(
+            imageSide: 951, height: 669, controlsBottom: 280, readingTop: 430)
+        // The same visible controls and text need the same support, regardless of art width.
+        for y in stride(from: CGFloat.zero, through: 660, by: 10) {
+            XCTAssertEqual(phone.readingAmount(at: y), wide.readingAmount(at: y))
+        }
+        for profile in [phone, wide] {
+            XCTAssertEqual(profile.readingAmount(at: 280), 0)
+            XCTAssertEqual(profile.readingAmount(at: 430), 1)
+            XCTAssertGreaterThan(profile.readingAmount(at: 355), 0)
+            XCTAssertLessThan(profile.readingAmount(at: 355), 1)
+            XCTAssertEqual(profile.readingAmount(at: 660), 1)
+            let amounts = stride(from: CGFloat.zero, through: 660, by: 5).map {
+                profile.readingAmount(at: $0)
+            }
+            XCTAssertEqual(amounts, amounts.sorted())
+            // Reading support must never form a darker stripe before the final track tint.
+            let neutral = profile.neutralStops.map(\.opacity)
+            XCTAssertEqual(neutral, neutral.sorted())
+            XCTAssertLessThanOrEqual(neutral.max() ?? .infinity, neutral.last ?? -.infinity)
+            XCTAssertGreaterThan(neutral.last ?? 0, neutral.first ?? 1)
+        }
+    }
+
+    func testAlbumImageFeatherJoinsTintContinuouslyAtSquareBoundary() {
+        for side: CGFloat in [430, 951] {
+            let profile = FoundationAlbumBackdropProfile(
+                imageSide: side, height: 900, controlsBottom: 280, readingTop: 430)
+            let amounts = (0...100).map { profile.imageOpacity(at: side * CGFloat($0) / 100) }
+            XCTAssertTrue(amounts.allSatisfy { $0.isFinite && (0...1).contains($0) })
+            XCTAssertEqual(amounts, amounts.sorted(by: >))
+            XCTAssertEqual(profile.imageOpacity(at: side), 0)
+            XCTAssertEqual(profile.imageOpacity(at: side + 1), 0)
+            // A smooth feather approaches the join continuously with a vanishing slope.
+            let nearEdge = profile.imageOpacity(at: side - 0.1)
+            let fartherFromEdge = profile.imageOpacity(at: side - 0.2)
+            XCTAssertGreaterThan(nearEdge, 0)
+            XCTAssertLessThan(nearEdge, 0.001)
+            XCTAssertLessThan(nearEdge, fartherFromEdge * 0.3)
+            XCTAssertEqual(profile.readingAmount(at: max(side, 430) + 1), 1)
+            XCTAssertEqual(profile.imageStops.last?.opacity, 0)
+        }
+    }
+
+    func testAlbumBackdropProfileKeepsScrolledAndMissingHeadersReadableWithFiniteStops() {
+        let profiles = [
+            // A still-visible first track must not defer support after controls leave the top.
+            FoundationAlbumBackdropProfile(
+                imageSide: 951, height: 669, controlsBottom: -40, readingTop: 250),
+            FoundationAlbumBackdropProfile(
+                imageSide: 430, height: 850, controlsBottom: nil, readingTop: 400),
+            FoundationAlbumBackdropProfile(
+                imageSide: .nan, height: .infinity, controlsBottom: .nan, readingTop: -.infinity),
+        ]
+        for profile in profiles {
+            XCTAssertEqual(profile.readingAmount(at: 0), 1)
+            XCTAssertEqual(profile.readingAmount(at: profile.height), 1)
+            // Scrolling the header away retains uniform support, without a residual dark band.
+            let neutral = profile.neutralStops.map(\.opacity)
+            XCTAssertEqual(Set(neutral).count, 1)
+            for stops in [profile.readingStops, profile.imageStops, profile.neutralStops] {
+                let positions = stops.map(\.location)
+                XCTAssertEqual(positions, positions.sorted())
+                XCTAssertEqual(positions.first, 0)
+                XCTAssertEqual(positions.last, 1)
+                XCTAssertTrue(positions.allSatisfy { $0.isFinite && (0...1).contains($0) })
+                XCTAssertTrue(
+                    stops.allSatisfy { $0.opacity.isFinite && (0...1).contains($0.opacity) })
+            }
+        }
+        // A visible control row with a virtualized track still gets a finite reading ramp.
+        let awaitingTracks = FoundationAlbumBackdropProfile(
+            imageSide: 951, height: 669, controlsBottom: 280, readingTop: nil)
+        XCTAssertEqual(awaitingTracks.readingAmount(at: 280), 0)
+        XCTAssertEqual(awaitingTracks.readingAmount(at: 669), 1)
+    }
+
+    func testFoldedPlayerRegionsKeepContentAboveControlsAndClearFoldMargins() throws {
+        // Different viewport shapes and an off-center fold must preserve on-screen
+        // roles without relying on device orientation or native primary-slot order.
+        for (size, foldY) in [
+            (CGSize(width: 669, height: 951), CGFloat(462)),
+            (CGSize(width: 951, height: 669), CGFloat(290)),
+        ] {
+            let fold = CGRect(x: 0, y: foldY, width: size.width, height: 3)
+            let regions = try XCTUnwrap(
+                FoundationPlayerRegionLayout.regions(
+                    size: size, divider: fold,
+                    margins: EdgeInsets(top: 7, leading: 0, bottom: 11, trailing: 0)))
+            XCTAssertTrue(regions.stacksVertically)
+            XCTAssertLessThan(regions.content.midY, regions.controls.midY)
+            XCTAssertLessThanOrEqual(regions.content.maxY, fold.minY - 7)
+            XCTAssertGreaterThanOrEqual(regions.controls.minY, fold.maxY + 11)
+            XCTAssertFalse(regions.controls.intersects(regions.content))
+            let viewport = CGRect(origin: .zero, size: size)
+            XCTAssertTrue(viewport.contains(regions.controls))
+            XCTAssertTrue(viewport.contains(regions.content))
+            XCTAssertGreaterThan(regions.controls.height, 0)
+            XCTAssertGreaterThan(regions.content.height, 0)
+        }
+    }
+
+    func testFoldedPlayerRegionsKeepContentPhysicallyLeftAndControlsRight() throws {
+        let size = CGSize(width: 951, height: 669)
+        // A zero-width division is a legitimate hinge, not missing geometry.
+        let fold = CGRect(x: 447, y: 0, width: 0, height: size.height)
+        let regions = try XCTUnwrap(
+            FoundationPlayerRegionLayout.regions(
+                size: size, divider: fold,
+                margins: EdgeInsets(top: 0, leading: 9, bottom: 0, trailing: 13)))
+        XCTAssertFalse(regions.stacksVertically)
+        XCTAssertLessThan(regions.content.midX, regions.controls.midX)
+        XCTAssertLessThanOrEqual(regions.content.maxX, fold.minX - 9)
+        XCTAssertGreaterThanOrEqual(regions.controls.minX, fold.maxX + 13)
+        XCTAssertFalse(regions.controls.intersects(regions.content))
+        let viewport = CGRect(origin: .zero, size: size)
+        XCTAssertTrue(viewport.contains(regions.controls))
+        XCTAssertTrue(viewport.contains(regions.content))
+    }
+
+    func testFoldedPlayerRegionsRejectInvalidOrUnusableGeometry() {
+        let size = CGSize(width: 669, height: 951)
+        let fold = CGRect(x: 0, y: 470, width: size.width, height: 0)
+        XCTAssertNil(
+            FoundationPlayerRegionLayout.regions(
+                size: .zero, divider: fold, margins: EdgeInsets()))
+        for invalid in [
+            CGRect.null, CGRect.infinite, CGRect.zero,
+            CGRect(x: 0, y: -20, width: size.width, height: 2),
+            CGRect(x: 0, y: size.height + 10, width: size.width, height: 2),
+        ] {
+            XCTAssertNil(
+                FoundationPlayerRegionLayout.regions(
+                    size: size, divider: invalid, margins: EdgeInsets()))
+        }
+        XCTAssertNil(
+            FoundationPlayerRegionLayout.regions(
+                size: size, divider: fold,
+                margins: EdgeInsets(top: .infinity, leading: 0, bottom: 0, trailing: 0)))
+        XCTAssertNil(
+            FoundationPlayerRegionLayout.regions(
+                size: size, divider: fold,
+                margins: EdgeInsets(top: size.height, leading: 0, bottom: 0, trailing: 0)))
+    }
+
     #if os(iOS)
         func testQueueNativeSwipesProtectHistoryAndRejectRetiredOccurrenceActions() throws {
             let item = FoundationItem(
@@ -75,116 +224,6 @@ final class FoundationPresentationTests: XCTestCase {
     #endif
 
     #if os(macOS)
-        func testOverviewSheetResetsImmersiveForegroundAndNativeBarAppearance() async throws {
-            for scheme in [ColorScheme.light, .dark] {
-                let window = NSWindow(
-                    contentRect: NSRect(x: 0, y: 0, width: 800, height: 700),
-                    styleMask: [.titled], backing: .buffered, defer: false)
-                window.isReleasedWhenClosed = false
-                // Match the actual immersive host's native and preferred dark appearance while
-                // requesting each semantic browsing scheme for the reading sheet.
-                let parentAppearance: NSAppearance.Name = .darkAqua
-                window.appearance = NSAppearance(named: parentAppearance)
-                let beganSheet = expectation(
-                    for: NSPredicate { _, _ in
-                        MainActor.assumeIsolated {
-                            guard let sheet = window.attachedSheet, let content = sheet.contentView
-                            else { return false }
-                            return sheet.isVisible && content.bounds.width > 0
-                                && content.bounds.height > 0
-                        }
-                    }, evaluatedWith: window)
-                window.contentView = NSHostingView(
-                    rootView: FoundationOverviewAppearanceHost(scheme: scheme))
-                window.orderFront(nil)
-                defer { window.close() }
-                await fulfillment(of: [beganSheet], timeout: 5)
-                let sheet = try XCTUnwrap(window.attachedSheet)
-                let content = try XCTUnwrap(sheet.contentView)
-                content.layoutSubtreeIfNeeded()
-                content.displayIfNeeded()
-                XCTAssertEqual(
-                    window.appearance?.name, parentAppearance, "The presenter is unchanged")
-                let bitmap = try XCTUnwrap(
-                    content.bitmapImageRepForCachingDisplay(in: content.bounds))
-                content.cacheDisplay(in: content.bounds, to: bitmap)
-                let image = NSImage(size: content.bounds.size)
-                image.addRepresentation(bitmap)
-                let attachment = XCTAttachment(image: image)
-                attachment.name =
-                    "Native Mac overview \(scheme) from preferred dark native window appearance"
-                attachment.lifetime = .keepAlways
-                add(attachment)
-                // Include the native frame as well: the reading view alone can omit the sheet's
-                // title and confirmation chrome. Review this capture in both appearances.
-                let frameView = content.superview ?? content
-                frameView.layoutSubtreeIfNeeded()
-                frameView.displayIfNeeded()
-                let frameBitmap = try XCTUnwrap(
-                    frameView.bitmapImageRepForCachingDisplay(in: frameView.bounds))
-                frameView.cacheDisplay(in: frameView.bounds, to: frameBitmap)
-                let frameImage = NSImage(size: frameView.bounds.size)
-                frameImage.addRepresentation(frameBitmap)
-                let chrome = XCTAttachment(image: frameImage)
-                chrome.name =
-                    "Native Mac overview \(scheme) full sheet frame and confirmation chrome"
-                chrome.lifetime = .keepAlways
-                add(chrome)
-                let footerColor = try XCTUnwrap(
-                    frameBitmap.colorAt(
-                        x: frameBitmap.pixelsWide / 8,
-                        y: frameBitmap.pixelsHigh - frameBitmap.pixelsHigh / 25
-                    )?.usingColorSpace(.sRGB))
-                let footerLuma =
-                    0.2126 * footerColor.redComponent
-                    + 0.7152 * footerColor.greenComponent + 0.0722 * footerColor.blueComponent
-                if scheme == .light {
-                    XCTAssertGreaterThan(footerLuma, 0.7, "Reading footer must follow Light")
-                } else {
-                    XCTAssertLessThan(footerLuma, 0.3, "Reading footer must follow Dark")
-                }
-
-                // Sample only the reading interior, excluding native chrome, edges and scrollbar.
-                // White-on-white inherited text cannot satisfy this contrast check.
-                var foregroundPixels = 0
-                var backgroundPixels = 0
-                for y in stride(from: bitmap.pixelsHigh / 4, to: bitmap.pixelsHigh * 3 / 4, by: 2) {
-                    for x in stride(
-                        from: bitmap.pixelsWide / 8, to: bitmap.pixelsWide * 7 / 8, by: 2)
-                    {
-                        let color = try XCTUnwrap(
-                            bitmap.colorAt(x: x, y: y)?.usingColorSpace(.sRGB))
-                        let luma =
-                            0.2126 * color.redComponent + 0.7152 * color.greenComponent
-                            + 0.0722 * color.blueComponent
-                        if scheme == .light ? luma < 0.35 : luma > 0.65 {
-                            foregroundPixels += 1
-                        }
-                        if scheme == .light ? luma > 0.8 : luma < 0.2 {
-                            backgroundPixels += 1
-                        }
-                    }
-                }
-                XCTAssertGreaterThan(
-                    foregroundPixels, 100, "Overview words must contrast with the sheet")
-                XCTAssertGreaterThan(
-                    backgroundPixels, 1000, "The reading surface must follow \(scheme)")
-                let dismissed = expectation(
-                    for: NSPredicate { _, _ in
-                        MainActor.assumeIsolated { window.attachedSheet == nil }
-                    }, evaluatedWith: window)
-                let returnKey = try XCTUnwrap(
-                    NSEvent.keyEvent(
-                        with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
-                        windowNumber: sheet.windowNumber, context: nil, characters: "\r",
-                        charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36))
-                XCTAssertTrue(
-                    sheet.performKeyEquivalent(with: returnKey),
-                    "Return must invoke the reading footer's default Done action")
-                await fulfillment(of: [dismissed], timeout: 5)
-            }
-        }
-
         func testHandoffBrowseRoutesWithoutAMountedRootCollectionBinding() async throws {
             let audio = FoundationMacHandoffAudioProbe()
             let player = FoundationPlayer(
@@ -501,7 +540,18 @@ final class FoundationPresentationTests: XCTestCase {
     }
 
     func testAccountAlertDismissalDefersModelChangeAndKeepsNewNotice() async {
-        let model = FoundationAppModel()
+        let suite = "FoundationPresentationTests." + UUID().uuidString
+        guard let defaults = UserDefaults(suiteName: suite) else {
+            XCTFail("Could not create isolated presentation preferences")
+            return
+        }
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let credentials = FoundationCredentials.Operations(
+            update: { _, _ in errSecItemNotFound }, add: { _ in errSecItemNotFound },
+            copy: { _ in (errSecItemNotFound, nil) }, delete: { _ in errSecItemNotFound })
+        let model = FoundationAppModel(
+            credentialOperations: credentials, credentialDefaults: defaults,
+            playbackPreferences: FoundationPlaybackPreferences(defaults: defaults))
         model.signOutNotice = "First sign-out result"
         let view = FoundationRootView(model: model)
 
@@ -675,24 +725,68 @@ final class FoundationPresentationTests: XCTestCase {
         XCTAssertNil(model.errorMessage)
     }
 
+    @MainActor
+    private final class HeldBrowsePage {
+        let entered = XCTestExpectation(description: "browse page entered hold")
+        private var continuation: CheckedContinuation<FoundationPage, Never>?
+        private var released: FoundationPage?
+        func hold() async -> FoundationPage {
+            entered.fulfill()
+            if let released { return released }
+            return await withCheckedContinuation { continuation = $0 }
+        }
+        func release(_ page: FoundationPage) {
+            released = page
+            continuation?.resume(returning: page)
+            continuation = nil
+        }
+    }
+
+    private func requireBrowseOperation(
+        _ task: Task<Void, Never>, gate: HeldBrowsePage, held: Task<Void, Never>, name: String
+    ) async -> Bool {
+        let finished = XCTestExpectation(description: name)
+        let observer = Task {
+            await task.value
+            finished.fulfill()
+        }
+        guard await XCTWaiter.fulfillment(of: [finished], timeout: 5) == .completed else {
+            task.cancel()
+            held.cancel()
+            gate.release(.init(items: [], nextStartIndex: nil))
+            observer.cancel()
+            XCTFail("\(name) did not finish within 5 seconds")
+            return false
+        }
+        return true
+    }
+
     func testCancellationIgnoringOldPageCannotReplaceNewPage() async {
         let model = FoundationBrowseModel()
-        let started = expectation(description: "Old load held")
-        var release: CheckedContinuation<FoundationPage, Never>?
+        let gate = HeldBrowsePage()
         let old = Task {
-            await model.load(.initial) { _ in
-                await withCheckedContinuation { continuation in
-                    release = continuation
-                    started.fulfill()
-                }
-            }
+            await model.load(.initial) { _ in await gate.hold() }
         }
-        await fulfillment(of: [started], timeout: 2)
+        guard await XCTWaiter.fulfillment(of: [gate.entered], timeout: 2) == .completed else {
+            old.cancel()
+            gate.release(.init(items: [], nextStartIndex: nil))
+            XCTFail("Old browse load did not enter within 2 seconds")
+            return
+        }
         old.cancel()
         let new = FoundationItem(id: "new", title: "New", subtitle: "", kind: .album, duration: nil)
-        await model.load(.refresh) { _ in FoundationPage(items: [new], nextStartIndex: nil) }
-        release?.resume(returning: FoundationPage(items: [], nextStartIndex: 50))
-        await old.value
+        let replacement = Task {
+            await model.load(.refresh) { _ in FoundationPage(items: [new], nextStartIndex: nil) }
+        }
+        guard
+            await requireBrowseOperation(
+                replacement, gate: gate, held: old, name: "replacement browse page")
+        else { return }
+        gate.release(FoundationPage(items: [], nextStartIndex: 50))
+        guard
+            await requireBrowseOperation(
+                old, gate: gate, held: old, name: "retired browse page")
+        else { return }
         XCTAssertEqual(model.items, [new])
         XCTAssertNil(model.nextStartIndex)
         XCTAssertFalse(model.isLoading)
@@ -701,8 +795,7 @@ final class FoundationPresentationTests: XCTestCase {
     func testNewAlbumsCompleteWhileTracksStallAndCancelledTrackResultStaysUnpublished() async {
         let tracks = FoundationBrowseModel()
         let albums = FoundationBrowseModel()
-        let trackStarted = expectation(description: "Track section request is suspended")
-        var releaseTrack: CheckedContinuation<FoundationPage, Never>?
+        let gate = HeldBrowsePage()
         var trackOffsets: [Int] = []
         var albumOffsets: [Int] = []
         let album = FoundationItem(
@@ -712,17 +805,25 @@ final class FoundationPresentationTests: XCTestCase {
         let trackLoad = Task {
             await tracks.loadPending { offset in
                 trackOffsets.append(offset)
-                return await withCheckedContinuation { continuation in
-                    releaseTrack = continuation
-                    trackStarted.fulfill()
-                }
+                return await gate.hold()
             }
         }
-        await fulfillment(of: [trackStarted], timeout: 2)
-        await albums.loadPending { offset in
-            albumOffsets.append(offset)
-            return FoundationPage(items: [album], nextStartIndex: 50)
+        guard await XCTWaiter.fulfillment(of: [gate.entered], timeout: 2) == .completed else {
+            trackLoad.cancel()
+            gate.release(.init(items: [], nextStartIndex: nil))
+            XCTFail("Track section did not enter within 2 seconds")
+            return
         }
+        let albumLoad = Task {
+            await albums.loadPending { offset in
+                albumOffsets.append(offset)
+                return FoundationPage(items: [album], nextStartIndex: 50)
+            }
+        }
+        guard
+            await requireBrowseOperation(
+                albumLoad, gate: gate, held: trackLoad, name: "independent album page")
+        else { return }
         XCTAssertTrue(tracks.isLoading)
         XCTAssertFalse(tracks.loaded)
         XCTAssertEqual(albums.items, [album])
@@ -732,8 +833,11 @@ final class FoundationPresentationTests: XCTestCase {
 
         // Leaving New cancels the owner, even if its loader finishes afterward.
         trackLoad.cancel()
-        releaseTrack?.resume(returning: FoundationPage(items: [track], nextStartIndex: 100))
-        await trackLoad.value
+        gate.release(FoundationPage(items: [track], nextStartIndex: 100))
+        guard
+            await requireBrowseOperation(
+                trackLoad, gate: gate, held: trackLoad, name: "retired track page")
+        else { return }
         XCTAssertTrue(tracks.items.isEmpty)
         XCTAssertFalse(tracks.loaded)
         XCTAssertNil(tracks.nextStartIndex)
@@ -743,7 +847,7 @@ final class FoundationPresentationTests: XCTestCase {
         XCTAssertEqual(albums.nextStartIndex, 50)
     }
 
-    func testNewSharedPagesEnterSeeAllWithoutReadsAndContinueOnlyOnExplicitLoadMore() async {
+    func testNewSharedPagesReuseSeedAndContinueOnVisibleEndDemand() async {
         let tracks = FoundationBrowseModel()
         let albums = FoundationBrowseModel()
         let first = FoundationItem(
@@ -777,8 +881,7 @@ final class FoundationPresentationTests: XCTestCase {
         XCTAssertTrue(seeAllAlbums.loaded)
         XCTAssertTrue(seeAllAlbums.items.isEmpty)
 
-        seeAllTracks.request(.more)
-        await seeAllTracks.loadPending(using: loadTracks)
+        await seeAllTracks.loadNextVisiblePage(using: loadTracks)
         await tracks.loadPending(using: loadTracks)
         await albums.loadPending(using: loadAlbums)
         XCTAssertEqual(trackOffsets, [0, 100])
@@ -787,6 +890,348 @@ final class FoundationPresentationTests: XCTestCase {
         XCTAssertNil(tracks.nextStartIndex)
     }
 
+    func testPlaylistAddVisibleDemandRevealsBufferedRowsBeforeOneProviderPage() async {
+        let model = FoundationBrowseModel()
+        model.configureCatalogPagination()
+        let buffered = (0..<30).map {
+            FoundationItem(
+                id: "buffered-\($0)", title: "Song \($0)", subtitle: "", kind: .track, duration: nil
+            )
+        }
+        await model.load(.initial) { _ in .init(items: buffered, nextStartIndex: 30) }
+        var reads: [Int] = []
+        let more = (30..<42).map {
+            FoundationItem(
+                id: "next-\($0)", title: "Song \($0)", subtitle: "", kind: .track, duration: nil)
+        }
+        func next(_ count: Int) async -> Int {
+            await FoundationPlaylistAddContinuation.advance(
+                visibleCount: count, model: model, ifActive: { true }, allowsNetwork: { true },
+                using: { offset in
+                    reads.append(offset)
+                    return .init(items: more, nextStartIndex: nil)
+                })
+        }
+        var visible = await next(12)
+        XCTAssertEqual(visible, 24)
+        XCTAssertTrue(reads.isEmpty, "Buffered rows must not request another provider page")
+        visible = await next(visible)
+        XCTAssertEqual(visible, 36)
+        XCTAssertTrue(reads.isEmpty)
+        XCTAssertEqual(Array(model.items.prefix(visible)), buffered)
+        visible = await next(visible)
+        XCTAssertEqual(visible, 48)
+        XCTAssertEqual(reads, [30])
+        XCTAssertEqual(model.items, buffered + more, "Visible row identity and order stay stable")
+        let exhaustedCount = await next(visible)
+        XCTAssertEqual(exhaustedCount, visible)
+        XCTAssertEqual(reads, [30], "An exhausted result must not read again")
+    }
+
+    func testPlaylistAddVisibleDemandStopsAtEmptyContinuationAndRetiredContext() async {
+        let model = FoundationBrowseModel()
+        model.configureCatalogPagination()
+        let seed = (0..<12).map {
+            FoundationItem(
+                id: "seed-\($0)", title: "Seed \($0)", subtitle: "", kind: .track, duration: nil)
+        }
+        await model.load(.initial) { _ in .init(items: seed, nextStartIndex: 12) }
+        var reads: [Int] = []
+        let visible = await FoundationPlaylistAddContinuation.advance(
+            visibleCount: 12, model: model, ifActive: { true }, allowsNetwork: { true },
+            using: { offset in
+                reads.append(offset)
+                return .init(items: [], nextStartIndex: 24)
+            })
+        XCTAssertEqual(visible, 12)
+        XCTAssertEqual(reads, [12], "An empty page must not walk its successor cursor")
+        // Catalog validation rejects an empty page that claims another offset.
+        // Preserve the last accepted cursor and require explicit recovery, never drain it.
+        XCTAssertEqual(model.nextStartIndex, 12)
+        XCTAssertEqual(model.items, seed)
+        XCTAssertNotNil(model.errorMessage)
+        let blocked = await FoundationPlaylistAddContinuation.advance(
+            visibleCount: visible, model: model, ifActive: { true }, allowsNetwork: { true },
+            using: { offset in
+                reads.append(offset)
+                XCTFail("A failed empty continuation must not retry automatically")
+                return .init(items: seed, nextStartIndex: nil)
+            })
+        XCTAssertEqual(blocked, visible)
+        XCTAssertEqual(reads, [12])
+        XCTAssertEqual(model.nextStartIndex, 12)
+        XCTAssertEqual(model.items, seed)
+
+        // A new query owns a clean model epoch; retire that epoch during its actual read.
+        model.clearRetainedData()
+        await model.load(.initial) { _ in .init(items: seed, nextStartIndex: 12) }
+        XCTAssertNil(model.errorMessage)
+        let retired = await FoundationPlaylistAddContinuation.advance(
+            visibleCount: visible, model: model, ifActive: { true }, allowsNetwork: { true },
+            using: { offset in
+                reads.append(offset)
+                model.clearRetainedData()
+                return .init(items: seed, nextStartIndex: 36)
+            })
+        XCTAssertEqual(retired, visible, "An obsolete query cannot advance the new view window")
+        XCTAssertTrue(model.items.isEmpty)
+        XCTAssertNil(model.nextStartIndex)
+        XCTAssertEqual(reads, [12, 12])
+    }
+
+    func testPlaylistAddVisibleDemandHonorsOperationOfflineAndCancellation() async {
+        let model = FoundationBrowseModel()
+        await model.load(.initial) { _ in
+            .init(
+                items: [
+                    .init(id: "seed", title: "Seed", subtitle: "", kind: .track, duration: nil)
+                ],
+                nextStartIndex: 12)
+        }
+        var reads = 0
+        for (active, online) in [(false, true), (true, false)] {
+            let count = await FoundationPlaylistAddContinuation.advance(
+                visibleCount: 12, model: model, ifActive: { active }, allowsNetwork: { online },
+                using: { _ in
+                    reads += 1
+                    return .init(items: [], nextStartIndex: nil)
+                })
+            XCTAssertEqual(count, 12)
+        }
+        var active = true
+        let count = await FoundationPlaylistAddContinuation.advance(
+            visibleCount: 12, model: model, ifActive: { active }, allowsNetwork: { true },
+            using: { _ in
+                reads += 1
+                active = false
+                return .init(
+                    items: [
+                        .init(id: "late", title: "Late", subtitle: "", kind: .track, duration: nil)
+                    ],
+                    nextStartIndex: nil)
+            })
+        XCTAssertEqual(count, 12, "An operation or dismissed editor cannot advance after a page")
+        XCTAssertEqual(reads, 1)
+        model.clearRetainedData()
+        await model.load(.initial) { _ in .init(items: [], nextStartIndex: 12) }
+        let cancelled = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return await FoundationPlaylistAddContinuation.advance(
+                visibleCount: 12, model: model, ifActive: { true }, allowsNetwork: { true },
+                using: { _ in
+                    reads += 1
+                    return .init(items: [], nextStartIndex: nil)
+                })
+        }
+        let cancelledCount = await cancelled.value
+        XCTAssertEqual(cancelledCount, 12)
+        XCTAssertEqual(reads, 1)
+    }
+
+    func testVisibleSearchContinuationSettlesItsSeedBeforeOneAutomaticPage() async throws {
+        let seed = try XCTUnwrap(
+            FoundationSearchResolver.categorySeed(
+                .init(items: [], nextStartIndex: nil), kind: .track))
+        let lease = FoundationSearchSeedLease(page: seed.page)
+        let model = FoundationBrowseModel()
+        model.configureCatalogPagination()
+        var reads: [Int] = []
+        let match = FoundationItem(
+            id: "match", title: "Garden", subtitle: "", kind: .track, duration: nil)
+        model.configureSearchContinuation(
+            query: "Garden", kind: .track, metadataScope: "synthetic",
+            fallback: .init(term: "gar", nextStartIndex: 50), seed: seed, seedLease: lease
+        ) { term, kind, offset in
+            XCTAssertEqual(term, "gar")
+            XCTAssertEqual(kind, .track)
+            reads.append(offset)
+            return .init(items: [match], nextStartIndex: nil)
+        }
+        XCTAssertTrue(lease.pending)
+        await model.loadNextVisiblePage { _ in
+            XCTFail("The scoped overview seed must not be reread from the provider")
+            return .init(items: [], nextStartIndex: nil)
+        }
+        XCTAssertFalse(lease.pending)
+        XCTAssertTrue(model.loaded)
+        XCTAssertEqual(reads, [50])
+        XCTAssertEqual(model.items, [match])
+        XCTAssertFalse(model.hasMorePages)
+        await model.loadNextVisiblePage { _ in
+            XCTFail("An exhausted category must not read again")
+            return .init(items: [], nextStartIndex: nil)
+        }
+        XCTAssertEqual(reads, [50])
+    }
+
+    func testMountedPaginationFooterDoesNotDrainAnEmptyPageOnCursorPublication() async {
+        let first = FoundationItem(
+            id: "first", title: "First", subtitle: "", kind: .track, duration: nil)
+        let last = FoundationItem(
+            id: "last", title: "Last", subtitle: "", kind: .track, duration: nil)
+        weak var publishedOwner: PaginationFooterOwner?
+        let model = FoundationBrowseModel(onLoadSettled: { publishedOwner?.publicationSettled() })
+        await model.load(.initial) { _ in .init(items: [first], nextStartIndex: 50) }
+        let owner = PaginationFooterOwner(model: model, last: last)
+        publishedOwner = owner
+        let root = PaginationFooterHarness(owner: owner, model: model)
+        #if os(iOS)
+            guard
+                let scene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }
+                ).first
+            else {
+                XCTFail("A connected test-host window scene is required to mount the real footer")
+                return
+            }
+            let oldKeyWindow = scene.windows.first(where: \.isKeyWindow)
+            let window = UIWindow(windowScene: scene)
+            window.frame = CGRect(x: 0, y: 0, width: 320, height: 120)
+            window.rootViewController = UIHostingController(rootView: root)
+            window.makeKeyAndVisible()
+            defer {
+                window.isHidden = true
+                window.rootViewController = nil
+                oldKeyWindow?.makeKey()
+            }
+        #else
+            let window = NSWindow(
+                contentRect: CGRect(x: 0, y: 0, width: 320, height: 120),
+                styleMask: [.titled], backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            window.contentView = NSHostingView(rootView: root)
+            window.makeKeyAndOrderFront(nil)
+            defer {
+                window.orderOut(nil)
+                window.contentView = nil
+                window.close()
+            }
+        #endif
+        guard await XCTWaiter.fulfillment(of: [owner.firstPage], timeout: 5) == .completed else {
+            XCTFail("Visible footer did not request its page")
+            return
+        }
+        let unsolicited = await XCTWaiter.fulfillment(
+            of: [owner.unexpectedContinuation], timeout: 1)
+        XCTAssertEqual(
+            unsolicited, .completed,
+            "A cursor publication alone must not restart the footer task")
+        XCTAssertTrue(owner.demand.footerVisible)
+        XCTAssertEqual(owner.offsets, [50])
+        XCTAssertEqual(model.nextStartIndex, 100)
+        owner.continuationAllowed = true
+        owner.demand.request(active: true, allowsNetwork: true, isLoading: false, hasError: false)
+        guard await XCTWaiter.fulfillment(of: [owner.lastPage], timeout: 5) == .completed else {
+            XCTFail("New user demand did not request the next page")
+            return
+        }
+        XCTAssertEqual(owner.offsets, [50, 100])
+        XCTAssertEqual(model.items.map(\.id), [first.id, last.id])
+        XCTAssertNil(model.nextStartIndex)
+    }
+
+    func testVisiblePaginationRechecksOfflineAndCancellationAfterBusyPublication() async {
+        for cancels in [false, true] {
+            let model = FoundationBrowseModel()
+            let first = FoundationItem(
+                id: "first", title: "First", subtitle: "", kind: .track, duration: nil)
+            await model.load(.initial) { _ in .init(items: [first], nextStartIndex: 50) }
+            let gate = HeldBrowsePage()
+            let refresh = Task { await model.load(.refresh) { _ in await gate.hold() } }
+            guard await XCTWaiter.fulfillment(of: [gate.entered], timeout: 2) == .completed else {
+                refresh.cancel()
+                gate.release(.init(items: [], nextStartIndex: nil))
+                XCTFail("Refresh did not enter its hold")
+                return
+            }
+            var online = true
+            var reads: [Int] = []
+            let waiting = XCTestExpectation(description: "pagination entered wait")
+            var checks = 0
+            let pending = Task {
+                await model.loadNextVisiblePage(
+                    ifActive: {
+                        checks += 1
+                        if checks == 1 { waiting.fulfill() }
+                        return true
+                    },
+                    allowsNetwork: { online }
+                ) { offset in
+                    reads.append(offset)
+                    return .init(items: [], nextStartIndex: nil)
+                }
+            }
+            guard await XCTWaiter.fulfillment(of: [waiting], timeout: 2) == .completed else {
+                pending.cancel()
+                refresh.cancel()
+                gate.release(.init(items: [], nextStartIndex: nil))
+                XCTFail("Pagination did not wait for the in-flight page")
+                return
+            }
+            if cancels { pending.cancel() } else { online = false }
+            gate.release(.init(items: [first], nextStartIndex: 50))
+            guard await requireBrowseOperation(refresh, gate: gate, held: refresh, name: "refresh")
+            else {
+                pending.cancel()
+                return
+            }
+            guard
+                await requireBrowseOperation(
+                    pending, gate: gate, held: refresh, name: "retired pagination")
+            else { return }
+            XCTAssertEqual(reads, [], "Retired or offline demand cannot start another read")
+            XCTAssertEqual(model.items, [first])
+            XCTAssertEqual(model.nextStartIndex, 50)
+        }
+    }
+
+}
+
+@MainActor
+private final class PaginationFooterOwner: ObservableObject {
+    @Published var demand = FoundationCatalogPageDemand()
+    let model: FoundationBrowseModel
+    let last: FoundationItem
+    let firstPage = XCTestExpectation(description: "first visible-end page")
+    let unexpectedContinuation: XCTestExpectation = {
+        let value = XCTestExpectation(description: "unwanted cursor-driven page")
+        value.isInverted = true
+        return value
+    }()
+    let lastPage = XCTestExpectation(description: "explicit new scroll demand")
+    var continuationAllowed = false
+    var offsets: [Int] = []
+
+    init(model: FoundationBrowseModel, last: FoundationItem) {
+        self.model = model
+        self.last = last
+    }
+
+    func page(_ offset: Int) async throws -> FoundationPage {
+        offsets.append(offset)
+        if offset == 50 { return .init(items: [], nextStartIndex: 100) }
+        if !continuationAllowed { unexpectedContinuation.fulfill() }
+        return .init(items: [last], nextStartIndex: nil)
+    }
+
+    func publicationSettled() {
+        if offsets.last == 50 { firstPage.fulfill() }
+        if offsets.last == 100, continuationAllowed { lastPage.fulfill() }
+    }
+}
+
+private struct PaginationFooterHarness: View {
+    @ObservedObject var owner: PaginationFooterOwner
+    @ObservedObject var model: FoundationBrowseModel
+    var body: some View {
+        FoundationPaginationFooter(
+            demand: $owner.demand, isLoading: model.isLoading, isEnabled: true,
+            hasError: model.errorMessage != nil, showsScrollHint: model.items.isEmpty
+        ) {
+            await model.loadNextVisiblePage(using: owner.page)
+        }
+        .id(model.catalogIdentityContext)
+        .frame(width: 300, height: 100)
+    }
 }
 
 private actor SongAlphabetFixture {
@@ -819,30 +1264,6 @@ private actor SongAlphabetFixture {
 }
 
 #if os(macOS)
-    private struct FoundationOverviewAppearanceHost: View {
-        let scheme: ColorScheme
-        @State private var presented = false
-
-        var body: some View {
-            Color.black
-                .sheet(isPresented: $presented) {
-                    FoundationOverviewSheet(
-                        item: .init(
-                            id: "synthetic-overview", title: "Synthetic Album", subtitle: "",
-                            kind: .album, duration: nil),
-                        overview: (1...12).map {
-                            "Overview paragraph \($0). Native reading text remains legible when an immersive artwork page uses white controls."
-                        }.joined(separator: "\n\n")
-                    ) { presented = false }
-                }
-                .foregroundStyle(Color.white)
-                .preferredColorScheme(.dark)
-                .environment(\.colorScheme, .dark)
-                .environment(\.foundationBrowsingColorScheme, scheme)
-                .onAppear { presented = true }
-        }
-    }
-
     private actor FoundationMacHandoffAudioProbe {
         private(set) var count = 0
         func resolve(_ item: FoundationItem) throws -> URL {

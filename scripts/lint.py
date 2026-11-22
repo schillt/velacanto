@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
-"""Reject new formatting debt while preserving the accepted build 106 source verbatim.
-
-The checked-in diagnostics are existing build 106 formatting findings, to remove in
-post-release cleanup. Compilation/tests remain strict and are never baselined.
-"""
+"""Require zero formatting findings across maintained native source and test trees."""
 import pathlib
 import subprocess
 
+source_roots = [
+    str(path)
+    for name in ("Sources", "Tests", "Shared", "Widgets", "Intents", "UITests")
+    if (path := pathlib.Path("NativeFoundation") / name).is_dir()
+]
+if not source_roots:
+    raise SystemExit("No maintained native source or test trees found for formatting.")
+
 result = subprocess.run([
     "xcrun", "swift-format", "lint", "--configuration", ".swift-format", "--strict",
-    "--recursive", "NativeFoundation/Sources", "NativeFoundation/Tests",
+    "--recursive", *source_roots,
 ], capture_output=True, text=True)
-findings = set((result.stdout + result.stderr).splitlines())
-baseline = set(pathlib.Path("scripts/foundation-lint-baseline.txt").read_text().splitlines())
-new = findings - baseline
-if new or (result.returncode and not findings):
-    print("\n".join(sorted(new)))
+output = result.stdout + result.stderr
+if result.returncode or output.strip():
+    print(output, end="" if output.endswith("\n") else "\n")
     raise SystemExit(result.returncode or 1)
-print(f"Formatting: no new findings; {len(findings)} existing build 106 findings retained for separate cleanup")
+print(f"Formatting: zero findings across {len(source_roots)} maintained native trees")

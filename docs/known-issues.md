@@ -2,6 +2,8 @@
 
 ## 0.7 development limitations
 
+- **Mac Home scrolling:** Upward motion can still stutter both while playing and paused. The cause remains unresolved. The owner explicitly deferred further smooth-scrolling work to 0.8 under [#234](https://github.com/schillt/velacanto/issues/234); accepted improvements remain in 0.7. Only this Home smoothness scope moves: #14, #24 and #137 retain their other 0.7 requirements.
+
 - **Native HLS downloads:** The system-managed download path does not have a demonstrated app-enforced in-flight byte cap. An oversized download can consume storage before it finishes; normal system storage management still applies. Quality, cancellation, storage-pressure and account/deletion checks remain open under [#214](https://github.com/schillt/velacanto/issues/214).
 - **Standalone artists:** Library and Search use album-artist results. Some artists who appear only on standalone tracks may therefore be absent. A reliable bounded distinction between those artists and featured contributors has not been established; [#157](https://github.com/schillt/velacanto/issues/157) remains open.
 

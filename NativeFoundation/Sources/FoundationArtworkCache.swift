@@ -743,6 +743,14 @@ actor FoundationArtworkCache {
         return await FoundationArtworkDirectoryOwner.shared.clear(root: directory, retaining: scope)
     }
 
+    nonisolated static func clearStoredScope(_ scope: String, root: URL? = nil) async -> Bool {
+        let base =
+            root
+            ?? FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("VelacantoArtwork", isDirectory: true)
+        return await FoundationArtworkDirectoryOwner.shared.clearScope(root: base, scope: scope)
+    }
+
     /// Separate physical cache files from transient decoded-image memory.
     func storageUsage() async -> (memory: Int64, disk: Int64?) {
         await flushPersistence()
@@ -1010,6 +1018,14 @@ private actor FoundationArtworkDirectoryOwner {
             try FileManager.default.removeItem(at: directory)
             return true
         } catch { return false }
+    }
+
+    func clearScope(root: URL, scope: String) -> Bool {
+        let directory = root.appendingPathComponent(scope, isDirectory: true)
+        guard leases[directory.resolvingSymlinksInPath().standardizedFileURL.path] == nil else {
+            return false
+        }
+        return FoundationScopedAccountRemoval.remove(root: root, scope: scope)
     }
 
     func clear(root: URL, retaining scope: String?) -> Bool {

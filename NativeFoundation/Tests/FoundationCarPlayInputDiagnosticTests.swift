@@ -27,8 +27,11 @@
 
         func testRecordCapIsFiniteAndDoesNotGrowAfterFurtherCallbacks() async throws {
             let destination = temporaryFile()
+            var writesFinished = false
             defer {
-                try? FileManager.default.removeItem(at: destination.deletingLastPathComponent())
+                if writesFinished {
+                    try? FileManager.default.removeItem(at: destination.deletingLastPathComponent())
+                }
             }
             let probe = FoundationCarPlayInputDiagnostic(destination: destination, clock: { 10 })
             for _ in 0..<1_000 {
@@ -36,7 +39,8 @@
             }
             XCTAssertEqual(probe.snapshot.records.count, 128)
             XCTAssertTrue(probe.snapshot.recordLimitReached)
-            await probe.waitForWrites()
+            try await waitForWrites(probe)
+            writesFinished = true
             let stored = try JSONDecoder().decode(
                 FoundationCarPlayInputDiagnostic.Snapshot.self, from: Data(contentsOf: destination))
             XCTAssertEqual(stored.records.count, 128)
@@ -45,8 +49,11 @@
         func testExpiredWindowCannotRearmAfterTimeMovesOrConnectionEvents() async throws {
             var now: TimeInterval = 10
             let destination = temporaryFile()
+            var writesFinished = false
             defer {
-                try? FileManager.default.removeItem(at: destination.deletingLastPathComponent())
+                if writesFinished {
+                    try? FileManager.default.removeItem(at: destination.deletingLastPathComponent())
+                }
             }
             let probe = FoundationCarPlayInputDiagnostic(destination: destination, clock: { now })
             probe.note(.connected, navigating: false)
@@ -57,7 +64,8 @@
             probe.note(.connected, navigating: false)
             XCTAssertTrue(probe.snapshot.expired)
             XCTAssertEqual(probe.snapshot.records.count, 1)
-            await probe.waitForWrites()
+            try await waitForWrites(probe)
+            writesFinished = true
             let stored = try JSONDecoder().decode(
                 FoundationCarPlayInputDiagnostic.Snapshot.self, from: Data(contentsOf: destination))
             XCTAssertTrue(stored.expired)
@@ -65,8 +73,11 @@
 
         func testNativeCompletionAndQueryMetadataHaveOnlyDeclaredScalarSchema() async throws {
             let destination = temporaryFile()
+            var writesFinished = false
             defer {
-                try? FileManager.default.removeItem(at: destination.deletingLastPathComponent())
+                if writesFinished {
+                    try? FileManager.default.removeItem(at: destination.deletingLastPathComponent())
+                }
             }
             let probe = FoundationCarPlayInputDiagnostic(
                 destination: destination, build: 220, appVersionComponents: [0, 6, 0],
@@ -84,7 +95,8 @@
             probe.note(
                 .sceneActivation, navigating: false, sceneEvent: .enteredBackground)
             probe.completed(sequence: sequence, rows: 4, navigating: false)
-            await probe.waitForWrites()
+            try await waitForWrites(probe)
+            writesFinished = true
             let data = try Data(contentsOf: destination)
             XCTAssertLessThanOrEqual(data.count, 1_048_576)
             let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
@@ -132,18 +144,38 @@
 
         func testCoalescedWriterRetainsTheLatestBoundedSnapshot() async throws {
             let destination = temporaryFile()
+            var writesFinished = false
             defer {
-                try? FileManager.default.removeItem(at: destination.deletingLastPathComponent())
+                if writesFinished {
+                    try? FileManager.default.removeItem(at: destination.deletingLastPathComponent())
+                }
             }
             let probe = FoundationCarPlayInputDiagnostic(destination: destination, clock: { 10 })
             for length in 0..<80 {
                 probe.note(.update, length: length, owned: true, navigating: false)
             }
-            await probe.waitForWrites()
+            try await waitForWrites(probe)
+            writesFinished = true
             let stored = try JSONDecoder().decode(
                 FoundationCarPlayInputDiagnostic.Snapshot.self, from: Data(contentsOf: destination))
             XCTAssertEqual(stored.records.count, 80)
             XCTAssertEqual(stored.records.last?.queryLength, 79)
+        }
+
+        private struct DiagnosticWriterTimeout: Error, CustomStringConvertible {
+            let description = "Diagnostic writer did not return within 5 seconds; fixture retained"
+        }
+
+        private func waitForWrites(_ probe: FoundationCarPlayInputDiagnostic) async throws {
+            let finished = XCTestExpectation(description: "diagnostic writer returned")
+            let observer = Task {
+                await probe.waitForWrites()
+                finished.fulfill()
+            }
+            guard await XCTWaiter.fulfillment(of: [finished], timeout: 5) == .completed else {
+                observer.cancel()
+                throw DiagnosticWriterTimeout()
+            }
         }
 
         private func temporaryFile() -> URL {

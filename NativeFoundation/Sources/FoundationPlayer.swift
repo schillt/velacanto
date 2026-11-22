@@ -45,6 +45,10 @@ final class FoundationPlayer: ObservableObject {
     @Published private(set) var shuffleEnabled = false
     @Published private(set) var repeatMode: RepeatMode = .off
     let sessionChanged = PassthroughSubject<Void, Never>()
+    #if DEBUG
+        nonisolated static let failedEndTestTokenKey = "FoundationPlayerFailedEndTestToken"
+        var failedEndProcessedForTesting: ((AVPlayerItem, UUID?) -> Void)?
+    #endif
 
     var history: [FoundationQueueEntry] { selectedIndex.map { Array(queue.prefix($0)) } ?? [] }
     var upcoming: [FoundationQueueEntry] {
@@ -118,6 +122,8 @@ final class FoundationPlayer: ObservableObject {
         // The saved current occurrence stays selected even when an older alternative copy
         // is preferred by the browsing projection; restoration must not jump into history.
         selectedEntryID = rawQueue.first { $0.id == snapshot.selectedEntryID }?.id
+        playbackCollection = snapshot.collection.flatMap { $0.isValid ? $0 : nil }
+        lastPlaybackCollection = snapshot.lastCollection.flatMap { $0.isValid ? $0 : nil }
         shuffleEnabled = snapshot.shuffleEnabled
         repeatMode = snapshot.repeatMode
         state = selectedEntryID == nil ? .idle : .paused
@@ -196,6 +202,8 @@ final class FoundationPlayer: ObservableObject {
     private var observeTrackCopies: ([FoundationItem]) -> Void = { _ in }
     @Published private(set) var queue: [FoundationQueueEntry] = []
     var persistedQueue: [FoundationQueueEntry] { rawQueue }
+    private(set) var playbackCollection: FoundationWidgetSnapshot.Collection?
+    private(set) var lastPlaybackCollection: FoundationWidgetSnapshot.Collection?
     // A transferred queue keeps its own effective copy selection. Ordinary metadata
     // learning never changes this queue's visibility or the device's preferences.
     private var continuationVisibleIDs: Set<UUID>?
@@ -333,8 +341,13 @@ final class FoundationPlayer: ObservableObject {
         private var pendingSessionResumption:
             (generation: UInt64, request: UInt64, item: AVPlayerItem)?
     #endif
-    // AVAudioSession is process-wide; retiring account owners must finish before a new owner activates.
-    private static var lastSessionOperation: Task<Void, Never>?
+    // System players share one process-wide audio-session lane; isolated tests supply their own.
+    final class SessionLane {
+        fileprivate var lastOperation: Task<Void, Never>?
+    }
+    private static let systemSessionLane = SessionLane()
+    private let sessionLane: SessionLane
+    private let diagnostic: @Sendable (String) -> Void
     private let startPlayback: (AVPlayer) -> Void
     private let seekForUser:
         @MainActor (AVPlayer, CMTime, @escaping @Sendable (Bool) -> Void) -> Void
@@ -387,6 +400,9 @@ final class FoundationPlayer: ObservableObject {
                 else { throw AudioSessionFailure.deactivationDeclined }
             #endif
         },
+        sessionLane: SessionLane? = nil,
+        observeSystemEvents: Bool = true,
+        diagnostic: (@Sendable (String) -> Void)? = nil,
         startPlayback: @escaping (AVPlayer) -> Void = { $0.play() },
         seekForContinuation:
             @escaping @MainActor (
@@ -407,6 +423,12 @@ final class FoundationPlayer: ObservableObject {
         reportPlayback: (@Sendable (FoundationPlaybackReport) async throws -> Void)? = nil,
         reportingAllowed: @escaping @MainActor @Sendable () -> Bool = { true }
     ) {
+        self.sessionLane = sessionLane ?? Self.systemSessionLane
+        #if DEBUG
+            self.diagnostic = diagnostic ?? { FoundationJournal.shared.record($0) }
+        #else
+            self.diagnostic = diagnostic ?? { _ in }
+        #endif
         self.seekForUser = seekForUser
         self.seekForContinuation = seekForContinuation
         self.reportingAllowed = reportingAllowed
@@ -421,118 +443,104 @@ final class FoundationPlayer: ObservableObject {
         self.activateSession = activateSession
         self.startPlayback = startPlayback
         self.deactivateSession = deactivateSession
-        #if os(iOS)
+        #if os(iOS) || os(macOS)
             // Keep music on the audio route instead of handing video playback to the receiver.
             nativePlayer.allowsExternalPlayback = false
         #endif
         nativePlayer.actionAtItemEnd = .none
-        observations = [
-            nativePlayer.observe(\.timeControlStatus, options: [.new]) { [weak self] _, _ in
-                Task { @MainActor [weak self] in self?.refreshNativeState() }
-            },
-            nativePlayer.observe(\.status, options: [.new]) { [weak self] _, _ in
-                Task { @MainActor [weak self] in self?.refreshNativeState() }
-            },
-        ]
-        timeObserver = nativePlayer.addPeriodicTimeObserver(
-            forInterval: CMTime(seconds: 0.5, preferredTimescale: 600), queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor [weak self] in self?.refreshTime() }
-        }
-        #if DEBUG
-            notifications.append(
-                NotificationCenter.default.addObserver(
-                    forName: AVPlayerItem.newAccessLogEntryNotification, object: nil, queue: .main
-                ) { [weak self] notification in
-                    guard let item = notification.object as? AVPlayerItem else { return }
-                    Task { @MainActor [weak self] in
-                        guard let self, self.nativePlayer.currentItem === item else { return }
-                        self.recordComparisonAccess(item, retiring: false)
-                    }
-                })
-        #endif
-        notifications.append(
-            NotificationCenter.default.addObserver(
-                forName: AVPlayerItem.didPlayToEndTimeNotification, object: nil, queue: .main
-            ) { [weak self] notification in
-                guard let item = notification.object as? AVPlayerItem else { return }
-                Task { @MainActor [weak self] in self?.didReachEnd(item) }
-            })
-        notifications.append(
-            NotificationCenter.default.addObserver(
-                forName: AVPlayerItem.failedToPlayToEndTimeNotification, object: nil, queue: .main
-            ) { [weak self] notification in
-                guard let item = notification.object as? AVPlayerItem else { return }
-                Task { @MainActor [weak self] in
-                    guard let self, self.selectionTask == nil,
-                        self.nativePlayer.currentItem === item
-                    else { return }
-                    self.fail(.nativeEnd, error: item.error)
-                }
-            })
-        let rateChangeReasonKey = AVPlayer.rateDidChangeReasonKey
-        notifications.append(
-            NotificationCenter.default.addObserver(
-                forName: AVPlayer.rateDidChangeNotification, object: nativePlayer, queue: .main
-            ) { [weak self] notification in
-                // Only the copied String crosses into the actor; Notification.userInfo is not Sendable.
-                let value = notification.userInfo?[rateChangeReasonKey] as? String
-                MainActor.assumeIsolated {
-                    #if DEBUG
-                        self?.recordSnapshot("native.rate reason=" + Self.rateCategory(value))
-                    #endif
-                    guard let value,
-                        AVPlayer.RateDidChangeReason(rawValue: value) == .setRateFailed
-                    else { return }
-                    self?.reconcileRejectedStart()
-                }
-            })
-        #if os(iOS)
-            notifications.append(
-                NotificationCenter.default.addObserver(
-                    forName: AVAudioSession.didBecomeInactiveNotification,
-                    object: AVAudioSession.sharedInstance(), queue: .main
-                ) { [weak self] notification in
-                    guard
-                        let context = notification.userInfo?[AVAudioSession.deactivationContextKey]
-                            as? AVAudioSession.DeactivationContext
-                    else { return }
-                    // Handle main-queue delivery here, without deferring a pause past a newer command.
-                    MainActor.assumeIsolated {
-                        #if DEBUG
-                            self?.recordSnapshot(
-                                "session.inactive source="
-                                    + Self.deactivationCategory(context.source)
-                                    + " reason="
-                                    + Self.interruptionCategory(context.interruptionContext?.reason)
-                            )
-                        #endif
-                        self?.didDeactivateAudioSession(source: context.source)
-                    }
-                })
-            notifications.append(
-                NotificationCenter.default.addObserver(
-                    forName: AVAudioSession.resumptionRecommendationNotification,
-                    object: AVAudioSession.sharedInstance(), queue: .main
-                ) { [weak self] notification in
-                    guard
-                        let context = notification.userInfo?[AVAudioSession.resumptionContextKey]
-                            as? AVAudioSession.ResumptionContext
-                    else { return }
-                    MainActor.assumeIsolated {
-                        self?.didReceiveSessionResumption(context.recommendation)
-                    }
-                })
+        if observeSystemEvents {
+            observations = [
+                nativePlayer.observe(\.timeControlStatus, options: [.new]) { [weak self] _, _ in
+                    Task { @MainActor [weak self] in self?.refreshNativeState() }
+                },
+                nativePlayer.observe(\.status, options: [.new]) { [weak self] _, _ in
+                    Task { @MainActor [weak self] in self?.refreshNativeState() }
+                },
+            ]
+            timeObserver = nativePlayer.addPeriodicTimeObserver(
+                forInterval: CMTime(seconds: 0.5, preferredTimescale: 600), queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in self?.refreshTime() }
+            }
             #if DEBUG
                 notifications.append(
                     NotificationCenter.default.addObserver(
-                        forName: AVAudioSession.routeChangeNotification,
+                        forName: AVPlayerItem.newAccessLogEntryNotification, object: nil,
+                        queue: .main
+                    ) { [weak self] notification in
+                        guard let item = notification.object as? AVPlayerItem else { return }
+                        Task { @MainActor [weak self] in
+                            guard let self, self.nativePlayer.currentItem === item else { return }
+                            self.recordComparisonAccess(item, retiring: false)
+                        }
+                    })
+            #endif
+            notifications.append(
+                NotificationCenter.default.addObserver(
+                    forName: AVPlayerItem.didPlayToEndTimeNotification, object: nil, queue: .main
+                ) { [weak self] notification in
+                    guard let item = notification.object as? AVPlayerItem else { return }
+                    Task { @MainActor [weak self] in self?.didReachEnd(item) }
+                })
+            notifications.append(
+                NotificationCenter.default.addObserver(
+                    forName: AVPlayerItem.failedToPlayToEndTimeNotification, object: nil,
+                    queue: .main
+                ) { [weak self] notification in
+                    guard let item = notification.object as? AVPlayerItem else { return }
+                    #if DEBUG
+                        let testToken = notification.userInfo?[Self.failedEndTestTokenKey] as? UUID
+                    #endif
+                    Task { @MainActor [weak self] in
+                        guard let self else { return }
+                        #if DEBUG
+                            defer { self.failedEndProcessedForTesting?(item, testToken) }
+                        #endif
+                        guard self.selectionTask == nil, self.nativePlayer.currentItem === item
+                        else { return }
+                        self.fail(.nativeEnd, error: item.error)
+                    }
+                })
+            let rateChangeReasonKey = AVPlayer.rateDidChangeReasonKey
+            notifications.append(
+                NotificationCenter.default.addObserver(
+                    forName: AVPlayer.rateDidChangeNotification, object: nativePlayer, queue: .main
+                ) { [weak self] notification in
+                    // Only the copied String crosses into the actor; Notification.userInfo is not Sendable.
+                    let value = notification.userInfo?[rateChangeReasonKey] as? String
+                    MainActor.assumeIsolated {
+                        #if DEBUG
+                            self?.recordSnapshot("native.rate reason=" + Self.rateCategory(value))
+                        #endif
+                        guard let value,
+                            AVPlayer.RateDidChangeReason(rawValue: value) == .setRateFailed
+                        else { return }
+                        self?.reconcileRejectedStart()
+                    }
+                })
+            #if os(iOS)
+                notifications.append(
+                    NotificationCenter.default.addObserver(
+                        forName: AVAudioSession.didBecomeInactiveNotification,
                         object: AVAudioSession.sharedInstance(), queue: .main
                     ) { [weak self] notification in
-                        let raw =
-                            notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt
+                        guard
+                            let context = notification.userInfo?[
+                                AVAudioSession.deactivationContextKey]
+                                as? AVAudioSession.DeactivationContext
+                        else { return }
+                        // Handle main-queue delivery here, without deferring a pause past a newer command.
                         MainActor.assumeIsolated {
-                            self?.recordSnapshot("session.route reason=" + Self.routeCategory(raw))
+                            #if DEBUG
+                                self?.recordSnapshot(
+                                    "session.inactive source="
+                                        + Self.deactivationCategory(context.source)
+                                        + " reason="
+                                        + Self.interruptionCategory(
+                                            context.interruptionContext?.reason)
+                                )
+                            #endif
+                            self?.didDeactivateAudioSession(source: context.source)
                         }
                     })
                 notifications.append(
@@ -540,17 +548,45 @@ final class FoundationPlayer: ObservableObject {
                         forName: AVAudioSession.resumptionRecommendationNotification,
                         object: AVAudioSession.sharedInstance(), queue: .main
                     ) { [weak self] notification in
-                        let context =
-                            notification.userInfo?[AVAudioSession.resumptionContextKey]
-                            as? AVAudioSession.ResumptionContext
+                        guard
+                            let context = notification.userInfo?[
+                                AVAudioSession.resumptionContextKey]
+                                as? AVAudioSession.ResumptionContext
+                        else { return }
                         MainActor.assumeIsolated {
-                            self?.recordSnapshot(
-                                "session.resumption recommendation="
-                                    + Self.resumptionCategory(context?.recommendation))
+                            self?.didReceiveSessionResumption(context.recommendation)
                         }
                     })
+                #if DEBUG
+                    notifications.append(
+                        NotificationCenter.default.addObserver(
+                            forName: AVAudioSession.routeChangeNotification,
+                            object: AVAudioSession.sharedInstance(), queue: .main
+                        ) { [weak self] notification in
+                            let raw =
+                                notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt
+                            MainActor.assumeIsolated {
+                                self?.recordSnapshot(
+                                    "session.route reason=" + Self.routeCategory(raw))
+                            }
+                        })
+                    notifications.append(
+                        NotificationCenter.default.addObserver(
+                            forName: AVAudioSession.resumptionRecommendationNotification,
+                            object: AVAudioSession.sharedInstance(), queue: .main
+                        ) { [weak self] notification in
+                            let context =
+                                notification.userInfo?[AVAudioSession.resumptionContextKey]
+                                as? AVAudioSession.ResumptionContext
+                            MainActor.assumeIsolated {
+                                self?.recordSnapshot(
+                                    "session.resumption recommendation="
+                                        + Self.resumptionCategory(context?.recommendation))
+                            }
+                        })
+                #endif
             #endif
-        #endif
+        }
     }
 
     isolated deinit {
@@ -566,12 +602,15 @@ final class FoundationPlayer: ObservableObject {
         if let resource = installedResource { Task { await resource.release() } }
     }
 
-    func setQueue(_ items: [FoundationItem], selectedIndex: Int) {
+    func setQueue(
+        _ items: [FoundationItem], selectedIndex: Int, collection: FoundationItem? = nil
+    ) {
         #if DEBUG
             recordSnapshot("command.setQueue")
         #endif
         guard items.allSatisfy({ $0.kind == .track }) else { return }
         if items.isEmpty {
+            playbackCollection = nil
             continuationVisibleIDs = nil
             discardSelection()
             selectedEntryID = nil
@@ -581,6 +620,8 @@ final class FoundationPlayer: ObservableObject {
             return
         }
         guard items.indices.contains(selectedIndex) else { return }
+        playbackCollection = collection.flatMap(FoundationWidgetSnapshot.Collection.init)
+        if let playbackCollection { lastPlaybackCollection = playbackCollection }
         // Tracks preceding the tapped row were not selected and must not become history.
         var replacements = items[selectedIndex...].map { FoundationQueueEntry(item: $0) }
         observeTrackCopies(items)
@@ -621,6 +662,9 @@ final class FoundationPlayer: ObservableObject {
         observeTrackCopies(items)
         let entries = projectedEntries(items.map { FoundationQueueEntry(item: $0) })
         guard !entries.isEmpty else { return }
+        // Manual extension can mix unrelated content. Keep the recent collection,
+        // but do not claim this mixed queue is still that collection's playback.
+        playbackCollection = nil
         let insertion =
             position == .next
             ? selectedEntryID.flatMap { id in rawQueue.firstIndex { $0.id == id }.map { $0 + 1 } }
@@ -650,6 +694,14 @@ final class FoundationPlayer: ObservableObject {
         finalPosition: (@MainActor @Sendable () async throws -> Double)? = nil
     ) {
         guard let entry = queue.first(where: { $0.id == id }) else { return }
+        if let previous = selectedEntryID,
+            let oldIndex = rawQueue.firstIndex(where: { $0.id == previous }),
+            let nextIndex = rawQueue.firstIndex(where: { $0.id == id }), nextIndex < oldIndex
+        {
+            // Retained earlier history may belong to another collection. Conservatively
+            // lose this presentation optimization on Back/history/repeat wrap, not the queue.
+            playbackCollection = nil
+        }
         discardSelection(retainingNativeItem: retainingEndedItem)
         isInterrupted = false
         if selectedEntryID != id { selectedEntryID = id }
@@ -786,7 +838,7 @@ final class FoundationPlayer: ObservableObject {
         #if DEBUG
             let direction =
                 target.seconds < nativePlayer.currentTime().seconds ? "backward" : "forward"
-            FoundationTrace.event("seek.request direction=\(direction)")
+            diagnostic("seek.request direction=\(direction)")
         #endif
         seekForUser(nativePlayer, target) {
             [weak self] finished in
@@ -804,7 +856,7 @@ final class FoundationPlayer: ObservableObject {
                 self.playbackPositionChanged.send()
                 #if DEBUG
                     let reached = abs(self.nativePlayer.currentTime().seconds - target.seconds) < 1
-                    FoundationTrace.event(
+                    self.diagnostic(
                         "seek.complete direction=\(direction) finished=\(finished ? 1 : 0) current=1 reached=\(reached ? 1 : 0)"
                     )
                 #endif
@@ -835,7 +887,7 @@ final class FoundationPlayer: ObservableObject {
         #if DEBUG
             recordSnapshot("command.stop")
         #endif
-        let previous = Self.lastSessionOperation
+        let previous = sessionLane.lastOperation
         let deactivate = deactivateSession
         let stopGeneration = generation
         sessionTask = Task { [weak self] in
@@ -845,7 +897,7 @@ final class FoundationPlayer: ObservableObject {
                 self.errorMessage = "Audio session could not be released. Try playback again."
             }
         }
-        Self.lastSessionOperation = sessionTask
+        sessionLane.lastOperation = sessionTask
     }
 
     private var selectedIndex: Int? { queue.firstIndex { $0.id == selectedEntryID } }
@@ -900,15 +952,18 @@ final class FoundationPlayer: ObservableObject {
         playRequest &+= 1
         let request = playRequest
         let selectionGeneration = generation
-        let previous = Self.lastSessionOperation
+        let previous = sessionLane.lastOperation
         let activate = activateSession
+        #if DEBUG
+            let diagnostic = diagnostic
+        #endif
         let task = Task { [weak self] in
             #if DEBUG
-                FoundationTrace.event("audioSession.previous.wait")
+                diagnostic("audioSession.previous.wait")
             #endif
             await previous?.value
             #if DEBUG
-                FoundationTrace.event("audioSession.previous.completed")
+                diagnostic("audioSession.previous.completed")
             #endif
             defer {
                 if self?.playRequest == request { self?.playTask = nil }
@@ -922,11 +977,11 @@ final class FoundationPlayer: ObservableObject {
                     return
                 }
                 #if DEBUG
-                    FoundationTrace.event("audioSession.activation.started")
+                    diagnostic("audioSession.activation.started")
                 #endif
                 try await activate()
                 #if DEBUG
-                    FoundationTrace.event("audioSession.activation.completed")
+                    diagnostic("audioSession.activation.completed")
                 #endif
                 try Task.checkCancellation()
                 guard let self, self.generation == selectionGeneration,
@@ -973,7 +1028,7 @@ final class FoundationPlayer: ObservableObject {
         }
         playTask = task
         sessionTask = task
-        Self.lastSessionOperation = task
+        sessionLane.lastOperation = task
     }
 
     private enum AudioSessionFailure: Error {
@@ -1398,6 +1453,7 @@ final class FoundationPlayer: ObservableObject {
             comparisonAccessEvents += 1
             let selectedGeneration = comparisonInstalledGeneration ?? generation
             let method = installedResource?.source.delivery.rawValue ?? "unknown"
+            let diagnostic = diagnostic
             item.fetchAccessLog { log in
                 guard let event = log?.events.last else { return }
                 let observed: String
@@ -1407,7 +1463,7 @@ final class FoundationPlayer: ObservableObject {
                 case "LIVE": observed = "live"
                 default: observed = "unknown"
                 }
-                FoundationJournal.shared.record(
+                diagnostic(
                     "player.comparison.access generation=\(selectedGeneration) requestedDelivery=\(method) "
                         + "retiring=\(retiring ? 1 : 0) observedType=\(observed) "
                         + "bytes=\(event.numberOfBytesTransferred) requests=\(event.numberOfMediaRequests) "
@@ -1457,7 +1513,7 @@ final class FoundationPlayer: ObservableObject {
                     Int((ProcessInfo.processInfo.systemUptime - $0) * 1000)
                 } ?? -1
             let delivery = installedResource?.source.delivery.rawValue ?? "unresolved"
-            FoundationJournal.shared.record(
+            diagnostic(
                 "player.\(event) generation=\(generation) state=\(state.rawValue) "
                     + "item=\(itemStatus) control=\(control) wait=\(reason) intent=\(wantsPlayback ? 1 : 0) "
                     + "selectionMs=\(selectionMs) requestedDelivery=\(delivery)"
@@ -1530,6 +1586,30 @@ struct FoundationPlaybackSnapshot: Codable {
     let shuffleEnabled: Bool
     let repeatMode: FoundationPlayer.RepeatMode
     let visibleEntryIDs: [UUID]?
+    var collection: FoundationWidgetSnapshot.Collection? = nil
+    var lastCollection: FoundationWidgetSnapshot.Collection? = nil
+
+    private enum CodingKeys: String, CodingKey {
+        case version, entries, selectedEntryID, shuffleEnabled, repeatMode, visibleEntryIDs
+        case collection, lastCollection
+    }
+
+    init(from decoder: any Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        version = try values.decode(Int.self, forKey: .version)
+        entries = try values.decode([Entry].self, forKey: .entries)
+        selectedEntryID = try values.decodeIfPresent(UUID.self, forKey: .selectedEntryID)
+        shuffleEnabled = try values.decode(Bool.self, forKey: .shuffleEnabled)
+        repeatMode = try values.decode(FoundationPlayer.RepeatMode.self, forKey: .repeatMode)
+        visibleEntryIDs = try values.decodeIfPresent([UUID].self, forKey: .visibleEntryIDs)
+        // Optional widget context must never invalidate an otherwise restorable queue.
+        collection =
+            (try? values.decode(FoundationWidgetSnapshot.Collection.self, forKey: .collection))
+            .flatMap { $0.isValid ? $0 : nil }
+        lastCollection =
+            (try? values.decode(FoundationWidgetSnapshot.Collection.self, forKey: .lastCollection))
+            .flatMap { $0.isValid ? $0 : nil }
+    }
 
     @MainActor init(player: FoundationPlayer) {
         version = 1
@@ -1538,6 +1618,8 @@ struct FoundationPlaybackSnapshot: Codable {
         shuffleEnabled = player.shuffleEnabled
         repeatMode = player.repeatMode
         visibleEntryIDs = player.persistedVisibleEntryIDs
+        collection = player.playbackCollection
+        lastCollection = player.lastPlaybackCollection
     }
 
     init(

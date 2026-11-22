@@ -56,6 +56,8 @@ final class FoundationPinSync: ObservableObject {
     @Published private var promptOwner: UUID?
     private var journal: Journal
     private(set) var task: Task<Void, Never>?
+    private var inFlightExchange: (id: UUID, task: Task<Void, Never>)?
+    private var refreshAfterExchange = false
     private var generation = UUID()
     private var revision: UInt = 0
     private var active = true
@@ -212,6 +214,7 @@ final class FoundationPinSync: ObservableObject {
         promptOwner = nil
         task?.cancel()
         task = nil
+        refreshAfterExchange = false
         isSyncing = false
         enabled = value
         journal.enabled = value
@@ -274,6 +277,16 @@ final class FoundationPinSync: ObservableObject {
         guard active, enabled, journal.needsRecovery != true,
             task == nil, let exchangeCloud
         else { return }
+        if inFlightExchange != nil {
+            if erase {
+                message = "A previous sync is still finishing. Try again."
+            } else {
+                refreshAfterExchange = true
+                message = "Waiting for the previous sync to finish…"
+            }
+            return
+        }
+        let exchangeID = UUID()
         let token = generation
         let startedRevision = revision
         let local = journal.state
@@ -283,7 +296,8 @@ final class FoundationPinSync: ObservableObject {
         let scope = scope
         isSyncing = true
         message = erase ? "Deleting cloud-saved pins…" : "Syncing pins…"
-        task = Task { [weak self] in
+        let operation = Task { [weak self] in
+            defer { self?.finishExchange(exchangeID) }
             do {
                 let result = try await exchangeCloud(scope, local, initial, device, account, erase)
                 guard let self, self.active, self.enabled, self.generation == token,
@@ -336,10 +350,29 @@ final class FoundationPinSync: ObservableObject {
                     "Pins remain local. iCloud sync did not finish; use Sync Now to retry."
             }
         }
+        task = operation
+        inFlightExchange = (exchangeID, operation)
+    }
+
+    private func finishExchange(_ id: UUID) {
+        guard inFlightExchange?.id == id else { return }
+        inFlightExchange = nil
+        if refreshAfterExchange, active, enabled {
+            refreshAfterExchange = false
+            refresh()
+        }
+    }
+
+    func invalidateAndCaptureExchange() -> Task<Void, Never>? {
+        let exchange = inFlightExchange?.task
+        invalidate()
+        return exchange
     }
 
     func invalidate() {
         active = false
+        refreshAfterExchange = false
+        inFlightExchange?.task.cancel()
         offersOptIn = false
         promptOwner = nil
         generation = UUID()

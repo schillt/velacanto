@@ -1,7 +1,7 @@
 # VelaCanto
 
 VelaCanto is a native Jellyfin music app for iPhone, iPad and Mac.
-Development is entering **0.7.0**, focused on reliability, privacy, measured
+Active development is **0.7.0**, focused on reliability, privacy, measured
 performance and platform polish while preserving the accepted 0.6 experience.
 
 Start with the [0.7.0 agent handoff](docs/0.7.0-agent-handoff.md),
@@ -10,7 +10,11 @@ Start with the [0.7.0 agent handoff](docs/0.7.0-agent-handoff.md),
 baseline is **0.6.0 (309)**; its exact checks remain in the
 [historical checkpoint](docs/0.6.0-alpha-checkpoint.md). Production pin sync is
 owner accepted as of November 2, 2026; residual iCloud lag is an accepted limitation.
-Preparation has not changed app code, versions or installed applications.
+The local source is labeled **0.7.0 (322)** for a separate review candidate.
+Earlier build321 owner acceptance remains scoped to its recorded Mac/iPhone checks;
+current artifact, signing and installation status are recorded in the handoff.
+Local implementation remains unpublished; installed review, source publication
+and distribution are separate states.
 
 The product spelling is **VelaCanto**; publisher drafts use **NovoLuxor**.
 
@@ -43,9 +47,39 @@ Basic Siri/system media commands are supported. This release makes no Apple
 Intelligence, natural-language catalog playback or on-device AI claim. Lyrics,
 recommendations, permissions and transcoding depend on the server/library. Jellyfin
 is the only implemented provider. Pins remain local unless optional iCloud sync is enabled; favorites are server-backed.
+
+Library Artists and artist Search use the same Jellyfin album-artist index. An
+artist credited only on standalone tracks may be absent from these artist results
+if the provider does not include that identity in its album-artist index. A missing
+or zero album count does not establish standalone status, and performer credits do
+not reliably distinguish primary artists from featured contributors. For 0.7,
+the owner accepted this documented provider limitation under
+[#157](https://github.com/schillt/velacanto/issues/157). Standalone-artist
+supplementation remains unsupported; the app does not infer it from names/counts
+or scan the catalog to classify artists.
+See the [provider audit and bounded request budget](docs/standalone-artists-157-provider-audit.json).
+
 The optional native system-managed download route has scoped AAC acceptance and
 Apple-managed media labels; broader format/storage-pressure coverage remains open.
 Original/AAC file downloads remain distinct from online HLS streaming.
+
+For **0.7**, native system-managed HLS downloads have no demonstrated enforceable
+in-flight byte cap. An oversized download can consume storage before it finishes;
+a completed-package size check is not a limit during acquisition. Check free
+device space before downloading. A lower AAC download preset can reduce expected
+storage use, but it does not guarantee a maximum total size. Cancel unwanted
+requests and remove completed downloads through **Downloads → Manage Downloads**
+or the iPhone's system Storage controls. Original downloads remain app-managed.
+If an Original request fails with system management enabled, remove that failed
+request, turn off **Manage New Downloads in iPhone Storage**, then request it again.
+Changing preferences does not replace existing ready downloads.
+
+The owner accepted this limitation for 0.7. Physical native
+selected-quality, storage-pressure, cancellation, restart and deletion/account
+reconciliation validation remains pending or requires explicit owner disposition
+under [#214](https://github.com/schillt/velacanto/issues/214). Existing scoped
+AAC/offline/system Storage acceptance is preserved; this disclosure is not a new
+native validation pass.
 
 Mac credentials now use the Data Protection Keychain. The first upgrade can require
 a fresh sign-in; legacy credential items are never read, migrated or deleted. Local
@@ -122,9 +156,11 @@ provisioning, accessibility or Apple distribution acceptance.
 - [Agent instructions](AGENTS.md)
 
 Media URLs can contain authentication tokens. HTTPS protects transit, but does not
-prevent exposure in server/proxy logs or endpoint retention; the conditional URL-token
-privacy investigation remains deferred. No release claim here establishes its
-remediation. Credentials, signing material and raw traces never belong in source.
+prevent exposure in server/proxy logs or endpoint retention. Playback/download
+URL-token privacy remains unremediated under #25; the owner deferred unfinished
+work to **0.9.0** on November 12, 2026. Preserve operational redaction and retention
+guidance; isolated relay experiments do not establish remediation in the installed
+app. Credentials, signing material and raw traces never belong in source.
 
 Publisher: Chameleon Enterprise Ltd. VelaCanto is public-source proprietary
 software under its [LICENSE](LICENSE), independent of and not endorsed by Jellyfin.

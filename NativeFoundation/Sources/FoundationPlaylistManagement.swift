@@ -71,12 +71,41 @@ struct FoundationPlaylistFeedback: ViewModifier {
     }
 }
 
+/// Each viewport demand reveals twelve buffered rows or reads one provider page.
+/// Cursor-only publications never create additional demand; the footer owns that lifecycle.
+@MainActor
+enum FoundationPlaylistAddContinuation {
+    static func advance(
+        visibleCount: Int, model: FoundationBrowseModel,
+        ifActive isActive: @MainActor () -> Bool,
+        allowsNetwork: @MainActor () -> Bool,
+        using loader: (Int) async throws -> FoundationPage
+    ) async -> Int {
+        guard !Task.isCancelled, isActive(), allowsNetwork(), model.errorMessage == nil else {
+            return visibleCount
+        }
+        if visibleCount < model.items.count {
+            return model.isLoading ? visibleCount : visibleCount + 12
+        }
+        let context = model.catalogIdentityContext
+        let loadedCount = model.items.count
+        await model.loadNextVisiblePage(
+            ifActive: isActive, allowsNetwork: allowsNetwork, using: loader)
+        guard !Task.isCancelled, isActive(), allowsNetwork(),
+            context == model.catalogIdentityContext, model.errorMessage == nil,
+            model.items.count > loadedCount
+        else { return visibleCount }
+        return visibleCount + 12
+    }
+}
+
 struct FoundationPlaylistEditor: View {
     @EnvironmentObject private var changes: FoundationPlaylistChanges
     @EnvironmentObject private var connectivity: FoundationConnectivity
     @EnvironmentObject private var downloads: FoundationDownloads
     @Environment(\.dismiss) private var dismiss
     @Environment(\.foundationReduceMotion) private var reduceMotion
+    @Environment(\.scenePhase) private var scenePhase
     let playlist: FoundationItem
     var onDeleted: () -> Void = {}
     var onRenamed: (String) -> Void = { _ in }
@@ -128,6 +157,7 @@ struct FoundationPlaylistEditor: View {
     @State private var addQuery = ""
     @State private var addResultKind: FoundationItem.Kind = .track
     @State private var addVisibleCount = 12
+    @State private var addPageDemand = FoundationCatalogPageDemand()
     @State private var addRevision = 0
     @State private var addedSelection: [FoundationItem] = []
     @StateObject private var addModel = FoundationBrowseModel()
@@ -250,18 +280,6 @@ struct FoundationPlaylistEditor: View {
         #endif
         #if os(iOS)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .safeAreaInset(edge: .bottom, spacing: 0) {
-                // Retain the footer host across keyboard transitions; only its extent changes.
-                phoneActionFooter
-                .frame(height: phoneKeyboardVisible ? 0 : nil)
-                .opacity(phoneKeyboardVisible ? 0 : 1)
-                .allowsHitTesting(!phoneKeyboardVisible)
-                .accessibilityHidden(phoneKeyboardVisible)
-                .transaction { transaction in
-                    transaction.animation = nil
-                    transaction.disablesAnimations = true
-                }
-            }
             .overlay(alignment: .bottomTrailing) {
                 if phoneKeyboardVisible && !addingSongs { phoneKeyboardDismissButton }
             }
@@ -354,7 +372,10 @@ struct FoundationPlaylistEditor: View {
             }
         }
         .onChange(of: entries.map(\.mutationID)) { _, ids in selection.formIntersection(ids) }
-        .onChange(of: addResultKind) { _, _ in addVisibleCount = 12 }
+        .onChange(of: addResultKind) { _, _ in
+            addVisibleCount = 12
+            addPageDemand = FoundationCatalogPageDemand()
+        }
         .onChange(of: addQuery) { _, _ in
             addCollection = nil
             addModel.clearRetainedData()
@@ -362,6 +383,7 @@ struct FoundationPlaylistEditor: View {
             addArtists.clearRetainedData()
             addRevision = 0
             addVisibleCount = 12
+            addPageDemand = FoundationCatalogPageDemand()
         }
         .task(
             id:
@@ -375,22 +397,12 @@ struct FoundationPlaylistEditor: View {
             do {
                 if collection == nil { try await Task.sleep(for: .milliseconds(250)) }
                 try Task.checkCancellation()
-                if let collection {
-                    await addModel.loadPending { offset in
-                        if collection.kind == .album {
-                            return try await library.tracks(
-                                albumID: collection.id, startIndex: offset)
-                        }
-                        return try await library.tracks(artistID: collection.id, startIndex: offset)
-                    }
-                } else {
-                    let model =
-                        addResultKind == .track
-                        ? addModel : addResultKind == .album ? addAlbums : addArtists
-                    await model.loadPending {
-                        try await library.search(
-                            query: term, kind: addResultKind, startIndex: $0, limit: 12)
-                    }
+                let kind = addResultKind
+                let model =
+                    collection != nil || kind == .track
+                    ? addModel : kind == .album ? addAlbums : addArtists
+                await model.loadPending {
+                    try await loadAddPage($0, collection: collection, term: term, kind: kind)
                 }
             } catch {}
         }
@@ -442,6 +454,13 @@ struct FoundationPlaylistEditor: View {
             .disabled(addCollection != nil || !editable || operation.isPending)
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 16) { addSection }
+            }
+            .onScrollPhaseChange { _, phase in
+                let model = activeAddModel
+                addPageDemand.scrollPhaseChanged(
+                    to: phase, footerVisible: addPageDemand.footerVisible,
+                    active: addContinuationActive, allowsNetwork: !connectivity.localOnly,
+                    isLoading: model.isLoading, hasError: model.errorMessage != nil)
             }
             Button("Add \(addedSelection.count) Songs", systemImage: "plus.circle.fill") {
                 addSongs()
@@ -499,6 +518,7 @@ struct FoundationPlaylistEditor: View {
         addArtists.clearRetainedData()
         addRevision = 0
         addVisibleCount = 12
+        addPageDemand = FoundationCatalogPageDemand()
         addingSongs = true
     }
 
@@ -539,6 +559,18 @@ struct FoundationPlaylistEditor: View {
             .foregroundStyle(.primary)
             .listStyle(.insetGrouped)
             .listSectionSpacing(20)
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                // Retain the footer host across keyboard transitions; only its extent changes.
+                phoneActionFooter
+                    .frame(height: phoneKeyboardVisible ? 0 : nil)
+                    .opacity(phoneKeyboardVisible ? 0 : 1)
+                    .allowsHitTesting(!phoneKeyboardVisible)
+                    .accessibilityHidden(phoneKeyboardVisible)
+                    .transaction { transaction in
+                        transaction.animation = nil
+                        transaction.disablesAnimations = true
+                    }
+            }
         #endif
     }
 
@@ -686,7 +718,7 @@ struct FoundationPlaylistEditor: View {
             }
             .padding(.vertical, 4)
         }
-        .scrollIndicators(.hidden)
+        .foundationHorizontalScrollIndicators()
         .frame(height: 88)
         .disabled(!canEditDetails || !canEditCover || operation.isPending)
     }
@@ -784,6 +816,7 @@ struct FoundationPlaylistEditor: View {
         } header: {
             HStack {
                 Label("\(entries.count) Songs", systemImage: "music.note.list")
+                    .accessibilityIdentifier("playlist-management-songs")
                 Spacer()
                 #if os(iOS)
                     Button(
@@ -812,7 +845,6 @@ struct FoundationPlaylistEditor: View {
                 Text("Clear the search to reorder songs.")
             }
         }
-        .accessibilityIdentifier("playlist-management-songs")
         #if os(macOS)
             // Only occurrence rows participate; cover/search/detail sections have no
             // reorder registration and cannot replace this container's collection.
@@ -880,12 +912,16 @@ struct FoundationPlaylistEditor: View {
         let models = [
             addResultKind == .track ? addModel : addResultKind == .album ? addAlbums : addArtists
         ]
-        return models.allSatisfy { $0.loaded && $0.items.isEmpty && $0.errorMessage == nil }
+        return models.allSatisfy {
+            $0.loaded && $0.items.isEmpty && !$0.hasMorePages && $0.errorMessage == nil
+        }
     }
 
     @ViewBuilder private func addResults(_ model: FoundationBrowseModel, title: String) -> some View
     {
-        if !model.items.isEmpty || model.isLoading || model.errorMessage != nil {
+        if !model.items.isEmpty || model.isLoading || model.errorMessage != nil
+            || model.hasMorePages
+        {
             Section {
                 ForEach(visibleAddItems(model)) { item in
                     Button {
@@ -913,15 +949,15 @@ struct FoundationPlaylistEditor: View {
                         }
                     }.buttonStyle(.plain)
                 }
-                if visibleAddItems(model).count < model.items.count || model.nextStartIndex != nil {
-                    Button("More \(title)", systemImage: "ellipsis") {
-                        let hasHiddenItems = visibleAddItems(model).count < model.items.count
-                        addVisibleCount += 12
-                        if !hasHiddenItems, model.nextStartIndex != nil {
-                            model.request(.more)
-                            addRevision += 1
-                        }
-                    }.disabled(model.isLoading)
+                if visibleAddItems(model).count < model.items.count || model.hasMorePages {
+                    FoundationPaginationFooter(
+                        demand: $addPageDemand, isLoading: model.isLoading,
+                        isEnabled: addContinuationActive && !connectivity.localOnly,
+                        hasError: model.errorMessage != nil, showsScrollHint: model.items.isEmpty
+                    ) {
+                        await continueAddResults(model)
+                    }
+                    .id(model.catalogIdentityContext)
                 }
             } header: {
                 #if os(macOS)
@@ -935,12 +971,56 @@ struct FoundationPlaylistEditor: View {
         }
     }
 
+    private var activeAddModel: FoundationBrowseModel {
+        addCollection != nil || addResultKind == .track
+            ? addModel : addResultKind == .album ? addAlbums : addArtists
+    }
+
+    private var addContinuationActive: Bool {
+        editorActive && addingSongs && editable && !operation.isPending && scenePhase == .active
+            && editorScope == library.catalogScopeID
+    }
+
+    private func loadAddPage(
+        _ offset: Int, collection: FoundationItem?, term: String, kind: FoundationItem.Kind
+    ) async throws -> FoundationPage {
+        if let collection {
+            if collection.kind == .album {
+                return try await library.tracks(albumID: collection.id, startIndex: offset)
+            }
+            return try await library.tracks(artistID: collection.id, startIndex: offset)
+        }
+        return try await library.search(query: term, kind: kind, startIndex: offset, limit: 12)
+    }
+
+    private func continueAddResults(_ model: FoundationBrowseModel) async {
+        let context = model.catalogIdentityContext
+        let collection = addCollection
+        let term = addSearchTerm
+        let kind = addResultKind
+        let count = addVisibleCount
+        let isCurrent = {
+            addContinuationActive && model === activeAddModel
+                && model.catalogIdentityContext == context && addCollection == collection
+                && addSearchTerm == term && addResultKind == kind
+        }
+        let nextCount = await FoundationPlaylistAddContinuation.advance(
+            visibleCount: count, model: model, ifActive: isCurrent,
+            allowsNetwork: { !connectivity.localOnly },
+            using: {
+                try await loadAddPage($0, collection: collection, term: term, kind: kind)
+            })
+        guard !Task.isCancelled, isCurrent(), addVisibleCount == count else { return }
+        addVisibleCount = nextCount
+    }
+
     private func visibleAddItems(_ model: FoundationBrowseModel) -> [FoundationItem] {
         Array(model.items.prefix(addVisibleCount))
     }
 
     private func browseAddCollection(_ item: FoundationItem?) {
         addVisibleCount = 12
+        addPageDemand = FoundationCatalogPageDemand()
         addCollection = item
         addModel.clearRetainedData()
         addRevision = 0
@@ -1396,6 +1476,7 @@ private struct FoundationPlaylistCoverArtwork: View {
 struct FoundationPlaylistSongPicker: View {
     @EnvironmentObject private var changes: FoundationPlaylistChanges
     @EnvironmentObject private var actions: FoundationLibraryActions
+    @Environment(\.scenePhase) private var scenePhase
     @EnvironmentObject private var connectivity: FoundationConnectivity
     @EnvironmentObject private var downloads: FoundationDownloads
     @Environment(\.dismiss) private var dismiss
@@ -1408,6 +1489,7 @@ struct FoundationPlaylistSongPicker: View {
     @State private var selected: [FoundationItem] = []
     @State private var revision = 0
     @State private var summary = ""
+    @State private var pageDemand = FoundationCatalogPageDemand()
 
     private var selectedIDs: Set<String> { Set(selected.map(\.id)) }
     private var visibleSelection: [FoundationItem] { actions.visibleTracks(selected) }
@@ -1449,12 +1531,26 @@ struct FoundationPlaylistSongPicker: View {
                         revision += 1
                     }
                 }
-                if songs.nextStartIndex != nil {
-                    Button("Load More Songs") {
-                        songs.request(.more)
-                        revision += 1
-                    }.disabled(songs.isLoading)
+                if songs.hasMorePages {
+                    FoundationPaginationFooter(
+                        demand: $pageDemand, isLoading: songs.isLoading,
+                        isEnabled: scenePhase == .active && !connectivity.localOnly
+                            && !operation.isPending,
+                        hasError: songs.errorMessage != nil, showsScrollHint: songs.items.isEmpty
+                    ) {
+                        await songs.loadNextVisiblePage(
+                            ifActive: { scenePhase == .active && !operation.isPending },
+                            allowsNetwork: { !connectivity.localOnly }, using: loadSongs)
+                    }
+                    .id(songs.catalogIdentityContext)
                 }
+            }
+            .onScrollPhaseChange { _, phase in
+                pageDemand.scrollPhaseChanged(
+                    to: phase, footerVisible: pageDemand.footerVisible,
+                    active: scenePhase == .active && !operation.isPending,
+                    allowsNetwork: !connectivity.localOnly,
+                    isLoading: songs.isLoading, hasError: songs.errorMessage != nil)
             }
             .disabled(operation.isPending || connectivity.localOnly)
             .navigationTitle("Add Songs")
@@ -1548,6 +1644,7 @@ struct FoundationPlaylistSongPicker: View {
 
 /// Add from elsewhere: the same destination picker is reached by song and album menus.
 struct FoundationPlaylistPicker: View {
+    @Environment(\.scenePhase) private var scenePhase
     @EnvironmentObject private var connectivity: FoundationConnectivity
     @EnvironmentObject private var changes: FoundationPlaylistChanges
     @EnvironmentObject private var downloads: FoundationDownloads
@@ -1562,6 +1659,7 @@ struct FoundationPlaylistPicker: View {
     @State private var newName = ""
     @State private var summary = ""
     @State private var createdDestination: FoundationItem?
+    @State private var pageDemand = FoundationCatalogPageDemand()
 
     private var filtered: [FoundationItem] {
         playlists.items.filter { query.isEmpty || $0.title.localizedStandardContains(query) }
@@ -1612,7 +1710,7 @@ struct FoundationPlaylistPicker: View {
                         query.isEmpty ? "No Playlists Yet" : "No Matching Playlists",
                         systemImage: "music.note.list",
                         description: Text(
-                            "Create a playlist or load more to find another destination."))
+                            "Create a playlist or continue scrolling to find another destination."))
                 }
                 if playlists.isLoading { ProgressView("Loading playlists…") }
                 if let error = playlists.errorMessage {
@@ -1622,13 +1720,30 @@ struct FoundationPlaylistPicker: View {
                         revision += 1
                     }
                 }
-                if playlists.nextStartIndex != nil {
-                    Button("Load More Playlists") {
-                        playlists.request(.more)
-                        revision += 1
+                if playlists.hasMorePages {
+                    FoundationPaginationFooter(
+                        demand: $pageDemand, isLoading: playlists.isLoading,
+                        isEnabled: scenePhase == .active && !connectivity.localOnly
+                            && !operation.isPending
+                            && !operation.succeeded,
+                        hasError: playlists.errorMessage != nil,
+                        showsScrollHint: filtered.isEmpty
+                    ) {
+                        await playlists.loadNextVisiblePage(
+                            ifActive: {
+                                scenePhase == .active && !operation.isPending
+                                    && !operation.succeeded
+                            }, allowsNetwork: { !connectivity.localOnly }, using: library.playlists)
                     }
-                    .disabled(playlists.isLoading)
+                    .id(playlists.catalogIdentityContext)
                 }
+            }
+            .onScrollPhaseChange { _, phase in
+                pageDemand.scrollPhaseChanged(
+                    to: phase, footerVisible: pageDemand.footerVisible,
+                    active: scenePhase == .active && !operation.isPending && !operation.succeeded,
+                    allowsNetwork: !connectivity.localOnly,
+                    isLoading: playlists.isLoading, hasError: playlists.errorMessage != nil)
             }
             .disabled(connectivity.localOnly || operation.isPending || operation.succeeded)
             .navigationTitle("Add to Playlist")

@@ -31,6 +31,10 @@ final class FoundationPrimaryGenresModel: ObservableObject {
     private weak var boundDownloads: FoundationDownloads?
     private var downloadObservation: AnyCancellable?
     private var downloadBindingID = UUID()
+    #if DEBUG
+        var downloadBindingForTesting: UUID { downloadBindingID }
+        var staleDownloadProjectionForTesting: ((UUID) -> Void)?
+    #endif
 
     init(library: any FoundationLibrary, appVersion: String? = nil) {
         self.library = library
@@ -202,11 +206,18 @@ final class FoundationPrimaryGenresModel: ObservableObject {
                     try await content.append(page.songs, source: scope.source)
                     for song in page.songs {
                         for genre in song.genres {
-                            if let old = descriptors[genre.id], old.title != genre.title {
+                            // Provider references can spell one genre ID with edge whitespace.
+                            // Normalize only its display label; raw tags and census IDs stay intact.
+                            let title = genre.title.trimmingCharacters(in: .whitespacesAndNewlines)
+                                .precomposedStringWithCanonicalMapping
+                            guard !title.isEmpty else {
+                                throw FoundationPrimaryGenreIndex.Failure.unknownMetadata
+                            }
+                            if let old = descriptors[genre.id], old.title != title {
                                 throw FoundationPrimaryGenreIndex.Failure.invalidPage
                             }
                             descriptors[genre.id] = FoundationItem(
-                                id: genre.id, title: genre.title, subtitle: "", kind: .genre,
+                                id: genre.id, title: title, subtitle: "", kind: .genre,
                                 duration: nil, catalogSource: scope.source)
                         }
                     }
@@ -303,7 +314,8 @@ final class FoundationPrimaryGenresModel: ObservableObject {
         activeBuildIsAutomatic = false
     }
 
-    func retire() {
+    @discardableResult
+    func retire() -> Task<Void, Never> {
         bindDownloads(nil)
         cancel()
         record = nil
@@ -316,7 +328,19 @@ final class FoundationPrimaryGenresModel: ObservableObject {
         automaticNetworkAllowed = false
         automaticAttempt = nil
         let departing = index
-        Task { await departing.retire() }
+        return Task { await departing.retire() }
+    }
+
+    /// Retire synchronously and expose the already-cancelled operations for isolated teardown.
+    func retireAndDrain() -> Task<Void, Never> {
+        let pendingJob = job
+        let pendingRestore = restoreTask
+        let retirement = retire()
+        return Task {
+            await pendingJob?.value
+            await pendingRestore?.value
+            await retirement.value
+        }
     }
 
     func page(query: String = "", startIndex: Int = 0, limit: Int = 50, localOnly: Bool)
@@ -354,9 +378,15 @@ final class FoundationPrimaryGenresModel: ObservableObject {
         ).sink { [weak self, weak downloads] _ in
             // Published revisions emit before their synchronous readiness transaction finishes.
             Task { @MainActor [weak self, weak downloads] in
-                guard let self, let downloads, self.downloadBindingID == binding,
+                guard let self else { return }
+                guard let downloads, self.downloadBindingID == binding,
                     self.boundDownloads === downloads
-                else { return }
+                else {
+                    #if DEBUG
+                        self.staleDownloadProjectionForTesting?(binding)
+                    #endif
+                    return
+                }
                 self.updateDownloads(downloads.downloadedSongs)
             }
         }

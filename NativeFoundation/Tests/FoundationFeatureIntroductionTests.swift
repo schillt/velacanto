@@ -154,11 +154,25 @@ final class FoundationFeatureIntroductionTests: XCTestCase {
     }
 
     func testVersionUpgradeStillOffersWhenEveryFeatureIDWasSeen() {
-        let history = FoundationIntroductionHistory(defaults: defaults())
+        let defaults = defaults()
+        let previous = FoundationIntroductionHistory(defaults: defaults)
+        let previousOwner = UUID()
+        XCTAssertTrue(previous.claimAutomaticPresentation(version: "0.6.0", owner: previousOwner))
+        previous.acknowledgeAutomaticPresentation(version: "0.6.0", owner: previousOwner)
+        previous.releaseAutomaticPresentation(owner: previousOwner)
+        let history = FoundationIntroductionHistory(defaults: defaults)
         history.acknowledge(FoundationIntroductionFeature.current.map(\.id))
         XCTAssertTrue(history.pending().isEmpty)
-        XCTAssertTrue(history.needsAutomaticPresentation(for: "0.6.0"))
-        XCTAssertTrue(history.claimAutomaticPresentation(version: "0.6.0", owner: UUID()))
+        XCTAssertFalse(history.needsAutomaticPresentation(for: "0.6.0"))
+        XCTAssertTrue(history.needsAutomaticPresentation(for: "0.7.0"))
+        let owner = UUID()
+        XCTAssertTrue(history.claimAutomaticPresentation(version: "0.7.0", owner: owner))
+        XCTAssertEqual(defaults.string(forKey: FoundationIntroductionHistory.versionKey), "0.6.0")
+        history.acknowledgeAutomaticPresentation(version: "0.7.0", owner: owner)
+        history.releaseAutomaticPresentation(owner: owner)
+        let restored = FoundationIntroductionHistory(defaults: defaults)
+        XCTAssertFalse(restored.needsAutomaticPresentation(for: "0.7.0"))
+        XCTAssertTrue(restored.pending().isEmpty)
     }
 
     func testDismissalReleasesVersionClaimWithoutAcknowledgement() {

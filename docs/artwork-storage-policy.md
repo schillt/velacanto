@@ -259,3 +259,22 @@ credentials/headers, stable account/item IDs and raw request bodies.
 #14 remains open until the current physical/performance/account/accessibility and
 signed protection/backup criteria are accepted. This packet performs no cleanup,
 new instrumentation, native run, policy activation, publication or distribution.
+
+## Animated album artwork — deferred from 0.7 — 2026-11-21
+
+The owner deferred #231 to 0.8 and postponed integration of every part of the
+feature. The 0.7 candidate retains the existing static artwork path only. It does
+not fetch original images for animation, create animated decoders/compositors or
+present animated frames. Static catalog, player, downloaded and widget artwork
+and their existing account/resource protections remain in scope.
+
+The earlier #111 evaluation was explicitly accepted and closed; its
+[completion comment](https://github.com/schillt/velacanto/issues/111#issuecomment-6885889390)
+remains historical research acceptance. It does not accept or integrate the feature.
+The experimental source, tests and prior provisional format/resource limits are
+preserved separately for future review; they are not 0.7 capabilities or promises.
+
+Future #231 integration still requires supported real HTTPS/Jellyfin response
+proof, bounded transfer/decoding and lifetime behavior, measured resource/audio
+pressure, rendered device/accessibility acceptance and explicit owner approval.
+No future implementation or acceptance is claimed by this deferral.

@@ -14,6 +14,9 @@ struct FoundationPlayerView: View {
     #endif
     @Environment(\.foundationReduceMotion) private var reduceMotion
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    #if os(iOS)
+        @Namespace private var playerLayoutTransition
+    #endif
     @Environment(\.foundationPlayerSystemColorScheme) private var systemColorScheme
     @State private var artworkFill: Image?
     @State private var artworkTint = Color(white: 0.12)
@@ -36,6 +39,35 @@ struct FoundationPlayerView: View {
             case .related(let item): "related." + item.id
             case .credits(let item): "credits." + item.id
             }
+        }
+    }
+
+    /// The native menu depends on track/routing values, not playback-clock publications.
+    private struct PlaybackOptionsMenu: View {
+        let current: FoundationItem?
+        let album: FoundationItem?
+        let artist: FoundationItem?
+        let canViewAlbum: Bool
+        let canViewArtist: Bool
+        @Binding var destination: PlayerSheetDestination?
+
+        var body: some View {
+            Menu {
+                Button("View Album", systemImage: "square.stack") {
+                    if let album { destination = .related(album) }
+                }.disabled(!canViewAlbum)
+                Button("View Artist", systemImage: "music.mic") {
+                    if let artist { destination = .related(artist) }
+                }.disabled(!canViewArtist)
+                Button("Song Credits", systemImage: "person.text.rectangle") {
+                    if let current { destination = .credits(current) }
+                }.disabled(current == nil)
+            } label: {
+                Image(systemName: "ellipsis").frame(width: 44, height: 44)
+            }
+            .menuStyle(.borderlessButton)
+            .foundationEllipsisMenuIndicator()
+            .accessibilityLabel("More playback options")
         }
     }
 
@@ -75,157 +107,7 @@ struct FoundationPlayerView: View {
     var body: some View {
         NavigationStack {
             GeometryReader { geometry in
-                VStack(spacing: 0) {
-                    GeometryReader { artworkGeometry in
-                        let artworkHeight =
-                            artworkGeometry.size.width
-                            + max(0, artworkGeometry.size.height - artworkGeometry.size.width)
-                            * 0.75 + geometry.safeAreaInsets.top
-                        ZStack(alignment: .topLeading) {
-                            artworkView(
-                                size: artworkGeometry.size.width,
-                                height: artworkHeight
-                            )
-                            #if DEBUG && os(iOS) && targetEnvironment(simulator)
-                                .modifier(FoundationPlayerArtworkFixtureTarget())
-                            #endif
-                            #if os(iOS)
-                                .foundationPlayerArtworkRegistration(
-                                    role: .expanded, identity: current?.sharedArtworkIdentity)
-                            #endif
-                            .mask(artworkFade)
-                            .frame(width: artworkGeometry.size.width, alignment: .top)
-                            .compositingGroup()
-                            .offset(y: -geometry.safeAreaInsets.top)
-                            .opacity(contentMode == .artwork ? 1 : 0)
-                            .accessibilityHidden(lyricsPresentation != nil || showingQueue)
-                            .allowsHitTesting(lyricsPresentation == nil && !showingQueue)
-                            #if os(iOS)
-                                FoundationPlayerQueueTransitionLayer(model: artworkPresentation)
-                                    .frame(width: artworkGeometry.size.width, height: artworkHeight)
-                                    .mask(artworkFade)
-                                    .offset(y: -geometry.safeAreaInsets.top)
-                                    .allowsHitTesting(false)
-                                    .accessibilityHidden(true)
-                            #endif
-                            if let presentation = lyricsPresentation {
-                                let entry = presentation.entry
-                                FoundationLyricsView(
-                                    item: entry.item, entryID: entry.id, library: library,
-                                    player: player, model: presentation.model,
-                                    availabilityChanged: { available in
-                                        guard player.selectedEntryID == entry.id else { return }
-                                        missingLyricsEntryID = available ? nil : entry.id
-                                    }
-                                )
-                                .id(presentation.id)
-                                .frame(
-                                    width: artworkGeometry.size.width,
-                                    height: artworkGeometry.size.height
-                                )
-                                .clipped()
-                                .transition(.opacity)
-                            }
-                            if showingQueue {
-                                FoundationQueueView(
-                                    player: player, library: library, isPresented: $showingQueue
-                                ) {
-                                    item in
-                                    guard showingQueue else { return }
-                                    sheetDestination = .related(item)
-                                }
-                                .frame(
-                                    width: artworkGeometry.size.width,
-                                    height: artworkGeometry.size.height
-                                )
-                                .clipped()
-                                .transition(.opacity)
-                            }
-                        }
-                        .frame(
-                            width: artworkGeometry.size.width, height: artworkGeometry.size.height,
-                            alignment: .topLeading
-                        )
-                    }
-                    VStack(alignment: .leading, spacing: geometry.size.height < 700 ? 8 : 14) {
-                        VStack(spacing: 0) {
-                            if !showingQueue { trackDetails }
-                            timeline
-                        }
-                        transport
-                        volumeControl
-                        HStack {
-                            Button {
-                                toggleLyrics()
-                            } label: {
-                                FoundationLyricsIcon(unavailable: lyricsUnavailable)
-                                    .font(.title2)
-                                    .frame(width: 44, height: 44)
-                            }
-                            .disabled(
-                                current == nil || connectivity.localOnly
-                                    || (lyricsUnavailable && lyricsPresentation == nil)
-                            )
-                            .accessibilityLabel(
-                                lyricsPresentation == nil
-                                    ? (lyricsUnavailable ? "Lyrics unavailable" : "Show lyrics")
-                                    : "Show artwork"
-                            )
-                            .accessibilityAddTraits(lyricsPresentation == nil ? [] : .isSelected)
-                            Spacer()
-                            FoundationAirPlayPicker(player: player)
-                                .frame(width: 44, height: 44)
-                            Spacer()
-                            Button {
-                                toggleQueue()
-                            } label: {
-                                Image(systemName: "list.bullet")
-                                    .font(.title2)
-                                    .frame(width: 44, height: 44)
-                            }
-                            .accessibilityLabel(showingQueue ? "Show artwork" : "Show queue")
-                            .accessibilityAddTraits(showingQueue ? .isSelected : [])
-                        }
-                    }
-                    .padding(.horizontal, 24)
-                    .fixedSize(horizontal: false, vertical: true)
-                }
-                .frame(maxWidth: 580)
-                .frame(width: geometry.size.width, height: geometry.size.height)
-                .background {
-                    GeometryReader { background in
-                        ZStack {
-                            backgroundTint
-                            if let backgroundArtwork {
-                                backgroundArtwork.resizable().scaledToFill().blur(radius: 28)
-                                    .frame(
-                                        width: background.size.width, height: background.size.height
-                                    )
-                            }
-                            LinearGradient(
-                                stops: [
-                                    .init(color: .clear, location: 0),
-                                    .init(color: .black.opacity(0.12), location: 0.50),
-                                    .init(color: backgroundTint.opacity(0.8), location: 0.80),
-                                    .init(color: backgroundTint, location: 1),
-                                ], startPoint: .top, endPoint: .bottom)
-                            Color.black.opacity(contentMode == .artwork ? 0 : 0.6)
-                                .allowsHitTesting(false)
-                                .accessibilityHidden(true)
-                        }
-                        .frame(width: background.size.width, height: background.size.height)
-                        .clipped()
-                    }.ignoresSafeArea()
-                }
-                #if os(iOS)
-                    .overlay {
-                        FoundationPlayerQueueTransitionLayer(
-                            model: artworkPresentation, isMetadata: true
-                        )
-                        .allowsHitTesting(false).accessibilityHidden(true)
-                    }
-                #endif
-                .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: contentMode)
+                playerSurface(geometry)
             }
             .onAppear { isVisible = true }
             .onDisappear { isVisible = false }
@@ -378,6 +260,359 @@ struct FoundationPlayerView: View {
         }
     }
 
+    @ViewBuilder private func playerSurface(_ geometry: GeometryProxy) -> some View {
+        #if os(iOS)
+            if #available(iOS 27.1, *) {
+                let division = geometry.reservedRegions(
+                    kind: .division, layoutDirectionBehavior: .fixed
+                ).first { $0.isActive }
+                if let division,
+                    let regions = FoundationPlayerRegionLayout.regions(
+                        size: geometry.size, divider: division.frame, margins: division.margins)
+                {
+                    foldedPlayer(geometry, regions: regions)
+                } else if geometry.size.width > geometry.size.height {
+                    widePlayer(geometry)
+                } else {
+                    classicPlayer(geometry)
+                }
+            } else {
+                classicPlayer(geometry)
+            }
+        #else
+            classicPlayer(geometry)
+        #endif
+    }
+
+    @ViewBuilder private func classicPlayer(_ geometry: GeometryProxy) -> some View {
+        #if os(iOS)
+            let landscape = geometry.size.width > geometry.size.height
+            let containedArtwork = true
+        #else
+            let landscape = false
+            let containedArtwork = false
+        #endif
+        let splitPanel = landscape && contentMode != .artwork
+        let playerWidth =
+            splitPanel ? geometry.size.width / 2 : min(geometry.size.width, 580)
+        VStack(spacing: 0) {
+            GeometryReader { artworkGeometry in
+                #if os(iOS)
+                    let artworkWidth = max(
+                        0,
+                        min(
+                            artworkGeometry.size.width - 48,
+                            artworkGeometry.size.height - 32))
+                    let artworkOffset = (artworkGeometry.size.width - artworkWidth) / 2
+                #else
+                    let artworkWidth = artworkGeometry.size.width
+                    let artworkOffset: CGFloat = 0
+                #endif
+                let artworkTop =
+                    containedArtwork
+                    ? max(0, (artworkGeometry.size.height - artworkWidth) / 2)
+                    : -geometry.safeAreaInsets.top
+                let artworkRadius: CGFloat =
+                    containedArtwork ? min(32, artworkWidth * 0.08) : 0
+                let panelWidth = splitPanel ? playerWidth : artworkGeometry.size.width
+                let panelHeight =
+                    splitPanel ? geometry.size.height : artworkGeometry.size.height
+                let artworkHeight =
+                    containedArtwork
+                    ? artworkWidth
+                    : artworkGeometry.size.width
+                        + max(0, artworkGeometry.size.height - artworkGeometry.size.width)
+                        * 0.75 + geometry.safeAreaInsets.top
+                ZStack(alignment: .topLeading) {
+                    artworkView(
+                        size: artworkWidth,
+                        height: artworkHeight
+                    )
+                    #if DEBUG && os(iOS) && targetEnvironment(simulator)
+                        .modifier(FoundationPlayerArtworkFixtureTarget())
+                    #endif
+                    #if os(iOS)
+                        .foundationPlayerArtworkRegistration(
+                            role: .expanded, identity: current?.sharedArtworkIdentity)
+                    #endif
+                    .mask(artworkFade(contained: containedArtwork))
+                    .clipShape(
+                        RoundedRectangle(cornerRadius: artworkRadius, style: .continuous)
+                    )
+                    .frame(width: artworkWidth, alignment: .topLeading)
+                    .compositingGroup()
+                    .offset(x: artworkOffset, y: artworkTop)
+                    .opacity(contentMode == .artwork || splitPanel ? 1 : 0)
+                    .accessibilityHidden(!splitPanel && contentMode != .artwork)
+                    .allowsHitTesting(splitPanel || contentMode == .artwork)
+                    #if os(iOS)
+                        FoundationPlayerQueueTransitionLayer(model: artworkPresentation)
+                            .frame(width: artworkWidth, height: artworkHeight)
+                            .mask(artworkFade(contained: containedArtwork))
+                            .clipShape(
+                                RoundedRectangle(
+                                    cornerRadius: artworkRadius, style: .continuous)
+                            )
+                            .offset(x: artworkOffset, y: artworkTop)
+                            .allowsHitTesting(false)
+                            .accessibilityHidden(true)
+                    #endif
+                    if let presentation = lyricsPresentation {
+                        let entry = presentation.entry
+                        FoundationLyricsView(
+                            item: entry.item, entryID: entry.id, library: library,
+                            player: player, model: presentation.model,
+                            availabilityChanged: { available in
+                                guard player.selectedEntryID == entry.id else { return }
+                                missingLyricsEntryID = available ? nil : entry.id
+                            }
+                        )
+                        .id(presentation.id)
+                        .frame(
+                            width: panelWidth, height: panelHeight
+                        )
+                        .clipped()
+                        .offset(x: splitPanel ? playerWidth : 0)
+                        .transition(.opacity)
+                    }
+                    if showingQueue {
+                        FoundationQueueView(
+                            player: player, library: library, isPresented: $showingQueue
+                        ) {
+                            item in
+                            guard showingQueue else { return }
+                            sheetDestination = .related(item)
+                        }
+                        .frame(
+                            width: panelWidth, height: panelHeight
+                        )
+                        .clipped()
+                        .offset(x: splitPanel ? playerWidth : 0)
+                        .transition(.opacity)
+                    }
+                }
+                .frame(
+                    width: artworkGeometry.size.width, height: artworkGeometry.size.height,
+                    alignment: .topLeading
+                )
+            }
+            playerControls(
+                height: geometry.size.height, showsDetails: !showingQueue || splitPanel,
+                alongside: landscape, contained: containedArtwork)
+        }
+        .frame(width: playerWidth)
+        .frame(
+            width: geometry.size.width, height: geometry.size.height,
+            alignment: splitPanel ? .leading : .center
+        )
+        #if os(iOS)
+            .onChange(of: landscape) { _, _ in
+                artworkPresentation?.cancelQueueTransition()
+            }
+        #endif
+        .background {
+            GeometryReader { background in
+                ZStack {
+                    backgroundTint
+                    if let backgroundArtwork {
+                        backgroundArtwork.resizable().scaledToFill().blur(radius: 28)
+                            .frame(
+                                width: background.size.width, height: background.size.height
+                            )
+                    }
+                    LinearGradient(
+                        stops: [
+                            .init(color: .clear, location: 0),
+                            .init(color: .black.opacity(0.12), location: 0.50),
+                            .init(color: backgroundTint.opacity(0.8), location: 0.80),
+                            .init(color: backgroundTint, location: 1),
+                        ], startPoint: .top, endPoint: .bottom)
+                    Color.black.opacity(contentMode == .artwork ? 0 : 0.6)
+                        .allowsHitTesting(false)
+                        .accessibilityHidden(true)
+                }
+                .frame(width: background.size.width, height: background.size.height)
+                .clipped()
+            }.ignoresSafeArea()
+        }
+        #if os(iOS)
+            .overlay {
+                FoundationPlayerQueueTransitionLayer(
+                    model: artworkPresentation, isMetadata: true
+                )
+                .allowsHitTesting(false).accessibilityHidden(true)
+            }
+        #endif
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: contentMode)
+    }
+
+    private func playerControls(
+        height: CGFloat, showsDetails: Bool, alongside: Bool, contained: Bool
+    ) -> some View {
+        VStack(alignment: .leading, spacing: height < 700 ? 8 : 14) {
+            VStack(spacing: 0) {
+                if showsDetails { trackDetails }
+                timeline
+            }
+            transport
+            volumeControl
+            HStack {
+                Button {
+                    toggleLyrics()
+                } label: {
+                    FoundationLyricsIcon(unavailable: lyricsUnavailable)
+                        .font(.title2)
+                        .frame(width: 44, height: 44)
+                }
+                .disabled(
+                    current == nil || connectivity.localOnly
+                        || (lyricsUnavailable && lyricsPresentation == nil)
+                )
+                .accessibilityLabel(
+                    lyricsPresentation == nil
+                        ? (lyricsUnavailable ? "Lyrics unavailable" : "Show lyrics")
+                        : "Show artwork"
+                )
+                .accessibilityAddTraits(lyricsPresentation == nil ? [] : .isSelected)
+                Spacer()
+                FoundationAirPlayPicker(player: player)
+                    .frame(width: 44, height: 44)
+                Spacer()
+                Button {
+                    toggleQueue(landscape: alongside)
+                } label: {
+                    Image(systemName: "list.bullet")
+                        .font(.title2)
+                        .frame(width: 44, height: 44)
+                }
+                .accessibilityLabel(showingQueue ? "Show artwork" : "Show queue")
+                .accessibilityAddTraits(showingQueue ? .isSelected : [])
+            }
+        }
+        .padding(.horizontal, 24)
+        .padding(.vertical, contained ? 12 : 0)
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    #if os(iOS)
+        private func foldedPlayer(
+            _ geometry: GeometryProxy, regions: FoundationPlayerRegionLayout.Regions
+        ) -> some View {
+            ZStack(alignment: .topLeading) {
+                Group {
+                    if regions.stacksVertically {
+                        controlsRegion(height: regions.controls.height)
+                    } else {
+                        primaryPlayerRegion(height: regions.controls.height)
+                    }
+                }
+                .frame(width: regions.controls.width, height: regions.controls.height)
+                .position(x: regions.controls.midX, y: regions.controls.midY)
+                Group {
+                    selectedPlayerContent
+                }
+                .frame(width: regions.content.width, height: regions.content.height)
+                .position(x: regions.content.midX, y: regions.content.midY)
+            }
+            .frame(width: geometry.size.width, height: geometry.size.height)
+            .background { playerBackground }
+            .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: contentMode)
+        }
+
+        private func widePlayer(_ geometry: GeometryProxy) -> some View {
+            HStack(spacing: 0) {
+                selectedPlayerContent
+                    .frame(width: geometry.size.width / 2, height: geometry.size.height)
+                primaryPlayerRegion(height: geometry.size.height)
+                    .frame(width: geometry.size.width / 2, height: geometry.size.height)
+            }
+            .background { playerBackground }
+            .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: contentMode)
+        }
+
+        private func primaryPlayerRegion(height: CGFloat) -> some View {
+            VStack(spacing: 0) {
+                if contentMode != .artwork {
+                    containedPlayerArtwork
+                        .frame(height: max(0, height * 0.28))
+                }
+                controlsRegion(height: height)
+            }
+        }
+
+        private func controlsRegion(height: CGFloat) -> some View {
+            ScrollView(.vertical) {
+                playerControls(
+                    height: height, showsDetails: true, alongside: true, contained: true
+                )
+                .frame(maxWidth: .infinity)
+            }
+            .defaultScrollAnchor(.center, for: .alignment)
+            .scrollBounceBehavior(.basedOnSize)
+        }
+
+        private var containedPlayerArtwork: some View {
+            GeometryReader { geometry in
+                let side = max(0, min(geometry.size.width - 48, geometry.size.height - 32))
+                let radius = min(32, side * 0.08)
+                artworkView(size: side, height: side)
+                    #if DEBUG && targetEnvironment(simulator)
+                        .modifier(FoundationPlayerArtworkFixtureTarget())
+                    #endif
+                    .foundationPlayerArtworkRegistration(
+                        role: .expanded, identity: current?.sharedArtworkIdentity
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
+                    .frame(width: geometry.size.width, height: geometry.size.height)
+            }
+        }
+
+        @ViewBuilder private var selectedPlayerContent: some View {
+            if let presentation = lyricsPresentation {
+                let entry = presentation.entry
+                FoundationLyricsView(
+                    item: entry.item, entryID: entry.id, library: library,
+                    player: player, model: presentation.model,
+                    availabilityChanged: { available in
+                        guard player.selectedEntryID == entry.id else { return }
+                        missingLyricsEntryID = available ? nil : entry.id
+                    })
+            } else if showingQueue {
+                FoundationQueueView(
+                    player: player, library: library, isPresented: $showingQueue
+                ) { item in
+                    guard showingQueue else { return }
+                    sheetDestination = .related(item)
+                }
+            } else {
+                containedPlayerArtwork
+            }
+        }
+
+        private var playerBackground: some View {
+            GeometryReader { geometry in
+                ZStack {
+                    backgroundTint
+                    if let backgroundArtwork {
+                        backgroundArtwork.resizable().scaledToFill().blur(radius: 28)
+                    }
+                    LinearGradient(
+                        stops: [
+                            .init(color: .clear, location: 0),
+                            .init(color: .black.opacity(0.12), location: 0.50),
+                            .init(color: backgroundTint.opacity(0.8), location: 0.80),
+                            .init(color: backgroundTint, location: 1),
+                        ], startPoint: .top, endPoint: .bottom)
+                    Color.black.opacity(contentMode == .artwork ? 0 : 0.6)
+                }
+                .frame(width: geometry.size.width, height: geometry.size.height)
+                .clipped()
+            }
+            .ignoresSafeArea()
+            .allowsHitTesting(false)
+        }
+    #endif
+
     private func toggleLyrics() {
         showingQueue = false
         lyricsPresentation?.model.cancel()
@@ -389,18 +624,22 @@ struct FoundationPlayerView: View {
         }
     }
 
-    private func toggleQueue() {
+    private func toggleQueue(landscape: Bool) {
         lyricsPresentation?.model.cancel()
         lyricsPresentation = nil
         #if os(iOS)
-            let image: FoundationPlayerArtworkPresentationModel.Artwork?
-            if let current, let result = currentArtwork.result(for: current) {
-                image = .init(identity: current.sharedArtworkIdentity, result: result)
+            if landscape {
+                artworkPresentation?.cancelQueueTransition()
             } else {
-                image = nil
+                let image: FoundationPlayerArtworkPresentationModel.Artwork?
+                if let current, let result = currentArtwork.result(for: current) {
+                    image = .init(identity: current.sharedArtworkIdentity, result: result)
+                } else {
+                    image = nil
+                }
+                artworkPresentation?.prepareQueueTransition(
+                    showing: !showingQueue, artwork: image, reduceMotion: reduceMotion)
             }
-            artworkPresentation?.prepareQueueTransition(
-                showing: !showingQueue, artwork: image, reduceMotion: reduceMotion)
         #endif
         showingQueue.toggle()
     }
@@ -424,30 +663,42 @@ struct FoundationPlayerView: View {
         }
     #endif
 
-    private var artworkFade: LinearGradient {
-        LinearGradient(
-            stops: [
-                .init(color: .white, location: 0.84),
-                .init(color: .white.opacity(0.82), location: 0.90),
-                .init(color: .white.opacity(0.35), location: 0.96),
-                .init(color: .white.opacity(0.07), location: 0.99),
-                .init(color: .clear, location: 1),
-            ], startPoint: .top, endPoint: .bottom)
+    @ViewBuilder private func artworkFade(contained: Bool) -> some View {
+        if contained {
+            Color.white
+        } else {
+            LinearGradient(
+                stops: [
+                    .init(color: .white, location: 0.84),
+                    .init(color: .white.opacity(0.82), location: 0.90),
+                    .init(color: .white.opacity(0.35), location: 0.96),
+                    .init(color: .white.opacity(0.07), location: 0.99),
+                    .init(color: .clear, location: 1),
+                ], startPoint: .top, endPoint: .bottom
+            )
+        }
     }
 
     @ViewBuilder private func artworkView(size: CGFloat, height: CGFloat) -> some View {
-        if let album {
-            FoundationCatalogArtwork(
-                source: .current(currentArtwork.result(for: album)), item: album, library: library,
-                isActive: isVisible, size: size,
-                displayHeight: height,
-                sampledColor: $artworkTint, isHero: true,
-                loadedImage: $artworkFill
-            ).id(album.sharedArtworkIdentity)
-        } else {
-            Image(systemName: "music.note").font(.system(size: 80)).foregroundStyle(.secondary)
-                .frame(width: size, height: height)
+        Group {
+            if let album {
+                FoundationCatalogArtwork(
+                    source: .current(currentArtwork.result(for: album)), item: album,
+                    library: library,
+                    isActive: isVisible, size: size,
+                    displayHeight: height,
+                    sampledColor: $artworkTint, isHero: true,
+                    loadedImage: $artworkFill
+                ).id(album.sharedArtworkIdentity)
+            } else {
+                Image(systemName: "music.note").font(.system(size: 80)).foregroundStyle(.secondary)
+                    .frame(width: size, height: height)
+            }
         }
+        #if os(iOS)
+            .matchedGeometryEffect(
+                id: "player-artwork", in: playerLayoutTransition, properties: .frame)
+        #endif
     }
 
     @ViewBuilder private var volumeControl: some View {
@@ -484,33 +735,19 @@ struct FoundationPlayerView: View {
                                 identity: current?.sharedArtworkIdentity ?? "",
                                 text: current?.title ?? "Nothing selected"))
                     #endif
-                Menu {
-                    Button("View Album", systemImage: "square.stack") {
-                        if let album { sheetDestination = .related(album) }
-                    }.disabled(
-                        album == nil
-                            || (connectivity.localOnly
-                                && album.map { downloads.browseTracks(for: $0).isEmpty } == true)
-                    )
-                    Button("View Artist", systemImage: "music.mic") {
-                        if let artist { sheetDestination = .related(artist) }
-                    }.disabled(
-                        artist == nil
-                            || (connectivity.localOnly
-                                && artist.map {
-                                    downloads.downloadedAlbums(artistID: $0.id).isEmpty
-                                }
-                                    == true)
-                    )
-                    Button("Song Credits", systemImage: "person.text.rectangle") {
-                        if let current { sheetDestination = .credits(current) }
-                    }.disabled(current == nil)
-                } label: {
-                    Image(systemName: "ellipsis").frame(width: 44, height: 44)
-                }
-                .menuStyle(.borderlessButton)
-                .foundationEllipsisMenuIndicator()
-                .accessibilityLabel("More playback options")
+                PlaybackOptionsMenu(
+                    current: current, album: album, artist: artist,
+                    canViewAlbum:
+                        album != nil
+                        && (!connectivity.localOnly
+                            || album.map { !downloads.browseTracks(for: $0).isEmpty } == true),
+                    canViewArtist:
+                        artist != nil
+                        && (!connectivity.localOnly
+                            || artist.map {
+                                !downloads.downloadedAlbums(artistID: $0.id).isEmpty
+                            } == true),
+                    destination: $sheetDestination)
                 if let current {
                     let favorite = actions.favoriteState(for: current, initial: current.isFavorite)
                     Button {
@@ -1552,3 +1789,50 @@ extension EnvironmentValues {
         }
     }
 #endif
+
+/// Pure root-coordinate partition used directly by the custom folded player.
+/// No child-host coordinates, content mode or previous orientation affect roles.
+enum FoundationPlayerRegionLayout {
+    struct Regions: Equatable, Sendable {
+        let controls: CGRect
+        let content: CGRect
+        let stacksVertically: Bool
+    }
+
+    nonisolated static func regions(
+        size: CGSize, divider: CGRect, margins: EdgeInsets
+    ) -> Regions? {
+        guard size.width.isFinite, size.height.isFinite, size.width > 0, size.height > 0,
+            !divider.isNull, !divider.isInfinite,
+            [
+                divider.minX, divider.minY, divider.maxX, divider.maxY,
+                margins.top, margins.bottom, margins.leading, margins.trailing,
+            ].allSatisfy(\.isFinite),
+            divider.width >= 0, divider.height >= 0,
+            divider.width > 0 || divider.height > 0
+        else { return nil }
+        if divider.width > divider.height {
+            guard divider.maxX > 0, divider.minX < size.width else { return nil }
+            let topEnd = divider.minY - max(0, margins.top)
+            let bottomStart = divider.maxY + max(0, margins.bottom)
+            guard topEnd > 0, bottomStart < size.height else { return nil }
+            return Regions(
+                controls: CGRect(
+                    x: 0, y: bottomStart, width: size.width,
+                    height: size.height - bottomStart),
+                content: CGRect(x: 0, y: 0, width: size.width, height: topEnd),
+                stacksVertically: true)
+        } else {
+            guard divider.maxY > 0, divider.minY < size.height else { return nil }
+            let leftEnd = divider.minX - max(0, margins.leading)
+            let rightStart = divider.maxX + max(0, margins.trailing)
+            guard leftEnd > 0, rightStart < size.width else { return nil }
+            return Regions(
+                controls: CGRect(
+                    x: rightStart, y: 0, width: size.width - rightStart,
+                    height: size.height),
+                content: CGRect(x: 0, y: 0, width: leftEnd, height: size.height),
+                stacksVertically: false)
+        }
+    }
+}

@@ -299,9 +299,38 @@ nonisolated enum FoundationNativeDownloadTransport {
             ProcessInfo.processInfo.arguments.contains("-diagnosticNativeDownload")
         }
     #endif
+    /// Reconnect only an independently fenced, unrepresented identifier. This
+    /// observer never creates/cancels a task or reads/writes a native allocation.
+    static func observeUnrepresentedEmptySession(
+        _ identifier: String, drained: @escaping @MainActor @Sendable () -> Void
+    ) async -> FoundationNativeEmptySessionOutcome {
+        #if os(iOS) && !FOUNDATION_ISOLATED_TEST_HOST
+            guard !Task.isCancelled,
+                FoundationNativeAllocationStore.directoryScope(forSessionIdentifier: identifier)
+                    != nil
+            else { return .unavailable }
+            let worker = FoundationNativeEmptySessionDelegate(drained: drained)
+            let configuration = URLSessionConfiguration.background(withIdentifier: identifier)
+            configuration.allowsCellularAccess = false
+            configuration.allowsExpensiveNetworkAccess = false
+            configuration.allowsConstrainedNetworkAccess = false
+            configuration.isDiscretionary = false
+            configuration.httpCookieStorage = nil
+            configuration.urlCredentialStorage = nil
+            configuration.httpAdditionalHeaders = ["Accept-Encoding": "identity"]
+            let session = AVAssetDownloadURLSession(
+                configuration: configuration, assetDownloadDelegate: worker,
+                delegateQueue: worker.delegateQueue)
+            return await worker.observe(session)
+        #else
+            return .unavailable
+        #endif
+    }
+
     static func transfer(
         _ proposal: FoundationNativeDownloadProposal, store: FoundationNativeAllocationStore,
-        allowsCellular: Bool, progress: @escaping FoundationDownloadTransport.Progress
+        allowsCellular: Bool, progress: @escaping FoundationDownloadTransport.Progress,
+        onTerminalNoAllocationFinality: (@MainActor @Sendable (String) -> Void)? = nil
     ) async throws -> FoundationDownloadManifest.File {
         #if !os(iOS)
             throw FoundationDownloadError.systemManagementUnavailable
@@ -370,7 +399,14 @@ nonisolated enum FoundationNativeDownloadTransport {
                 throw primary
             }
             let sessionIdentifier = store.sessionIdentifier
-            let worker = FoundationNativeDownloadDelegate(progress: progress, store: store)
+            let worker = FoundationNativeDownloadDelegate(
+                progress: progress, store: store, backgroundEventsFinished: { _ in },
+                deferLiveRetirementUntilFinality: true,
+                acknowledgedDelivery: { identifier in
+                    await MainActor.run {
+                        FoundationAppRuntime.model.finishBackgroundDownloadEvents(identifier)
+                    }
+                })
             // The delegate queue exists and is gated before either OS factory. A
             // crash after this durable phase can never be mistaken for no allocation.
             defer { worker.activateDelegateQueue() }
@@ -396,10 +432,7 @@ nonisolated enum FoundationNativeDownloadTransport {
             let session = AVAssetDownloadURLSession(
                 configuration: configuration, assetDownloadDelegate: worker,
                 delegateQueue: worker.delegateQueue)
-            defer {
-                worker.activateDelegateQueue()
-                session.finishTasksAndInvalidate()
-            }
+            defer { worker.requestFinality(session) }
             // Use the existing official authenticated HLS master boundary. Do not put
             // reserved Authorization headers in configuration or private AVAsset options.
             // The OS may retain this credential URL in private task/package metadata.
@@ -414,6 +447,7 @@ nonisolated enum FoundationNativeDownloadTransport {
                     session.makeAssetDownloadTask(downloadConfiguration: download)
                 }
             } catch {
+                _ = await worker.finishAndAwaitFinality(session)
                 // Creation/binding uncertainty remains cleanup even if the independent
                 // scoped server conversion cleanup fails. Pending authority must survive.
                 do {
@@ -487,7 +521,9 @@ nonisolated enum FoundationNativeDownloadTransport {
                     stage = "conversionCleanup"
                 #endif
                 try await closeConversion(proposal.cleanupRequest, allowsCellular: allowsCellular)
-                guard !worker.failedSession else { throw FoundationDownloadError.cleanup }
+                guard await worker.finishAndAwaitFinality(session) else {
+                    throw FoundationDownloadError.cleanup
+                }
                 #if DEBUG
                     if diagnosticEnabled {
                         FoundationJournal.shared.record(
@@ -499,6 +535,9 @@ nonisolated enum FoundationNativeDownloadTransport {
                     nativePackage: package, nativeRendition: rendition)
             } catch {
                 task.cancel()
+                guard await worker.finishAndAwaitFinality(session) else {
+                    throw FoundationDownloadError.cleanup
+                }
                 // No raw AV/HTTP error, header, URL or server response reaches product diagnostics.
                 let failure =
                     error as? FoundationDownloadError
@@ -562,6 +601,15 @@ nonisolated enum FoundationNativeDownloadTransport {
                         }
                     #endif
                     throw FoundationDownloadError.conversionCleanup
+                }
+                if acquired == nil, let receipt = try? store.load(),
+                    receipt.phase == .terminalNoAllocation, receipt.creationVersion == 1,
+                    receipt.taskIdentifier == task.taskIdentifier, receipt.taskIdentifier > 0,
+                    receipt.nativeURL == nil, receipt.package == nil,
+                    receipt.namespaceBookmark == nil,
+                    receipt.hasProvenRetirement
+                {
+                    await onTerminalNoAllocationFinality?(store.sessionIdentifier)
                 }
                 throw failure
             }
@@ -712,22 +760,33 @@ nonisolated enum FoundationNativeDownloadTransport {
 
     /// Reconnect only to opaque sessions recorded by this account. Interrupted acquisitions
     /// are cancelled and reconciled; they never become ready from a stale callback.
-    static func retireInterruptedSessions(_ identifiers: Set<String>, directory: URL) async -> Set<
-        String
-    > {
+    static func retireInterruptedSessions(
+        _ identifiers: Set<String>, directory: URL,
+        mayRetire: @escaping @MainActor @Sendable () -> Bool,
+        onFinality: (@Sendable (FoundationNativeAllocationStore) async throws -> Void)? = nil
+    ) async -> Set<String> {
         var retired: Set<String> = []
         #if os(iOS)
             for identifier in identifiers {
                 let store = FoundationNativeAllocationStore(
                     directory: directory, sessionIdentifier: identifier)
-                guard store.validSession else { continue }
-                let worker = FoundationNativeDownloadDelegate(progress: { _, _ in }, store: store)
+                guard store.validSession, !Task.isCancelled, await mayRetire() else { continue }
+                let worker = FoundationNativeDownloadDelegate(
+                    progress: { _, _ in }, store: store, backgroundEventsFinished: { _ in },
+                    deferLiveRetirementUntilFinality: true,
+                    acknowledgedDelivery: { identifier in
+                        await MainActor.run {
+                            FoundationAppRuntime.model.finishBackgroundDownloadEvents(identifier)
+                        }
+                    })
                 let configuration = URLSessionConfiguration.background(withIdentifier: identifier)
                 let session = AVAssetDownloadURLSession(
                     configuration: configuration,
                     assetDownloadDelegate: worker, delegateQueue: worker.delegateQueue)
                 do {
-                    try await worker.retire(session)
+                    try await worker.retire(session, mayRetire: mayRetire) {
+                        try await onFinality?(store)
+                    }
                     retired.insert(identifier)
                 } catch {
                     // Preserve this receipt; unrelated verified downloads remain usable.
@@ -1102,6 +1161,24 @@ nonisolated final class FoundationNativeDownloadDelegate: FoundationNativeDownlo
     private let progress: FoundationDownloadTransport.Progress
     private let store: FoundationNativeAllocationStore
     private let backgroundEventsFinished: @Sendable (String) -> Void
+    private let acknowledgedDelivery: (@Sendable (String) async -> Void)?
+    private let acknowledgedFinality: @Sendable (String) async -> Void
+    private let deferLiveRetirementUntilFinality: Bool
+    private let retireAllocation: @Sendable () throws -> Void
+    private var deliveryTail: Task<Void, Never>?
+    private var finality: Bool?
+    private var finalityRequested = false
+    private var finalityWaiters: [CheckedContinuation<Bool, Never>] = []
+    #if FOUNDATION_ISOLATED_TEST_HOST
+        var isolatedFinalityWaitStarted: (() -> Void)?
+        var isolatedRetirementWaitStarted: (() -> Void)?
+        var isolatedTerminalFailure: FoundationDownloadError? {
+            lock.withLock {
+                guard case .failure(let error)? = terminalResult else { return nil }
+                return error as? FoundationDownloadError
+            }
+        }
+    #endif
     let delegateQueue: OperationQueue
     private var boundTask: URLSessionTask?
     private var ownedSession: URLSession?
@@ -1125,11 +1202,21 @@ nonisolated final class FoundationNativeDownloadDelegate: FoundationNativeDownlo
             Task { @MainActor in
                 FoundationAppRuntime.model.finishBackgroundDownloadEvents(identifier)
             }
-        }
+        },
+        deferLiveRetirementUntilFinality: Bool = false,
+        acknowledgedDelivery: (@Sendable (String) async -> Void)? = nil,
+        acknowledgedFinality: @escaping @Sendable (String) async -> Void = { _ in
+            await MainActor.run {}
+        },
+        retireAllocation: (@Sendable () throws -> Void)? = nil
     ) {
         self.progress = progress
         self.store = store
         self.backgroundEventsFinished = backgroundEventsFinished
+        self.acknowledgedDelivery = acknowledgedDelivery
+        self.acknowledgedFinality = acknowledgedFinality
+        self.deferLiveRetirementUntilFinality = deferLiveRetirementUntilFinality
+        self.retireAllocation = retireAllocation ?? { @Sendable in try store.retire() }
         self.announceAllocation = announceAllocation
         self.sealAllocation = sealAllocation
         let queue = OperationQueue()
@@ -1169,37 +1256,118 @@ nonisolated final class FoundationNativeDownloadDelegate: FoundationNativeDownlo
         }
     }
 
-    func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
+    private func deliverBackgroundEvents() -> Task<Void, Never>? {
         backgroundEventsFinished(store.sessionIdentifier)
+        guard let acknowledgedDelivery else { return nil }
+        let identifier = store.sessionIdentifier
+        return lock.withLock {
+            let previous = deliveryTail
+            let next = Task {
+                await previous?.value
+                await acknowledgedDelivery(identifier)
+            }
+            deliveryTail = next
+            return next
+        }
     }
 
-    func retire(_ session: URLSession) async throws {
-        try await withCheckedThrowingContinuation { continuation in
+    func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
+        _ = deliverBackgroundEvents()
+    }
+
+    /// Final invalidation is an owner-lifetime boundary, not the OS event-drain signal.
+    /// Join any earlier drain delivery and a separate main-actor barrier in order.
+    private func acknowledgeFinalInvalidation() -> Task<Void, Never> {
+        let identifier = store.sessionIdentifier
+        let acknowledge = acknowledgedFinality
+        return lock.withLock {
+            let previous = deliveryTail
+            let next = Task {
+                await previous?.value
+                await acknowledge(identifier)
+            }
+            deliveryTail = next
+            return next
+        }
+    }
+
+    func requestFinality(_ session: URLSession) {
+        activateDelegateQueue()
+        let request = lock.withLock { () -> Bool in
+            guard !finalityRequested, invalidationFailed == nil else { return false }
+            finalityRequested = true
+            return true
+        }
+        if request { session.finishTasksAndInvalidate() }
+    }
+
+    /// A cancelled waiter cannot turn an unfinished native session into cleanup authority.
+    func finishAndAwaitFinality(_ session: URLSession) async -> Bool {
+        requestFinality(session)
+        return await withCheckedContinuation { continuation in
+            let completed = lock.withLock { () -> Bool? in
+                if let finality { return finality }
+                finalityWaiters.append(continuation)
+                #if FOUNDATION_ISOLATED_TEST_HOST
+                    isolatedFinalityWaitStarted?()
+                #endif
+                return nil
+            }
+            if let completed { continuation.resume(returning: completed) }
+        }
+    }
+
+    private func completeFinality(_ succeeded: Bool) {
+        let waiters = lock.withLock { () -> [CheckedContinuation<Bool, Never>] in
+            guard finality == nil else { return [] }
+            finality = succeeded
+            let waiters = finalityWaiters
+            finalityWaiters.removeAll()
+            return waiters
+        }
+        for waiter in waiters { waiter.resume(returning: succeeded) }
+    }
+
+    func retire(
+        _ session: URLSession, mayRetire: @escaping @MainActor @Sendable () -> Bool,
+        onFinality: (@Sendable () async throws -> Void)? = nil
+    ) async throws {
+        try await withCheckedThrowingContinuation {
+            (continuation: CheckedContinuation<Void, Error>) in
             // Cold reconnection must attach retirement before delivering its events.
             defer { activateDelegateQueue() }
             let invalidated = lock.withLock { () -> Bool? in
                 if let invalidationFailed { return invalidationFailed }
                 ownedSession = session
                 retirement = continuation
+                #if FOUNDATION_ISOLATED_TEST_HOST
+                    isolatedRetirementWaitStarted?()
+                #endif
                 return nil
             }
-            // A systemic failure may arrive before the recovery caller attaches.
-            // Never wait for another message from an already-invalid session.
             if let invalidated {
-                do {
-                    guard !invalidated else { throw FoundationDownloadError.cleanup }
-                    try store.retire()
+                if invalidated {
+                    continuation.resume(throwing: FoundationDownloadError.cleanup)
+                } else {
                     continuation.resume()
-                } catch { continuation.resume(throwing: FoundationDownloadError.cleanup) }
+                }
                 return
             }
             session.getAllTasks { tasks in
                 for task in tasks { task.cancel() }
-                // Cancellation policy is unchanged. Wait for the cancelled tasks and
-                // their final delegate callbacks before invalidating this connection.
                 session.finishTasksAndInvalidate()
             }
         }
+        // The final delegate callback alone does not join its model delivery. Retain
+        // the session and receipt until both finality and the scoped owner check hold.
+        guard await finishAndAwaitFinality(session), !Task.isCancelled,
+            await mayRetire(), !Task.isCancelled
+        else { throw FoundationDownloadError.cleanup }
+        try await onFinality?()
+        guard !Task.isCancelled, await mayRetire(), !Task.isCancelled else {
+            throw FoundationDownloadError.cleanup
+        }
+        try retireAllocation()
     }
 
     func urlSession(_ session: URLSession, didBecomeInvalidWithError error: Error?) {
@@ -1214,7 +1382,14 @@ nonisolated final class FoundationNativeDownloadDelegate: FoundationNativeDownlo
             return (true, pending)
         }
         guard result.0 else { return }
-        defer { backgroundEventsFinished(store.sessionIdentifier) }
+        defer {
+            let acknowledgement = acknowledgeFinalInvalidation()
+            let succeeded = error == nil
+            Task {
+                await acknowledgement.value
+                completeFinality(succeeded)
+            }
+        }
         if error != nil {
             // Retain the exact receipt. A final session error does not provide the
             // original live task's no-allocation callback history or cleanup proof.
@@ -1222,11 +1397,7 @@ nonisolated final class FoundationNativeDownloadDelegate: FoundationNativeDownlo
             complete(.failure(FoundationDownloadError.cleanup))
             return
         }
-        guard let pending = result.1 else { return }
-        do {
-            try store.retire()
-            pending.resume()
-        } catch { pending.resume(throwing: FoundationDownloadError.cleanup) }
+        result.1?.resume()
     }
 
     func run(_ task: URLSessionTask) async throws -> URL {
@@ -1391,7 +1562,7 @@ nonisolated final class FoundationNativeDownloadDelegate: FoundationNativeDownlo
             #if DEBUG
                 diagnosticCleanupFailed = cleanupFailed
             #endif
-            return (liveTaskIdentifier, observedAllocation, location, cancelled || cleanupFailed)
+            return (liveTaskIdentifier, observedAllocation, location, cancelled, cleanupFailed)
         }
         #if DEBUG
             if FoundationNativeDownloadTransport.diagnosticEnabled {
@@ -1405,9 +1576,21 @@ nonisolated final class FoundationNativeDownloadDelegate: FoundationNativeDownlo
             if state.0 == task.taskIdentifier && !state.1 {
                 try store.recordTerminalNoAllocation(taskIdentifier: task.taskIdentifier)
             }
-            if error != nil || state.3 {
-                try store.retire()
-                complete(.failure(FoundationDownloadError.cancelled))
+            if error != nil || state.3 || state.4 {
+                if !deferLiveRetirementUntilFinality { try store.retire() }
+                let nativeError = error as NSError?
+                let failure: FoundationDownloadError
+                if state.4 {
+                    failure = .cleanup
+                } else if state.3
+                    || (nativeError?.domain == NSURLErrorDomain
+                        && nativeError?.code == NSURLErrorCancelled)
+                {
+                    failure = .cancelled
+                } else {
+                    failure = .network
+                }
+                complete(.failure(failure))
             } else if state.2 != nil {
                 var pending: CheckedContinuation<URL, Error>?
                 let sealed = try lock.withLock { () throws -> URL in
@@ -1427,7 +1610,7 @@ nonisolated final class FoundationNativeDownloadDelegate: FoundationNativeDownlo
                 }
                 pending?.resume(returning: sealed)
             } else {
-                try store.retire()
+                if !deferLiveRetirementUntilFinality { try store.retire() }
                 complete(.failure(FoundationDownloadError.incomplete))
             }
         } catch { complete(.failure(FoundationDownloadError.cleanup)) }
@@ -1507,4 +1690,246 @@ nonisolated private final class FoundationNativeDownloadEnumerationFailure: @unc
     private var value = false
     var failed: Bool { lock.withLock { value } }
     func record() { lock.withLock { value = true } }
+}
+
+nonisolated enum FoundationNativeEmptySessionOutcome: Sendable, Equatable {
+    case quiescent
+    case observedNativeWork
+    case unavailable
+}
+
+/// Evidence reducer for the proposed nonmutating empty-session reconciliation.
+/// It does not create a session, query account data, own a native task, or authorize
+/// any storage mutation. A caller must independently fence account/storage identity.
+nonisolated final class FoundationNativeEmptySessionEvidence: @unchecked Sendable {
+    private let lock = NSLock()
+    private var inventoryRecorded = false
+    private var emptyInventory = false
+    private var drainDelivered: Bool
+    private var drainAcknowledged: Bool
+    private var invalidationRecorded = false
+    private var successfulInvalidation = false
+    private var finalityAcknowledged = false
+    private var disqualified = false
+    private var observedNativeWork = false
+
+    /// Prior acknowledgement is admissible only for this exact pending event in
+    /// the current model, from a real native delivery already joined on MainActor.
+    /// No persisted marker, empty inventory, or previous process can supply it.
+    init(priorDrainAcknowledged: Bool = false) {
+        drainDelivered = priorDrainAcknowledged
+        drainAcknowledged = priorDrainAcknowledged
+    }
+
+    func recordInventory(count: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+        if inventoryRecorded || invalidationRecorded { disqualified = true }
+        inventoryRecorded = true
+        emptyInventory = count == 0
+        if count != 0 {
+            disqualified = true
+            observedNativeWork = true
+        }
+    }
+
+    func observeTaskAllocationOrChallenge() {
+        lock.lock()
+        disqualified = true
+        observedNativeWork = true
+        lock.unlock()
+    }
+
+    func recordDrainDelivery() {
+        lock.lock()
+        if invalidationRecorded { disqualified = true }
+        drainDelivered = true
+        lock.unlock()
+    }
+
+    func acknowledgeDrainDelivery() {
+        lock.lock()
+        if !drainDelivered { disqualified = true }
+        drainAcknowledged = drainDelivered
+        lock.unlock()
+    }
+
+    func recordInvalidation(succeeded: Bool) {
+        lock.lock()
+        if invalidationRecorded || !inventoryRecorded { disqualified = true }
+        invalidationRecorded = true
+        successfulInvalidation = succeeded
+        if !succeeded { disqualified = true }
+        lock.unlock()
+    }
+
+    func acknowledgeFinality() {
+        lock.lock()
+        if !invalidationRecorded { disqualified = true }
+        finalityAcknowledged = invalidationRecorded
+        lock.unlock()
+    }
+
+    func cancel() {
+        lock.lock()
+        disqualified = true
+        lock.unlock()
+    }
+
+    var outcome: FoundationNativeEmptySessionOutcome {
+        lock.lock()
+        defer { lock.unlock() }
+        if observedNativeWork { return .observedNativeWork }
+        return inventoryRecorded && emptyInventory && invalidationRecorded
+            && successfulInvalidation && finalityAcknowledged && !disqualified
+            ? .quiescent : .unavailable
+    }
+
+    /// Contract-derived quiescence of an observed empty native session. This is
+    /// separate from the actual URLSessionDidFinishEvents delivery signal.
+    var isQuiescentEmpty: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return inventoryRecorded && emptyInventory && invalidationRecorded
+            && successfulInvalidation && finalityAcknowledged && !disqualified
+    }
+
+    var isSuccessful: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return inventoryRecorded && emptyInventory && drainDelivered && drainAcknowledged
+            && invalidationRecorded && successfulInvalidation && finalityAcknowledged
+            && !disqualified
+    }
+}
+
+/// One owned nonmutating observation. Even a failed/nonempty observation retains
+/// its exact session through final invalidation; cancellation never cancels tasks.
+nonisolated private final class FoundationNativeEmptySessionDelegate: NSObject,
+    AVAssetDownloadDelegate, @unchecked Sendable
+{
+    let delegateQueue: OperationQueue
+    private let lock = NSLock()
+    private let evidence = FoundationNativeEmptySessionEvidence()
+    private let drained: @MainActor @Sendable () -> Void
+    private var session: AVAssetDownloadURLSession?
+    private var continuation: CheckedContinuation<FoundationNativeEmptySessionOutcome, Never>?
+    private var deliveryTail: Task<Void, Never>?
+    private var invalidationClaimed = false
+
+    init(drained: @escaping @MainActor @Sendable () -> Void) {
+        self.drained = drained
+        let queue = OperationQueue()
+        queue.maxConcurrentOperationCount = 1
+        queue.isSuspended = true
+        delegateQueue = queue
+    }
+
+    func observe(_ session: AVAssetDownloadURLSession) async -> FoundationNativeEmptySessionOutcome
+    {
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                lock.withLock {
+                    self.session = session
+                    self.continuation = continuation
+                }
+                delegateQueue.isSuspended = false
+                session.getAllTasks { [self] tasks in
+                    evidence.recordInventory(count: tasks.count)
+                    // Graceful invalidation does not cancel unexpected existing
+                    // tasks. The owner stays alive until their final callback.
+                    session.finishTasksAndInvalidate()
+                }
+            }
+        } onCancel: {
+            self.evidence.cancel()
+        }
+    }
+
+    private func owns(_ value: URLSession) -> Bool {
+        let matched = lock.withLock { session === value }
+        if !matched { evidence.observeTaskAllocationOrChallenge() }
+        return matched
+    }
+
+    func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
+        guard owns(session) else { return }
+        evidence.recordDrainDelivery()
+        let delivered = drained
+        lock.withLock {
+            let previous = deliveryTail
+            deliveryTail = Task { [self] in
+                await previous?.value
+                await delivered()
+                evidence.acknowledgeDrainDelivery()
+            }
+        }
+    }
+
+    func urlSession(_ session: URLSession, didBecomeInvalidWithError error: Error?) {
+        guard owns(session) else { return }
+        let claimed = lock.withLock { () -> Bool in
+            guard !invalidationClaimed else { return false }
+            invalidationClaimed = true
+            return true
+        }
+        guard claimed else { return }
+        evidence.recordInvalidation(succeeded: error == nil)
+        lock.withLock {
+            let previous = deliveryTail
+            deliveryTail = Task { [self] in
+                await previous?.value
+                await MainActor.run {}
+                evidence.acknowledgeFinality()
+                let result = evidence.outcome
+                let pending = lock.withLock {
+                    () -> CheckedContinuation<FoundationNativeEmptySessionOutcome, Never>? in
+                    let value = continuation
+                    continuation = nil
+                    self.session = nil
+                    deliveryTail = nil
+                    return value
+                }
+                pending?.resume(returning: result)
+            }
+        }
+    }
+
+    func urlSession(
+        _ session: URLSession, assetDownloadTask: AVAssetDownloadTask,
+        willDownloadTo location: URL
+    ) {
+        guard owns(session) else { return }
+        evidence.observeTaskAllocationOrChallenge()
+        // The supplied location is deliberately never inspected or persisted.
+    }
+
+    func urlSession(
+        _ session: URLSession, task: URLSessionTask,
+        didCompleteWithError error: Error?
+    ) {
+        guard owns(session) else { return }
+        evidence.observeTaskAllocationOrChallenge()
+    }
+
+    func urlSession(
+        _ session: URLSession, didReceive challenge: URLAuthenticationChallenge,
+        completionHandler:
+            @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        _ = owns(session)
+        evidence.observeTaskAllocationOrChallenge()
+        completionHandler(.performDefaultHandling, nil)
+    }
+
+    func urlSession(
+        _ session: URLSession, task: URLSessionTask,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler:
+            @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        _ = owns(session)
+        evidence.observeTaskAllocationOrChallenge()
+        completionHandler(.performDefaultHandling, nil)
+    }
 }

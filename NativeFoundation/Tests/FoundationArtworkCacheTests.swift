@@ -5,6 +5,39 @@ import XCTest
 
 @testable import VelacantoFoundation
 
+/// Observes the captured production task, including bounded failure cleanup.
+/// Cancellation cannot force arbitrary production work to terminate.
+@MainActor
+private func requireArtworkTask<Success: Sendable, Failure: Error>(
+    _ task: Task<Success, Failure>, context: String,
+    stopOnCancellation: Bool = true, cleanup: @MainActor () async -> Void
+) async -> Bool {
+    var returnedAt: ContinuousClock.Instant?
+    let observer = Task {
+        _ = await task.result
+        returnedAt = .now
+    }
+    let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+    while returnedAt == nil, ContinuousClock.now < deadline,
+        !stopOnCancellation || !Task.isCancelled
+    {
+        await Task.yield()
+    }
+    if let returnedAt, returnedAt <= deadline, !stopOnCancellation || !Task.isCancelled {
+        return true
+    }
+    task.cancel()
+    await cleanup()
+    let cleanupDeadline = ContinuousClock.now.advanced(by: .seconds(5))
+    while returnedAt == nil, ContinuousClock.now < cleanupDeadline { await Task.yield() }
+    observer.cancel()
+    XCTFail("Timed out or cancelled waiting for \(context)")
+    if !(returnedAt.map { $0 <= cleanupDeadline } ?? false) {
+        XCTFail("Captured task did not return during cleanup: \(context)")
+    }
+    return false
+}
+
 final class FoundationArtworkCacheTests: XCTestCase {
     func testArtistLogoContrastRespondsToAppearanceAndPreservesReadableOriginals() throws {
         func logo(_ white: CGFloat, alpha: CGFloat = 1) throws -> CGImage {
@@ -473,11 +506,18 @@ final class FoundationArtworkCacheTests: XCTestCase {
         _ task: Task<Success, Failure>, releasing probes: [ArtworkCacheProbe],
         cache: FoundationArtworkCache? = nil
     ) {
-        addTeardownBlock {
+        addTeardownBlock { @MainActor in
             task.cancel()
             for probe in probes { await probe.release() }
-            _ = await task.result
-            if let cache { _ = await cache.invalidate(removeDisk: true) }
+            _ = await requireArtworkTask(
+                task, context: "held artwork teardown", stopOnCancellation: false,
+                cleanup: { for probe in probes { await probe.release() } })
+            if let cache {
+                let retirement = Task { await cache.invalidate(removeDisk: true) }
+                _ = await requireArtworkTask(
+                    retirement, context: "artwork cache retirement", stopOnCancellation: false,
+                    cleanup: { for probe in probes { await probe.release() } })
+            }
         }
     }
 
@@ -1039,6 +1079,10 @@ final class FoundationArtworkCacheTests: XCTestCase {
         XCTAssertEqual(preview?.image.width, 160)
         upgrade.cancel()
         await held.release()
+        guard
+            await requireArtworkTask(
+                upgrade, context: "upgrade completion", cleanup: { await held.release() })
+        else { return }
         _ = try? await upgrade.value
         let retained = try await cache.cachedResult(for: album, pixels: 640)
         XCTAssertNotNil(retained)
@@ -1218,8 +1262,16 @@ final class FoundationArtworkCacheTests: XCTestCase {
         }
         first.cancel()
         await probe.release()
+        guard
+            await requireArtworkTask(
+                second, context: "second completion", cleanup: { await probe.release() })
+        else { return }
         _ = try await second.value
         do {
+            guard
+                await requireArtworkTask(
+                    first, context: "first completion", cleanup: { await probe.release() })
+            else { return }
             _ = try await first.value
             XCTFail("Cancelled consumer returned artwork")
         } catch is CancellationError {}
@@ -1265,7 +1317,17 @@ final class FoundationArtworkCacheTests: XCTestCase {
         }
         cleanUp(current, releasing: [], cache: cache)
         try await probe.waitForCount(1)
+        guard
+            await requireArtworkTask(
+                current, context: "current completion",
+                cleanup: { await admission.release(browsePermit) })
+        else { return }
         let currentResult = try await current.value
+        guard
+            await requireArtworkTask(
+                browse, context: "browse completion",
+                cleanup: { await admission.release(browsePermit) })
+        else { return }
         let browseResult = try await browse.value
         XCTAssertEqual(currentResult?.id, browseResult?.id)
         let count = await probe.count
@@ -1315,7 +1377,15 @@ final class FoundationArtworkCacheTests: XCTestCase {
         }
         XCTAssertNotNil(current)
         await held.release()
+        guard
+            await requireArtworkTask(
+                first, context: "first completion", cleanup: { await held.release() })
+        else { return }
         _ = try await first.value
+        guard
+            await requireArtworkTask(
+                second, context: "second completion", cleanup: { await held.release() })
+        else { return }
         _ = try await second.value
         _ = await cache.invalidate(removeDisk: false)
     }
@@ -1345,9 +1415,17 @@ final class FoundationArtworkCacheTests: XCTestCase {
         }
         cleanUp(current, releasing: [held], cache: cache)
         try await ready.waitForCount(1)
+        guard
+            await requireArtworkTask(
+                current, context: "current completion", cleanup: { await held.release() })
+        else { return }
         let result = try await current.value
         XCTAssertNotNil(result)
         await held.release()
+        guard
+            await requireArtworkTask(
+                first, context: "first completion", cleanup: { await held.release() })
+        else { return }
         _ = try await first.value
         _ = await cache.invalidate(removeDisk: false)
     }
@@ -1372,7 +1450,13 @@ final class FoundationArtworkCacheTests: XCTestCase {
         try await probe.waitForCount(2)
         for task in tasks { task.cancel() }
         await probe.release()
-        for task in tasks { _ = try? await task.value }
+        for task in tasks {
+            guard
+                await requireArtworkTask(
+                    task, context: "cancelled artwork worker", cleanup: { await probe.release() })
+            else { return }
+            _ = try? await task.value
+        }
         _ = await cache.invalidate(removeDisk: false)
         let peak = await probe.peak
         XCTAssertLessThanOrEqual(peak, 2)
@@ -1403,12 +1487,18 @@ final class FoundationArtworkCacheTests: XCTestCase {
         } catch {
             work.cancel()
             await barrier.release()
-            _ = await work.result
+            _ = await requireArtworkTask(
+                work, context: "persistence entry cleanup", stopOnCancellation: false,
+                cleanup: { await barrier.release() })
             // Consume the expectation on the failure path without changing the first error.
             await fulfillment(of: [ready], timeout: 2)
             throw error
         }
         await fulfillment(of: [ready], timeout: 2)
+        guard
+            await requireArtworkTask(
+                work, context: "work completion", cleanup: { await barrier.release() })
+        else { return }
         let image = try await work.value
         XCTAssertNotNil(image)
         // An oversized/uncached decoded result remains reusable while its write is pending.
@@ -1420,6 +1510,10 @@ final class FoundationArtworkCacheTests: XCTestCase {
         let retired = Task { await cache.invalidate(removeDisk: true) }
         cleanUp(retired, releasing: [barrier], cache: cache)
         await barrier.release()
+        guard
+            await requireArtworkTask(
+                retired, context: "retired completion", cleanup: { await barrier.release() })
+        else { return }
         let cleared = await retired.value
         XCTAssertTrue(cleared)
         let restored = FoundationArtworkCache(scope: "synthetic-held-persistence", root: root)
@@ -1450,9 +1544,17 @@ final class FoundationArtworkCacheTests: XCTestCase {
             await Task.yield()
         }
         await probe.release()
+        guard
+            await requireArtworkTask(
+                retire, context: "retire completion", cleanup: { await probe.release() })
+        else { return }
         let cleared = await retire.value
         XCTAssertTrue(cleared)
         do {
+            guard
+                await requireArtworkTask(
+                    task, context: "task completion", cleanup: { await probe.release() })
+            else { return }
             _ = try await task.value
             XCTFail("Retired account returned late artwork")
         } catch is CancellationError {}
@@ -1526,6 +1628,10 @@ final class FoundationArtworkCacheTests: XCTestCase {
         while published.isEmpty, ContinuousClock.now < deadline { await Task.yield() }
         XCTAssertEqual(published, [preview.id])
         await probe.release()
+        guard
+            await requireArtworkTask(
+                slow, context: "slow completion", cleanup: { await probe.release() })
+        else { return }
         let final = try await slow.value
         XCTAssertEqual(final?.id, full.id)
     }
@@ -1713,6 +1819,14 @@ final class FoundationArtworkCacheTests: XCTestCase {
         addTeardownBlock { @MainActor in
             player.stop()
             await resolver.release()
+            guard
+                await requireArtworkTask(
+                    selectionTask, context: "selectionTask completion",
+                    cleanup: {
+                        player.stop()
+                        await resolver.release()
+                    })
+            else { return }
             await selectionTask.value
             _ = await restored.invalidate(removeDisk: true)
         }
@@ -1740,6 +1854,14 @@ final class FoundationArtworkCacheTests: XCTestCase {
         current.invalidate()
         player.stop()
         await resolver.release()
+        guard
+            await requireArtworkTask(
+                selectionTask, context: "selectionTask completion",
+                cleanup: {
+                    player.stop()
+                    await resolver.release()
+                })
+        else { return }
         await selectionTask.value
         _ = await restored.invalidate(removeDisk: true)
     }

@@ -14,6 +14,8 @@ import SwiftUI
         static let transportContentHeight: CGFloat = 48
         static let catalogHorizontalInset: CGFloat = 24
         static let minimumSidebarWidth: CGFloat = 170
+        static let defaultSidebarWidth: CGFloat = 254
+        static let defaultInspectorWidth: CGFloat = 316
         // Includes the fixed transport groups, shell margins and a usable artwork/title area.
         static let minimumDetailWidth: CGFloat = 480
         static let minimumInspectorWidth: CGFloat = 280
@@ -148,7 +150,7 @@ import SwiftUI
         @ObservedObject var navigation: FoundationMacNavigation
         @FocusState private var searchFocused: Bool
         @State private var columnVisibility = NavigationSplitViewVisibility.all
-        @State private var sidebarWidth: CGFloat = 230
+        @State private var sidebarWidth = FoundationMacLayout.defaultSidebarWidth
         @State private var headerScrollByItem: [String: Bool] = [:]
         private var rootHeaderOwnerID: String {
             "root-\(selection.rawValue)-\(libraryNavigationID)-\(navigationRevision)"
@@ -166,6 +168,7 @@ import SwiftUI
         private let librarySidebar: () -> LibrarySidebar
         private let profile: () -> Profile
         private let activateSearch: () -> Void
+        private let submitSearch: () -> Void
         private let catalogPageCache: FoundationCatalogPageCache?
         @EnvironmentObject private var connectivity: FoundationConnectivity
         private let destination: (FoundationItem) -> Destination
@@ -181,7 +184,8 @@ import SwiftUI
             @ViewBuilder librarySidebar: @escaping () -> LibrarySidebar,
             @ViewBuilder profile: @escaping () -> Profile,
             @ViewBuilder destination: @escaping (FoundationItem) -> Destination,
-            activateSearch: @escaping () -> Void
+            activateSearch: @escaping () -> Void,
+            submitSearch: @escaping () -> Void = {}
         ) {
             _selection = selection
             _searchQuery = searchQuery
@@ -197,6 +201,7 @@ import SwiftUI
             self.librarySidebar = librarySidebar
             self.profile = profile
             self.activateSearch = activateSearch
+            self.submitSearch = submitSearch
             self.destination = destination
         }
 
@@ -245,6 +250,7 @@ import SwiftUI
                     librarySidebar()
                 }
                 .listStyle(.sidebar)
+                .toolbar(removing: .sidebarToggle)
                 .environment(\.defaultMinListRowHeight, FoundationMacLayout.sidebarRowHeight)
                 .labelStyle(.titleAndIcon)
                 .accessibilityLabel("Main navigation")
@@ -267,7 +273,8 @@ import SwiftUI
                 }
                 .navigationTitle("VelaCanto")
                 .navigationSplitViewColumnWidth(
-                    min: FoundationMacLayout.minimumSidebarWidth, ideal: 230, max: 280
+                    min: FoundationMacLayout.minimumSidebarWidth,
+                    ideal: FoundationMacLayout.defaultSidebarWidth, max: 280
                 )
                 .onGeometryChange(for: CGFloat.self) {
                     $0.size.width
@@ -306,6 +313,10 @@ import SwiftUI
             // detail-stack identity change. Recreate that navigation owner on activation.
             .id(navigationRevision)
             .searchable(text: $searchQuery, placement: .sidebar, prompt: "Search music")
+            .onSubmit(of: .search) {
+                // Detail search fields keep their own submit actions and cannot flush this query.
+                if searchFocused, selection == .search { submitSearch() }
+            }
             .searchFocused($searchFocused)
             .onChange(of: searchActivation, initial: true) { _, activation in
                 if selection == .search, activation > 0 { searchFocused = true }
@@ -321,8 +332,24 @@ import SwiftUI
             .onPreferenceChange(FoundationMacScrolledHeaderPreference.self) {
                 headerScrollByItem = $0
             }
+            // Album/artist routes already keep their revealed native title item mounted.
+            // Other routes need a real location item, including roots without any actions.
+            .toolbar {
+                if navigation.path.last?.item.kind != .album,
+                    navigation.path.last?.item.kind != .artist
+                {
+                    ToolbarItem(placement: .navigation) {
+                        Text(navigation.path.last?.item.title ?? selection.title)
+                            .font(.headline)
+                            .lineLimit(1)
+                            .accessibilityIdentifier("mac-window-location-title")
+                    }.sharedBackgroundVisibility(.hidden)
+                }
+            }
+            .toolbar(removing: .title)
+            .toolbarVisibility(.visible, for: .windowToolbar)
             .toolbarBackground(.ultraThinMaterial, for: .windowToolbar)
-            // Keep native window geometry stable; the noninteractive overlay reveals frost on scroll.
+            // The noninteractive overlay reveals frost on scroll without toggling the toolbar.
             .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
             .overlay(alignment: .top) {
                 GeometryReader { geometry in
@@ -453,6 +480,7 @@ import SwiftUI
         @FocusedValue(\.foundationMacActions) private var actions
 
         var body: some Commands {
+            SidebarCommands()
             CommandMenu("Navigate") {
                 ForEach(FoundationDestination.allCases, id: \.self) { destination in
                     Button(destination.title) { actions?.navigate(destination) }
@@ -911,11 +939,26 @@ private struct FoundationMacShelfUnderlap: ViewModifier {
                 .background(FoundationMacCarouselWheelRouting())
                 .contentMargins(.horizontal, contentInset, for: .scrollContent)
                 .padding(.horizontal, -horizontalInset)
-                // Overflow is visual; the viewport still starts inside the detail column.
                 .scrollClipDisabled()
+                .clipShape(FoundationHorizontalShelfClip())
         #else
             content
+                // Move the viewport to the page edge without moving its first item.
+                // Zero-inset callers already own their content padding.
+                .contentMargins(.horizontal, horizontalInset, for: .scrollContent)
+                .padding(.horizontal, -horizontalInset)
+                .scrollClipDisabled()
+                .clipShape(FoundationHorizontalShelfClip())
         #endif
+    }
+}
+
+/// Permit lateral artwork underlap without painting into adjacent vertical shelves.
+/// The extra viewport on each side covers page padding and native side controls;
+/// it changes drawing only, leaving scroll gestures and control hit regions intact.
+private struct FoundationHorizontalShelfClip: Shape {
+    func path(in rect: CGRect) -> Path {
+        Path(rect.insetBy(dx: -rect.width, dy: 0))
     }
 }
 
@@ -936,6 +979,102 @@ extension View {
         modifier(
             FoundationMacShelfUnderlap(horizontalInset: horizontalInset, contentInset: contentInset)
         )
+    }
+}
+
+#if os(macOS)
+    private struct FoundationMacHorizontalShelfGeometry: Equatable {
+        let offset: CGFloat
+        let minimum: CGFloat
+        let maximum: CGFloat
+        let viewport: CGFloat
+
+        init(_ geometry: ScrollGeometry, layoutDirection: LayoutDirection) {
+            let left =
+                layoutDirection == .leftToRight
+                ? geometry.contentInsets.leading : geometry.contentInsets.trailing
+            let right =
+                layoutDirection == .leftToRight
+                ? geometry.contentInsets.trailing : geometry.contentInsets.leading
+            offset = geometry.contentOffset.x
+            minimum = -left
+            maximum = max(
+                minimum, geometry.contentSize.width + right - geometry.containerSize.width)
+            viewport = geometry.containerSize.width
+        }
+
+        var canScroll: Bool {
+            offset.isFinite && minimum.isFinite && maximum.isFinite && viewport.isFinite
+                && viewport > 0 && maximum - minimum > 1
+        }
+    }
+
+    /// Each shelf owns its geometry without publishing every wheel/trackpad update.
+    @MainActor
+    private final class FoundationMacHorizontalShelfGeometryCache {
+        var current: FoundationMacHorizontalShelfGeometry?
+    }
+
+    private struct FoundationMacHorizontalShelfInput: ViewModifier {
+        private enum Focus: Hashable {
+            case shelf
+        }
+
+        @Environment(\.layoutDirection) private var layoutDirection
+        @State private var position = ScrollPosition(idType: Never.self)
+        @State private var geometryCache = FoundationMacHorizontalShelfGeometryCache()
+        @State private var canScroll = false
+        @FocusState private var focus: Focus?
+
+        func body(content: Content) -> some View {
+            content
+                .scrollPosition($position)
+                .onScrollGeometryChange(for: FoundationMacHorizontalShelfGeometry.self) {
+                    geometry in
+                    FoundationMacHorizontalShelfGeometry(geometry, layoutDirection: layoutDirection)
+                } action: { _, geometry in
+                    geometryCache.current = geometry
+                    if canScroll != geometry.canScroll {
+                        canScroll = geometry.canScroll
+                    }
+                }
+                .focusable(canScroll, interactions: .activate)
+                .focused($focus, equals: .shelf)
+                .onKeyPress(keys: [.leftArrow, .rightArrow], phases: [.down, .repeat]) { press in
+                    scroll(for: press)
+                }
+        }
+
+        private func scroll(for press: KeyPress) -> KeyPress.Result {
+            // Descendant controls and modified shortcuts keep their native dispatch.
+            guard focus == .shelf,
+                press.modifiers.intersection([.command, .control, .option, .shift]).isEmpty,
+                let geometry = geometryCache.current, geometry.canScroll
+            else { return .ignored }
+
+            let requested = position.isPositionedByUser ? nil : position.x
+            let current = min(max(requested ?? geometry.offset, geometry.minimum), geometry.maximum)
+            let direction: CGFloat = press.key == .rightArrow ? 1 : -1
+            // Keep part of the previous viewport visible and clamp both end positions.
+            let target = min(
+                max(current + direction * geometry.viewport * 0.8, geometry.minimum),
+                geometry.maximum)
+            guard target.isFinite, abs(target - current) > 0.5 else { return .ignored }
+            position.scrollTo(x: target)
+            return .handled
+        }
+    }
+#endif
+
+extension View {
+    /// Hide horizontal overflow indicators even when macOS detects a mouse.
+    @ViewBuilder func foundationHorizontalScrollIndicators() -> some View {
+        #if os(macOS)
+            self.scrollIndicators(.never, axes: .horizontal)
+                .modifier(FoundationMacHorizontalShelfInput())
+        #else
+            self.scrollIndicators(.hidden)
+        #endif
     }
 }
 

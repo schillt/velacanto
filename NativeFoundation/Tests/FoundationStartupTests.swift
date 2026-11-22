@@ -65,13 +65,14 @@ final class FoundationStartupTests: XCTestCase {
             })
     }
 
+    private enum BackgroundOutcomeFailure: Error { case handoffTimedOut }
+
     private func waitForBackgroundOutcome(_ outcome: @MainActor () -> Bool) async throws {
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: .seconds(3))
         while !outcome() {
             guard clock.now < deadline else {
-                XCTFail("Background handoff did not settle")
-                return
+                throw BackgroundOutcomeFailure.handoffTimedOut
             }
             try await Task.sleep(for: .milliseconds(5))
         }
@@ -93,7 +94,7 @@ final class FoundationStartupTests: XCTestCase {
             playbackPreferences: try backgroundPreferences(),
             backgroundDownloadRoot: fixture.root,
             backgroundNativeRetirement: { identifiers, directory in
-                _ = await gate.prepare()
+                guard await gate.prepare() else { return [] }
                 for identifier in identifiers {
                     try? FoundationNativeAllocationStore(
                         directory: directory, sessionIdentifier: identifier
@@ -107,7 +108,13 @@ final class FoundationStartupTests: XCTestCase {
         }
         model.receiveBackgroundDownloadEvents(fixture.identifier, completionHandler: completion)
         model.receiveBackgroundDownloadEvents(fixture.identifier, completionHandler: completion)
-        try await gate.waitUntilStarted()
+        do {
+            try await gate.waitUntilStarted()
+        } catch {
+            model.invalidateAccountReadiness()
+            model.finishBackgroundDownloadEvents(fixture.identifier)
+            throw error
+        }
         // Drain arrives before durable publication.
         model.finishBackgroundDownloadEvents(fixture.identifier)
         XCTAssertEqual(completions, 0)
@@ -117,7 +124,8 @@ final class FoundationStartupTests: XCTestCase {
         XCTAssertEqual(preparations, 0)
         XCTAssertEqual(restorations, 0)
         gate.complete(true)
-        let readiness = await startup.value
+        let readiness = try await requireStartupTask(
+            startup, model: model, gates: [gate], name: "background startup")
         XCTAssertEqual(readiness, .signedOut)
         XCTAssertEqual(completions, 2)
         XCTAssertEqual(preparations, 1)
@@ -134,6 +142,7 @@ final class FoundationStartupTests: XCTestCase {
     {
         let fixture = try backgroundFixture()
         var completions = 0
+        let completed = XCTestExpectation(description: "background completion delivered")
         let model = FoundationAppModel(
             prepareCaches: {
                 XCTFail("Headless callback bootstrapped caches")
@@ -151,26 +160,75 @@ final class FoundationStartupTests: XCTestCase {
                 }
                 return identifiers
             })
-        model.receiveBackgroundDownloadEvents(fixture.identifier) { completions += 1 }
-        try await waitForBackgroundOutcome {
-            (try? FoundationDownloadStorage.load(directory: fixture.directory)
-                .nativePendingSessions?.isEmpty) == true
+        model.receiveBackgroundDownloadEvents(fixture.identifier) {
+            completions += 1
+            if completions == 1 { completed.fulfill() }
+        }
+        do {
+            try await waitForBackgroundOutcome {
+                (try? FoundationDownloadStorage.load(directory: fixture.directory)
+                    .nativePendingSessions?.isEmpty) == true
+            }
+        } catch {
+            model.finishBackgroundDownloadEvents(fixture.identifier)
+            throw error
         }
         XCTAssertEqual(completions, 0)
         XCTAssertNil(model.library)
         XCTAssertFalse(model.cachesReady)
         model.finishBackgroundDownloadEvents(fixture.identifier)
+        guard await XCTWaiter.fulfillment(of: [completed], timeout: 3) == .completed else {
+            model.invalidateAccountReadiness()
+            XCTFail("Background completion was not delivered within 3 seconds")
+            return
+        }
         XCTAssertEqual(completions, 1)
         model.finishBackgroundDownloadEvents(fixture.identifier)
         XCTAssertEqual(completions, 1)
     }
 
-    func testUnknownAndLockedBackgroundEventsPreserveProtectedAccountRecords() async throws {
-        for locked in [false, true] {
+    #if DEBUG
+        func testUnknownAndLockedBackgroundEventsPreserveProtectedAccountRecords() async throws {
+            for locked in [false, true] {
+                let fixture = try backgroundFixture()
+                let manifestURL = fixture.directory.appendingPathComponent("manifest.json")
+                let manifestBefore = try Data(contentsOf: manifestURL)
+                let receiptBefore = try Data(contentsOf: fixture.store.receiptURL)
+                var completions = 0
+                let model = FoundationAppModel(
+                    prepareCaches: {
+                        XCTFail("Unexpected bootstrap")
+                        return false
+                    },
+                    restoreAccount: { _ in XCTFail("Unexpected account restore") },
+                    credentialOperations: backgroundCredentials(
+                        fixture.data, status: locked ? errSecInteractionNotAllowed : errSecSuccess),
+                    playbackPreferences: try backgroundPreferences(),
+                    backgroundDownloadRoot: fixture.root,
+                    backgroundNativeRetirement: { _, _ in
+                        XCTFail("Unadmitted native session opened")
+                        return []
+                    })
+                let settled = expectation(description: "unresolved background route settled")
+                model.backgroundRoutingSettled = { _ in settled.fulfill() }
+                model.receiveBackgroundDownloadEvents(
+                    locked ? fixture.identifier : fixture.identifier + ".unknown"
+                ) { completions += 1 }
+                let result = await XCTWaiter.fulfillment(of: [settled], timeout: 5)
+                XCTAssertEqual(result, .completed)
+                model.finishBackgroundDownloadEvents(fixture.identifier)
+                XCTAssertEqual(completions, 0)
+                XCTAssertEqual(try Data(contentsOf: manifestURL), manifestBefore)
+                XCTAssertEqual(try Data(contentsOf: fixture.store.receiptURL), receiptBefore)
+                XCTAssertNil(model.library)
+            }
+        }
+
+        func testFailedNativeRetirementRetainsBackgroundCompletion() async throws {
             let fixture = try backgroundFixture()
-            let manifestURL = fixture.directory.appendingPathComponent("manifest.json")
-            let manifestBefore = try Data(contentsOf: manifestURL)
-            let receiptBefore = try Data(contentsOf: fixture.store.receiptURL)
+            let beforeManifest = try Data(
+                contentsOf: fixture.directory.appendingPathComponent("manifest.json"))
+            let beforeReceipt = try Data(contentsOf: fixture.store.receiptURL)
             var completions = 0
             let model = FoundationAppModel(
                 prepareCaches: {
@@ -178,61 +236,71 @@ final class FoundationStartupTests: XCTestCase {
                     return false
                 },
                 restoreAccount: { _ in XCTFail("Unexpected account restore") },
-                credentialOperations: backgroundCredentials(
-                    fixture.data, status: locked ? errSecInteractionNotAllowed : errSecSuccess),
+                credentialOperations: backgroundCredentials(fixture.data),
                 playbackPreferences: try backgroundPreferences(),
                 backgroundDownloadRoot: fixture.root,
-                backgroundNativeRetirement: { _, _ in
-                    XCTFail("Unadmitted native session opened")
-                    return []
-                })
-            model.receiveBackgroundDownloadEvents(
-                locked ? fixture.identifier : fixture.identifier + ".unknown"
-            ) { completions += 1 }
-            try await waitForBackgroundOutcome { completions == 1 }
+                backgroundNativeRetirement: { _, _ in [] })
+            let settled = expectation(description: "failed retirement route settled")
+            model.backgroundRoutingSettled = { _ in settled.fulfill() }
+            model.receiveBackgroundDownloadEvents(fixture.identifier) { completions += 1 }
             model.finishBackgroundDownloadEvents(fixture.identifier)
-            XCTAssertEqual(completions, 1)
-            XCTAssertEqual(try Data(contentsOf: manifestURL), manifestBefore)
-            XCTAssertEqual(try Data(contentsOf: fixture.store.receiptURL), receiptBefore)
+            let result = await XCTWaiter.fulfillment(of: [settled], timeout: 5)
+            XCTAssertEqual(result, .completed)
+            XCTAssertEqual(completions, 0)
+            XCTAssertEqual(
+                try Data(contentsOf: fixture.directory.appendingPathComponent("manifest.json")),
+                beforeManifest)
+            XCTAssertEqual(try Data(contentsOf: fixture.store.receiptURL), beforeReceipt)
+        }
+
+        func testRetiredAccountCannotPublishLateBackgroundRecovery() async throws {
+            let fixture = try backgroundFixture()
+            let gate = PreparationGate()
+            var completions = 0
+            let model = FoundationAppModel(
+                prepareCaches: {
+                    XCTFail("Unexpected bootstrap")
+                    return false
+                },
+                restoreAccount: { _ in XCTFail("Unexpected account restore") },
+                credentialOperations: backgroundCredentials(fixture.data),
+                playbackPreferences: try backgroundPreferences(),
+                backgroundDownloadRoot: fixture.root,
+                backgroundNativeRetirement: { identifiers, directory in
+                    guard await gate.prepare() else { return [] }
+                    for identifier in identifiers {
+                        try? FoundationNativeAllocationStore(
+                            directory: directory, sessionIdentifier: identifier
+                        ).retire()
+                    }
+                    return identifiers
+                })
+            let settled = XCTestExpectation(description: "retired background route settled")
+            model.backgroundRoutingSettled = { _ in settled.fulfill() }
+            model.receiveBackgroundDownloadEvents(fixture.identifier) { completions += 1 }
+            do {
+                try await gate.waitUntilStarted()
+            } catch {
+                model.invalidateAccountReadiness()
+                model.finishBackgroundDownloadEvents(fixture.identifier)
+                throw error
+            }
+            model.invalidateAccountReadiness()
+            model.finishBackgroundDownloadEvents(fixture.identifier)
+            gate.complete(true)
+            let result = await XCTWaiter.fulfillment(of: [settled], timeout: 5)
+            XCTAssertEqual(result, .completed)
+            XCTAssertEqual(completions, 0)
+            XCTAssertTrue(
+                try FoundationDownloadStorage.load(directory: fixture.directory)
+                    .nativePendingSessions?
+                    .contains(fixture.identifier) == true)
+            // Retain cleanup authority for the matching account.
+            XCTAssertEqual(try fixture.store.load().retired, true)
             XCTAssertNil(model.library)
         }
-    }
 
-    func testRetiredAccountCannotPublishLateBackgroundRecovery() async throws {
-        let fixture = try backgroundFixture()
-        let gate = PreparationGate()
-        var completions = 0
-        let model = FoundationAppModel(
-            prepareCaches: {
-                XCTFail("Unexpected bootstrap")
-                return false
-            },
-            restoreAccount: { _ in XCTFail("Unexpected account restore") },
-            credentialOperations: backgroundCredentials(fixture.data),
-            playbackPreferences: try backgroundPreferences(),
-            backgroundDownloadRoot: fixture.root,
-            backgroundNativeRetirement: { identifiers, directory in
-                _ = await gate.prepare()
-                for identifier in identifiers {
-                    try? FoundationNativeAllocationStore(
-                        directory: directory, sessionIdentifier: identifier
-                    ).retire()
-                }
-                return identifiers
-            })
-        model.receiveBackgroundDownloadEvents(fixture.identifier) { completions += 1 }
-        try await gate.waitUntilStarted()
-        model.invalidateAccountReadiness()
-        model.finishBackgroundDownloadEvents(fixture.identifier)
-        gate.complete(true)
-        try await waitForBackgroundOutcome { completions == 1 }
-        XCTAssertTrue(
-            try FoundationDownloadStorage.load(directory: fixture.directory).nativePendingSessions?
-                .contains(fixture.identifier) == true)
-        // Retain cleanup authority for the matching account.
-        XCTAssertEqual(try fixture.store.load().retired, true)
-        XCTAssertNil(model.library)
-    }
+    #endif
 
     func testInactiveSceneDoesNotRestoreAccountButExplicitReadinessStillWorks() async throws {
         var preparations = 0
@@ -243,6 +311,7 @@ final class FoundationStartupTests: XCTestCase {
                 return true
             },
             restoreAccount: { _ in restorations += 1 },
+            credentialOperations: backgroundCredentials(Data(), status: errSecItemNotFound),
             playbackPreferences: try backgroundPreferences())
         await model.prepareForScene(isActive: false)
         XCTAssertEqual(preparations, 0)
@@ -262,6 +331,7 @@ final class FoundationStartupTests: XCTestCase {
                 return true
             },
             restoreAccount: { _ in restorations += 1 },
+            credentialOperations: backgroundCredentials(Data(), status: errSecItemNotFound),
             playbackPreferences: try backgroundPreferences())
         await freshForegroundModel.prepareForScene(isActive: false)
         XCTAssertEqual(preparations, 1)
@@ -286,7 +356,9 @@ final class FoundationStartupTests: XCTestCase {
                 preparations += 1
                 return true
             },
-            restoreAccount: { _ in restorations += 1 }, credentialDefaults: defaults,
+            restoreAccount: { _ in restorations += 1 },
+            credentialOperations: backgroundCredentials(Data(), status: errSecItemNotFound),
+            credentialDefaults: defaults,
             playbackPreferences: preferences)
         let readiness = await model.ensureReady()
         XCTAssertEqual(readiness, .signedOut)
@@ -328,6 +400,28 @@ final class FoundationStartupTests: XCTestCase {
             XCTAssertEqual(readiness, .unavailable)
             XCTAssertTrue(model.isPreparingCaches)
             XCTAssertFalse(model.cachesReady)
+            #if os(iOS) && targetEnvironment(simulator)
+                if Bundle.main.bundleIdentifier == "com.chameleonenterprise.velacanto.uitesting" {
+                    guard FoundationDownloadsTestHarness.enabled else {
+                        XCTFail(
+                            "UITesting runtime qualification requires its validated fixture context"
+                        )
+                        return
+                    }
+                    // Native background callbacks must stop at this explicitly
+                    // isolated global model, before account/session work starts.
+                    for candidate in [model, FoundationAppRuntime.model] {
+                        var completions = 0
+                        candidate.receiveBackgroundDownloadEvents("synthetic-fixture-callback") {
+                            completions += 1
+                        }
+                        XCTAssertEqual(completions, 1)
+                        XCTAssertNil(candidate.library)
+                        XCTAssertNil(candidate.player)
+                        XCTAssertNil(candidate.downloads)
+                    }
+                }
+            #endif
             XCTAssertNil(model.library)
             XCTAssertNil(model.player)
             XCTAssertNil(model.downloads)
@@ -594,9 +688,11 @@ final class FoundationStartupTests: XCTestCase {
     private final class PreparationGate {
         private var continuation: CheckedContinuation<Bool, Never>?
         private var started = false
+        private var completed: Bool?
 
         func prepare() async -> Bool {
             started = true
+            if let completed { return completed }
             return await withCheckedContinuation { continuation = $0 }
         }
 
@@ -607,16 +703,57 @@ final class FoundationStartupTests: XCTestCase {
         func waitUntilStarted() async throws {
             let clock = ContinuousClock()
             let deadline = clock.now.advanced(by: .seconds(5))
-            while !started {
-                guard clock.now < deadline else { throw WaitError.startupTimedOut }
-                try await Task.sleep(for: .milliseconds(10))
+            do {
+                while !started {
+                    guard clock.now < deadline else { throw WaitError.startupTimedOut }
+                    try await Task.sleep(for: .milliseconds(10))
+                }
+            } catch {
+                complete(false)
+                throw error
             }
         }
 
         func complete(_ result: Bool) {
+            completed = result
             continuation?.resume(returning: result)
             continuation = nil
         }
+    }
+
+    private enum StartupTaskFailure: Error {
+        case completionTimedOut(String)
+    }
+
+    @MainActor
+    private final class StartupTaskObservation {
+        let finished: XCTestExpectation
+        private(set) var result: FoundationAppModel.Readiness?
+        init(name: String) { finished = XCTestExpectation(description: name) }
+        func record(_ value: FoundationAppModel.Readiness) {
+            result = value
+            finished.fulfill()
+        }
+    }
+
+    private func requireStartupTask(
+        _ task: Task<FoundationAppModel.Readiness, Never>,
+        companions: [Task<FoundationAppModel.Readiness, Never>] = [],
+        model: FoundationAppModel, gates: [PreparationGate], name: String
+    ) async throws -> FoundationAppModel.Readiness {
+        let observation = StartupTaskObservation(name: name)
+        let observer = Task { observation.record(await task.value) }
+        guard await XCTWaiter.fulfillment(of: [observation.finished], timeout: 5) == .completed,
+            let result = observation.result
+        else {
+            task.cancel()
+            for companion in companions { companion.cancel() }
+            model.invalidateAccountReadiness()
+            for gate in gates { gate.complete(false) }
+            observer.cancel()
+            throw StartupTaskFailure.completionTimedOut(name)
+        }
+        return result
     }
 
     func testConcurrentEntrypointsRestoreOnceWithoutCreatingPlayback() async throws {
@@ -627,14 +764,23 @@ final class FoundationStartupTests: XCTestCase {
             prepareCaches: {
                 preparations += 1
                 return await gate.prepare()
-            }, restoreAccount: { _ in restorations += 1 })
+            }, restoreAccount: { _ in restorations += 1 },
+            credentialOperations: backgroundCredentials(Data(), status: errSecItemNotFound))
         let phone = Task { await model.ensureReady() }
-        try await gate.waitUntilStarted()
+        do {
+            try await gate.waitUntilStarted()
+        } catch {
+            phone.cancel()
+            model.invalidateAccountReadiness()
+            throw error
+        }
         let carPlay = Task { await model.ensureReady() }
         model.restore()
         gate.complete(true)
-        let phoneResult = await phone.value
-        let carPlayResult = await carPlay.value
+        let phoneResult = try await requireStartupTask(
+            phone, companions: [carPlay], model: model, gates: [gate], name: "phone startup")
+        let carPlayResult = try await requireStartupTask(
+            carPlay, model: model, gates: [gate], name: "CarPlay startup")
         let repeatedResult = await model.ensureReady()
         XCTAssertEqual(phoneResult, .signedOut)
         XCTAssertEqual(carPlayResult, .signedOut)
@@ -651,12 +797,20 @@ final class FoundationStartupTests: XCTestCase {
         var restorations = 0
         let model = FoundationAppModel(
             prepareCaches: { await gate.prepare() },
-            restoreAccount: { _ in restorations += 1 })
+            restoreAccount: { _ in restorations += 1 },
+            credentialOperations: backgroundCredentials(Data(), status: errSecItemNotFound))
         let caller = Task { await model.ensureReady() }
-        try await gate.waitUntilStarted()
+        do {
+            try await gate.waitUntilStarted()
+        } catch {
+            caller.cancel()
+            model.invalidateAccountReadiness()
+            throw error
+        }
         caller.cancel()
         gate.complete(true)
-        let cancelled = await caller.value
+        let cancelled = try await requireStartupTask(
+            caller, model: model, gates: [gate], name: "cancelled startup caller")
         let later = await model.ensureReady()
         XCTAssertEqual(cancelled, .cancelled)
         XCTAssertEqual(later, .signedOut)
@@ -668,12 +822,20 @@ final class FoundationStartupTests: XCTestCase {
         var restorations = 0
         let model = FoundationAppModel(
             prepareCaches: { await gate.prepare() },
-            restoreAccount: { _ in restorations += 1 })
+            restoreAccount: { _ in restorations += 1 },
+            credentialOperations: backgroundCredentials(Data(), status: errSecItemNotFound))
         let caller = Task { await model.ensureReady() }
-        try await gate.waitUntilStarted()
+        do {
+            try await gate.waitUntilStarted()
+        } catch {
+            caller.cancel()
+            model.invalidateAccountReadiness()
+            throw error
+        }
         model.invalidateAccountReadiness()
         gate.complete(true)
-        let result = await caller.value
+        let result = try await requireStartupTask(
+            caller, model: model, gates: [gate], name: "retired startup caller")
         XCTAssertEqual(result, .cancelled)
         XCTAssertEqual(restorations, 0)
         XCTAssertNil(model.player)
@@ -687,7 +849,8 @@ final class FoundationStartupTests: XCTestCase {
             prepareCaches: {
                 preparations += 1
                 return preparations > 1
-            }, restoreAccount: { _ in restorations += 1 })
+            }, restoreAccount: { _ in restorations += 1 },
+            credentialOperations: backgroundCredentials(Data(), status: errSecItemNotFound))
         let failed = await model.ensureReady()
         let repeated = await model.ensureReady()
         XCTAssertEqual(failed, .unavailable)
@@ -711,13 +874,28 @@ final class FoundationStartupTests: XCTestCase {
             prepareCaches: {
                 preparations += 1
                 return await (preparations == 1 ? first : second).prepare()
-            }, restoreAccount: { _ in restorations += 1 })
+            }, restoreAccount: { _ in restorations += 1 },
+            credentialOperations: backgroundCredentials(Data(), status: errSecItemNotFound))
         let original = Task { await model.ensureReady() }
-        try await first.waitUntilStarted()
+        do {
+            try await first.waitUntilStarted()
+        } catch {
+            original.cancel()
+            model.invalidateAccountReadiness()
+            throw error
+        }
         model.retryCachePreparation()
-        try await second.waitUntilStarted()
+        do {
+            try await second.waitUntilStarted()
+        } catch {
+            original.cancel()
+            first.complete(false)
+            model.invalidateAccountReadiness()
+            throw error
+        }
         first.complete(false)
-        let retired = await original.value
+        let retired = try await requireStartupTask(
+            original, model: model, gates: [first, second], name: "retired startup generation")
         XCTAssertEqual(retired, .cancelled)
         XCTAssertTrue(model.isPreparingCaches)
         XCTAssertNil(model.credentialError)
@@ -734,7 +912,8 @@ final class FoundationStartupTests: XCTestCase {
             prepareCaches: {
                 preparations += 1
                 return true
-            }, restoreAccount: { _ in restorations += 1 })
+            }, restoreAccount: { _ in restorations += 1 },
+            credentialOperations: backgroundCredentials(Data(), status: errSecItemNotFound))
         let caller = Task {
             withUnsafeCurrentTask { $0?.cancel() }
             return await model.ensureReady()
@@ -749,7 +928,8 @@ final class FoundationStartupTests: XCTestCase {
     func testUnavailableCredentialsRemainAnHonestReadinessFailure() async throws {
         let model = FoundationAppModel(
             prepareCaches: { true },
-            restoreAccount: { $0.credentialError = "Saved sign-in unavailable." })
+            restoreAccount: { $0.credentialError = "Saved sign-in unavailable." },
+            credentialOperations: backgroundCredentials(Data(), status: errSecItemNotFound))
         let result = await model.ensureReady()
         XCTAssertEqual(result, .unavailable)
         XCTAssertNil(model.player)
@@ -928,7 +1108,17 @@ final class FoundationCredentialsTests: XCTestCase {
             var published = 0
             var heldArtwork: CheckedContinuation<Bool, Never>?
             var holdArtwork = false
-            var artworkStarted: CheckedContinuation<Void, Never>?
+            let artworkEntered = XCTestExpectation(
+                description: "credential artwork cleanup entered")
+            private var artworkRetired = false
+            private var artworkAnnounced = false
+
+            func releaseArtwork(retiring: Bool = false) {
+                if retiring { artworkRetired = true }
+                let pending = heldArtwork
+                heldArtwork = nil
+                pending?.resume(returning: true)
+            }
             var pagesSucceeded = true
 
             init() { defaults = UserDefaults(suiteName: suite)! }
@@ -972,10 +1162,19 @@ final class FoundationCredentialsTests: XCTestCase {
                     artwork: { scope in
                         self.calls.append(("artwork", scope))
                         if self.holdArtwork {
+                            guard !self.artworkRetired else { return false }
+                            guard self.heldArtwork == nil else {
+                                XCTFail(
+                                    "Concurrent held artwork cleanup is unsupported by this fixture"
+                                )
+                                return false
+                            }
                             return await withCheckedContinuation {
                                 self.heldArtwork = $0
-                                self.artworkStarted?.resume()
-                                self.artworkStarted = nil
+                                if !self.artworkAnnounced {
+                                    self.artworkAnnounced = true
+                                    self.artworkEntered.fulfill()
+                                }
                             }
                         }
                         return true
@@ -991,6 +1190,24 @@ final class FoundationCredentialsTests: XCTestCase {
                     publishAccount: { _, _ in self.published += 1 })
             }
             var names: [String] { calls.map { $0.0 } }
+        }
+
+        private func requireArtworkCleanup(
+            _ model: FoundationAppModel, fixture: Fixture
+        ) async -> Bool {
+            let finished = XCTestExpectation(description: "credential artwork cleanup returned")
+            let observer = Task {
+                await model.waitForAccountCleanup()
+                finished.fulfill()
+            }
+            guard await XCTWaiter.fulfillment(of: [finished], timeout: 5) == .completed else {
+                model.invalidateAccountReadiness()
+                fixture.releaseArtwork(retiring: true)
+                observer.cancel()
+                XCTFail("Credential artwork cleanup did not finish within 5 seconds")
+                return false
+            }
+            return true
         }
 
         func testPendingMissingOrLockedCredentialsPreserveAllStoresAcrossRelaunch() async {
@@ -1018,7 +1235,7 @@ final class FoundationCredentialsTests: XCTestCase {
             _ = await model.ensureReady()
             let accept = try await model.prepareSignIn { fixture.session }
             XCTAssertTrue(fixture.calls.isEmpty)
-            try accept()
+            try await accept()
             XCTAssertEqual(
                 Array(fixture.names.prefix(5)),
                 ["pins", "playback", "downloads", "selections", "save"])
@@ -1051,7 +1268,10 @@ final class FoundationCredentialsTests: XCTestCase {
                 let model = fixture.model()
                 _ = await model.ensureReady()
                 let accept = try await model.prepareSignIn { fixture.session }
-                XCTAssertThrowsError(try accept())
+                do {
+                    try await accept()
+                    XCTFail("Expected acceptance to fail")
+                } catch {}
                 XCTAssertFalse(fixture.names.contains("save"))
                 XCTAssertEqual(fixture.published, 0)
                 XCTAssertTrue(model.awaitsCredentialUpgrade)
@@ -1069,7 +1289,10 @@ final class FoundationCredentialsTests: XCTestCase {
             XCTAssertTrue(fixture.calls.isEmpty)
             fixture.saveStatus = errSecAuthFailed
             let accept = try await model.prepareSignIn { fixture.session }
-            XCTAssertThrowsError(try accept())
+            do {
+                try await accept()
+                XCTFail("Expected acceptance to fail")
+            } catch {}
             XCTAssertEqual(fixture.published, 0)
             XCTAssertTrue(model.awaitsCredentialUpgrade)
         }
@@ -1080,18 +1303,24 @@ final class FoundationCredentialsTests: XCTestCase {
             _ = await model.ensureReady()
             let stale = try await model.prepareSignIn { fixture.session }
             model.cancelCredentialUpgrade()
-            XCTAssertThrowsError(try stale())
+            do {
+                try await stale()
+                XCTFail("Expected stale acceptance to fail")
+            } catch {}
             XCTAssertTrue(fixture.calls.isEmpty)
             let retired = try await model.prepareSignIn { fixture.session }
             model.invalidateAccountReadiness()
-            XCTAssertThrowsError(try retired())
+            do {
+                try await retired()
+                XCTFail("Expected retired acceptance to fail")
+            } catch {}
             XCTAssertTrue(fixture.calls.isEmpty)
             let task = Task {
                 let accept = try await model.prepareSignIn {
                     withUnsafeCurrentTask { $0?.cancel() }
                     return fixture.session
                 }
-                try accept()
+                try await accept()
             }
             do {
                 try await task.value
@@ -1108,7 +1337,7 @@ final class FoundationCredentialsTests: XCTestCase {
             let accept = try await model.prepareSignIn { fixture.session }
             var ticket: UUID?
             do {
-                try accept()
+                try await accept()
                 XCTFail("Mismatch accepted")
             } catch FoundationCredentialUpgradeError.confirmationRequired(let value) {
                 ticket = value
@@ -1128,7 +1357,7 @@ final class FoundationCredentialsTests: XCTestCase {
             _ = await model.ensureReady()
             let accept = try await model.prepareSignIn { fixture.session }
             var ticket: UUID?
-            do { try accept() } catch FoundationCredentialUpgradeError.confirmationRequired(
+            do { try await accept() } catch FoundationCredentialUpgradeError.confirmationRequired(
                 let value)
             { ticket = value }
             let valid = try XCTUnwrap(ticket)
@@ -1142,50 +1371,52 @@ final class FoundationCredentialsTests: XCTestCase {
 
         func testLateCacheCleanupCannotPruneNextStoreOrMarkReady() async throws {
             let fixture = Fixture()
+            defer { fixture.releaseArtwork(retiring: true) }
             fixture.holdArtwork = true
             let model = fixture.model()
             _ = await model.ensureReady()
             let accept = try await model.prepareSignIn { fixture.session }
-            try accept()
-            await withCheckedContinuation { continuation in
-                if fixture.heldArtwork != nil {
-                    continuation.resume()
-                } else {
-                    fixture.artworkStarted = continuation
-                }
+            try await accept()
+            guard
+                await XCTWaiter.fulfillment(of: [fixture.artworkEntered], timeout: 5) == .completed
+            else {
+                model.invalidateAccountReadiness()
+                fixture.releaseArtwork(retiring: true)
+                XCTFail("Credential artwork cleanup did not enter within 5 seconds")
+                return
             }
             XCTAssertNotNil(fixture.heldArtwork)
             model.invalidateAccountReadiness()
-            fixture.heldArtwork?.resume(returning: true)
-            fixture.heldArtwork = nil
-            await model.waitForAccountCleanup()
+            fixture.releaseArtwork()
+            guard await requireArtworkCleanup(model, fixture: fixture) else { return }
             XCTAssertFalse(fixture.names.contains("pages"))
             XCTAssertTrue(model.awaitsCredentialUpgrade)
         }
 
         func testNewAuthenticationCannotLosePendingPrunePolicyToOldCleanup() async throws {
             let fixture = Fixture()
+            defer { fixture.releaseArtwork(retiring: true) }
             fixture.holdArtwork = true
             let model = fixture.model()
             _ = await model.ensureReady()
             let first = try await model.prepareSignIn { fixture.session }
-            try first()
-            await withCheckedContinuation { continuation in
-                if fixture.heldArtwork != nil {
-                    continuation.resume()
-                } else {
-                    fixture.artworkStarted = continuation
-                }
+            try await first()
+            guard
+                await XCTWaiter.fulfillment(of: [fixture.artworkEntered], timeout: 5) == .completed
+            else {
+                model.invalidateAccountReadiness()
+                fixture.releaseArtwork(retiring: true)
+                XCTFail("Credential artwork cleanup did not enter within 5 seconds")
+                return
             }
             let second = try await model.prepareSignIn { fixture.session }
-            fixture.heldArtwork?.resume(returning: true)
-            fixture.heldArtwork = nil
-            await model.waitForAccountCleanup()
+            fixture.releaseArtwork()
+            guard await requireArtworkCleanup(model, fixture: fixture) else { return }
             XCTAssertTrue(model.awaitsCredentialUpgrade)
             fixture.holdArtwork = false
-            try second()
+            try await second()
             XCTAssertEqual(fixture.names.filter { $0 == "pins" }.count, 2)
-            await model.waitForAccountCleanup()
+            guard await requireArtworkCleanup(model, fixture: fixture) else { return }
             XCTAssertFalse(model.awaitsCredentialUpgrade)
         }
 
@@ -1195,22 +1426,21 @@ final class FoundationCredentialsTests: XCTestCase {
             let model = fixture.model()
             _ = await model.ensureReady()
             let accept = try await model.prepareSignIn { fixture.session }
-            try accept()
+            try await accept()
             await model.waitForAccountCleanup()
             XCTAssertTrue(model.awaitsCredentialUpgrade)
             XCTAssertNotNil(model.credentialError)
         }
 
-        func testReadyMissingCredentialKeepsOrdinarySignedOutCleanup() async {
+        func testReadyMissingCredentialPreservesAccountStores() async {
             let fixture = Fixture()
             fixture.defaults.set(
                 "data-protection-ready", forKey: FoundationAppModel.credentialBackendKey)
             let model = fixture.model()
             _ = await model.ensureReady()
             XCTAssertFalse(model.awaitsCredentialUpgrade)
-            XCTAssertEqual(
-                Array(fixture.names.prefix(4)), ["pins", "playback", "downloads", "selections"])
-            XCTAssertTrue(fixture.calls.prefix(4).allSatisfy { $0.1 == nil })
+            await model.waitForAccountCleanup()
+            XCTAssertTrue(fixture.calls.isEmpty)
         }
 
         func testURLAliasCannotSilentlyMergeOrEraseRetainedScopes() async throws {
@@ -1223,7 +1453,10 @@ final class FoundationCredentialsTests: XCTestCase {
                 serverURL: URL(string: "https://example.invalid/")!,
                 accessToken: old.accessToken, userID: old.userID, deviceID: old.deviceID)
             let accept = try await model.prepareSignIn { alias }
-            XCTAssertThrowsError(try accept())
+            do {
+                try await accept()
+                XCTFail("Expected acceptance to fail")
+            } catch {}
             let oldScope = FoundationMusicLibraryStore.digest(
                 "jellyfin\0" + old.serverURL.absoluteString + "\0" + old.userID)
             XCTAssertNotEqual(fixture.inspectedScopes.first, oldScope)
@@ -1240,7 +1473,7 @@ final class FoundationCredentialsTests: XCTestCase {
             _ = await model.ensureReady()
             let accept = try await model.prepareSignIn { fixture.session }
             var ticket: UUID?
-            do { try accept() } catch FoundationCredentialUpgradeError.confirmationRequired(
+            do { try await accept() } catch FoundationCredentialUpgradeError.confirmationRequired(
                 let value)
             { ticket = value }
             // Both native dismissal and view disappearance retire this owner method.
@@ -1259,7 +1492,7 @@ final class FoundationCredentialsTests: XCTestCase {
             _ = await model.ensureReady()
             let accept = try await model.prepareSignIn { fixture.session }
             var ticket: UUID?
-            do { try accept() } catch FoundationCredentialUpgradeError.confirmationRequired(
+            do { try await accept() } catch FoundationCredentialUpgradeError.confirmationRequired(
                 let value)
             { ticket = value }
             let value = try XCTUnwrap(ticket)
@@ -1307,7 +1540,17 @@ final class FoundationCredentialsTests: XCTestCase {
             XCTAssertEqual(
                 try FoundationAccountRetention.inventory(
                     scope: "a", defaults: fixture.defaults,
+                    roots: [(root, "a")]), .unmatched)
+            try FileManager.default.removeItem(at: root.appendingPathComponent("different"))
+            XCTAssertEqual(
+                try FoundationAccountRetention.inventory(
+                    scope: "a", defaults: fixture.defaults,
                     roots: [(root, "a")]), .matching)
+            fixture.defaults.set([], forKey: FoundationPinSync.storagePrefix + "b")
+            XCTAssertEqual(
+                try FoundationAccountRetention.inventory(
+                    scope: "a", defaults: fixture.defaults,
+                    roots: [(root, "a")]), .unmatched)
             let bad = root.appendingPathComponent("file")
             try Data().write(to: bad)
             XCTAssertThrowsError(

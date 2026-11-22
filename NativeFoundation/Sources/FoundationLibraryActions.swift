@@ -13,6 +13,17 @@ enum FoundationPinStorage {
 
     static func key(for sourceScope: String) -> String { keyPrefix + sourceScope }
 
+    static func removeStoredPins(for sourceScope: String, defaults: UserDefaults = .standard)
+        -> Bool
+    {
+        guard sourceScope.count == 64, sourceScope.allSatisfy({ $0.isHexDigit }) else {
+            return false
+        }
+        let keys = [key(for: sourceScope), FoundationPinSync.storagePrefix + sourceScope]
+        for key in keys { defaults.removeObject(forKey: key) }
+        return keys.allSatisfy { defaults.object(forKey: $0) == nil }
+    }
+
     /// Also removes keys left by older sign-outs for other account scopes.
     @discardableResult
     static func removeStoredPins(
@@ -89,6 +100,25 @@ final class FoundationLibraryActions: ObservableObject {
         }
     }
 
+    /// Display identity follows the account-owned pin, never its mutable position or metadata.
+    struct PinnedRow: Identifiable {
+        struct ID: Hashable {
+            let sourceScopeKey: String
+            let kind: FoundationItem.Kind
+            let itemID: String
+        }
+        let id: ID
+        let item: FoundationItem
+    }
+
+    /// Reuse the existing account-scoped storage identity; retain no second scope or owner.
+    var pinnedRows: [PinnedRow] {
+        pins.map { item in
+            PinnedRow(
+                id: .init(sourceScopeKey: storageKey, kind: item.kind, itemID: item.id), item: item)
+        }
+    }
+
     /// Client browsing intent only. Existing visible model owners decide what to reload.
     @Published private(set) var libraryRefreshRevision = 0
 
@@ -129,7 +159,7 @@ final class FoundationLibraryActions: ObservableObject {
     @Published private(set) var trackVisibilityRevision = 0
     private let storageKey: String
     private let write: (String, Data) throws -> Void
-    private let mutateFavorite: @Sendable (FoundationItem, Bool) async throws -> Void
+    private var mutateFavorite: @Sendable (FoundationItem, Bool) async throws -> Void
     private var tasks: [Key: Task<Void, Error>] = [:]
     private var favoriteReads: [UUID: Task<FoundationItem?, Error>] = [:]
     private var active = true
@@ -222,7 +252,11 @@ final class FoundationLibraryActions: ObservableObject {
         sourceScope: String, containerIdentifier: String?,
         resolve: @escaping (FoundationItem) async throws -> FoundationItem?
     ) {
-        pinSync?.invalidate()
+        // One sync owner per account owner: replacing it could orphan an exchange.
+        guard pinSync == nil else {
+            pinErrorMessage = "Pin sync is already configured for this library."
+            return
+        }
         pinSync = FoundationPinSync(
             scope: sourceScope, containerIdentifier: containerIdentifier,
             currentPins: { [weak self] in
@@ -396,18 +430,31 @@ final class FoundationLibraryActions: ObservableObject {
         _ items: [FoundationItem], albumID: String? = nil,
         isAvailable: ((FoundationItem) -> Bool)? = nil
     ) -> [FoundationItem] {
-        guard !showDuplicateAlbumTracks() else { return items }
+        visibleTrackSourceIndices(items, albumID: albumID, isAvailable: isAvailable).map {
+            items[$0]
+        }
+    }
+
+    /// Carry original occurrence positions through eligibility and the SAME
+    /// existing album-copy policy. This is provenance, not row identity.
+    func visibleTrackSourceIndices(
+        _ items: [FoundationItem], albumID: String? = nil,
+        isAvailable: ((FoundationItem) -> Bool)? = nil
+    ) -> [Int] {
+        guard !showDuplicateAlbumTracks() else { return Array(items.indices) }
         let isAvailable = isAvailable ?? trackAvailability
-        let eligible = items.filter { item in
+        let eligible = items.indices.filter { index in
+            let item = items[index]
             guard
                 let key = FoundationAlbumTrackPolicy.key(for: item, albumID: albumID)
                     ?? knownTrackKeys[item.id], let canonical = canonicalTracks[key]
             else { return true }
             return canonical.id == item.id || (!isAvailable(canonical) && isAvailable(item))
         }
-        return FoundationAlbumTrackPolicy.visibleTracks(
-            eligible, albumID: albumID, showDuplicates: false, isAvailable: isAvailable)
-
+        let candidates = eligible.map { items[$0] }
+        return FoundationAlbumTrackPolicy.visibleSourceIndices(
+            candidates, albumID: albumID, showDuplicates: false, isAvailable: isAvailable
+        ).map { eligible[$0] }
     }
 
     func collectionTracks(
@@ -465,7 +512,8 @@ final class FoundationLibraryActions: ObservableObject {
         }
         loadCollection(item, library: library, operation: .playback, owner: owner) { items in
             guard shouldCommit?() ?? true else { return }
-            player.setQueue(shuffled ? items.shuffled() : items, selectedIndex: 0)
+            player.setQueue(
+                shuffled ? items.shuffled() : items, selectedIndex: 0, collection: item)
         }
     }
 
@@ -612,10 +660,41 @@ final class FoundationLibraryActions: ObservableObject {
         retryQueueAdditionAction = nil
     }
 
+    /// Existing account-owned presentation namespace, absent after retirement.
+    /// It grants no provider/network authority and retains no second scope.
+    var catalogIdentityScope: String? { active ? storageKey : nil }
+
     /// Read-only authority check for source-aware native controls. Invalidation
     /// remains owned by the account runtime; no new lifetime or cached scope.
     func acceptsCatalogAccount(_ scope: String) -> Bool {
         active && storageKey == FoundationPinStorage.key(for: scope)
+    }
+
+    #if FOUNDATION_ISOLATED_TEST_HOST
+        func isolatedSetFavoriteMutation(
+            _ mutation: @escaping @Sendable (FoundationItem, Bool) async throws -> Void
+        ) {
+            mutateFavorite = mutation
+        }
+        func isolatedInstallPinSync(_ sync: FoundationPinSync) {
+            precondition(pinSync == nil)
+            pinSync = sync
+        }
+    #endif
+
+    /// Retain and join the exact work already admitted before scoped local removal.
+    func invalidateAndDrain() -> Task<Void, Never> {
+        let favoriteTasks = Array(tasks.values)
+        let readTasks = Array(favoriteReads.values)
+        let queue = queueTask
+        let sync = pinSync?.invalidateAndCaptureExchange()
+        invalidate()
+        return Task {
+            for operation in favoriteTasks { _ = try? await operation.value }
+            for operation in readTasks { _ = try? await operation.value }
+            await queue?.value
+            await sync?.value
+        }
     }
 
     /// Called by the source owner before replacing or dismissing this source.

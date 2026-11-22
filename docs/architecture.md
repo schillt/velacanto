@@ -1,9 +1,9 @@
 # Current VelaCanto architecture
 
 The maintained application is NativeFoundation, scheme VelacantoFoundation.
-The v0.6 development round starts from the corrected v0.5 runtime; see the
-[development record](0.6-development-record.md) for exact integrated commits and
-acceptance limits. Internal Foundation names preserve project/storage identity.
+The active local round is 0.7.0, continuing the owner-accepted 0.6 baseline; see the
+[current handoff](0.7.0-agent-handoff.md) for exact source and acceptance limits.
+Historical development records retain their original artifact scope. Internal Foundation names preserve project/storage identity.
 The legacy app remains historical evidence, not a second maintained implementation.
 
 ## Existing owners and boundaries
@@ -25,16 +25,26 @@ The current feature set includes HLS streaming, quality choices, verified
 Original/AAC offline downloads, playlist lifecycle/membership management, persistent
 queue modes/restoration, synchronized lyrics, native AirPlay, Siri and CarPlay.
 Bounded Jellyfin reporting is implemented; live-server history/session acceptance
-is separate. Multi-account, local-folder indexing, additional providers, Handoff,
-iCloud pin sync and native HLS offline assets are not implemented by a plan alone.
+is separate. Native Handoff/remote Continue Listening are implemented with their
+recorded source-control limitations. Production pin sync was owner-accepted under
+#198; local pin cleanup was accepted under #179 with disclosed edge-case limits.
+Those acceptances do not establish archive/profile or every cross-account case.
+Local-folder/composed-provider entry points remain unfinished and hidden; native
+HLS offline assets remain distinct from verified Original/AAC downloads. A plan or
+type declaration does not establish implementation of future scope.
 
-## Maintainability during v0.6
+## Current maintainability boundaries
 
 The [priority review](0.6-priority-review.md) ties cleanup to playlist, CarPlay,
 loading, queue/lyrics and desktop scrolling work. FoundationTrackQueueSelection
 now centralizes equivalent already-loaded online/offline occurrence projection;
 it does not resolve audio, fetch collections or replace the player. New source
 must be described by its actual integration record, not a future design claim.
+
+The [0.7.0 responsibility contracts](0.7.0-boundary-review.md) map current owners,
+FoundationViews units, retained boundaries and concrete extraction triggers. The
+review separates proposed declaration removal from runtime changes and does not
+claim compilation, measured performance or owner acceptance.
 
 Prefer a small pure rule or a narrow presentation component when responsibilities
 repeat. Keep one existing mutable owner and explicit lifetime/cancellation. Split

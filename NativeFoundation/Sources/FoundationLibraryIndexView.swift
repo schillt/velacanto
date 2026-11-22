@@ -48,6 +48,11 @@ struct FoundationLibraryIndexView: View {
         if !term.isEmpty { return searchModel }
         return selectedLetter == nil ? model : letterModel
     }
+    private var indexActionContext: FoundationLibraryIndexSelection.Context? {
+        FoundationLibraryIndexSelection.context(
+            model: displayed, actions: actions, catalogScope: library.metadataScopeID,
+            query: term, letter: selectedLetter)
+    }
     private var alphabetAvailable: Bool { kind == .track && term.isEmpty }
     private var wantsNativeAlphabet: Bool { alphabetAvailable }
     private var alphabetTitles: [String] {
@@ -234,6 +239,10 @@ struct FoundationLibraryIndexView: View {
         let active = isActive && isVisible
         let allowsNetwork = !usesLocalCatalog
         let pageModel = displayed
+        let rows =
+            indexActionContext.map {
+                FoundationLibraryIndexSelection.rows(in: pageModel, context: $0)
+            } ?? []
         return ScrollViewReader { proxy in
             List {
                 if !usesLocalCatalog,
@@ -258,13 +267,15 @@ struct FoundationLibraryIndexView: View {
                             .id(genre.genreIdentity)
                         }
                     } else {
-                        ForEach(Array(displayed.items.enumerated()), id: \.offset) { index, item in
+                        ForEach(rows) { row in
+                            let item = row.item
                             FoundationLibraryItemRow(
                                 item: item, library: library, isActive: isActive && isVisible,
-                                open: { openedItem = item },
-                                play: kind == .track ? { play(index) } : nil,
+                                open: { openIndexItem(row.intent) },
+                                play: kind == .track ? { play(row.intent) } : nil,
                                 player: player, showsTrackArtwork: true,
-                                navigate: { openedItem = $0 }
+                                navigate: { navigate($0, from: row.intent) },
+                                canPerform: { _ in canPerformIndexAction(row.intent) }
                             )
                             .foundationLibraryListRow()
                             .id("\(kind):\(item.id)")
@@ -513,6 +524,7 @@ struct FoundationLibraryIndexView: View {
             transition: FoundationCollectionTransitionContext?, viewport: CGSize,
             placeholderRows: Int
         ) -> some View {
+            let actionContext = indexActionContext
             let rows = displayed.items.map { item in
                 FoundationAlphabetRow(id: "\(kind):\(item.id)", item: item)
             }
@@ -550,23 +562,24 @@ struct FoundationLibraryIndexView: View {
                         requestVisibleRefresh()
                     }
                 ) { entry in
+                    let intent = actionContext.map {
+                        FoundationLibraryIndexSelection.intent(for: entry.item, context: $0)
+                    }
                     Group {
                         if isCoverGrid {
                             collectionTile(entry.item)
                         } else {
                             FoundationLibraryItemRow(
                                 item: entry.item, library: library, isActive: isActive && isVisible,
-                                open: { openedItem = entry.item },
+                                open: { if let intent { openIndexItem(intent) } },
                                 play: kind == .track
-                                    ? {
-                                        if let index = displayed.items.firstIndex(where: {
-                                            $0.id == entry.item.id
-                                        }) {
-                                            play(index)
-                                        }
-                                    } : nil,
+                                    ? { if let intent { play(intent) } } : nil,
                                 player: player, showsTrackArtwork: true,
-                                navigate: { openedItem = $0 }
+                                navigate: { if let intent { navigate($0, from: intent) } },
+                                canPerform: { _ in
+                                    guard let intent else { return false }
+                                    return canPerformIndexAction(intent)
+                                }
                             )
                             .lineLimit(1)
                         }
@@ -649,12 +662,210 @@ struct FoundationLibraryIndexView: View {
         }
     #endif
 
-    private func play(_ index: Int) {
-        guard
-            let selection = displayed.trackQueue(
-                selecting: index, isAvailable: { !connectivity.localOnly || downloads.isReady($0) })
+    private func currentIndexItem(_ intent: FoundationLibraryIndexSelection.Intent)
+        -> FoundationLibraryIndexSelection.Match?
+    {
+        guard isActive, isVisible else { return nil }
+        return FoundationLibraryIndexSelection.resolve(
+            intent, current: indexActionContext, model: displayed, actions: actions)
+    }
+
+    private func openIndexItem(_ intent: FoundationLibraryIndexSelection.Intent) {
+        guard let match = currentIndexItem(intent) else { return }
+        openedItem = match.item
+    }
+
+    private func navigate(
+        _ item: FoundationItem, from intent: FoundationLibraryIndexSelection.Intent
+    ) {
+        guard isActive, isVisible,
+            let destination = FoundationLibraryIndexSelection.relatedDestination(
+                item, from: intent, current: indexActionContext, model: displayed, actions: actions)
+        else { return }
+        openedItem = destination
+    }
+
+    private func canPerformIndexAction(_ intent: FoundationLibraryIndexSelection.Intent) -> Bool {
+        FoundationLibraryIndexSelection.admits(
+            intent, current: indexActionContext, model: displayed, actions: actions,
+            isActive: isActive && isVisible)
+    }
+
+    private func play(_ intent: FoundationLibraryIndexSelection.Intent) {
+        guard isActive, isVisible,
+            let selection = FoundationLibraryIndexSelection.trackQueue(
+                intent, current: indexActionContext, model: displayed, actions: actions,
+                isAvailable: { !connectivity.localOnly || downloads.isReady($0) })
         else { return }
         player.setQueue(selection.items, selectedIndex: selection.index)
+    }
+}
+
+/// Only LibraryIndex's configured unique catalogs may resolve a held item action.
+/// Collection/playlist occurrences keep their separate source-position policy.
+@MainActor
+enum FoundationLibraryIndexSelection {
+    struct Identity: Hashable {
+        let sourceScopeKey: String
+        let kind: FoundationItem.Kind
+        let itemID: String
+    }
+    struct Context: Equatable {
+        let sourceScopeKey: String
+        let owner: ObjectIdentifier
+        let model: ObjectIdentifier
+        let clearLifetime: UUID
+        let catalogScope: String
+        let query: String
+        let letter: String?
+    }
+    struct Intent {
+        let identity: Identity
+        let context: Context
+        let snapshot: FoundationItem
+    }
+    struct Row: Identifiable {
+        let id: Identity
+        let item: FoundationItem
+        let intent: Intent
+    }
+    struct Match {
+        let item: FoundationItem
+        let sourceIndex: Int
+    }
+
+    /// Only catalog-entity producers use this projection; collection occurrences
+    /// retain their separate owner. Positions remain selection data, never IDs.
+    struct PositionedItem: Identifiable {
+        let id: Identity
+        let item: FoundationItem
+        let sourceIndex: Int
+    }
+
+    static func positionedItems(
+        _ items: [FoundationItem], actions: FoundationLibraryActions
+    ) -> [PositionedItem] {
+        guard let scope = actions.catalogIdentityScope else { return [] }
+        return items.enumerated().map { index, item in
+            PositionedItem(
+                id: Identity(sourceScopeKey: scope, kind: item.kind, itemID: item.id),
+                item: item, sourceIndex: index)
+        }
+    }
+
+    static func resolve(
+        _ identity: Identity, in items: [FoundationItem], actions: FoundationLibraryActions
+    ) -> Match? {
+        guard actions.catalogIdentityScope == identity.sourceScopeKey else { return nil }
+        var match: Match?
+        for (index, item) in items.enumerated()
+        where item.kind == identity.kind && item.id == identity.itemID {
+            // A catalog callback never guesses between ambiguous occurrences.
+            guard match == nil else { return nil }
+            match = Match(item: item, sourceIndex: index)
+        }
+        return match
+    }
+
+    static func relatedDestination(
+        _ target: FoundationItem, from identity: Identity, in items: [FoundationItem],
+        actions: FoundationLibraryActions
+    ) -> FoundationItem? {
+        guard let match = resolve(identity, in: items, actions: actions) else { return nil }
+        return relatedDestination(target, from: match.item)
+    }
+
+    static func context(
+        model: FoundationBrowseModel, actions: FoundationLibraryActions,
+        catalogScope: String, query: String, letter: String?
+    ) -> Context? {
+        guard let scope = actions.catalogIdentityScope else { return nil }
+        return Context(
+            sourceScopeKey: scope, owner: ObjectIdentifier(actions), model: ObjectIdentifier(model),
+            clearLifetime: model.catalogIdentityContext, catalogScope: catalogScope,
+            query: query, letter: letter)
+    }
+
+    static func intent(for item: FoundationItem, context: Context) -> Intent {
+        Intent(
+            identity: Identity(
+                sourceScopeKey: context.sourceScopeKey, kind: item.kind, itemID: item.id),
+            context: context, snapshot: item)
+    }
+
+    static func rows(in model: FoundationBrowseModel, context: Context) -> [Row] {
+        model.items.map { item in
+            let intent = intent(for: item, context: context)
+            return Row(id: intent.identity, item: item, intent: intent)
+        }
+    }
+
+    static func resolve(
+        _ intent: Intent, current: Context?, model: FoundationBrowseModel,
+        actions: FoundationLibraryActions
+    ) -> Match? {
+        guard let current, current == intent.context,
+            current.owner == ObjectIdentifier(actions), current.model == ObjectIdentifier(model),
+            current.clearLifetime == model.catalogIdentityContext,
+            actions.catalogIdentityScope == current.sourceScopeKey,
+            intent.identity.sourceScopeKey == current.sourceScopeKey,
+            model.hasUniqueCatalogIdentity
+        else { return nil }
+        return resolve(intent.identity, in: model.items, actions: actions)
+    }
+
+    /// The existing row/menu capability seam must use the same current row fence.
+    static func admits(
+        _ intent: Intent, current: Context?, model: FoundationBrowseModel,
+        actions: FoundationLibraryActions, isActive: Bool
+    ) -> Bool {
+        guard isActive else { return false }
+        return admits(
+            intent.snapshot,
+            current: resolve(intent, current: current, model: model, actions: actions)?.item)
+    }
+
+    /// Identity may survive a metadata refresh, but an old menu must not write
+    /// its captured metadata back into pins, downloads or queued item snapshots.
+    static func admits(_ snapshot: FoundationItem, current: FoundationItem?) -> Bool {
+        guard let current else { return false }
+        return current == snapshot
+    }
+
+    /// A held related-route action may use refreshed metadata for the same target,
+    /// but must not silently follow an old association after the source row changes.
+    static func relatedDestination(
+        _ target: FoundationItem, from intent: Intent, current: Context?,
+        model: FoundationBrowseModel, actions: FoundationLibraryActions
+    ) -> FoundationItem? {
+        guard let match = resolve(intent, current: current, model: model, actions: actions) else {
+            return nil
+        }
+        return relatedDestination(target, from: match.item)
+    }
+
+    static func relatedDestination(
+        _ target: FoundationItem, from item: FoundationItem
+    ) -> FoundationItem? {
+        let related: FoundationItem?
+        switch target.kind {
+        case .album: related = item.relatedAlbum
+        case .artist: related = item.relatedArtist
+        default: related = nil
+        }
+        guard let related, related.kind == target.kind, related.id == target.id else { return nil }
+        return related
+    }
+
+    static func trackQueue(
+        _ intent: Intent, current: Context?, model: FoundationBrowseModel,
+        actions: FoundationLibraryActions,
+        isAvailable: (FoundationItem) -> Bool = { _ in true }
+    ) -> FoundationTrackQueueSelection? {
+        guard intent.identity.kind == .track,
+            let match = resolve(intent, current: current, model: model, actions: actions)
+        else { return nil }
+        return model.trackQueue(selecting: match.sourceIndex, isAvailable: isAvailable)
     }
 }
 

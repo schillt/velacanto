@@ -37,14 +37,14 @@ final class FoundationHandoffPlayerTests: XCTestCase {
         player.seek(to: 5, entryID: value.selectedEntryID!)
         XCTAssertEqual(player.elapsed, 5)
         player.play()
-        await initialSeek(probe)
+        try await initialSeek(probe)
         XCTAssertEqual(try request(probe).0.seconds, 5, accuracy: 0.001)
         XCTAssertEqual(probe.starts, 0)
         XCTAssertEqual(probe.activations, 0)
         player.play()
         XCTAssertEqual(probe.requests.count, 1)
         try request(probe).1(true)
-        await started(probe)
+        try await started(probe)
         let calls = await resolver.calls
         XCTAssertEqual(calls, 1)
         XCTAssertEqual(probe.starts, 1)
@@ -57,16 +57,16 @@ final class FoundationHandoffPlayerTests: XCTestCase {
         let player = makePlayer(probe, resolver: resolver)
         defer { player.stop() }
         XCTAssertTrue(player.continueSession(snapshot(), position: 3, wasPlaying: true))
-        await initialSeek(probe)
+        try await initialSeek(probe)
         player.pause()
         try request(probe).1(true)
         let noStart = probe.noStartWindow()
-        await assertCompleted([noStart], timeout: 0.2)
+        try await assertCompleted([noStart], timeout: 0.2)
         XCTAssertFalse(player.wantsPlayback)
         XCTAssertEqual(player.state, .paused)
         probe.forbiddenStart = nil
         player.play()
-        await started(probe)
+        try await started(probe)
         XCTAssertEqual(probe.requests.count, 1)
         let calls = await resolver.calls
         XCTAssertEqual(calls, 1)
@@ -79,13 +79,13 @@ final class FoundationHandoffPlayerTests: XCTestCase {
         let player = makePlayer(probe, resolver: resolver)
         defer { player.stop() }
         XCTAssertTrue(player.continueSession(snapshot(), position: 3, wasPlaying: true))
-        await initialSeek(probe)
+        try await initialSeek(probe)
         let failed = expectation(description: "Initial seek fails")
         let observation = player.$state.filter { $0 == .failed }.first().sink { _ in
             failed.fulfill()
         }
         try request(probe).1(false)
-        await assertCompleted([failed], timeout: 5)
+        try await assertCompleted([failed], timeout: 5)
         observation.cancel()
         XCTAssertFalse(player.wantsPlayback)
         XCTAssertEqual(probe.starts, 0)
@@ -93,7 +93,7 @@ final class FoundationHandoffPlayerTests: XCTestCase {
         XCTAssertEqual(
             player.errorMessage, FoundationHandoffError.positionUnavailable.errorDescription)
         player.play()
-        await started(probe)
+        try await started(probe)
         let calls = await resolver.calls
         XCTAssertEqual(calls, 2)
         XCTAssertEqual(probe.requests.count, 1)
@@ -106,14 +106,14 @@ final class FoundationHandoffPlayerTests: XCTestCase {
         defer { player.stop() }
         let value = snapshot()
         XCTAssertTrue(player.continueSession(value, position: 3, wasPlaying: true))
-        await initialSeek(probe)
+        try await initialSeek(probe)
         let other = try XCTUnwrap(player.queue.first { $0.id != value.selectedEntryID })
         player.select(other.id)
-        await started(probe)
+        try await started(probe)
         let installed = player.nativePlayer.currentItem
         let noStart = probe.noStartWindow()
         try request(probe).1(true)
-        await assertCompleted([noStart], timeout: 0.2)
+        try await assertCompleted([noStart], timeout: 0.2)
         XCTAssertEqual(player.selectedEntryID, other.id)
         XCTAssertTrue(player.nativePlayer.currentItem === installed)
         XCTAssertEqual(probe.starts, 1)
@@ -123,14 +123,15 @@ final class FoundationHandoffPlayerTests: XCTestCase {
         let probe = HandoffPlaybackProbe()
         let resolver = HandoffResourceProbe()
         let player = makePlayer(probe, resolver: resolver)
+        defer { player.stop() }
         let value = snapshot()
         XCTAssertTrue(player.continueSession(value, position: 3, wasPlaying: true))
         let generation = player.continuationGeneration
-        await initialSeek(probe)
+        try await initialSeek(probe)
         player.stop()
         let noStart = probe.noStartWindow()
         try request(probe).1(true)
-        await assertCompleted([noStart], timeout: 0.2)
+        try await assertCompleted([noStart], timeout: 0.2)
         XCTAssertFalse(player.wantsPlayback)
         XCTAssertNil(player.nativePlayer.currentItem)
         XCTAssertFalse(
@@ -145,18 +146,18 @@ final class FoundationHandoffPlayerTests: XCTestCase {
         defer { player.stop() }
         let value = snapshot()
         XCTAssertTrue(player.continueSession(value, position: 2, wasPlaying: true))
-        await initialSeek(probe)
+        try await initialSeek(probe)
         probe.seek = expectation(description: "New explicit position")
         player.seek(to: 5, entryID: value.selectedEntryID!)
-        await assertCompleted([probe.seek], timeout: 5)
+        try await assertCompleted([probe.seek], timeout: 5)
         XCTAssertEqual(probe.requests.count, 2)
         XCTAssertEqual(try request(probe, index: 1).0.seconds, 5, accuracy: 0.001)
         let noStart = probe.noStartWindow()
         try request(probe).1(true)
-        await assertCompleted([noStart], timeout: 0.2)
+        try await assertCompleted([noStart], timeout: 0.2)
         probe.forbiddenStart = nil
         try request(probe, index: 1).1(true)
-        await started(probe)
+        try await started(probe)
         XCTAssertEqual(probe.starts, 1)
     }
 
@@ -174,7 +175,7 @@ final class FoundationHandoffPlayerTests: XCTestCase {
         }
         XCTAssertTrue(player.continueSession(value, position: 3, wasPlaying: true))
         let generation = player.continuationGeneration
-        await assertCompleted([playing], timeout: 8)
+        try await assertCompleted([playing], timeout: 8)
         observation.cancel()
         XCTAssertTrue(player.nativePlayer === native)
         XCTAssertGreaterThanOrEqual(player.nativePlayer.currentTime().seconds, 2.9)
@@ -218,18 +219,18 @@ final class FoundationHandoffPlayerTests: XCTestCase {
             player.continueSession(
                 snapshot(), position: 1, wasPlaying: true,
                 finalPosition: { try await gate.position() }))
-        await assertCompleted([gate.entered], timeout: 5)
+        try await assertCompleted([gate.entered], timeout: 5)
         XCTAssertEqual(player.nativePlayer.currentItem?.status, .readyToPlay)
         XCTAssertEqual(gate.calls, 1)
         XCTAssertTrue(probe.requests.isEmpty)
         XCTAssertEqual(probe.activations, 0)
         XCTAssertEqual(probe.starts, 0)
         gate.complete(5)
-        await initialSeek(probe)
+        try await initialSeek(probe)
         XCTAssertEqual(try request(probe).0.seconds, 5, accuracy: 0.001)
         XCTAssertEqual(probe.requests.count, 1)
         try request(probe).1(true)
-        await started(probe)
+        try await started(probe)
         XCTAssertEqual(probe.starts, 1)
     }
 
@@ -265,15 +266,15 @@ final class FoundationHandoffPlayerTests: XCTestCase {
             player.continueSession(
                 value, position: 1, wasPlaying: true,
                 finalPosition: { try await gate.position() }))
-        await assertCompleted([gate.entered], timeout: 5)
+        try await assertCompleted([gate.entered], timeout: 5)
         let other = try XCTUnwrap(player.queue.first { $0.id != value.selectedEntryID })
         player.select(other.id)
-        await started(probe)
+        try await started(probe)
         let noSeek = expectation(description: "no late old readiness seek")
         noSeek.isInverted = true
         probe.forbiddenSeek = noSeek
         gate.complete(5)
-        await assertCompleted([noSeek], timeout: 0.2)
+        try await assertCompleted([noSeek], timeout: 0.2)
         XCTAssertTrue(probe.requests.isEmpty)
         XCTAssertEqual(player.selectedEntryID, other.id)
         XCTAssertEqual(probe.starts, 1)
@@ -292,18 +293,18 @@ final class FoundationHandoffPlayerTests: XCTestCase {
             player.continueSession(
                 snapshot(), position: 1, wasPlaying: true,
                 finalPosition: { try await gate.position() }))
-        await assertCompleted([gate.entered], timeout: 5)
+        try await assertCompleted([gate.entered], timeout: 5)
         player.pause()
         let noSeek = expectation(description: "paused clock cannot seek")
         noSeek.isInverted = true
         probe.forbiddenSeek = noSeek
         gate.complete(5)
-        await assertCompleted([noSeek], timeout: 0.2)
+        try await assertCompleted([noSeek], timeout: 0.2)
         XCTAssertTrue(probe.requests.isEmpty)
         XCTAssertEqual(probe.starts, 0)
         XCTAssertFalse(player.wantsPlayback)
         player.play()
-        await started(probe)
+        try await started(probe)
         XCTAssertEqual(probe.starts, 1)
         XCTAssertTrue(probe.requests.isEmpty)
     }
@@ -314,9 +315,18 @@ final class FoundationHandoffPlayerTests: XCTestCase {
         try XCTUnwrap(probe.requests.indices.contains(index) ? probe.requests[index] : nil)
     }
 
-    private func assertCompleted(_ expectations: [XCTestExpectation], timeout: TimeInterval) async {
+    private struct ExpectationFailure: Error, CustomStringConvertible {
+        let description: String
+    }
+
+    private func assertCompleted(
+        _ expectations: [XCTestExpectation], timeout: TimeInterval
+    ) async throws {
         let result = await XCTWaiter.fulfillment(of: expectations, timeout: timeout)
-        XCTAssertEqual(result, .completed)
+        guard result == .completed else {
+            throw ExpectationFailure(
+                description: "Expected test event did not complete within \(timeout) seconds")
+        }
     }
 
     private func snapshot() -> FoundationPlaybackSnapshot {
@@ -339,12 +349,12 @@ final class FoundationHandoffPlayerTests: XCTestCase {
             })
     }
 
-    private func initialSeek(_ probe: HandoffPlaybackProbe) async {
-        await assertCompleted([probe.seek], timeout: 5)
+    private func initialSeek(_ probe: HandoffPlaybackProbe) async throws {
+        try await assertCompleted([probe.seek], timeout: 5)
     }
 
-    private func started(_ probe: HandoffPlaybackProbe) async {
-        await assertCompleted([probe.start], timeout: 5)
+    private func started(_ probe: HandoffPlaybackProbe) async throws {
+        try await assertCompleted([probe.start], timeout: 5)
     }
 }
 
@@ -393,14 +403,22 @@ private actor HandoffResourceProbe {
 private final class FinalPositionGate {
     let entered = XCTestExpectation(description: "native readiness clock requested")
     var calls = 0
-    private var continuation: CheckedContinuation<Double, Error>?
+    private var continuations: [CheckedContinuation<Double, Error>] = []
+    private var completedPosition: Double?
     func position() async throws -> Double {
         calls += 1
-        entered.fulfill()
-        return try await withCheckedThrowingContinuation { continuation = $0 }
+        if calls == 1 {
+            entered.fulfill()
+        } else {
+            XCTFail("Final-position fixture entered more than once")
+        }
+        if let completedPosition { return completedPosition }
+        return try await withCheckedThrowingContinuation { continuations.append($0) }
     }
     func complete(_ seconds: Double) {
-        continuation?.resume(returning: seconds)
-        continuation = nil
+        completedPosition = seconds
+        let pending = continuations
+        continuations.removeAll()
+        for continuation in pending { continuation.resume(returning: seconds) }
     }
 }

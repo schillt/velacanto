@@ -319,11 +319,49 @@ final class FoundationMusicLibrarySelectionTests: XCTestCase {
         XCTAssertTrue(applications.isEmpty)
         online = true
         let oldValidation = Task { await model.validateSavedChoice() }
-        await loader.waitUntilFirstStarted()
-        try await model.select(second)
+        guard await loader.waitUntilFirstStarted() else {
+            model.invalidate()
+            oldValidation.cancel()
+            await loader.releaseFirst(with: [])
+            XCTFail("Old library validation did not enter within 5 seconds")
+            return
+        }
+        let selection = Task { try await model.select(second) }
+        let selected = XCTestExpectation(description: "replacement library selection returned")
+        var selectionOutcome: Result<Void, Error>?
+        let selectionObserver = Task {
+            selectionOutcome = await selection.result
+            selected.fulfill()
+        }
+        guard await XCTWaiter.fulfillment(of: [selected], timeout: 5) == .completed else {
+            model.invalidate()
+            selection.cancel()
+            selectionObserver.cancel()
+            oldValidation.cancel()
+            await loader.releaseFirst(with: [])
+            XCTFail("Replacement library selection did not finish within 5 seconds")
+            return
+        }
+        if case .some(.failure(let error)) = selectionOutcome {
+            oldValidation.cancel()
+            await loader.releaseFirst(with: [])
+            throw error
+        }
+        XCTAssertNotNil(selectionOutcome)
         XCTAssertEqual(model.selectedID, second.id)
         await loader.releaseFirst(with: [])
-        await oldValidation.value
+        let finished = XCTestExpectation(description: "old library validation returned")
+        let observer = Task {
+            await oldValidation.value
+            finished.fulfill()
+        }
+        guard await XCTWaiter.fulfillment(of: [finished], timeout: 5) == .completed else {
+            model.invalidate()
+            oldValidation.cancel()
+            observer.cancel()
+            XCTFail("Old library validation did not finish within 5 seconds")
+            return
+        }
         XCTAssertEqual(model.selectedID, second.id)
         XCTAssertFalse(model.unavailable)
         XCTAssertEqual(applications.count, 1)
@@ -368,19 +406,32 @@ final class FoundationMusicLibrarySelectionTests: XCTestCase {
     func testCancellationAndInvalidationCannotPersistLateChoice() async {
         let first = first
         var wrote = false
+        let entered = XCTestExpectation(description: "library choice load entered")
+        let finished = XCTestExpectation(description: "cancelled library choice returned")
+        var didThrow = false
         let model = FoundationMusicLibrarySelection(
             load: {
+                entered.fulfill()
                 try await Task.sleep(for: .seconds(5))
                 return [first]
             }, save: { _ in wrote = true }, apply: { _, _ in XCTFail("Late scope change") })
-        let task = Task { try await model.select(first) }
-        await Task.yield()
+        let task = Task {
+            do { try await model.select(first) } catch { didThrow = true }
+            finished.fulfill()
+        }
+        guard await XCTWaiter.fulfillment(of: [entered], timeout: 5) == .completed else {
+            model.invalidate()
+            task.cancel()
+            XCTFail("Library choice load did not enter within 5 seconds")
+            return
+        }
         model.invalidate()
         task.cancel()
-        do {
-            try await task.value
-            XCTFail("Expected cancellation")
-        } catch {}
+        guard await XCTWaiter.fulfillment(of: [finished], timeout: 5) == .completed else {
+            XCTFail("Cancelled library choice did not return within 5 seconds")
+            return
+        }
+        XCTAssertTrue(didThrow, "Expected cancellation")
         XCTAssertFalse(wrote)
         XCTAssertNil(model.selectedID)
     }
@@ -435,26 +486,27 @@ final class FoundationMusicLibrarySelectionTests: XCTestCase {
         let choices: [FoundationMusicLibraryChoice]
         var count = 0
         private var first: CheckedContinuation<[FoundationMusicLibraryChoice], Never>?
-        private var started: [CheckedContinuation<Void, Never>] = []
+        private var releasedFirst: [FoundationMusicLibraryChoice]?
 
         init(choices: [FoundationMusicLibraryChoice]) { self.choices = choices }
 
         func load() async -> [FoundationMusicLibraryChoice] {
             count += 1
             guard count == 1 else { return choices }
-            return await withCheckedContinuation { continuation in
-                first = continuation
-                for waiter in started { waiter.resume() }
-                started = []
-            }
+            if let releasedFirst { return releasedFirst }
+            return await withCheckedContinuation { first = $0 }
         }
 
-        func waitUntilFirstStarted() async {
-            guard count == 0 else { return }
-            await withCheckedContinuation { started.append($0) }
+        func waitUntilFirstStarted() async -> Bool {
+            let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+            while count == 0 && !Task.isCancelled && ContinuousClock.now < deadline {
+                try? await Task.sleep(for: .milliseconds(10))
+            }
+            return count > 0 && !Task.isCancelled
         }
 
         func releaseFirst(with choices: [FoundationMusicLibraryChoice]) {
+            releasedFirst = choices
             first?.resume(returning: choices)
             first = nil
         }

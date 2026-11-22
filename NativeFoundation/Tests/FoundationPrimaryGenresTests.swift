@@ -17,7 +17,7 @@ final class FoundationPrimaryGenresTests: XCTestCase {
 
     private func seededDownloads(
         root: URL, scope: String, track: FoundationItem
-    ) async throws {
+    ) async throws -> FoundationDownloads {
         let downloads = FoundationDownloads(
             scope: scope, library: PrimaryGenreDownloadLibrary(), root: root,
             transfer: { _, destination, _, progress in
@@ -28,6 +28,28 @@ final class FoundationPrimaryGenresTests: XCTestCase {
         downloads.download(track)
         try await waitForDownloads { downloads.isReady(track) }
         downloads.invalidate()
+        return downloads
+    }
+
+    private struct GenreFixtureTimeout: Error, CustomStringConvertible {
+        let description: String
+    }
+
+    private func requireGenreCompletion(
+        _ task: Task<Void, Never>?, model: FoundationPrimaryGenresModel
+    ) async throws {
+        let finished = XCTestExpectation(description: "primary genre build returned")
+        let observer = Task {
+            await task?.value
+            finished.fulfill()
+        }
+        guard await XCTWaiter.fulfillment(of: [finished], timeout: 5) == .completed else {
+            model.cancel()
+            task?.cancel()
+            observer.cancel()
+            throw GenreFixtureTimeout(
+                description: "Primary genre build did not finish within 5 seconds")
+        }
     }
 
     func testVerifiedInventoryAndReadyChangesDriveBoundOfflineGenresWithoutProgressRescans()
@@ -37,7 +59,7 @@ final class FoundationPrimaryGenresTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let track = FoundationItem(
             id: Self.id(100), title: "Synthetic", subtitle: "", kind: .track, duration: 1)
-        try await seededDownloads(root: root, scope: "primary-ready", track: track)
+        _ = try await seededDownloads(root: root, scope: "primary-ready", track: track)
         let inventory = PrimaryGenreGate()
         let transfer = PrimaryGenreGate()
         let downloads = FoundationDownloads(
@@ -57,9 +79,22 @@ final class FoundationPrimaryGenresTests: XCTestCase {
         let library = try library()
         let model = FoundationPrimaryGenresModel(library: library)
         model.start()
-        await model.buildCompletion?.value
+        do {
+            try await requireGenreCompletion(model.buildCompletion, model: model)
+        } catch {
+            await inventory.release()
+            await transfer.release()
+            throw error
+        }
         model.bindDownloads(downloads)
-        await inventory.started()
+        guard await inventory.started() else {
+            downloads.invalidate()
+            model.cancel()
+            await inventory.release()
+            await transfer.release()
+            XCTFail("Primary genre inventory did not enter within 5 seconds")
+            return
+        }
         XCTAssertTrue(downloads.isLoading)
         XCTAssertTrue(model.items(localOnly: true).isEmpty)
         XCTAssertEqual(downloads.verifiedReadyRevision, 0)
@@ -75,7 +110,7 @@ final class FoundationPrimaryGenresTests: XCTestCase {
         XCTAssertEqual(model.readySongIDs, [track.id], "Library changes retain account ready IDs")
         model.bind(library)
         model.start()
-        await model.buildCompletion?.value
+        try await requireGenreCompletion(model.buildCompletion, model: model)
         downloads.removeTrack(track)
         try await waitForDownloads { model.readySongIDs.isEmpty }
         XCTAssertTrue(model.items(localOnly: true).isEmpty)
@@ -91,8 +126,33 @@ final class FoundationPrimaryGenresTests: XCTestCase {
         defer { observation.cancel() }
         downloads.updateConnectivity(isAllowed: true)
         downloads.download(next)
-        await transfer.started()
-        try await waitForDownloads { downloads.owners.first?.activeTrackProgress != nil }
+        guard await transfer.started() else {
+            downloads.invalidate()
+            model.cancel()
+            await transfer.release()
+            XCTFail("Primary genre transfer did not enter within 5 seconds")
+            return
+        }
+        let progressDeadline = ContinuousClock.now.advanced(by: .seconds(3))
+        do {
+            while downloads.owners.first?.activeTrackProgress == nil,
+                ContinuousClock.now < progressDeadline
+            {
+                try await Task.sleep(for: .milliseconds(5))
+            }
+        } catch {
+            downloads.invalidate()
+            model.cancel()
+            await transfer.release()
+            throw error
+        }
+        guard downloads.owners.first?.activeTrackProgress != nil else {
+            downloads.invalidate()
+            model.cancel()
+            await transfer.release()
+            XCTFail("Transfer progress did not arrive within 3 seconds")
+            return
+        }
         XCTAssertEqual(downloads.verifiedReadyRevision, beforeProgress)
         XCTAssertEqual(readinessEvents, 0, "Transfer progress must not trigger a membership scan")
         XCTAssertTrue(model.readySongIDs.isEmpty)
@@ -104,12 +164,15 @@ final class FoundationPrimaryGenresTests: XCTestCase {
 
     func testHeldInventoryCannotPublishThroughReplacedRetiredOrCrossAccountBinding() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: root) }
+        var rootSafeToRemove = false
+        defer {
+            if rootSafeToRemove { try? FileManager.default.removeItem(at: root) }
+        }
         let track = FoundationItem(
             id: Self.id(100), title: "Synthetic", subtitle: "", kind: .track, duration: 1)
         for mode in 0..<3 {
             let scope = "primary-binding-\(mode)"
-            try await seededDownloads(root: root, scope: scope, track: track)
+            let seeder = try await seededDownloads(root: root, scope: scope, track: track)
             let inventory = PrimaryGenreGate()
             let old = FoundationDownloads(
                 scope: scope, library: PrimaryGenreDownloadLibrary(), root: root,
@@ -122,9 +185,24 @@ final class FoundationPrimaryGenresTests: XCTestCase {
             let replacement = FoundationDownloads(
                 scope: scope + "-empty", library: PrimaryGenreDownloadLibrary(), root: root,
                 monitorConnectivity: false)
+            let cleanupState = GenreOwnerCleanupState()
+            addTeardownBlock { @MainActor in
+                try await self.cleanupGenreOwners(
+                    old, replacement, seeder, inventory: inventory, state: cleanupState)
+            }
             let model = FoundationPrimaryGenresModel(library: try library())
             model.bindDownloads(old)
-            await inventory.started()
+            guard await inventory.started() else {
+                old.invalidate()
+                replacement.invalidate()
+                model.cancel()
+                await inventory.release()
+                XCTFail("Retired genre inventory did not enter within 5 seconds")
+                return
+            }
+            #if DEBUG
+                let inventoryTask = try XCTUnwrap(old.inventoryTaskForTesting)
+            #endif
             switch mode {
             case 0: model.bindDownloads(replacement)
             case 1: model.retire()
@@ -137,12 +215,126 @@ final class FoundationPrimaryGenresTests: XCTestCase {
             }
             await inventory.release()
             try await waitForDownloads { !old.isLoading }
-            // Join a fresh MainActor turn after the old producer's publication task.
-            await Task.yield()
+            #if DEBUG
+                let inventoryReturned = XCTestExpectation(description: "inventory owner returned")
+                let inventoryObserver = Task {
+                    await inventoryTask.value
+                    inventoryReturned.fulfill()
+                }
+                guard await XCTWaiter.fulfillment(of: [inventoryReturned], timeout: 5) == .completed
+                else {
+                    inventoryTask.cancel()
+                    inventoryObserver.cancel()
+                    old.invalidate()
+                    replacement.invalidate()
+                    seeder.invalidate()
+                    model.cancel()
+                    XCTFail("Inventory owner did not return within 5 seconds; fixture retained")
+                    return
+                }
+            #else
+                await Task.yield()
+            #endif
             XCTAssertTrue(old.isReady(track))
             XCTAssertTrue(model.readySongIDs.isEmpty, "Departed binding resurrected downloaded IDs")
+            model.cancel()
+            #if DEBUG
+                // This independent phase starts with ready old downloads, so a stale
+                // queued projection would republish a nonempty ID if the guard failed.
+                guard old.isReady(track) else {
+                    old.invalidate()
+                    replacement.invalidate()
+                    seeder.invalidate()
+                    XCTFail("Ready old downloads required for queued projection; fixture retained")
+                    return
+                }
+                let queuedModel = FoundationPrimaryGenresModel(library: try library())
+                queuedModel.bindDownloads(old)
+                let oldBinding = queuedModel.downloadBindingForTesting
+                let processed = XCTestExpectation(
+                    description: "ready old download binding rejected")
+                var acknowledged = false
+                queuedModel.staleDownloadProjectionForTesting = { binding in
+                    if binding == oldBinding && !acknowledged {
+                        acknowledged = true
+                        processed.fulfill()
+                    }
+                }
+                switch mode {
+                case 0: queuedModel.bindDownloads(replacement)
+                case 1: queuedModel.retire()
+                default:
+                    queuedModel.bind(
+                        FoundationJellyfinLibrary(
+                            session: .init(
+                                serverURL: Self.session.serverURL, accessToken: "synthetic-token",
+                                userID: Self.id(98), deviceID: "synthetic-device")))
+                }
+                guard await XCTWaiter.fulfillment(of: [processed], timeout: 5) == .completed else {
+                    old.invalidate()
+                    replacement.invalidate()
+                    seeder.invalidate()
+                    queuedModel.cancel()
+                    XCTFail(
+                        "Ready old binding guard did not run within 5 seconds; fixture retained")
+                    return
+                }
+                queuedModel.staleDownloadProjectionForTesting = nil
+                XCTAssertTrue(
+                    queuedModel.readySongIDs.isEmpty,
+                    "Queued old ready downloads resurrected departed IDs")
+                queuedModel.cancel()
+            #endif
+            try await cleanupGenreOwners(
+                old, replacement, seeder, inventory: inventory, state: cleanupState)
+        }
+        rootSafeToRemove = true
+    }
+
+    private final class GenreOwnerCleanupState {
+        var attempted = false
+    }
+
+    private func cleanupGenreOwners(
+        _ old: FoundationDownloads, _ replacement: FoundationDownloads,
+        _ seeder: FoundationDownloads, inventory: PrimaryGenreGate, state: GenreOwnerCleanupState
+    ) async throws {
+        guard !state.attempted else { return }
+        state.attempted = true
+        await inventory.release()
+        let cleanup = Task {
+            #if DEBUG
+                // Seeder and old share one store. Retire seeder before its sole
+                // clearing owner deletes that store; absence is not a success receipt.
+                await seeder.retireOwnedFixtureTasksForTesting()
+                let oldCleared = await old.clearAccount()
+                let replacementCleared = await replacement.clearAccount()
+                return oldCleared && replacementCleared
+            #else
+                let oldCleared = await old.clearAccount()
+                let replacementCleared = await replacement.clearAccount()
+                let seederCleared = await seeder.clearAccount()
+                return oldCleared && replacementCleared && seederCleared
+            #endif
+        }
+        let finished = XCTestExpectation(description: "genre download fixtures retired")
+        let observer = Task {
+            _ = await cleanup.value
+            finished.fulfill()
+        }
+        guard await XCTWaiter.fulfillment(of: [finished], timeout: 5) == .completed else {
+            cleanup.cancel()
+            observer.cancel()
             old.invalidate()
             replacement.invalidate()
+            seeder.invalidate()
+            throw GenreFixtureTimeout(
+                description:
+                    "Genre fixture owners did not retire within 5 seconds; fixture retained")
+        }
+        guard await cleanup.value else {
+            throw GenreFixtureTimeout(
+                description: "Genre fixture owner refused cleanup; fixture retained")
         }
     }
 
@@ -150,6 +342,165 @@ final class FoundationPrimaryGenresTests: XCTestCase {
     private static let session = FoundationSession(
         serverURL: URL(string: "https://example.invalid/base/")!, accessToken: "synthetic-token",
         userID: id(99), deviceID: "synthetic-device")
+
+    func testNewMusicArtistsUseLoadedReferencesInOrderAndRejectForeignScope() throws {
+        let source = try FoundationCatalogSource.jellyfin(scope: String(repeating: "a", count: 64))
+        let foreign = try FoundationCatalogSource.jellyfin(scope: String(repeating: "b", count: 64))
+        func music(
+            _ id: String, kind: FoundationItem.Kind, artist: String,
+            source: FoundationCatalogSource
+        ) -> FoundationItem {
+            FoundationItem(
+                id: id, title: id, subtitle: "", kind: kind, duration: nil,
+                artist: .init(
+                    id: artist, title: artist, primaryImageTag: "image-" + artist,
+                    catalogSource: source), catalogSource: source)
+        }
+        let first = music("album-1", kind: .album, artist: "artist-1", source: source)
+        let second = music("album-2", kind: .album, artist: "artist-2", source: source)
+        var mismatched = first
+        mismatched.artist = .init(id: "foreign-ref", title: "Wrong owner", catalogSource: foreign)
+        let repeated = music("track-1", kind: .track, artist: "artist-1", source: source)
+        let third = music("track-2", kind: .track, artist: "artist-3", source: source)
+        let entries = FoundationNewMusicProjection.artists(
+            albums: [
+                first, music("foreign", kind: .album, artist: "foreign", source: foreign),
+                mismatched, second, third,
+            ],
+            tracks: [repeated, third, first], source: source)
+        XCTAssertEqual(entries.map(\.id), ["artist-1", "artist-2", "artist-3"])
+        XCTAssertTrue(entries.allSatisfy { $0.kind == .artist && $0.catalogSource == source })
+        XCTAssertEqual(entries.first?.primaryImageTag, "image-artist-1")
+        XCTAssertEqual(first.artist?.id, "artist-1", "Loaded provider metadata is not rewritten")
+    }
+
+    func testNewMusicGenreSetsKeepLoadedOrderAndCanonicalMembership() async throws {
+        let library = try library()
+        let model = FoundationPrimaryGenresModel(library: library)
+        model.start()
+        try await requireGenreCompletion(model.buildCompletion, model: model)
+        let record = try XCTUnwrap(
+            model.completedRecord(libraryScope: library.primaryGenreIndexScope))
+        let first = FoundationItem(
+            id: Self.id(102), title: "Recent first", subtitle: "", kind: .track, duration: 1,
+            genres: [.init(id: Self.id(3), title: "Raw rare tag")],
+            catalogSource: record.snapshot.scope.source)
+        let second = FoundationItem(
+            id: Self.id(101), title: "Recent second", subtitle: "", kind: .track, duration: 1,
+            catalogSource: record.snapshot.scope.source)
+        var foreign = first
+        foreign.catalogSource = .local(sourceID: UUID())
+        let unknown = FoundationItem(
+            id: "not-in-census", title: "Unknown", subtitle: "", kind: .track, duration: 1,
+            genres: [.init(id: Self.id(3), title: "Raw rare tag")])
+        // The complete census permits up to two primary genres for one song.
+        // This fixture deliberately puts the second song in both genre sets.
+        XCTAssertEqual(record.snapshot.primaryBySongID[first.id], [Self.id(1)])
+        XCTAssertEqual(record.snapshot.primaryBySongID[second.id], [Self.id(1), Self.id(2)])
+        let groups = FoundationNewMusicProjection.genreGroups(
+            record: record, tracks: [foreign, unknown, first, first, second])
+        XCTAssertEqual(groups.map(\.genre.id), [Self.id(1), Self.id(2)])
+        XCTAssertEqual(
+            groups.map { $0.tracks.map(\.id) }, [[first.id, second.id], [second.id]],
+            "Each canonical genre keeps loaded order and excludes repeated/foreign/unknown songs")
+        XCTAssertTrue(
+            groups.allSatisfy { $0.genre.primaryGenreCensusID == record.snapshot.censusID })
+        XCTAssertTrue(
+            FoundationNewMusicProjection.tracks(
+                in: Self.id(3), record: record, tracks: [first]
+            ).isEmpty,
+            "Raw provider tags cannot create New genre membership")
+        let offline = FoundationNewMusicProjection.genreGroups(
+            record: record, tracks: [first, second], readySongIDs: [second.id])
+        XCTAssertEqual(offline.map(\.genre.id), [Self.id(1), Self.id(2)])
+        XCTAssertEqual(
+            offline.map { $0.tracks.map(\.id) }, [[second.id], [second.id]],
+            "Readiness filters songs before grouping without changing their canonical genres")
+        XCTAssertEqual(first.genres.map(\.id), [Self.id(3)])
+    }
+
+    func testNewGenreProjectionCanBeEmptyUntilExplicitBrowsingLoadsMatchingSongs() async throws {
+        let library = try library()
+        let model = FoundationPrimaryGenresModel(library: library)
+        model.start()
+        try await requireGenreCompletion(model.buildCompletion, model: model)
+        let record = try XCTUnwrap(
+            model.completedRecord(libraryScope: library.primaryGenreIndexScope))
+        let unclassified = FoundationItem(
+            id: Self.id(103), title: "Unclassified", subtitle: "", kind: .track, duration: 1,
+            genres: [.init(id: Self.id(1), title: "Raw tag")],
+            catalogSource: record.snapshot.scope.source)
+        let matching = FoundationItem(
+            id: Self.id(102), title: "Later loaded", subtitle: "", kind: .track, duration: 1,
+            catalogSource: record.snapshot.scope.source)
+        XCTAssertEqual(record.snapshot.primaryBySongID[unclassified.id], [])
+        XCTAssertFalse(
+            record.descriptors.isEmpty, "An available genre index need not match a recent page")
+        XCTAssertTrue(
+            FoundationNewMusicProjection.genreGroups(record: record, tracks: [unclassified]).isEmpty
+        )
+        let groups = FoundationNewMusicProjection.genreGroups(
+            record: record, tracks: [unclassified, matching])
+        XCTAssertEqual(groups.map(\.genre.id), [Self.id(1)])
+        XCTAssertEqual(groups.map { $0.tracks.map(\.id) }, [[matching.id]])
+        XCTAssertTrue(
+            FoundationNewMusicProjection.genreGroups(
+                record: record, tracks: [unclassified, matching], readySongIDs: [unclassified.id]
+            ).isEmpty)
+    }
+
+    func testNewAlbumGenresJoinCanonicalSongsWithoutUsingAlbumTags() async throws {
+        let library = try library()
+        let model = FoundationPrimaryGenresModel(library: library)
+        model.start()
+        try await requireGenreCompletion(model.buildCompletion, model: model)
+        let base = try XCTUnwrap(
+            model.completedRecord(libraryScope: library.primaryGenreIndexScope))
+        let content = FoundationPrimaryGenreContentIndex(
+            tracks: [
+                Self.id(102): .init(
+                    title: "First", albumID: "a", artistID: nil, duration: nil, year: nil,
+                    dateAdded: nil),
+                Self.id(101): .init(
+                    title: "Second", albumID: "b", artistID: nil, duration: nil, year: nil,
+                    dateAdded: nil),
+                Self.id(103): .init(
+                    title: "Unclassified", albumID: "c", artistID: nil, duration: nil, year: nil,
+                    dateAdded: nil),
+            ], albums: ["a": "A", "b": "B", "c": "C"], artists: [:])
+        let record = FoundationPrimaryGenreRecord(
+            snapshot: base.snapshot, descriptors: base.descriptors,
+            contentMetadataVersion: FoundationPrimaryGenreContentIndex.version,
+            contentIndex: content)
+        func album(_ id: String) -> FoundationItem {
+            FoundationItem(
+                id: id, title: id, subtitle: "", kind: .album, duration: nil,
+                genres: [.init(id: Self.id(3), title: "Raw tag")],
+                catalogSource: base.snapshot.scope.source)
+        }
+        var foreign = album("a")
+        foreign.catalogSource = .local(sourceID: UUID())
+        let albums = [foreign, album("c"), album("b"), album("a"), album("b")]
+        let groups = FoundationNewMusicProjection.albumGenreGroups(record: record, albums: albums)
+        XCTAssertEqual(groups.map(\.genre.id), [Self.id(1), Self.id(2)])
+        XCTAssertEqual(groups.map { $0.albums.map(\.id) }, [["b", "a"], ["b"]])
+        XCTAssertTrue(groups.allSatisfy { $0.genre.primaryGenreCensusID == base.snapshot.censusID })
+        let offline = FoundationNewMusicProjection.albumGenreGroups(
+            record: record, albums: albums, readySongIDs: [Self.id(102), Self.id(103)])
+        XCTAssertEqual(offline.map(\.genre.id), [Self.id(1)])
+        XCTAssertEqual(offline.map { $0.albums.map(\.id) }, [["a"]])
+        XCTAssertTrue(
+            FoundationNewMusicProjection.albumGenreGroups(
+                record: .init(snapshot: base.snapshot, descriptors: base.descriptors),
+                albums: albums
+            ).isEmpty)
+        XCTAssertTrue(
+            FoundationNewMusicProjection.albumGenreGroups(
+                record: record, albums: [album("c"), foreign]
+            ).isEmpty)
+        XCTAssertEqual(
+            albums.map(\.id), ["a", "c", "b", "a", "b"], "The provider order is not rewritten")
+    }
 
     func testRecentGenresUseOnlyLoadedSongPrimaryMembershipAndTrustedArtwork() async throws {
         let library = try library()
@@ -358,6 +709,116 @@ final class FoundationPrimaryGenresTests: XCTestCase {
         XCTAssertTrue(model.page(query: "Genre 3", localOnly: false).items.isEmpty)
     }
 
+    private func genreLabelLibrary(_ labels: [String]) throws -> FoundationJellyfinLibrary {
+        let pages = try labels.enumerated().map { offset, label in
+            try JSONSerialization.data(withJSONObject: [
+                "Items": [
+                    [
+                        "Id": Self.id(100 + offset), "Type": "Audio", "Name": "Song \(offset)",
+                        "Genres": [label],
+                        "GenreItems": [["Id": Self.id(1), "Name": label]],
+                    ]
+                ],
+                "StartIndex": offset, "TotalRecordCount": labels.count,
+            ])
+        }
+        return FoundationJellyfinLibrary(session: Self.session) { request in
+            let query =
+                URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!.queryItems ?? []
+            let offset = Int(query.first { $0.name == "startIndex" }?.value ?? "0")!
+            return (
+                pages[offset],
+                HTTPURLResponse(
+                    url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            )
+        }.scoped(to: Self.id(77))
+    }
+
+    func testSameGenreIDEdgeWhitespacePublishesCompleteCensusWithStableDisplayName() async throws {
+        for labels in [["Rock", " Rock\n"], [" Rock\n", "Rock"]] {
+            let library = try genreLabelLibrary(labels)
+            let model = FoundationPrimaryGenresModel(library: library)
+            model.start()
+            try await requireGenreCompletion(model.buildCompletion, model: model)
+            let record = try XCTUnwrap(model.record)
+            XCTAssertNil(model.errorMessage)
+            XCTAssertEqual(model.processedSongs, 2)
+            XCTAssertEqual(record.snapshot.songCount, 2)
+            XCTAssertEqual(record.snapshot.eligibleGenreIDs, [Self.id(1)])
+            XCTAssertEqual(record.descriptors.map(\.title), ["Rock"])
+            XCTAssertEqual(record.snapshot.primaryBySongID[Self.id(100)], [Self.id(1)])
+            XCTAssertEqual(record.snapshot.primaryBySongID[Self.id(101)], [Self.id(1)])
+            XCTAssertEqual(
+                model.page(query: "rock", localOnly: false).items.map(\.id), [Self.id(1)])
+            let genre = try XCTUnwrap(model.page(query: "rock", localOnly: false).items.first)
+            XCTAssertEqual(genre.id, Self.id(1))
+            XCTAssertNotNil(
+                model.canonicalRecord(for: genre, libraryScope: library.primaryGenreIndexScope))
+            let requests = PrimaryGenreRequests()
+            let items: [[String: Any]] = labels.enumerated().map { offset, label in
+                [
+                    "Id": Self.id(100 + offset), "Type": "Audio", "Name": "Song \(offset)",
+                    "Genres": [label],
+                    "GenreItems": [["Id": Self.id(1), "Name": label]],
+                ]
+            }
+            let data = try JSONSerialization.data(withJSONObject: [
+                "Items": items, "StartIndex": 0, "TotalRecordCount": 2,
+            ])
+            let resolver = FoundationJellyfinLibrary(session: Self.session) { request in
+                await requests.append(request)
+                return (
+                    data,
+                    HTTPURLResponse(
+                        url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+                )
+            }.scoped(to: Self.id(77))
+            let page = try await record.songPage(
+                genreID: genre.id, startIndex: 0, library: resolver)
+            XCTAssertEqual(page.items.map(\.id), [Self.id(100), Self.id(101)])
+            XCTAssertEqual(page.items.map { $0.genres.map(\.title) }, labels.map { [$0] })
+            let captured = await requests.requests
+            XCTAssertEqual(captured.count, 1)
+            let query =
+                URLComponents(
+                    url: try XCTUnwrap(captured.first?.url), resolvingAgainstBaseURL: false)!
+                .queryItems ?? []
+            XCTAssertEqual(
+                query.filter { $0.name == "ids" }.compactMap(\.value), [Self.id(100), Self.id(101)])
+            XCTAssertEqual(query.first { $0.name == "parentId" }?.value, Self.id(77))
+            XCTAssertEqual(query.first { $0.name == "userId" }?.value, Self.session.userID)
+            XCTAssertNil(query.first { ["genres", "genreIds", "searchTerm"].contains($0.name) })
+        }
+    }
+
+    func testMateriallyDifferentNamesForSameGenreIDPreservePriorCompleteCensus() async throws {
+        let library = try genreLabelLibrary(["Rock", "Rock"])
+        let model = FoundationPrimaryGenresModel(library: library)
+        model.start()
+        try await requireGenreCompletion(model.buildCompletion, model: model)
+        let before = try XCTUnwrap(model.record)
+        model.bind(try genreLabelLibrary(["Rock", "Jazz"]))
+        model.start()
+        try await requireGenreCompletion(model.buildCompletion, model: model)
+        XCTAssertEqual(model.record, before)
+        XCTAssertEqual(model.processedSongs, 1)
+        XCTAssertEqual(
+            model.errorMessage,
+            "The library changed or returned incomplete pages. Refresh primary genres to try again. The previous complete index is still in use."
+        )
+    }
+
+    func testWhitespaceOnlyGenreDisplayNameRejectsWithoutPublishingPartialCensus() async throws {
+        let library = try genreLabelLibrary(["Rock", " \t\n"])
+        let model = FoundationPrimaryGenresModel(library: library)
+        model.start()
+        try await requireGenreCompletion(model.buildCompletion, model: model)
+        XCTAssertNil(model.record)
+        XCTAssertEqual(model.processedSongs, 1)
+        XCTAssertEqual(
+            model.errorMessage, "Some song tags were unavailable. No partial index was saved.")
+    }
+
     func testOmittedGenreFieldsFailWhileExplicitEmptyArraysAreValid() async throws {
         let data = Data(
             "{\"Items\":[{\"Id\":\"\(Self.id(100))\",\"Type\":\"Audio\"}],\"StartIndex\":0,\"TotalRecordCount\":1}"
@@ -374,6 +835,31 @@ final class FoundationPrimaryGenresTests: XCTestCase {
             _ = try await library.primaryGenreMetadataPage(startIndex: 0)
             XCTFail("Missing fields were interpreted as untagged")
         } catch { XCTAssertEqual(error as? FoundationPrimaryGenreIndex.Failure, .unknownMetadata) }
+
+        let emptyData = Data(
+            """
+            {"Items":[{"Id":"\(Self.id(100))","Type":"Audio","Name":"Synthetic Untagged","Genres":[],"GenreItems":[]}],"StartIndex":0,"TotalRecordCount":1}
+            """.utf8)
+        let requests = PrimaryGenreRequests()
+        let explicitEmptyLibrary = FoundationJellyfinLibrary(session: Self.session) { request in
+            await requests.append(request)
+            return (
+                emptyData,
+                HTTPURLResponse(
+                    url: request.url!, statusCode: 200,
+                    httpVersion: nil, headerFields: nil)!
+            )
+        }
+        let page = try await explicitEmptyLibrary.primaryGenreMetadataPage(startIndex: 0)
+        XCTAssertEqual(page.startIndex, 0)
+        XCTAssertEqual(page.total, 1)
+        XCTAssertNil(page.nextStartIndex)
+        XCTAssertEqual(page.songs.count, 1)
+        let song = try XCTUnwrap(page.songs.first)
+        XCTAssertEqual(song.id, Self.id(100))
+        XCTAssertTrue(song.genres.isEmpty, "Explicit empty fields represent an untagged song")
+        let sent = await requests.requests.count
+        XCTAssertEqual(sent, 1, "Accept explicit empty metadata without a retry or extra demand")
     }
 
     func testAutomaticPreparationWaitsForOnlineAndPersistsOneSuccessfulAppVersion() async throws {
@@ -410,18 +896,23 @@ final class FoundationPrimaryGenresTests: XCTestCase {
         let firstLibrary = try library(cache: cache)
         let first = FoundationPrimaryGenresModel(library: firstLibrary, appVersion: "0.6.0(246)")
         await first.prepareAutomaticallyIfNeeded(allowsNetwork: true)
-        await first.buildCompletion?.value
+        try await requireGenreCompletion(first.buildCompletion, model: first)
         let previous = try XCTUnwrap(first.record)
         let gate = PrimaryGenreGate()
         let updatedLibrary = try library(cache: cache, gate: gate)
         let updated = FoundationPrimaryGenresModel(
             library: updatedLibrary, appVersion: "0.6.0(247)")
         await updated.prepareAutomaticallyIfNeeded(allowsNetwork: true)
-        await gate.started()
+        guard await gate.started() else {
+            updated.cancel()
+            await gate.release()
+            XCTFail("Primary genre request did not enter its hold within 5 seconds")
+            return
+        }
         XCTAssertTrue(updated.isBuilding)
         XCTAssertEqual(updated.record, previous)
         await gate.release()
-        await updated.buildCompletion?.value
+        try await requireGenreCompletion(updated.buildCompletion, model: updated)
         XCTAssertEqual(updated.record?.builtWithAppVersion, "0.6.0(247)")
         XCTAssertNotEqual(updated.record?.snapshot.censusID, previous.snapshot.censusID)
     }
@@ -463,18 +954,23 @@ final class FoundationPrimaryGenresTests: XCTestCase {
         let held = try library(cache: cache, gate: gate)
         let model = FoundationPrimaryGenresModel(library: held, appVersion: "0.6.0(247)")
         await model.prepareAutomaticallyIfNeeded(allowsNetwork: true)
-        await gate.started()
+        guard await gate.started() else {
+            model.cancel()
+            await gate.release()
+            XCTFail("Primary genre request did not enter its hold within 5 seconds")
+            return
+        }
         let old = model.buildCompletion
         model.suspendForOffline()
         await model.prepareAutomaticallyIfNeeded(allowsNetwork: false)
         XCTAssertFalse(model.isBuilding)
         await gate.release()
-        await old?.value
+        try await requireGenreCompletion(old, model: model)
         XCTAssertNil(model.record)
         let good = try library(cache: cache)
         model.bind(good)
         await model.prepareAutomaticallyIfNeeded(allowsNetwork: true)
-        await model.buildCompletion?.value
+        try await requireGenreCompletion(model.buildCompletion, model: model)
         XCTAssertEqual(model.record?.builtWithAppVersion, "0.6.0(247)")
     }
 
@@ -532,10 +1028,15 @@ final class FoundationPrimaryGenresTests: XCTestCase {
         let model = FoundationPrimaryGenresModel(library: library)
         model.start()
         let pending = model.buildCompletion
-        await gate.started()
+        guard await gate.started() else {
+            model.cancel()
+            await gate.release()
+            XCTFail("Primary genre request did not enter its hold within 5 seconds")
+            return
+        }
         model.bind(library.scoped(to: Self.id(77)))
         await gate.release()
-        await pending?.value
+        try await requireGenreCompletion(pending, model: model)
         XCTAssertNil(model.record)
         XCTAssertFalse(model.isBuilding)
         XCTAssertTrue(model.items(localOnly: false).isEmpty)
@@ -1604,10 +2105,15 @@ final class FoundationPrimaryGenresTests: XCTestCase {
         let model = FoundationPrimaryGenresModel(library: library)
         model.start()
         let completion = model.buildCompletion
-        await gate.started()
+        guard await gate.started() else {
+            model.cancel()
+            await gate.release()
+            XCTFail("Primary genre request did not enter its hold within 5 seconds")
+            return
+        }
         model.bind(library.scoped(to: Self.id(99)))
         await gate.release()
-        await completion?.value
+        try await requireGenreCompletion(completion, model: model)
         XCTAssertNil(model.record)
         let count = await requests.requests.count
         XCTAssertEqual(count, 2, "Retired account/library generation cannot issue the artist batch")
@@ -2005,7 +2511,7 @@ final class FoundationPrimaryGenresTests: XCTestCase {
         XCTAssertTrue(first.primaryGenres === second.primaryGenres)
         first.primaryGenres.start()
         second.primaryGenres.start()
-        await shared.buildCompletion?.value
+        try await requireGenreCompletion(shared.buildCompletion, model: shared)
         let count = await recorder.requests.count
         XCTAssertEqual(count, 2, "Two windows must share the same two-page build")
         XCTAssertNotNil(second.primaryGenres.record)
@@ -2028,10 +2534,15 @@ final class FoundationPrimaryGenresTests: XCTestCase {
         owner.configurePrimaryGenres(held)
         shared.start()
         let pending = shared.buildCompletion
-        await gate.started()
+        guard await gate.started() else {
+            shared.cancel()
+            await gate.release()
+            XCTFail("Primary genre request did not enter its hold within 5 seconds")
+            return
+        }
         owner.retirePrimaryGenres()
         await gate.release()
-        await pending?.value
+        try await requireGenreCompletion(pending, model: shared)
         XCTAssertNil(owner.primaryGenres)
         XCTAssertFalse(shared.isSupported)
         XCTAssertNil(first.primaryGenres.record)
@@ -2135,19 +2646,22 @@ private actor PrimaryGenreRequests {
 
 private actor PrimaryGenreGate {
     private var continuation: CheckedContinuation<Void, Never>?
-    private var startWaiter: CheckedContinuation<Void, Never>?
     private var didStart = false
+    private var released = false
     func wait() async {
         didStart = true
-        startWaiter?.resume()
-        startWaiter = nil
+        guard !released else { return }
         await withCheckedContinuation { continuation = $0 }
     }
-    func started() async {
-        if didStart { return }
-        await withCheckedContinuation { startWaiter = $0 }
+    func started() async -> Bool {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while !didStart && !Task.isCancelled && ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return didStart && !Task.isCancelled
     }
     func release() {
+        released = true
         continuation?.resume()
         continuation = nil
     }

@@ -800,17 +800,24 @@ private final class SourceLifecycle {
 
 private actor ResourceHold {
     nonisolated let entered = XCTestExpectation(description: "receiver resource held")
-    private var continuation: CheckedContinuation<Void, Never>?
+    private var continuations: [CheckedContinuation<Void, Never>] = []
     private var released = false
+    private var calls = 0
     func wait() async {
-        entered.fulfill()
+        calls += 1
+        if calls == 1 {
+            entered.fulfill()
+        } else {
+            XCTFail("Receiver resource fixture entered more than once")
+        }
         if released { return }
-        await withCheckedContinuation { continuation = $0 }
+        await withCheckedContinuation { continuations.append($0) }
     }
     func release() {
         released = true
-        continuation?.resume()
-        continuation = nil
+        let pending = continuations
+        continuations.removeAll()
+        for continuation in pending { continuation.resume() }
     }
 }
 
@@ -928,15 +935,33 @@ final class FoundationHandoffResolutionTests: XCTestCase {
             return Self.response(request, id: "00000000000000000000000000000002", type: "Audio")
         }
         let task = Task { try await self.resolve(self.item(.track), library: delayed) }
-        await gate.waitUntilStarted()
+        guard await gate.waitUntilStarted() else {
+            task.cancel()
+            await gate.release()
+            XCTFail("Synthetic transport did not start within 5 seconds")
+            return
+        }
         task.cancel()
         await gate.release()
-        do {
-            _ = try await task.value
+        let finished = XCTestExpectation(description: "cancelled handoff resolution returned")
+        var outcome: Result<FoundationItem, Error>?
+        let observer = Task {
+            outcome = await task.result
+            finished.fulfill()
+        }
+        guard await XCTWaiter.fulfillment(of: [finished], timeout: 5) == .completed else {
+            observer.cancel()
+            XCTFail("Cancelled handoff resolution did not finish within 5 seconds")
+            return
+        }
+        switch outcome {
+        case .some(.success):
             XCTFail("Late response after cancellation must fail")
-        } catch {
+        case .some(.failure(let error)):
             XCTAssertTrue(
                 error is CancellationError || error as? FoundationLibraryError == .cancelled)
+        case nil:
+            XCTFail("Cancelled handoff resolution returned without an outcome")
         }
     }
 
@@ -1024,7 +1049,7 @@ final class FoundationHandoffResolutionTests: XCTestCase {
             await gate.hold()
             return Self.response(request, id: track.id, type: "Audio")
         }
-        let finished = expectation(description: "retired resolver returned")
+        let finished = XCTestExpectation(description: "retired resolver returned")
         fixture.receiver.configure(
             scope: scope, player: fixture.receiverPlayer,
             resolve: { item in
@@ -1034,10 +1059,18 @@ final class FoundationHandoffResolutionTests: XCTestCase {
             }, navigate: { _ in XCTFail("Retired account must not navigate") })
         let previous = fixture.receiverPlayer.persistedQueue
         XCTAssertTrue(fixture.receiver.receive(try XCTUnwrap(fixture.source.activity)) { true })
-        await gate.waitUntilStarted()
+        guard await gate.waitUntilStarted() else {
+            fixture.receiver.invalidate()
+            await gate.release()
+            XCTFail("Synthetic transport did not start within 5 seconds")
+            return
+        }
         fixture.receiver.invalidate()
         await gate.release()
-        await fulfillment(of: [finished], timeout: 5)
+        guard await XCTWaiter.fulfillment(of: [finished], timeout: 5) == .completed else {
+            XCTFail("Retired handoff resolver did not finish within 5 seconds")
+            return
+        }
         XCTAssertNil(fixture.receiver.pending)
         XCTAssertEqual(fixture.receiverPlayer.persistedQueue, previous)
         let count = await fixture.audio.count
@@ -1135,17 +1168,22 @@ final class FoundationHandoffResolutionTests: XCTestCase {
 
 private actor HandoffResolutionGate {
     private var started = false
+    private var released = false
     private var continuation: CheckedContinuation<Void, Never>?
     func hold() async {
         started = true
+        guard !released else { return }
         await withCheckedContinuation { continuation = $0 }
     }
-    func waitUntilStarted() async {
-        let deadline = Date().addingTimeInterval(5)
-        while !started && Date() < deadline { await Task.yield() }
-        XCTAssertTrue(started, "Synthetic transport did not start")
+    func waitUntilStarted() async -> Bool {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while !started && !Task.isCancelled && ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return started && !Task.isCancelled
     }
     func release() {
+        released = true
         continuation?.resume()
         continuation = nil
     }

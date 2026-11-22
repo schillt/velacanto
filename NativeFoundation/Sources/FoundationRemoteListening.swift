@@ -743,7 +743,8 @@ struct FoundationRemoteContinuationOffer: Sendable {
         return FoundationMusicLibraryStore.digest(
             [
                 account, sessionID, deviceID.lowercased(),
-                current.itemID, selection == .currentSong ? (reportedOccurrence ?? "") : sourceOccurrence,
+                current.itemID,
+                selection == .currentSong ? (reportedOccurrence ?? "") : sourceOccurrence,
             ].joined(separator: "\0"))
     }
 
@@ -866,10 +867,11 @@ struct FoundationRemoteContinuationOffer: Sendable {
             let device = Activity.remoteDeviceID(session.deviceID),
             device.caseInsensitiveCompare(ownDeviceID) != .orderedSame,
             session.isActive == true,
-            session.playState?.isPaused == false || (allowPaused && session.playState?.isPaused == true),
+            session.playState?.isPaused == false
+                || (allowPaused && session.playState?.isPaused == true),
             let current = session.nowPlayingItem, current.type == "Audio",
             let currentID = Activity.catalogID(current.id),
-            (selection == .currentSong || Activity.occurrenceID(session.playlistItemID) != nil),
+            selection == .currentSong || Activity.occurrenceID(session.playlistItemID) != nil,
             let position = Activity.seconds(session.playState?.positionTicks), position.isFinite,
             position <= Double(Int64.max / 600) - 1
         else {
@@ -910,13 +912,16 @@ struct FoundationRemoteContinuationOffer: Sendable {
             // Missing queue never means empty queue. This concrete selection keeps only
             // the current item; no other queue entries or source modes are inferred.
             let reported = Activity.occurrenceID(session.playlistItemID)
-            guard session.playlistItemID == nil || session.playlistItemID == "" || reported != nil else {
+            guard session.playlistItemID == nil || session.playlistItemID == "" || reported != nil
+            else {
                 throw FoundationHandoffError.invalid
             }
             let selected = reported ?? "song-" + currentID
-            let queue = [Occurrence(
-                itemID: currentID, sourceID: selected,
-                localID: Self.occurrenceID(selected, scope: scope, sessionID: sessionID))]
+            let queue = [
+                Occurrence(
+                    itemID: currentID, sourceID: selected,
+                    localID: Self.occurrenceID(selected, scope: scope, sessionID: sessionID))
+            ]
             var offer = Self(
                 scope: scope, sessionID: sessionID, deviceID: device,
                 client: Activity.text(session.client) ?? "Unknown player",

@@ -1440,7 +1440,8 @@
                     showMessage("This collection is too large. Choose a smaller collection.")
                     return
                 }
-                context.player.setQueue(shuffled ? ready.shuffled() : ready, selectedIndex: 0)
+                context.player.setQueue(
+                    shuffled ? ready.shuffled() : ready, selectedIndex: 0, collection: item)
                 showNowPlaying(context)
                 return
             }

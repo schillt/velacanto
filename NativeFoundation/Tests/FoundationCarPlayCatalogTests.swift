@@ -301,8 +301,25 @@ final class FoundationCarPlayCatalogTests: XCTestCase {
         for searching in [false, true] {
             let library = PrimaryCarPlayLibrary(songCount: 2, genreCount: 1)
             let model = FoundationPrimaryGenresModel(library: library)
+            func buildFinished() async -> Bool {
+                let build = model.buildCompletion
+                let finished = XCTestExpectation(description: "CarPlay genre census finished")
+                let observer = Task {
+                    await build?.value
+                    finished.fulfill()
+                }
+                guard await XCTWaiter.fulfillment(of: [finished], timeout: 5) == .completed else {
+                    model.cancel()
+                    observer.cancel()
+                    return false
+                }
+                return true
+            }
             model.start()
-            await model.buildCompletion?.value
+            guard await buildFinished() else {
+                XCTFail("Initial CarPlay genre census did not finish within 5 seconds")
+                return
+            }
             let genre = try XCTUnwrap(model.items(localOnly: false).first)
             let gate = PrimaryCarPlayGate()
             await library.holdNextRead(gate, searching: searching)
@@ -317,14 +334,40 @@ final class FoundationCarPlayCatalogTests: XCTestCase {
                         localOnly: false, primaryGenres: model)
                 }
             }
-            await gate.started()
+            guard await gate.started() else {
+                pending.cancel()
+                await gate.release()
+                XCTFail("CarPlay genre read did not enter the hold within 5 seconds")
+                return
+            }
             model.start()
-            await model.buildCompletion?.value
+            guard await buildFinished() else {
+                pending.cancel()
+                await gate.release()
+                XCTFail("Updated CarPlay genre census did not finish within 5 seconds")
+                return
+            }
             await gate.release()
-            do {
-                try await pending.value
+            let finished = XCTestExpectation(description: "late CarPlay genre request returned")
+            var outcome: Result<Void, Error>?
+            let observer = Task {
+                outcome = await pending.result
+                finished.fulfill()
+            }
+            guard await XCTWaiter.fulfillment(of: [finished], timeout: 5) == .completed else {
+                pending.cancel()
+                observer.cancel()
+                XCTFail("Late CarPlay genre request did not return within 5 seconds")
+                return
+            }
+            switch outcome {
+            case .some(.success):
                 XCTFail("A departed census published a late CarPlay result")
-            } catch { XCTAssertEqual(error as? FoundationLibraryError, .unavailable) }
+            case .some(.failure(let error)):
+                XCTAssertEqual(error as? FoundationLibraryError, .unavailable)
+            case nil:
+                XCTFail("Late CarPlay genre request returned without an outcome")
+            }
         }
     }
 
@@ -369,7 +412,8 @@ private actor PrimaryCarPlayLibrary: FoundationLibrary {
                         .init(
                             id: "genre-\(genre)",
                             title: String(format: "Synthetic Genre %03d", genre))
-                    ])
+                    ],
+                    content: .init(title: "Synthetic song-\($0)"))
             }, nextStartIndex: nil)
     }
     func primaryGenreSongs(ids: [String]) async throws -> [FoundationItem] {
@@ -418,19 +462,22 @@ private actor PrimaryCarPlayLibrary: FoundationLibrary {
 
 private actor PrimaryCarPlayGate {
     private var continuation: CheckedContinuation<Void, Never>?
-    private var startWaiter: CheckedContinuation<Void, Never>?
     private var didStart = false
+    private var released = false
     func wait() async {
         didStart = true
-        startWaiter?.resume()
-        startWaiter = nil
+        guard !released else { return }
         await withCheckedContinuation { continuation = $0 }
     }
-    func started() async {
-        if didStart { return }
-        await withCheckedContinuation { startWaiter = $0 }
+    func started() async -> Bool {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while !didStart && !Task.isCancelled && ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return didStart && !Task.isCancelled
     }
     func release() {
+        released = true
         continuation?.resume()
         continuation = nil
     }

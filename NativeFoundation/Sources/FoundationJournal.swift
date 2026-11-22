@@ -4,13 +4,24 @@
 
     /// Internal diagnostics. Callers supply categories and ephemeral IDs only.
     final class FoundationJournal: @unchecked Sendable {
-        static let shared = FoundationJournal()
+        #if FOUNDATION_ISOLATED_TEST_HOST
+            static let shared = FoundationJournal(permanentlyDisabled: true)
+        #else
+            static let shared = FoundationJournal()
+        #endif
         private let lock = NSLock()
+        private let permanentlyDisabled: Bool
         private let maximumBytes = 1_048_576
         private let file: URL
         private var enabled = true
 
-        init(file: URL? = nil) {
+        init(file: URL? = nil, permanentlyDisabled: Bool = false) {
+            self.permanentlyDisabled = permanentlyDisabled
+            if permanentlyDisabled {
+                self.file = FileManager.default.temporaryDirectory
+                self.enabled = false
+                return
+            }
             let directory =
                 FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
                 .first ?? FileManager.default.temporaryDirectory
@@ -28,13 +39,13 @@
         func setEnabled(_ enabled: Bool) {
             lock.lock()
             defer { lock.unlock() }
-            self.enabled = enabled
+            self.enabled = enabled && !permanentlyDisabled
         }
 
         func record(_ event: String) {
             lock.lock()
             defer { lock.unlock() }
-            guard enabled else { return }
+            guard enabled, !permanentlyDisabled else { return }
             let line =
                 "time=\(Date().timeIntervalSince1970) \(event.replacingOccurrences(of: "\n", with: " "))\n"
             guard let data = line.data(using: .utf8), data.count < maximumBytes else { return }
@@ -65,12 +76,14 @@
         func snapshot() -> String {
             lock.lock()
             defer { lock.unlock() }
+            guard !permanentlyDisabled else { return "" }
             return (try? String(contentsOf: file, encoding: .utf8)) ?? ""
         }
 
         func clear() {
             lock.lock()
             defer { lock.unlock() }
+            guard !permanentlyDisabled else { return }
             try? FileManager.default.removeItem(at: file)
         }
     }

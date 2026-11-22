@@ -27,17 +27,21 @@ final class FoundationLyricsTests: XCTestCase {
             )
         }
         let model = FoundationLyricsModel()
+        let firstEntry = expectation(description: "initial lyrics request entered")
+        await probe.acknowledgeNextEntry(firstEntry)
         let task = Task { await model.load(item: item, library: library) { true } }
-        while !(await probe.waiting) { await Task.yield() }
+        guard await waitForHeldLyrics(firstEntry, probe: probe, task: task) else { return }
         model.suspendForOffline()
         await probe.finish()
-        await task.value
+        guard await waitForLyricsTask(task, probe: probe) else { return }
         XCTAssertEqual(model.state, .idle)
         XCTAssertTrue(model.isActive)
+        let reloadEntry = expectation(description: "reloaded lyrics request entered")
+        await probe.acknowledgeNextEntry(reloadEntry)
         let reload = Task { await model.load(item: item, library: library) { true } }
-        while !(await probe.waiting) { await Task.yield() }
+        guard await waitForHeldLyrics(reloadEntry, probe: probe, task: reload) else { return }
         await probe.finish()
-        await reload.value
+        guard await waitForLyricsTask(reload, probe: probe) else { return }
         XCTAssertEqual(model.state, .loaded(.init(text: "Available")))
         model.suspendForOffline()
         XCTAssertEqual(model.state, .loaded(.init(text: "Available")))
@@ -251,8 +255,10 @@ final class FoundationLyricsTests: XCTestCase {
             }
             let model = FoundationLyricsModel()
             var current = true
+            let entered = expectation(description: "obsolete lyrics request entered")
+            await probe.acknowledgeNextEntry(entered)
             let task = Task { await model.load(item: item, library: library) { current } }
-            while !(await probe.waiting) { await Task.yield() }
+            guard await waitForHeldLyrics(entered, probe: probe, task: task) else { return }
             if dismissed {
                 model.cancel()
                 task.cancel()
@@ -260,7 +266,7 @@ final class FoundationLyricsTests: XCTestCase {
                 current = false
             }
             await probe.finish()
-            await task.value
+            guard await waitForLyricsTask(task, probe: probe) else { return }
             XCTAssertNotEqual(model.state, .loaded(FoundationLyrics(text: "Obsolete")))
         }
     }
@@ -275,15 +281,22 @@ final class FoundationLyricsTests: XCTestCase {
             )
         }
         let model = FoundationLyricsModel()
+        let entered = expectation(description: "coalesced lyrics request entered")
+        await probe.acknowledgeNextEntry(entered)
         let task = Task { await model.load(item: item, library: library) { true } }
-        while !(await probe.waiting) { await Task.yield() }
-        await model.load(item: item, library: library) { true }
+        guard await waitForHeldLyrics(entered, probe: probe, task: task) else { return }
+        let coalesced = Task { await model.load(item: item, library: library) { true } }
+        guard await waitForLyricsTask(coalesced, probe: probe) else {
+            model.cancel()
+            task.cancel()
+            return
+        }
         let count = await probe.count
         XCTAssertEqual(count, 1)
         model.cancel()
         task.cancel()
         await probe.finish()
-        await task.value
+        guard await waitForLyricsTask(task, probe: probe) else { return }
         XCTAssertEqual(model.state, .idle)
     }
 
@@ -469,18 +482,90 @@ final class FoundationLyricsTests: XCTestCase {
         HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!
     }
 
+    func testMissingLyricsEntryTimesOutAndDrainsHeldAndLateWork() async {
+        let probe = Probe()
+        let entered = expectation(description: "deliberately missing lyrics entry")
+        await probe.acknowledgeNextEntry(entered)
+        let task = Task { await probe.wait(announce: false) }
+        let result = await XCTWaiter.fulfillment(of: [entered], timeout: 0.1)
+        XCTAssertEqual(result, .timedOut, "Missing lyrics entry must time out")
+        let held = await probe.waiting
+        XCTAssertTrue(held, "Timeout must exercise a held lyrics request")
+        task.cancel()
+        await probe.cancel()
+        guard await waitForLyricsTask(task, probe: probe) else { return }
+        let stillHeld = await probe.waiting
+        XCTAssertFalse(stillHeld, "Timeout cleanup must drain the lyrics request")
+        await probe.wait()
+        let lateHeld = await probe.waiting
+        XCTAssertFalse(lateHeld, "A request starting after cleanup must not become stranded")
+    }
+
+    private func waitForLyricsTask(_ task: Task<Void, Never>, probe: Probe) async -> Bool {
+        let finished = XCTestExpectation(description: "lyrics task returned")
+        let observer = Task {
+            await task.value
+            finished.fulfill()
+        }
+        guard await XCTWaiter.fulfillment(of: [finished], timeout: 5) == .completed else {
+            task.cancel()
+            await probe.cancel()
+            observer.cancel()
+            XCTFail("Lyrics task did not return within 5 seconds")
+            return false
+        }
+        return true
+    }
+
+    private func waitForHeldLyrics(
+        _ entered: XCTestExpectation, probe: Probe, task: Task<Void, Never>
+    ) async -> Bool {
+        let result = await XCTWaiter.fulfillment(of: [entered], timeout: 5)
+        guard result == .completed else {
+            XCTFail("Timed out waiting for \(entered.expectationDescription)")
+            task.cancel()
+            await probe.cancel()
+            _ = await waitForLyricsTask(task, probe: probe)
+            return false
+        }
+        return true
+    }
+
     private actor Probe {
         var count = 0
-        var waiting: Bool { continuation != nil }
-        private var continuation: CheckedContinuation<Void, Never>?
+        var waiting: Bool { !continuations.isEmpty }
+        private var continuations: [CheckedContinuation<Void, Never>] = []
+        private var entry: XCTestExpectation?
+        private var closed = false
+
         func increment() -> Int {
             count += 1
             return count
         }
-        func wait() async { await withCheckedContinuation { continuation = $0 } }
+
+        func acknowledgeNextEntry(_ expectation: XCTestExpectation) {
+            entry = expectation
+        }
+
+        func wait(announce: Bool = true) async {
+            guard !closed else { return }
+            await withCheckedContinuation { continuation in
+                self.continuations.append(continuation)
+                if announce { entry?.fulfill() }
+                entry = nil
+            }
+        }
+
         func finish() {
-            continuation?.resume()
-            continuation = nil
+            let held = continuations
+            continuations.removeAll()
+            for continuation in held { continuation.resume() }
+        }
+
+        func cancel() {
+            closed = true
+            entry = nil
+            finish()
         }
     }
 }

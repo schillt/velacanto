@@ -14,10 +14,13 @@ struct FoundationComposedSongsView<NativeIndex: View>: View {
     let isActive: Bool
     let openLocalLibrary: () -> Void
     let isCurrent: @MainActor (FoundationComposedCatalogModel.Context) -> Bool
+    let searchCoverageMessage: String?
+    let returnToSearch: (() -> Void)?
     @ViewBuilder let nativeIndex: (Bool, Bool) -> NativeIndex
     @State private var model: FoundationComposedCatalogModel?
     @State private var ownerID = UUID()
     @State private var failed = false
+    @State private var pendingSearchSeed: FoundationCatalogSearchSeed?
     // User choice belongs to this mounted query owner; folder/route updates do not reseed it.
     @State private var sourceFilter: FoundationComposedCatalogModel.Filter
 
@@ -26,6 +29,8 @@ struct FoundationComposedSongsView<NativeIndex: View>: View {
         isActive: Bool, initialFilter: FoundationComposedCatalogModel.Filter,
         openLocalLibrary: @escaping () -> Void,
         isCurrent: @escaping @MainActor (FoundationComposedCatalogModel.Context) -> Bool,
+        initialSearchSeed: FoundationCatalogSearchSeed? = nil,
+        searchCoverageMessage: String? = nil, returnToSearch: (() -> Void)? = nil,
         @ViewBuilder nativeIndex: @escaping (Bool, Bool) -> NativeIndex
     ) {
         self.query = query
@@ -34,6 +39,9 @@ struct FoundationComposedSongsView<NativeIndex: View>: View {
         self.isActive = isActive
         self.openLocalLibrary = openLocalLibrary
         self.isCurrent = isCurrent
+        self.searchCoverageMessage = searchCoverageMessage
+        self.returnToSearch = returnToSearch
+        _pendingSearchSeed = State(initialValue: initialSearchSeed)
         self.nativeIndex = nativeIndex
         _sourceFilter = State(initialValue: initialFilter)
     }
@@ -56,6 +64,7 @@ struct FoundationComposedSongsView<NativeIndex: View>: View {
                 FoundationComposedCatalogView(
                     model: model, library: library, player: player, isActive: isActive,
                     openLocalLibrary: openLocalLibrary, selectionChanged: { sourceFilter = $0 },
+                    searchCoverageMessage: searchCoverageMessage, returnToSearch: returnToSearch,
                     nativeIndex: nativeIndex)
             } else if localLibrary == nil || !(library is FoundationJellyfinLibrary) {
                 // Unsupported adapter/fixture environments retain their functioning index.
@@ -79,17 +88,26 @@ struct FoundationComposedSongsView<NativeIndex: View>: View {
             let connectivity = connectivity
             let downloads = downloads
             let currentQuery = query
+            let seed = pendingSearchSeed
+            pendingSearchSeed = nil
             do {
                 let next = try FoundationComposedCatalogModel(
                     ownerID: ownerID, query: query,
                     jellyfin: jellyfin, localLibrary: localLibrary,
-                    actions: actions,
+                    actions: actions, initialSearchSeed: seed,
                     allowsNetwork: { !connectivity.localOnly },
                     offlineJellyfinItems: {
                         switch currentQuery {
                         case .songs: downloads.downloadedSongs
                         case .search(let text, let kind):
                             downloads.localSearchItems(query: text, kind: kind)
+                        }
+                    },
+                    offlineReadyTracks: { downloads.downloadedSongs },
+                    offlineSearch: { text, kind, limit in
+                        await MainActor.run {
+                            downloads.localSearch(
+                                query: text, kind: kind, startIndex: 0, limit: limit)
                         }
                     },
                     isCurrent: { context in
@@ -121,13 +139,19 @@ struct FoundationComposedCatalogView<NativeIndex: View>: View {
     let isActive: Bool
     let openLocalLibrary: () -> Void
     let selectionChanged: (FoundationComposedCatalogModel.Filter) -> Void
+    var searchCoverageMessage: String? = nil
+    var returnToSearch: (() -> Void)? = nil
     @ViewBuilder let nativeIndex: (Bool, Bool) -> NativeIndex
+    @Environment(\.scenePhase) private var scenePhase
     @EnvironmentObject private var actions: FoundationLibraryActions
     @EnvironmentObject private var downloads: FoundationDownloads
     @EnvironmentObject private var connectivity: FoundationConnectivity
     @State private var lifetime = FoundationComposedCatalogLifetime()
     @State private var openedItem: FoundationItem?
     @State private var collectionOwner = UUID()
+    @State private var jellyfinPageDemand = FoundationCatalogPageDemand()
+    @State private var localPageDemand = FoundationCatalogPageDemand()
+    @State private var processedDownloadRevision: DownloadRevision?
 
     private struct Activation: Equatable {
         let owner: ObjectIdentifier
@@ -135,8 +159,18 @@ struct FoundationComposedCatalogView<NativeIndex: View>: View {
         let isActive: Bool
     }
 
+    private struct DownloadRevision: Equatable {
+        let model: ObjectIdentifier
+        let downloads: ObjectIdentifier
+        let actions: ObjectIdentifier
+        let ready: UInt
+        let catalog: UInt
+        let trackVisibility: Int
+    }
+
+    private var composedIsActive: Bool { isActive && model.filter != .jellyfin }
+
     var body: some View {
-        let composedIsActive = isActive && model.filter != .jellyfin
         VStack(spacing: 0) {
             Picker(
                 "Sources",
@@ -169,8 +203,26 @@ struct FoundationComposedCatalogView<NativeIndex: View>: View {
         .onChange(of: model.localPresentationRevision, initial: true) { _, _ in
             model.synchronizeLocalRevision()
         }
-        .onReceive(downloads.$verifiedReadyRevision.removeDuplicates()) { _ in
-            model.refreshOfflineJellyfin()
+        .onReceive(
+            Publishers.Merge3(
+                downloads.$verifiedReadyRevision.map { _ in () },
+                downloads.$offlineTrackCatalogRevision.map { _ in () },
+                actions.$trackVisibilityRevision.map { _ in () }
+            )
+        ) { _ in
+            // @Published emits before its transaction finishes. Coalesce same-turn
+            // readiness/owner changes and read only the current scoped owners.
+            Task { @MainActor in
+                let revision = DownloadRevision(
+                    model: ObjectIdentifier(model), downloads: ObjectIdentifier(downloads),
+                    actions: ObjectIdentifier(actions),
+                    ready: downloads.verifiedReadyRevision,
+                    catalog: downloads.offlineTrackCatalogRevision,
+                    trackVisibility: actions.trackVisibilityRevision)
+                guard processedDownloadRevision != revision else { return }
+                processedDownloadRevision = revision
+                model.refreshOfflineJellyfin()
+            }
         }
         .onDisappear {
             lifetime.end()
@@ -204,6 +256,21 @@ struct FoundationComposedCatalogView<NativeIndex: View>: View {
 
     private var composedList: some View {
         List {
+            if let searchCoverageMessage = FoundationSearchResolver.continuationCoverageMessage(
+                searchCoverageMessage, hasFallback: model.hasSearchFallback)
+            {
+                Section {
+                    Text(searchCoverageMessage).font(.caption).foregroundStyle(.secondary)
+                    if let returnToSearch { Button("Return to Search", action: returnToSearch) }
+                }
+            } else if model.searchRelatedCoverageIncomplete {
+                Section {
+                    Text(
+                        "Some close or related matches may be missing. Return to Search and narrow or adjust the query to reload them."
+                    ).font(.caption).foregroundStyle(.secondary)
+                    if let returnToSearch { Button("Return to Search", action: returnToSearch) }
+                }
+            }
             if model.filter != .jellyfin {
                 Section("Local Files") {
                     if model.localIsUpdating { ProgressView("Updating local library…") }
@@ -244,16 +311,46 @@ struct FoundationComposedCatalogView<NativeIndex: View>: View {
                     sourceStatus(section)
                     if section.failed {
                         Button("Retry \(section.title)") { model.retry(section.id.kind) }
-                    } else if section.hasMore, section.state != .loading {
-                        Button("Load More") { model.loadNext(section.id.kind) }
-                            .accessibilityLabel("Load more \(section.title) results")
+                    } else if section.hasMore {
+                        FoundationPaginationFooter(
+                            demand: pageDemand(for: section.id.kind),
+                            isLoading: section.state == .loading,
+                            isEnabled: composedIsActive && scenePhase == .active
+                                && (section.id.kind == .local || !connectivity.localOnly),
+                            hasError: section.failed, showsScrollHint: section.rows.isEmpty
+                        ) {
+                            guard
+                                let current = model.sections.first(where: { $0.id == section.id }),
+                                current.hasMore, !current.failed, current.state != .loading
+                            else { return }
+                            await model.loadNext(section.id.kind)?.value
+                        }
+                        .id(section.id)
+                        .id(model.context.ownerID)
                     }
                 }
+            }
+        }
+        .onScrollPhaseChange { _, phase in
+            for section in model.sections where section.hasMore {
+                var demand = pageDemand(for: section.id.kind).wrappedValue
+                demand.scrollPhaseChanged(
+                    to: phase, footerVisible: demand.footerVisible,
+                    active: composedIsActive && scenePhase == .active,
+                    allowsNetwork: section.id.kind == .local || !connectivity.localOnly,
+                    isLoading: section.state == .loading, hasError: section.failed)
+                pageDemand(for: section.id.kind).wrappedValue = demand
             }
         }
         .foundationBottomChromeListClearance()
         .foundationCatalogHeader(title)
         .refreshable { await model.refresh() }
+    }
+
+    private func pageDemand(for kind: FoundationCatalogSource.Kind)
+        -> Binding<FoundationCatalogPageDemand>
+    {
+        kind == .local ? $localPageDemand : $jellyfinPageDemand
     }
 
     private var visibleJellyfinItems: [FoundationItem] {
@@ -290,6 +387,10 @@ struct FoundationComposedCatalogView<NativeIndex: View>: View {
                 }
             }, player: player, showsTrackArtwork: true,
             navigate: { if canPerform(.catalogPresence) { openedItem = $0 } },
+            subtitleOverride: {
+                guard case .search(let text, _) = model.context.query else { return nil }
+                return FoundationSearchResolver.explainedSubtitle(nil, item: item, query: text)
+            }(),
             canPerform: canPerform
         )
         .foundationLibraryListRow()
@@ -334,7 +435,13 @@ struct FoundationComposedCatalogView<NativeIndex: View>: View {
         }
         switch section.state {
         case .loading: ProgressView("Loading \(section.title)…")
-        case .empty: Text("No matching items.").foregroundStyle(.secondary)
+        case .empty:
+            Text(
+                section.hasMore
+                    ? "No matches in the items checked. Scroll to continue browsing."
+                    : "No matching items."
+            )
+            .foregroundStyle(.secondary)
         case .partial:
             Text("Some results may be missing or out of date.").foregroundStyle(.secondary)
         case .unavailable:

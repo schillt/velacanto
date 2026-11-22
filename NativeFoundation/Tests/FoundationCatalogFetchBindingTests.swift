@@ -59,26 +59,51 @@ final class FoundationCatalogFetchBindingTests: XCTestCase {
             root: root, folder: folder, storage: storage, source: source, id: id,
             recorder: recorder)
     }
+    private enum HeldTransportFailure: Error {
+        case entryTimedOut
+        case completionTimedOut
+    }
+
     private actor HeldTransport {
-        var started = false
-        var startWaiter: CheckedContinuation<Void, Never>?
-        var finishWaiters: [CheckedContinuation<Void, Never>] = []
+        private var started = false
+        private var released = false
+        private var finishWaiters: [CheckedContinuation<Void, Never>] = []
         func hold() async {
-            await withCheckedContinuation { continuation in
-                finishWaiters.append(continuation)
-                started = true
-                startWaiter?.resume()
-                startWaiter = nil
-            }
+            started = true
+            guard !released else { return }
+            await withCheckedContinuation { finishWaiters.append($0) }
         }
-        func waitForStart() async {
-            if started { return }
-            await withCheckedContinuation { startWaiter = $0 }
+        func waitForStart() async -> Bool {
+            let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+            while !started && !Task.isCancelled && ContinuousClock.now < deadline {
+                try? await Task.sleep(for: .milliseconds(10))
+            }
+            return started && !Task.isCancelled
         }
         func release() {
+            released = true
             for waiter in finishWaiters { waiter.resume() }
             finishWaiters.removeAll()
         }
+    }
+
+    private func requireHeldCompletion(
+        _ task: Task<Void, Error>, gate: HeldTransport
+    ) async throws {
+        let finished = XCTestExpectation(description: "held catalog binding returned")
+        var outcome: Result<Void, Error>?
+        let observer = Task {
+            outcome = await task.result
+            finished.fulfill()
+        }
+        guard await XCTWaiter.fulfillment(of: [finished], timeout: 5) == .completed else {
+            task.cancel()
+            await gate.release()
+            observer.cancel()
+            throw HeldTransportFailure.completionTimedOut
+        }
+        guard let outcome else { throw HeldTransportFailure.completionTimedOut }
+        try outcome.get()
     }
 
     func testConcreteHeldJellyfinDoesNotBlockPersistedLocalCacheOrStartIndexing() async throws {
@@ -96,8 +121,18 @@ final class FoundationCatalogFetchBindingTests: XCTestCase {
             query: .songs, jellyfin: library,
             local: fixture.source, localID: fixture.id)
         let pending = Task { try await binding.loadJellyfin() }
-        await gate.waitForStart()
-        try await binding.loadLocal()
+        guard await gate.waitForStart() else {
+            pending.cancel()
+            await gate.release()
+            throw HeldTransportFailure.entryTimedOut
+        }
+        do {
+            try await binding.loadLocal()
+        } catch {
+            pending.cancel()
+            await gate.release()
+            throw error
+        }
         let interim = await binding.snapshots()
         XCTAssertEqual(interim.map(\.state), [.loading, .ready])
         XCTAssertEqual(interim[1].items.count, 1)
@@ -105,7 +140,7 @@ final class FoundationCatalogFetchBindingTests: XCTestCase {
         let scans = await fixture.recorder.scans
         XCTAssertEqual(scans, 1, "Cached browsing must never acquire folder access or start a scan")
         await gate.release()
-        try await pending.value
+        try await requireHeldCompletion(pending, gate: gate)
         let completed = await binding.snapshots()
         XCTAssertEqual(completed.map(\.state), [.ready, .ready])
         let requests = await recorder.requests
@@ -141,6 +176,49 @@ final class FoundationCatalogFetchBindingTests: XCTestCase {
             URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems)
         XCTAssertEqual(query.first { $0.name.lowercased() == "searchterm" }?.value, "cafe")
         XCTAssertEqual(query.first { $0.name.lowercased() == "parentid" }?.value, selectedID)
+    }
+
+    func testSearchSeedRequiresExactQueryAndScopeAndRejectedSeedAllowsFreshRetry() async throws {
+        let recorder = Recorder()
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            await recorder.append(request)
+            return (Self.page, Self.response(request))
+        }
+        let item = FoundationItem(
+            id: remoteID, title: "Synthetic", subtitle: "", kind: .track, duration: nil)
+        let seed = FoundationCatalogSearchSeed(
+            query: "garden", metadataScope: library.metadataScopeID,
+            page: .init(items: [item], nextStartIndex: nil), supplementalIDs: [remoteID])
+        let binding = try FoundationCatalogFetchBinding(
+            query: .search(text: "garden", kind: .track), jellyfin: library,
+            local: nil, localID: nil, searchSeed: seed)
+        try await binding.loadJellyfin()
+        let snapshots = await binding.snapshots()
+        let requests = await recorder.requests
+        XCTAssertEqual(snapshots.first?.items.map(\.id), [remoteID])
+        XCTAssertTrue(requests.isEmpty)
+
+        let rejected = try FoundationCatalogFetchBinding(
+            query: .search(text: "other", kind: .track), jellyfin: library,
+            local: nil, localID: nil, searchSeed: seed)
+        do {
+            try await rejected.loadJellyfin()
+            XCTFail("A seed from another query must not publish")
+        } catch FoundationCatalogComposition.Failure.stale {}
+        try await rejected.loadJellyfin()
+        let afterRetry = await recorder.requests
+        XCTAssertEqual(afterRetry.count, 1)
+
+        let otherScope = library.scoped(to: "00000000000000000000000000000011")
+        let rejectedScope = try FoundationCatalogFetchBinding(
+            query: .search(text: "garden", kind: .track), jellyfin: otherScope,
+            local: nil, localID: nil, searchSeed: seed)
+        do {
+            try await rejectedScope.loadJellyfin()
+            XCTFail("A seed from another catalog scope must not publish")
+        } catch FoundationCatalogComposition.Failure.stale {}
+        let scopedSnapshots = await rejectedScope.snapshots()
+        XCTAssertTrue(scopedSnapshots.first?.items.isEmpty == true)
     }
 
     func testReselectedFolderRetiresPriorLocalRecordsAndRouteBeforePublication() async throws {
@@ -200,12 +278,23 @@ final class FoundationCatalogFetchBindingTests: XCTestCase {
             local: fixture.source, localID: fixture.id)
         try await binding.loadLocal()
         let pending = Task { try await binding.loadJellyfin() }
-        await gate.waitForStart()
-        let remote = try FoundationCatalogSource.jellyfin(scope: library.catalogAccountIdentity)
+        guard await gate.waitForStart() else {
+            pending.cancel()
+            await gate.release()
+            throw HeldTransportFailure.entryTimedOut
+        }
+        let remote: FoundationCatalogSource
+        do {
+            remote = try FoundationCatalogSource.jellyfin(scope: library.catalogAccountIdentity)
+        } catch {
+            pending.cancel()
+            await gate.release()
+            throw error
+        }
         await binding.retire(remote)
         await gate.release()
         do {
-            try await pending.value
+            try await requireHeldCompletion(pending, gate: gate)
             XCTFail("Late retired server page published")
         } catch FoundationCatalogComposition.Failure.stale {}
         let snapshots = await binding.snapshots()

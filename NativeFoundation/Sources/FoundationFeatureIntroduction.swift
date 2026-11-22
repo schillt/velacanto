@@ -208,8 +208,11 @@ struct FoundationFeatureIntroductionView: View {
     private func highlightPage(_ feature: FoundationIntroductionFeature) -> some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
-                Text("VelaCanto \(feature.release)").font(.caption.weight(.semibold))
-                    .textCase(.uppercase).tracking(1).foregroundStyle(.secondary)
+                Text(
+                    "VelaCanto \(FoundationIntroductionHistory.marketingVersion ?? feature.release)"
+                )
+                .font(.caption.weight(.semibold))
+                .textCase(.uppercase).tracking(1).foregroundStyle(.secondary)
                 FoundationFeatureIllustration(feature: feature)
                     .frame(height: 250)
                     .accessibilityHidden(true)

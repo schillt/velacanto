@@ -1,5 +1,25 @@
 import Foundation
 
+/// An overview snapshot is reusable only for its exact query and account/catalog scope.
+struct FoundationCatalogSearchSeed: Sendable {
+    let query: String
+    let metadataScope: String
+    let page: FoundationPage
+    let supplementalIDs: Set<String>
+    let fallbackCursor: FoundationSearchResolver.FallbackCursor?
+
+    init(
+        query: String, metadataScope: String, page: FoundationPage,
+        supplementalIDs: Set<String>, fallbackCursor: FoundationSearchResolver.FallbackCursor? = nil
+    ) {
+        self.query = query
+        self.metadataScope = metadataScope
+        self.page = page
+        self.supplementalIDs = supplementalIDs
+        self.fallbackCursor = fallbackCursor
+    }
+}
+
 /// One binding is one immutable browse/search result set. It cannot reuse cursors
 /// for a changed query, account, music-library selection or local index snapshot.
 enum FoundationCatalogQuery: Equatable, Sendable {
@@ -39,10 +59,14 @@ actor FoundationCatalogFetchBinding {
     private let composition: FoundationCatalogComposition
     private var localSnapshot: FoundationLocalCatalog?
     private var retired: Set<FoundationCatalogSource> = []
+    private var searchSeed: FoundationCatalogSearchSeed?
+    private let refreshSearchRelations: Bool
 
     init(
         query: FoundationCatalogQuery, jellyfin: FoundationJellyfinLibrary?,
-        local: FoundationLocalSource?, localID: UUID?
+        local: FoundationLocalSource?, localID: UUID?,
+        searchSeed: FoundationCatalogSearchSeed? = nil,
+        refreshSearchRelations: Bool = false
     ) throws {
         guard (local == nil) == (localID == nil) else {
             throw FoundationCatalogComposition.Failure.invalidSource
@@ -51,6 +75,8 @@ actor FoundationCatalogFetchBinding {
         self.jellyfin = jellyfin
         self.local = local
         self.localID = localID
+        self.searchSeed = searchSeed
+        self.refreshSearchRelations = refreshSearchRelations
         jellyfinSource = try jellyfin.map {
             try FoundationCatalogSource.jellyfin(scope: $0.catalogAccountIdentity)
         }
@@ -77,7 +103,66 @@ actor FoundationCatalogFetchBinding {
         guard let source = jellyfinSource, let jellyfin, !retired.contains(source) else {
             throw FoundationCatalogComposition.Failure.unavailable
         }
+        if let seed = searchSeed {
+            // Attempt once: a rejected or cancelled seed cannot prevent an explicit fresh Retry.
+            searchSeed = nil
+            guard case .search(let text, .track) = query, text == seed.query,
+                jellyfin.metadataScopeID == seed.metadataScope
+            else { throw FoundationCatalogComposition.Failure.stale }
+            try await composition.seedSearch(
+                source, page: seed.page, supplementalIDs: seed.supplementalIDs,
+                fallbackCursor: seed.fallbackCursor)
+            try Task.checkCancellation()
+            guard !retired.contains(source) else {
+                throw FoundationCatalogComposition.Failure.stale
+            }
+            return
+        }
         let query = query
+        let snapshot = await composition.snapshots().first { $0.source == source }
+        if refreshSearchRelations, case .search(let text, .track) = query,
+            snapshot?.state == .idle,
+            snapshot?.nextStartIndex == 0
+        {
+            let fresh = try await FoundationSearchResolver(library: jellyfin)
+                .resolveCategory(query: text, kind: .track)
+            try Task.checkCancellation()
+            guard !retired.contains(source) else {
+                throw FoundationCatalogComposition.Failure.stale
+            }
+            let supplemental = Set(fresh.page.items.map(\.id))
+                .subtracting(fresh.direct.originalIDs)
+            try await composition.seedSearch(
+                source, page: fresh.page, supplementalIDs: supplemental,
+                fallbackCursor: fresh.direct.fallbackCursor, incompleteCoverage: fresh.incomplete)
+            try Task.checkCancellation()
+            guard !retired.contains(source) else {
+                throw FoundationCatalogComposition.Failure.stale
+            }
+            return
+        }
+        if (snapshot?.seedOverflowCount ?? 0) > 0 {
+            try await composition.loadSeedOverflow(source)
+            try Task.checkCancellation()
+            guard !retired.contains(source) else {
+                throw FoundationCatalogComposition.Failure.stale
+            }
+            return
+        }
+        if case .search(let text, .track) = query,
+            snapshot?.nextStartIndex == nil, let fallback = snapshot?.fallbackCursor
+        {
+            try await composition.loadSearchFallback(source, query: text) { cursor in
+                let page = try await jellyfin.search(
+                    query: fallback.term, kind: .track, startIndex: cursor, limit: 50)
+                return .init(page: page)
+            }
+            try Task.checkCancellation()
+            guard !retired.contains(source) else {
+                throw FoundationCatalogComposition.Failure.stale
+            }
+            return
+        }
         try await composition.load(source) { cursor in
             let page: FoundationPage
             switch query {

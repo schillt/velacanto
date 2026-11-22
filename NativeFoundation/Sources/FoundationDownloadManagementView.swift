@@ -151,7 +151,11 @@ struct FoundationDownloadManagementView: View {
                     .disabled(!hasSelection || removingAll)
             }
             Button("Remove All Downloads", role: .destructive) { confirmingAll = true }
-                .disabled(removingAll || (downloads.owners.isEmpty && downloads.storageBytes == 0))
+                .disabled(
+                    removingAll
+                        || (downloads.owners.isEmpty && downloads.storageBytes == 0
+                            && !downloads.hasPendingNativeCleanup)
+                )
         } footer: {
             Text(
                 "Removal affects only this device. Your server library, playlists and favorites stay unchanged. Files in use are deleted after playback releases them."

@@ -287,6 +287,11 @@ actor FoundationCatalogPageCache {
         await FoundationPageDirectoryOwner.shared.clear(root: root ?? defaultRoot, retaining: scope)
     }
 
+    nonisolated static func clearStoredScope(_ scope: String, root: URL? = nil) async -> Bool {
+        let base = root ?? defaultRoot
+        return await FoundationPageDirectoryOwner.shared.clearScope(root: base, scope: scope)
+    }
+
     /// Physical bytes for this account's disposable page files; never creates or trims storage.
     func storageBytes() async -> Int64? {
         await registration.value
@@ -377,6 +382,14 @@ private actor FoundationPageDirectoryOwner {
             try FileManager.default.removeItem(at: directory)
             return true
         } catch { return false }
+    }
+
+    func clearScope(root: URL, scope: String) -> Bool {
+        let directory = root.appendingPathComponent(scope, isDirectory: true)
+        guard leases[directory.resolvingSymlinksInPath().standardizedFileURL.path] == nil else {
+            return false
+        }
+        return FoundationScopedAccountRemoval.remove(root: root, scope: scope)
     }
 
     func clear(root: URL, retaining scope: String?) -> Bool {

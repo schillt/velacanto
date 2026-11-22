@@ -1,10 +1,34 @@
 # Sign-out privacy — issue #30
 
-**Status:** Open. Velacanto sends one authenticated `POST /Sessions/Logout` with the
-current token in the Authorization header, then clears its local Keychain session
-without waiting for the server. The request path contains no token; the focused
-client test checks this. A successful response means Jellyfin accepted the request,
-not that old-token rejection or every log destination has been verified.
+**Status:** Open. When attempted, server sign-out uses a bounded authenticated
+`POST /Sessions/Logout` with the current token in the Authorization header and no
+token in the request path. A focused client test checks the request shape. A
+successful response means Jellyfin accepted that request, not that old-token
+rejection or every log sink has been verified. Local cleanup and the server
+outcome are separate results.
+
+## Current source ordering
+
+The standard app with the system credential backend uses a durable transaction.
+It first attempts to verify the active account and record a sign-out intent. It
+then retires scoped work and completes the required local cleanup before recording
+cleanup completion, clearing the matching Keychain credential and removing the
+intent. Only after that local transaction completes does it start a bounded server
+logout attempt using the session captured in memory. The server result is reported separately when the
+account context still matches. An interrupted process or a failure before the
+attempt can leave server revocation unconfirmed; successful local cleanup does not
+guarantee that a logout request reached the server or that an old token is invalid.
+
+The legacy path, used when the durable transaction is not configured, starts a
+server revocation task before attempting local Keychain deletion; it does not wait
+for the server result before clearing local credentials. Starting the task does not
+prove the request reached the server before deletion. If Keychain deletion fails,
+the active account and pins are retained, but the already-started server attempt
+may still succeed. Cleanup or credential failures can leave local sign-out
+incomplete. A server failure leaves revocation unconfirmed; it does not by itself
+establish whether local cleanup succeeded. See
+[`FoundationApp.swift`](../NativeFoundation/Sources/FoundationApp.swift) and
+[`FoundationCredentials.swift`](../NativeFoundation/Sources/FoundationCredentials.swift).
 
 ## Server log observation and source boundary
 
@@ -44,7 +68,15 @@ synthetic test session before relying on it. Jellyfin's
 distinguishes runtime reload of an existing file from a newly created file that
 needs a server restart. No server setting was changed for this note.
 
-Issue #30 remains open for a controlled old-token rejection check, deployed-server
-version and log-sink review, offline sign-out validation, and broader signed-build
-Keychain acceptance. Keep client request safety, server acceptance, and server
-log safety as separate results.
+Accepted #179 evidence covers the recorded local online/server-unreachable sign-out
+and relaunch scope on Mac 317 and iPhone 316, including its pin-cleanup limits;
+#219 separately covers the accepted reauthentication data-preservation repair on
+316 with its stated limits. These results do not establish direct OS Keychain
+deletion, a second-account/fault/migration matrix, forced OS callback timing,
+old-token rejection or deployed-server log privacy.
+
+Issue #30 remains open for a controlled old-token rejection check, the deployed
+server's effective version and relevant log sinks, access and retention, and
+broader exact-signed-build Keychain acceptance. Keep local cleanup, client request
+safety, server acceptance, old-token rejection and server log safety as separate
+results. This source-ordering correction adds no new runtime or server evidence.

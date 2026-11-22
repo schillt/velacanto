@@ -198,25 +198,26 @@ final class FoundationLocalSourceTests: XCTestCase {
     }
 
     private actor HeldScan {
-        var started = false
-        var startWaiter: CheckedContinuation<Void, Never>?
-        var finishWaiter: CheckedContinuation<Void, Never>?
+        private var started = false
+        private var released = false
+        private var finishWaiter: CheckedContinuation<Void, Never>?
 
         func run() async {
-            await withCheckedContinuation { continuation in
-                finishWaiter = continuation
-                started = true
-                startWaiter?.resume()
-                startWaiter = nil
-            }
+            started = true
+            guard !released else { return }
+            await withCheckedContinuation { finishWaiter = $0 }
         }
 
-        func waitForStart() async {
-            if started { return }
-            await withCheckedContinuation { startWaiter = $0 }
+        func waitForStart() async -> Bool {
+            let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+            while !started && !Task.isCancelled && ContinuousClock.now < deadline {
+                try? await Task.sleep(for: .milliseconds(10))
+            }
+            return started && !Task.isCancelled
         }
 
         func finish() {
+            released = true
             finishWaiter?.resume()
             finishWaiter = nil
         }
@@ -224,7 +225,8 @@ final class FoundationLocalSourceTests: XCTestCase {
 
     func testRetiredSourceCannotPublishLateScan() async throws {
         let root = try fixture()
-        defer { try? FileManager.default.removeItem(at: root) }
+        var rootSafeToRemove = true
+        defer { if rootSafeToRemove { try? FileManager.default.removeItem(at: root) } }
         let gate = HeldScan()
         let owner = FoundationLocalSource(
             storage: root.appendingPathComponent("private"), makeBookmark: { _ in Data([1]) },
@@ -234,20 +236,52 @@ final class FoundationLocalSourceTests: XCTestCase {
             })
         _ = try await owner.select(root.appendingPathComponent("music"))
         let pending = Task { try await owner.refresh() }
-        await gate.waitForStart()
-        try await owner.removeSelection()
-        await gate.finish()
+        rootSafeToRemove = false
+        guard await gate.waitForStart() else {
+            pending.cancel()
+            await gate.finish()
+            XCTFail("Local source scan did not enter its hold within 5 seconds")
+            return
+        }
         do {
-            _ = try await pending.value
+            try await owner.removeSelection()
+        } catch {
+            pending.cancel()
+            await gate.finish()
+            throw error
+        }
+        await gate.finish()
+        let finished = XCTestExpectation(description: "retired local source scan returned")
+        var outcome: Result<FoundationLocalCatalog?, Error>?
+        let observer = Task {
+            outcome = await pending.result
+            finished.fulfill()
+        }
+        guard await XCTWaiter.fulfillment(of: [finished], timeout: 5) == .completed else {
+            pending.cancel()
+            observer.cancel()
+            XCTFail("Retired local source scan did not return within 5 seconds")
+            return
+        }
+        rootSafeToRemove = true
+        switch outcome {
+        case .some(.success):
             XCTFail("Retired source published a result")
-        } catch FoundationLocalSource.Failure.superseded {}
+        case .some(.failure(let error)):
+            guard let sourceError = error as? FoundationLocalSource.Failure,
+                case .superseded = sourceError
+            else { throw error }
+        case nil:
+            XCTFail("Retired local source scan returned without an outcome")
+        }
         let cached = try await owner.cachedCatalog()
         XCTAssertNil(cached)
     }
 
     func testCancelledCallerCannotPublishSuccessfulLateScan() async throws {
         let root = try fixture()
-        defer { try? FileManager.default.removeItem(at: root) }
+        var rootSafeToRemove = true
+        defer { if rootSafeToRemove { try? FileManager.default.removeItem(at: root) } }
         let gate = HeldScan()
         let owner = FoundationLocalSource(
             storage: root.appendingPathComponent("private"), makeBookmark: { _ in Data([1]) },
@@ -257,13 +291,36 @@ final class FoundationLocalSourceTests: XCTestCase {
             })
         _ = try await owner.select(root.appendingPathComponent("music"))
         let pending = Task { try await owner.refresh() }
-        await gate.waitForStart()
+        rootSafeToRemove = false
+        guard await gate.waitForStart() else {
+            pending.cancel()
+            await gate.finish()
+            XCTFail("Local source scan did not enter its hold within 5 seconds")
+            return
+        }
         pending.cancel()
         await gate.finish()
-        do {
-            _ = try await pending.value
+        let finished = XCTestExpectation(description: "cancelled local source scan returned")
+        var outcome: Result<FoundationLocalCatalog?, Error>?
+        let observer = Task {
+            outcome = await pending.result
+            finished.fulfill()
+        }
+        guard await XCTWaiter.fulfillment(of: [finished], timeout: 5) == .completed else {
+            pending.cancel()
+            observer.cancel()
+            XCTFail("Cancelled local source scan did not return within 5 seconds")
+            return
+        }
+        rootSafeToRemove = true
+        switch outcome {
+        case .some(.success):
             XCTFail("Cancelled caller published a result")
-        } catch is CancellationError {}
+        case .some(.failure(let error)):
+            guard error is CancellationError else { throw error }
+        case nil:
+            XCTFail("Cancelled local source scan returned without an outcome")
+        }
     }
 
 }

@@ -28,7 +28,17 @@ active development until its disposition is known.
 
 ## Owner-approved hosted simulator exception — 2026-11-12
 
-Owner direction on 2026-11-12: use one dedicated iPhone Duo simulator for all local VelaCanto iOS testing and reviews. Verify its exact unique identity and availability before each run; preserve other simulators and their data. The former `Velacanto Test Sim` selection is superseded. For the GitHub-hosted `xcode-27` quality job only, the existing workflow may use its uniquely selected available iOS 27.0 iPhone Air. This is a scoped hosted exception, not permission to use another project's local simulator. A prior quality job's metadata identified the GitHub Actions runner group and `xcode-27` label; GitHub documents that label as a hosted image. Verify the actual runner and destination for the exact authorized run; CI environment variables alone do not establish ownership. No hosted run is authorized by this documentation.
+Owner direction on 2026-11-12: all local VelaCanto iOS testing and reviews use
+one dedicated iPhone Duo simulator, named `VelaCanto Duo Test Sim`. Verify its
+unique identity, device type and availability before each run; preserve other
+simulators and data. The former `Velacanto Test Sim` selection is superseded.
+For the GitHub-hosted `xcode-27` quality job only, the existing workflow may
+use its uniquely selected available iOS 27.0 iPhone Air. This is a scoped hosted
+exception, not permission to use another project's local simulator. A prior quality
+job's metadata identified the GitHub Actions runner group and `xcode-27` label;
+GitHub documents that label as a hosted image. Verify the actual runner and
+destination for the exact authorized run; CI environment variables alone do not
+establish ownership. No hosted run is authorized by this documentation.
 
 ## Scope and efficient execution
 
@@ -47,22 +57,52 @@ one reviewable candidate with a short platform-specific checklist. Separate prod
 preferences from functional regressions. Ask the owner only for a material decision,
 missing authority or interaction evidence that cannot be obtained independently.
 
-When the same symptom survives a fix, collect bounded reproduction, screenshots,
-crash or lifecycle evidence before another speculative change. Prove the smallest
-supported public-API path before promising parity with Apple's own apps. Preserve
-failed evidence; do not assume a platform, network or scheduling cause.
+Choose a complete issue deliverable and its acceptance exit criteria before
+starting a slice; continue toward the whole authorized contract, including review
+and required evidence, instead of treating a narrow passing test as completion.
+Timebox repeated validation: after two unsuccessful iterations on the same symptom,
+preserve the evidence, reassess the hypothesis and change approach before further
+repetition. Collect bounded reproduction, screenshots, crash or lifecycle evidence
+where relevant; do not assume a platform, network or scheduling cause. Prove the
+smallest supported public-API path before promising parity with Apple's own apps.
+
+Run appropriate focused and integrated gates on the exact candidate. Once they pass,
+do not repeat them without a changed path, failure, new evidence or unresolved
+concern. Escalate a material missing decision or authority with a concrete,
+reviewable recommendation, while continuing independent authorized work. Report
+closed and owner-accepted issues separately from partial implementation, evidence
+and outstanding release gates; do not invent weighted progress percentages. Close
+a completed issue only after its required acceptance and actual owner approval;
+record any separate owner-directed disposition explicitly. Preserve safety, issue
+ownership and exact-source release requirements.
+
+## Owner-directed keyboard scope through v1
+
+The owner explicitly defers general keyboard navigation/focus enhancements post-v1
+under [#226](https://github.com/schillt/velacanto/issues/226), assigned to Post-1.0
+Backlog, unless Apple requires a specific repair for release. Preserve existing
+standard shortcuts, native text entry and accepted #225 shelf keyboard scrolling;
+do not remove working controls. This does not defer VoiceOver/touch, Dynamic Type,
+other accessibility, or unrelated functional input requirements. Existing #22,
+#137, #168 and release contracts carry this explicit exception; deferral is not a
+pass. Before release, check current Apple requirements on the exact candidate and
+bring any specifically mandatory fix into the active milestone. The current HIG
+recommendation for Full Keyboard Access is not by itself proof of a blanket App
+Review requirement. Do not start general keyboard expansion before v1 solely to
+satisfy superseded historical checklists.
 
 ## Engineering standards through v1
 
 Treat correctness, data preservation and understandable ownership as release
-requirements. For the current 0.7 round, first address the demonstrated synthetic
-reauthentication data-preservation failures under #219/#203, coordinating #30/#179;
-physical impact remains unverified. Keep bounded test reliability #201 urgent. Owner deferred unfinished
-playback-URL privacy #25 to 0.9.0 on 2026-11-12; preserve its documented
-operational redaction and retention guidance. Use reliable tests to enable focused ownership
-cleanup, then measure and improve performance and UI/accessibility. New feature
-work remains lower priority. Do not infer that this ordering completes, discards
-or expands any existing issue, or that a code-review score is release acceptance.
+requirements. The owner accepted the scoped local #219 reauthentication repair
+and #203 account-lifetime work with their recorded evidence and limitations.
+Preserve those changes and do not restart or reopen accepted work without new
+evidence. Remaining #30 Keychain, token-rejection and deployed-server checks
+remain open. Keep bounded test reliability #201 urgent. The owner deferred
+unfinished playback-URL privacy #25 to 0.9.0 on 2026-11-12; preserve its
+operational redaction and retention guidance. Measure performance and improve
+accessibility on affected flows, with new features sequenced behind correctness.
+A code-review score does not substitute for release acceptance.
 
 Before changing a path, identify its owner, affected invariants, failure outcome
 and smallest meaningful verification. Prefer cohesive functions and concrete,
@@ -170,6 +210,90 @@ sleeps, skipped failures or privacy weakening to make tests pass. Poll the same
 live process handle; a timeout is not completion. Report actual platform/count/scope;
 an owner pass with an unspecified platform stays unspecified. Device installation,
 audible playback, accessibility, server behavior and distribution are distinct.
+
+## Shared VelaCanto simulator
+
+Use exactly one dedicated iPhone Duo simulator for local VelaCanto iOS testing
+and reviews, named `VelaCanto Duo Test Sim`; the hosted-only exception above is
+separate. The coordinator owns the serialized simulator/device lane and verifies
+the unique available name, iPhone Duo device type and current UUID in the live
+inventory before each run; never assume a saved simulator ID. Reuse it for all VelaCanto fixtures and tests;
+do not create parallel or task-specific simulators. If the named simulator is absent,
+unavailable or ambiguous, report the gap and resolve it before simulator testing.
+Do not alter or remove simulators belonging to other projects. Remove temporary test
+trust installed by a VelaCanto fixture after that fixture finishes; if removal cannot
+be verified, report it. Do not modify host trust to work around simulator setup.
+
+## Regular local owner review
+
+The owner directs regular local Mac and iPhone review builds during development,
+so they can try meaningful increments and approve them or request revisions while
+other independent work continues. At each review handoff, freeze or otherwise
+identify the exact source snapshot and any uncommitted changes, configuration,
+version/build, artifact and destination. Run proportionate affected build, test and
+safety checks before presenting or installing it; report actual results and open
+risks. A build, install or elapsed time is not owner acceptance.
+
+The coordinator schedules all build, simulator and physical-device activity through
+the single native lane. Preserve real account, Keychain, downloads, queue and other
+app data; do not reset devices, delete data, overwrite an app under active review or
+interrupt the owner's use. Verify destination and existing app identity before an
+update, and do not claim a data-preserving update without evidence. If the intended
+device or safe update path is unavailable, report the gap and use available safe
+checks; do not present a different platform as equivalent. Keep the reviewed snapshot
+and artifact identifiable while owners examine them. Independent subagent work may
+continue without changing that snapshot; route feedback to the issue owner and
+revalidate changes before the next review.
+
+Local review, installation and owner feedback do not authorize publishing source,
+release promotion, cloud builds or distribution. Keep review artifacts and private
+evidence on non-synchronized local disk and update issue/Project tracking with a
+sanitized summary and actual platform outcomes.
+
+## Mandatory pre-release milestone disposition gate
+
+Before any release, release promotion, tag, GitHub release or prerelease, or
+app distribution, inspect the live release milestone and every page of its
+issues. Every issue must have one of these recorded dispositions:
+
+- Completed against its acceptance criteria, owner accepted, and closed as
+  completed with evidence.
+- Explicitly deferred to a specific later milestone, removed from the current
+  milestone, and updated consistently in active Project tracking.
+- Explicitly discarded with a recorded reason, closed as not planned or an
+  equivalent state, and removed from the current milestone and active Project
+  or roadmap tracking, while preserving its historical issue record.
+
+Unresolved, newly opened or reopened issues block the action. Do not mark work
+complete, defer or discard it merely to bypass this gate. Record the milestone,
+dispositions, evidence, verification time and unresolved count, and recheck
+actual membership immediately before each release or distribution action.
+An unavailable Project readback or missing acceptance is not a passed gate;
+earlier tests, source publication or TestFlight activity do not replace it.
+
+## Released milestones must have no open work
+
+After a release, its milestone must contain zero open work issues. Audit every
+page of actual issue and pull-request membership, including already closed older
+milestones; summary counts alone are not sufficient. Complete and close an item
+only with its required evidence and owner acceptance. Otherwise explicitly carry
+its unfinished contract into the active milestone or defer it to a named future
+milestone under current owner authority, and move the actual GitHub milestone
+assignment. Record the origin, destination, remaining requirements and reason in
+the issue and current handoff; preserve prior acceptance and failed evidence.
+Do not leave unfinished work in a released milestone, merely say it is deferred,
+remove its milestone without a destination, or mark it complete to improve a
+percentage. If a released issue needs reopening, assign the current or future
+milestone before reopening it. Keep completed issues in their historical release.
+
+The owner directs 0.7.0 to reconcile all earlier milestone work: finish it here or
+explicitly assign its remaining work to an appropriate future milestone. Before
+release closeout, read back every reassignment and verify every prior release
+has zero actual open items, then close any released milestone still left open.
+Report actual completed/accepted issues and remaining work separately from test
+counts, builds and administrative milestone closure. Moving work or closing an
+empty historical milestone does not establish implementation, verification or
+release acceptance, and does not authorize source promotion or distribution.
 
 ## Publication and closeout
 

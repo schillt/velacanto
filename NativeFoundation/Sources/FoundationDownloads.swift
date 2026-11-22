@@ -63,21 +63,38 @@ final class FoundationDownloads: ObservableObject {
             @escaping FoundationDownloadTransport.Progress
         ) async throws -> FoundationDownloadManifest.File
     typealias NativeRetirement = @Sendable (Set<String>, URL) async -> Set<String>
+
+    /// Only durable sign-out supplies this operation-bound recovery. A restored
+    /// receipt alone never authorizes deletion or establishes native finality.
+    struct SignOutNativeRecovery {
+        let operation: UUID
+        let current: @MainActor @Sendable () async -> Bool
+        let retireAllocated:
+            @MainActor @Sendable (
+                FoundationNativeAllocationStore,
+                FoundationScopedAccountRemoval.ColdAllocatedCandidate
+            ) async -> Bool
+    }
     typealias FileVerifier =
         @Sendable ([String: FoundationDownloadManifest.File], URL) async throws
         -> [String: FoundationDownloadManifest.File]
 
     @Published private(set) var owners: [FoundationDownloadOwner] = []
     @Published private(set) var allowsCellular = false
-    @Published private(set) var isLoading = false
+    @Published private(set) var isLoading = false {
+        didSet { if isLoading != oldValue { offlineTrackCatalogRevision &+= 1 } }
+    }
     @Published private(set) var storageBytes: Int64 = 0
     @Published private(set) var errorMessage: String?
     @Published private(set) var artworkRevision: UInt = 0
     @Published private(set) var catalogRevision: UInt = 0
     @Published private(set) var verifiedReadyRevision: UInt = 0
+    /// Changes only when the playable owner projection or its availability can change.
+    @Published private(set) var offlineTrackCatalogRevision: UInt = 0
     @Published private(set) var isPreparingOfflinePlaylists = false
     @Published private(set) var offlinePlaylistPreparationMessage: String?
-    private let library: any FoundationLibrary
+    private var library: any FoundationLibrary
+    private let accountScope: String
     private let projectTracks: @MainActor ([FoundationItem], String?) -> [FoundationItem]
     private let observeTracks: @MainActor ([FoundationItem], String?) -> Void
     private let directory: URL
@@ -85,11 +102,14 @@ final class FoundationDownloads: ObservableObject {
     private let convertedTransfer: ConvertedTransfer
     private let requestedQuality: @MainActor () -> FoundationDownloadQuality
     private let systemManagedDownloads: @MainActor () -> Bool
-    private let nativeTransfer: NativeTransfer
-    private let nativeRetirement: NativeRetirement
+    private let nativeTransfer: NativeTransfer?
+    private let nativeTransferProvesFinality: Bool
+    private let nativeRetirement: NativeRetirement?
+    private let allowNativeCleanup: Bool
     private let verifyReacquisitionFiles: FileVerifier
     private let verifyInventoryFiles: FileVerifier
     private var manifest = FoundationDownloadManifest()
+    private var manifestRevision: UInt = 0
     private var collectionModels: [String: FoundationBrowseModel] = [:]
     private var paused: Set<String> = []
     private var expanded: Set<String> = []
@@ -109,6 +129,20 @@ final class FoundationDownloads: ObservableObject {
     private var attemptedArtwork: Set<String> = []
     private var worker: Task<Void, Never>?
     private var inventoryTask: Task<Void, Never>?
+    #if DEBUG
+        var inventoryTaskForTesting: Task<Void, Never>? { inventoryTask }
+        /// Fence this synthetic owner and acknowledge its current four owned tasks.
+        /// Does not delete storage that another fixture owner still uses.
+        func retireOwnedFixtureTasksForTesting() async {
+            invalidate()
+            let tasks = [artworkTask, worker, syncTask, inventoryTask].compactMap { $0 }
+            for task in tasks { await task.value }
+        }
+        var backgroundSessionJoinEnteredForTesting:
+            (@MainActor (String, ContinuousClock.Instant) -> Void)?
+        var backgroundSessionReconcileReturnedForTesting:
+            (@MainActor (String, ContinuousClock.Instant) -> Void)?
+    #endif
     private var resetting = false
     private var syncTask: Task<Void, Never>?
     private var syncPending = false
@@ -118,13 +152,47 @@ final class FoundationDownloads: ObservableObject {
     private var monitor: NWPathMonitor?
     private var connected = false
     private var wifi = false
-    private var isLive = true
+    private var isLive = true {
+        didSet { if isLive != oldValue { offlineTrackCatalogRevision &+= 1 } }
+    }
+    private var handoffAdmission: UUID?
+    private var handoffOriginalLibrary: (any FoundationLibrary)?
+    private var deferredAllowsCellular: Bool?
+    private var deferredReconciliation = false
+    private var deferredPresentationRefresh = false
     private var generation: UInt = 0
     private var pendingClear = false
     private var leaseWaiters: [UUID: CheckedContinuation<Bool, Never>] = [:]
-    private var storageUsable = true
+    private var handoffLeaseWaiterID: UUID?
+    private var handoffOperations: Set<UUID> = []
+    private var handoffOperationsWaiter: (UUID, CheckedContinuation<Bool, Never>)?
+    private var handoffWorkWaiter: (UUID, CheckedContinuation<Bool, Never>)?
+    private let leaseWaitStarted: (() -> Void)?
+    #if DEBUG
+        /// Optional acknowledgement for a synthetic progress callback after its actor-side guard.
+        var progressCallbackSettledForTesting: (() -> Void)?
+    #endif
+    private var storageUsable = true {
+        didSet { if storageUsable != oldValue { offlineTrackCatalogRevision &+= 1 } }
+    }
     // Admission comes only from this account's loaded manifest or a live acquisition.
     private var knownNativeSessions: Set<String> = []
+    private var consumedNoFactorySessions: Set<String> = []
+    // Only this retired owner's actual scoped-removal outcome can release a
+    // native claim before its account transaction finishes. Bounded by known IDs.
+    private var removedNativeSessionOperations: [String: UUID] = [:]
+    private struct ConsumedAllocatedSignOutProof {
+        let finality: FoundationNativeAllocationStore.Receipt.ColdSignOutProof
+        let package: FoundationNativeDownloadPackage
+    }
+    // Bounded by this retired owner's known allocations. Entries are admitted only
+    // from exact tombstones actually unlinked by its scoped removal worker.
+    private var consumedAllocatedSignOutProofs: [String: ConsumedAllocatedSignOutProof] = [:]
+    private var accountClearInProgress = false
+    private var finalizedNativeSessions: Set<String> = []
+    private var terminalNativeFinalitySessions: Set<String> = []
+    private var inventoryRetiredNativeSessions: Set<String> = []
+    private let nativeInventoryRetired: @MainActor (Set<String>) -> Void
     private var liveNativeSessions: Set<String> = []
     private var settlingNativeSessions: Set<String> = []
     private var drainedNativeSessions: Set<String> = []
@@ -138,30 +206,30 @@ final class FoundationDownloads: ObservableObject {
         systemManagedDownloads: @escaping @MainActor () -> Bool = { false },
         nativeTransfer: NativeTransfer? = nil,
         nativeRetirement: NativeRetirement? = nil,
+        allowNativeCleanup: Bool = true,
+        leaseWaitStarted: (() -> Void)? = nil,
         nativeResolution:
             @escaping @Sendable (FoundationNativeDownloadPackage, String) ->
             FoundationNativeDownloadPackage.Resolution = { $0.resolution(scope: $1) },
         verifyReacquisitionFiles: FileVerifier? = nil,
         verifyInventoryFiles: FileVerifier? = nil,
+        nativeInventoryRetired: @escaping @MainActor (Set<String>) -> Void = { _ in },
         observeTracks: @escaping @MainActor ([FoundationItem], String?) -> Void = { _, _ in },
         projectTracks: @escaping @MainActor ([FoundationItem], String?) -> [FoundationItem] = {
             items, _ in items
         }
     ) {
         self.library = library
+        self.nativeInventoryRetired = nativeInventoryRetired
+        self.accountScope = scope
         self.requestedQuality = requestedQuality
         self.systemManagedDownloads = systemManagedDownloads
-        self.nativeTransfer =
-            nativeTransfer ?? { @Sendable proposal, store, cellular, progress in
-                try await FoundationNativeDownloadTransport.transfer(
-                    proposal, store: store, allowsCellular: cellular, progress: progress)
-            }
+        self.nativeTransferProvesFinality = nativeTransfer == nil
+        self.nativeTransfer = nativeTransfer
         self.nativeResolution = nativeResolution
-        self.nativeRetirement =
-            nativeRetirement ?? { @Sendable sessions, directory in
-                await FoundationNativeDownloadTransport.retireInterruptedSessions(
-                    sessions, directory: directory)
-            }
+        self.allowNativeCleanup = allowNativeCleanup
+        self.leaseWaitStarted = leaseWaitStarted
+        self.nativeRetirement = nativeRetirement
         self.convertedTransfer =
             convertedTransfer ?? { proposal, target, cellular, progress in
                 try await FoundationConvertedDownload.transfer(
@@ -187,6 +255,8 @@ final class FoundationDownloads: ObservableObject {
             try FoundationDownloadStorage.prepare(directory)
             manifest = try FoundationDownloadStorage.load(directory: directory)
             knownNativeSessions = manifest.nativePendingSessions ?? []
+            knownNativeSessions.formUnion(
+                manifest.files.values.compactMap { $0.nativePackage?.sessionIdentifier })
             allowsCellular = manifest.allowsCellular
             for saved in manifest.owners {
                 if saved.paused { paused.insert(saved.id) }
@@ -199,14 +269,7 @@ final class FoundationDownloads: ObservableObject {
                         requestedQuality: saved.requestedQuality ?? .original,
                         systemManaged: saved.systemManaged ?? false))
             }
-            for owner in owners {
-                observeTracks(owner.tracks, owner.item.kind == .album ? owner.item.id : nil)
-            }
-            for collection in manifest.collections ?? [] {
-                observeTracks(
-                    collection.tracks.map(\.item),
-                    collection.item.kind == "album" ? collection.item.id : nil)
-            }
+            replayObservedTracks()
             if manifest.files.isEmpty && (manifest.artwork?.isEmpty ?? true)
                 && (manifest.nativePendingSessions?.isEmpty ?? true)
             {
@@ -242,6 +305,47 @@ final class FoundationDownloads: ObservableObject {
         monitor?.cancel()
     }
 
+    #if FOUNDATION_ISOLATED_TEST_HOST
+        var isolatedBackgroundProofDelay: (@Sendable () async -> Void)?
+        var isolatedNoFactoryCheckpoint: FoundationScopedAccountRemoval.NoFactoryCheckpoint?
+        var isolatedAfterAccountRemoval: (@MainActor () async -> Void)?
+        var isolatedAllocatedRetirement:
+            (@Sendable (FoundationNativeAllocationStore) throws -> Void)?
+
+        func isolatedRecordNativeFinality(_ identifier: String) {
+            if knownNativeSessions.contains(identifier) {
+                finalizedNativeSessions.insert(identifier)
+            }
+        }
+
+        func isolatedTrackTerminalNativeSession(_ identifier: String, finalized: Bool) {
+            knownNativeSessions.insert(identifier)
+            if finalized { terminalNativeFinalitySessions.insert(identifier) }
+        }
+
+        /// Exercises the exact track lease/release bookkeeping without resolving a
+        /// synthetic bookmark or declaring the fake package ready for playback.
+        func isolatedAcquireNativePlaybackLease(trackID: String) throws
+            -> FoundationPlaybackResource
+        {
+            guard admitsAccountWork, let package = manifest.files[trackID]?.nativePackage,
+                knownNativeSessions.contains(package.sessionIdentifier)
+            else { throw FoundationDownloadError.cleanup }
+            return leasedResource(url: package.nativeURL, trackID: trackID)
+        }
+
+        func isolatedSeedAllocatedFile(trackID: String, file: FoundationDownloadManifest.File)
+            throws
+        {
+            guard let package = file.nativePackage, manifest.files[trackID] == nil else {
+                throw FoundationDownloadError.cleanup
+            }
+            manifest.files[trackID] = file
+            knownNativeSessions.insert(package.sessionIdentifier)
+            try save()
+        }
+    #endif
+
     func recordBackgroundSessionDrain(_ identifier: String) {
         if knownNativeSessions.contains(identifier) { drainedNativeSessions.insert(identifier) }
     }
@@ -250,34 +354,107 @@ final class FoundationDownloads: ObservableObject {
         drainedNativeSessions.contains(identifier)
     }
 
+    /// A restored manifest alone does not make a background identifier belong to a
+    /// newly opened owner. Only this process's live or finalized transport does.
+    func allowsUnrepresentedSessionObservation(_ identifier: String, operation: UUID?) -> Bool {
+        if let removed = removedNativeSessionOperations[identifier] { return removed == operation }
+        return !knownNativeSessions.contains(identifier) && !liveNativeSessions.contains(identifier)
+    }
+
+    /// A saved completed allocation may be observed without claiming its task or
+    /// changing availability. Existing app routing excludes account/native recovery.
+    func completedNativeSessionForObservation(
+        _ identifier: String, allowRetiredOwner: Bool = false
+    ) -> FoundationScopedAccountRemoval.CompletedNativeSession? {
+        guard isLive || allowRetiredOwner, storageUsable, !isLoading, !resetting,
+            !accountClearInProgress, handoffAdmission == nil, inventoryTask == nil,
+            knownNativeSessions.contains(identifier),
+            !ownsNativeSessionInCurrentProcess(identifier),
+            !liveNativeSessions.contains(identifier), !settlingNativeSessions.contains(identifier),
+            manifest.nativePendingSessions?.contains(identifier) != true,
+            let file = manifest.files.first(where: {
+                $0.value.nativePackage?.sessionIdentifier == identifier
+            }),
+            let package = file.value.nativePackage
+        else { return nil }
+        return .init(trackID: file.key, package: package)
+    }
+
+    func allowsRetiredSessionObservation(_ identifier: String) -> Bool {
+        !accountClearInProgress && !resetting && !isLoading && inventoryTask == nil
+            && !liveNativeSessions.contains(identifier)
+            && !settlingNativeSessions.contains(identifier)
+    }
+
+    func ownsNativeSessionInCurrentProcess(_ identifier: String) -> Bool {
+        liveNativeSessions.contains(identifier) || finalizedNativeSessions.contains(identifier)
+            || inventoryRetiredNativeSessions.contains(identifier)
+    }
+
     /// Reuse the live account owner; never create a second session for its task or inventory.
-    func reconcileBackgroundSession(_ identifier: String) async -> Bool {
+    func reconcileBackgroundSession(_ identifier: String, allowRetiredOwner: Bool = false) async
+        -> Bool
+    {
+        #if DEBUG
+            defer { backgroundSessionReconcileReturnedForTesting?(identifier, .now) }
+        #endif
         let store = FoundationNativeAllocationStore(
             directory: directory, sessionIdentifier: identifier)
-        guard isLive, knownNativeSessions.contains(identifier), store.validSession else {
+        guard isLive || allowRetiredOwner, knownNativeSessions.contains(identifier),
+            store.validSession
+        else {
             return false
         }
+        let epoch = generation
         if liveNativeSessions.contains(identifier) {
             await withCheckedContinuation { continuation in
                 nativeSessionWaiters[identifier, default: []].append(continuation)
+                #if DEBUG
+                    backgroundSessionJoinEnteredForTesting?(identifier, .now)
+                #endif
             }
         } else if let inventoryTask {
             await inventoryTask.value
-        } else {
-            // Historical IDs alone are not current callback authority. A settled
-            // session needs both a current manifest binding and a verified drain.
-            let recorded =
-                manifest.nativePendingSessions?.contains(identifier) == true
-                || manifest.files.values.contains {
-                    $0.nativePackage?.sessionIdentifier == identifier
-                }
-            guard recorded, drainedNativeSessions.contains(identifier),
-                (try? store.load()) != nil
-            else { return false }
         }
-        // An account retirement during the wait forbids publication by the existing
-        // acquisition/inventory guards. It does not erase its delivered-event authority.
-        return true
+        guard isLive || allowRetiredOwner, generation == epoch,
+            drainedNativeSessions.contains(identifier)
+        else { return false }
+        let directory = directory
+        let revision = manifestRevision
+        let finalized = finalizedNativeSessions.contains(identifier)
+        #if FOUNDATION_ISOLATED_TEST_HOST
+            let proofDelay = isolatedBackgroundProofDelay
+        #endif
+        let proof = Task.detached(priority: .utility) {
+            #if FOUNDATION_ISOLATED_TEST_HOST
+                await proofDelay?()
+            #endif
+            guard !Task.isCancelled,
+                let latest = try? FoundationDownloadStorage.load(directory: directory),
+                latest.nativePendingSessions?.contains(identifier) != true,
+                let receipt = try? store.load(),
+                FoundationDownloadStorage.synchronizeManifest(directory: directory)
+            else { return false }
+            if receipt.retired == true { return receipt.hasProvenRetirement }
+            // Live finality is instance-owned and is not inferred across relaunch.
+            guard finalized, receipt.completionAttempted == true,
+                let trackID = receipt.trackID, let recorded = receipt.package,
+                let persisted = latest.files[trackID]?.nativePackage
+            else { return false }
+            return recorded.sessionIdentifier == identifier
+                && persisted.sessionIdentifier == identifier
+                && recorded.nativeURL == persisted.nativeURL
+                && recorded.bookmark == persisted.bookmark
+                && recorded.namespaceBookmark == persisted.namespaceBookmark
+        }
+        let reconciled = await withTaskCancellationHandler {
+            await proof.value
+        } onCancel: {
+            proof.cancel()
+        }
+        return reconciled && !Task.isCancelled && (isLive || allowRetiredOwner)
+            && generation == epoch && manifestRevision == revision
+            && drainedNativeSessions.contains(identifier)
     }
 
     private func finishNativeSession(_ identifier: String) {
@@ -299,33 +476,44 @@ final class FoundationDownloads: ObservableObject {
     static func reconcileBackgroundSession(
         _ identifier: String, scope: String, root: URL? = nil,
         retirement: NativeRetirement? = nil,
-        mayCommit: @MainActor () -> Bool
+        mayCommit: @escaping @MainActor @Sendable () -> Bool
     ) async -> Bool {
         let directory = FoundationDownloadStorage.directory(scope: scope, root: root)
         let store = FoundationNativeAllocationStore(
             directory: directory, sessionIdentifier: identifier)
         guard mayCommit(), store.validSession,
             let manifest = try? FoundationDownloadStorage.load(directory: directory),
-            manifest.nativePendingSessions?.contains(identifier) == true,
-            (try? store.load()) != nil
+            let initialReceipt = try? store.load()
         else { return false }
-        let retired: Set<String>
-        if let retirement {
-            retired = await retirement([identifier], directory)
-        } else {
-            retired = await FoundationNativeDownloadTransport.retireInterruptedSessions(
-                [identifier], directory: directory)
-        }
-        // Failure leaves the protected pending record/receipt intact. Successful
-        // cancellation publishes only this ID, using the latest account manifest.
-        if retired.contains(identifier), mayCommit(),
-            var latest = try? FoundationDownloadStorage.load(directory: directory),
-            latest.nativePendingSessions?.contains(identifier) == true
-        {
+        if manifest.nativePendingSessions?.contains(identifier) == true {
+            let retired: Set<String>
+            if let retirement {
+                retired = await retirement([identifier], directory)
+            } else {
+                retired = await FoundationNativeDownloadTransport.retireInterruptedSessions(
+                    [identifier], directory: directory, mayRetire: mayCommit)
+            }
+            guard retired.contains(identifier), mayCommit(),
+                let receipt = try? store.load(), receipt.hasProvenRetirement,
+                var latest = try? FoundationDownloadStorage.load(directory: directory),
+                latest.nativePendingSessions?.contains(identifier) == true
+            else { return false }
             latest.nativePendingSessions?.remove(identifier)
-            try? FoundationDownloadStorage.save(latest, directory: directory)
+            do { try FoundationDownloadStorage.save(latest, directory: directory) } catch {
+                return false
+            }
+        } else if !initialReceipt.hasProvenRetirement {
+            return false
         }
-        return true
+        let synchronization = Task.detached(priority: .utility) {
+            FoundationDownloadStorage.synchronizeManifest(directory: directory)
+        }
+        let durable = await withTaskCancellationHandler {
+            await synchronization.value
+        } onCancel: {
+            synchronization.cancel()
+        }
+        return durable && !Task.isCancelled && mayCommit()
     }
 
     private func beginInventory(recoveringRemovalFailure: Bool = false) {
@@ -339,11 +527,39 @@ final class FoundationDownloads: ObservableObject {
         let pendingLeaseDeletions = recoveringRemovalFailure ? pendingDeletion : []
         let retireNative = nativeRetirement
         inventoryTask = Task { [weak self] in
+            guard let self else { return }
+            // Keep this owner and its registered inventory task alive through native
+            // retirement; lifecycle transitions must join this task before readmission.
+            defer {
+                self.inventoryTask = nil
+                self.finishHandoffWorkIfIdle()
+            }
             do {
-                let retired = await retireNative(pendingNative, directory)
+                // Recovery can run while a previously issued playback resource remains
+                // in use. Keep native authority pending until that resource is released.
+                let hasPlaybackLease = self.leases.values.contains(where: { $0 > 0 })
+                let retired: Set<String>
+                if hasPlaybackLease {
+                    retired = []
+                } else if let retireNative {
+                    retired = await retireNative(pendingNative, directory)
+                } else {
+                    retired = await FoundationNativeDownloadTransport.retireInterruptedSessions(
+                        pendingNative, directory: directory,
+                        mayRetire: { [weak self] in
+                            guard let self else { return false }
+                            return self.isLive && self.generation == epoch
+                        })
+                }
                 let verified = try await verifier(files, directory)
                 let verifiedArtwork = try await verifier(artwork.mapValues(\.file), directory)
-                guard let self, self.isLive, self.generation == epoch else { return }
+                guard self.isLive, self.generation == epoch else { return }
+                let provenRetired = Set(
+                    retired.filter { identifier in
+                        let store = FoundationNativeAllocationStore(
+                            directory: directory, sessionIdentifier: identifier)
+                        return (try? store.load().hasProvenRetirement) == true
+                    })
                 self.manifest.nativePendingSessions = pendingNative.subtracting(retired)
                 self.manifest.artwork = artwork.filter { verifiedArtwork[$0.key] != nil }
                 self.manifest.files = verified
@@ -381,6 +597,8 @@ final class FoundationDownloads: ObservableObject {
                         .intersection(self.retainedTrackIDs)
                         .subtracting(self.quarantinedNativeTrackIDs)
                     try self.save()
+                    self.inventoryRetiredNativeSessions.formUnion(provenRetired)
+                    self.nativeInventoryRetired(provenRetired)
                     self.storageUsable = true
                     // A lease may have released while verification held isLoading.
                     // Service only its prior deletion intent, with fresh verification
@@ -394,19 +612,23 @@ final class FoundationDownloads: ObservableObject {
                     self.refreshBytes()
                     self.artworkRevision &+= 1
                     self.errorMessage =
-                        "Some downloads could not be removed. Verified downloads remain available."
+                        hasPlaybackLease && !pendingNative.isEmpty
+                        ? "Some downloads are still in use. Stop playback, then try Remove All Downloads again."
+                        : "Some downloads could not be removed. Verified downloads remain available."
                     self.inventoryTask = nil
                     return
                 }
                 try self.finishInventory()
+                self.inventoryRetiredNativeSessions.formUnion(provenRetired)
                 self.inventoryTask = nil
+                self.nativeInventoryRetired(provenRetired)
                 self.scheduleArtwork()
                 self.schedule()
                 if self.syncPending || self.offlinePreparationPending {
                     self.startSynchronization()
                 }
             } catch {
-                guard let self, self.isLive, self.generation == epoch else { return }
+                guard self.isLive, self.generation == epoch else { return }
                 self.inventoryTask = nil
                 self.isLoading = false
                 self.storageUsable = false
@@ -430,12 +652,105 @@ final class FoundationDownloads: ObservableObject {
         }
         try save()
         refreshStates()
-        collectUnusedFiles()
+        collectUnusedFiles(manifestAlreadySaved: true)
         refreshBytes()
         artworkRevision &+= 1
     }
 
-    private var allowed: Bool { connected && (wifi || allowsCellular) }
+    private var admitsAccountWork: Bool { isLive && handoffAdmission == nil }
+    private var allowed: Bool { handoffAdmission == nil && connected && (wifi || allowsCellular) }
+
+    #if FOUNDATION_ISOLATED_TEST_HOST
+        var isolatedWorkerTask: Task<Void, Never>? { worker }
+        var isolatedManifestRevision: UInt { manifestRevision }
+        func isolatedPublishRetainedArtworkRevision() { artworkRevision &+= 1 }
+        var isolatedHandoffOperationsWaitStarted: (() -> Void)?
+        var isolatedRemoteReleaseJoined: (@Sendable () -> Void)?
+        var isolatedArtworkReadStarted: (@Sendable () async -> Void)?
+        var isolatedHandoffWorkWaitStarted: (() -> Void)?
+        var isolatedLibrarySession: FoundationSession? {
+            (library as? FoundationJellyfinLibrary)?.session
+        }
+    #endif
+
+    private func admitUserMutation() -> Bool {
+        guard isLive else { return false }
+        guard handoffAdmission == nil else {
+            errorMessage = "Downloads are paused while account recovery finishes. Try again."
+            return false
+        }
+        return true
+    }
+
+    /// Stops new user work; existing work is not yet drained by this prerequisite.
+    func beginAccountHandoff() -> UUID? {
+        guard isLive, handoffAdmission == nil, !resetting else { return nil }
+        let token = UUID()
+        handoffAdmission = token
+        if syncTask != nil { deferredReconciliation = true }
+        worker?.cancel()
+        artworkTask?.cancel()
+        syncTask?.cancel()
+        return token
+    }
+
+    func accountHandoffIsCurrent(_ token: UUID) -> Bool {
+        isLive && handoffAdmission == token
+    }
+
+    /// The same scoped owner can adopt refreshed credentials only after its work is drained.
+    /// Existing local leases and native callback authority remain with this object.
+    func rebindSameAccountLibrary(_ library: FoundationJellyfinLibrary, token: UUID) -> Bool {
+        guard isLive, handoffAdmission == token, handoffOriginalLibrary == nil,
+            library.catalogAccountIdentity == accountScope,
+            storageUsable, !resetting, !isLoading,
+            worker == nil, artworkTask == nil, syncTask == nil, inventoryTask == nil,
+            handoffOperations.isEmpty
+        else { return false }
+        handoffOriginalLibrary = self.library
+        self.library = library
+        generation &+= 1
+        return true
+    }
+
+    /// Finalize only after the model and credentials have committed in this actor turn.
+    @discardableResult
+    func commitSameAccountRebind(_ token: UUID) -> Bool {
+        guard isLive, handoffAdmission == token, handoffOriginalLibrary != nil else { return false }
+        handoffOriginalLibrary = nil
+        return cancelAccountHandoff(token)
+    }
+
+    /// Roll back only the still-current live owner's fence. Retirement cannot be reversed.
+    @discardableResult
+    func cancelAccountHandoff(_ token: UUID) -> Bool {
+        guard isLive, handoffAdmission == token else { return false }
+        if let original = handoffOriginalLibrary {
+            library = original
+            handoffOriginalLibrary = nil
+            generation &+= 1
+        }
+        cancelHandoffLeaseWait()
+        cancelHandoffOperationsWait()
+        cancelHandoffWorkWait()
+        handoffAdmission = nil
+        let shouldReconcile = deferredReconciliation
+        deferredReconciliation = false
+        let shouldRefresh = deferredPresentationRefresh
+        deferredPresentationRefresh = false
+        if let deferredAllowsCellular {
+            self.deferredAllowsCellular = nil
+            setAllowsCellular(deferredAllowsCellular)
+        } else {
+            refreshStates()
+            scheduleArtwork()
+            schedule()
+            startSynchronization()
+        }
+        if shouldReconcile, allowed { reconcilePlaylists() }
+        if shouldRefresh { refreshPresentation() }
+        return true
+    }
 
     /// Injection seam for deterministic policy tests; native transfers also enforce cellular policy.
     func updateConnectivity(isAllowed: Bool) {
@@ -448,19 +763,19 @@ final class FoundationDownloads: ObservableObject {
 
     private func receiveConnectivity(connected: Bool, wifi: Bool) {
         guard isLive else { return }
+        if handoffAdmission != nil {
+            if self.connected != connected || self.wifi != wifi { deferredReconciliation = true }
+            self.connected = connected
+            self.wifi = wifi
+            if !connected || (!wifi && (!allowsCellular || deferredAllowsCellular == false)) {
+                cancelWorkForDisallowedPath()
+            }
+            return
+        }
         let previous = allowed
         self.connected = connected
         self.wifi = wifi
-        if !allowed {
-            if isPreparingOfflinePlaylists {
-                offlinePlaylistPreparationMessage =
-                    "Connect to finish saving playlist availability."
-                isPreparingOfflinePlaylists = false
-            }
-            worker?.cancel()
-            artworkTask?.cancel()
-            syncTask?.cancel()
-        }
+        if !allowed { cancelWorkForDisallowedPath() }
         refreshStates()
         if allowed {
             scheduleArtwork()
@@ -469,8 +784,23 @@ final class FoundationDownloads: ObservableObject {
         }
     }
 
+    private func cancelWorkForDisallowedPath() {
+        if isPreparingOfflinePlaylists {
+            offlinePlaylistPreparationMessage = "Connect to finish saving playlist availability."
+            isPreparingOfflinePlaylists = false
+        }
+        worker?.cancel()
+        artworkTask?.cancel()
+        syncTask?.cancel()
+    }
+
     func setAllowsCellular(_ value: Bool) {
         guard isLive, storageUsable else { return }
+        if handoffAdmission != nil {
+            deferredAllowsCellular = value
+            if !connected || (!wifi && !value) { cancelWorkForDisallowedPath() }
+            return
+        }
         let old = allowsCellular
         allowsCellular = value
         do { try save() } catch {
@@ -495,8 +825,21 @@ final class FoundationDownloads: ObservableObject {
         return kind + ":" + item.id
     }
 
+    /// Rehydrate the new actions projection when this same scoped owner is retained.
+    func replayObservedTracks() {
+        guard isLive, storageUsable else { return }
+        for owner in owners {
+            observeTracks(owner.tracks, owner.item.kind == .album ? owner.item.id : nil)
+        }
+        for collection in manifest.collections ?? [] {
+            observeTracks(
+                collection.tracks.map(\.item),
+                collection.item.kind == "album" ? collection.item.id : nil)
+        }
+    }
+
     func download(_ item: FoundationItem) {
-        guard isLive, storageUsable, [.track, .album, .playlist].contains(item.kind),
+        guard admitUserMutation(), storageUsable, [.track, .album, .playlist].contains(item.kind),
             item.kind != .track || !projectTracks([item], nil).isEmpty
         else { return }
         let id = ownerID(item)
@@ -518,7 +861,8 @@ final class FoundationDownloads: ObservableObject {
     }
 
     func cancel(ownerID: String) {
-        guard isLive, storageUsable, let index = owners.firstIndex(where: { $0.id == ownerID })
+        guard isLive, storageUsable,
+            let index = owners.firstIndex(where: { $0.id == ownerID })
         else { return }
         paused.insert(ownerID)
         if activeOwner == ownerID { transferRevision &+= 1 }
@@ -530,7 +874,8 @@ final class FoundationDownloads: ObservableObject {
     }
 
     func retry(ownerID: String) {
-        guard isLive, storageUsable, let index = owners.firstIndex(where: { $0.id == ownerID })
+        guard admitUserMutation(), storageUsable,
+            let index = owners.firstIndex(where: { $0.id == ownerID })
         else { return }
         guard owners[index].item.kind != .track || !projectTracks([owners[index].item], nil).isEmpty
         else { return }
@@ -547,7 +892,8 @@ final class FoundationDownloads: ObservableObject {
     }
 
     func remove(ownerID: String) {
-        guard isLive, storageUsable, let index = owners.firstIndex(where: { $0.id == ownerID })
+        guard admitUserMutation(), storageUsable,
+            let index = owners.firstIndex(where: { $0.id == ownerID })
         else { return }
         let old = owners.remove(at: index)
         let wasPaused = paused.remove(ownerID) != nil
@@ -564,6 +910,7 @@ final class FoundationDownloads: ObservableObject {
         if activeOwner == ownerID { worker?.cancel() }
         collectUnusedFiles()
         refreshBytes()
+        if !old.tracks.isEmpty { offlineTrackCatalogRevision &+= 1 }
         schedule()
     }
 
@@ -596,74 +943,53 @@ final class FoundationDownloads: ObservableObject {
 
     /// Physical files are shared; the Songs projection never repeats playlist occurrences.
     var downloadedSongs: [FoundationItem] {
-        var seen: Set<String> = []
         // Visibility is reversible; physical manifests and retained file accounting stay raw.
-        let ready = owners.flatMap(\.tracks).filter { isReady($0) && seen.insert($0.id).inserted }
+        let ready = FoundationOfflineCatalogProjection.uniqueSongs(
+            owners.flatMap(\.tracks).filter { isReady($0) })
         return projectTracks(ready, nil)
     }
 
     var downloadedPlaylists: [FoundationItem] {
         guard isLive, storageUsable else { return [] }
         // Saved snapshots remain browsable after their final local track is removed.
-        var result = owners.filter { $0.item.kind == .playlist && expanded.contains($0.id) }.map(
-            \.item)
-        var seen = Set(result.map(\.id))
-        for saved in manifest.collections ?? [] where saved.item.kind == "playlist" {
-            if saved.tracks.contains(where: { isReady($0.item) }),
-                seen.insert(saved.item.id).inserted
-            {
-                result.append(saved.item.item)
-            }
-        }
-        return result
+        let expandedItems = owners.filter {
+            $0.item.kind == .playlist && expanded.contains($0.id)
+        }.map(\.item)
+        let remembered = (manifest.collections ?? []).filter {
+            $0.item.kind == "playlist" && $0.tracks.contains(where: { isReady($0.item) })
+        }.map(\.item.item)
+        return FoundationOfflineCatalogProjection.containers(
+            expanded: expandedItems, remembered: remembered)
     }
 
     var downloadedAlbums: [FoundationItem] {
         guard isLive, storageUsable else { return [] }
-        var items = owners.filter {
+        let expandedItems = owners.filter {
             $0.item.kind == .album && expanded.contains($0.id)
         }.map(\.item)
-        var seen = Set(items.map(\.id))
-        for saved in manifest.collections ?? [] where saved.item.kind == "album" {
-            if saved.tracks.contains(where: { isReady($0.item) }),
-                seen.insert(saved.item.id).inserted
-            {
-                items.append(saved.item.item)
-            }
-        }
-        for song in downloadedSongs {
-            if let album = song.album, seen.insert(album.id).inserted {
-                var item = FoundationItem(
-                    id: album.id, title: album.title, subtitle: song.subtitle,
-                    kind: .album, duration: nil, primaryImageTag: album.primaryImageTag)
-                item.artist = song.artist
-                items.append(item)
-            }
-        }
-        return items
+        let remembered = (manifest.collections ?? []).filter {
+            $0.item.kind == "album" && $0.tracks.contains(where: { isReady($0.item) })
+        }.map(\.item.item)
+        let seeds = FoundationOfflineCatalogProjection.containers(
+            expanded: expandedItems, remembered: remembered)
+        return FoundationOfflineCatalogProjection.albums(seeds: seeds, songs: downloadedSongs)
     }
 
     var downloadedArtists: [FoundationItem] {
         guard isLive, storageUsable else { return [] }
-        var seen: Set<String> = []
-        return (downloadedSongs + downloadedAlbums).compactMap { item in
-            guard let artist = item.artist, seen.insert(artist.id).inserted else { return nil }
-            return FoundationItem(
-                id: artist.id, title: artist.title, subtitle: "", kind: .artist,
-                duration: nil, primaryImageTag: artist.primaryImageTag)
-        }
+        return FoundationOfflineCatalogProjection.artists(
+            songs: downloadedSongs, albums: downloadedAlbums)
     }
 
     func downloadedAlbums(artistID: String) -> [FoundationItem] {
-        let albumIDs = Set(
-            downloadedSongs.filter { $0.artist?.id == artistID }.compactMap { $0.album?.id })
-        return downloadedAlbums.filter { $0.artist?.id == artistID || albumIDs.contains($0.id) }
+        FoundationOfflineCatalogProjection.albums(
+            artistID: artistID, songs: downloadedSongs, albums: downloadedAlbums)
     }
 
     /// Retain only catalog membership already fetched by a visible collection; never fetch to discover.
     /// Bounded independently of download ownership so remembered playlists cannot retain shared files.
     func rememberCollection(_ item: FoundationItem, tracks: [FoundationItem], complete: Bool) {
-        guard isLive, storageUsable, [.album, .playlist].contains(item.kind),
+        guard admitsAccountWork, storageUsable, [.album, .playlist].contains(item.kind),
             tracks.count <= 10_000, tracks.allSatisfy({ $0.kind == .track })
         else { return }
         let previous = manifest.collections
@@ -708,6 +1034,10 @@ final class FoundationDownloads: ObservableObject {
 
     func refreshPresentation() {
         guard isLive, storageUsable else { return }
+        if handoffAdmission != nil {
+            deferredPresentationRefresh = true
+            return
+        }
         reconcileSystemRemovals()
         revalidateQuarantinedNative()
         refreshStates()
@@ -718,41 +1048,29 @@ final class FoundationDownloads: ObservableObject {
     /// Shared account-owned catalog projection for local browsing and search.
     func localCatalogItems(kind: FoundationItem.Kind? = nil) -> [FoundationItem] {
         guard isLive, storageUsable else { return [] }
-        var seen: Set<String> = []
         let containers = downloadedAlbums + downloadedArtists + downloadedPlaylists
-        let candidates =
-            downloadedSongs
-            + containers.filter { availability(for: $0) != .unavailable }
-        return candidates.filter {
-            (kind == nil || kind == $0.kind) && seen.insert(collectionKey($0)).inserted
-        }
+        let membership = CatalogMembership(owners: owners)
+        return FoundationOfflineCatalogProjection.catalogItems(
+            songs: downloadedSongs,
+            availableContainers: containers.filter {
+                availability(for: $0, membership: membership) != .unavailable
+            },
+            kind: kind)
     }
 
     /// Local search uses verified playable audio and its remembered related containers only.
     func localSearchItems(query: String, kind: FoundationItem.Kind? = nil) -> [FoundationItem] {
         let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { return [] }
-        let candidates = localCatalogItems(kind: kind)
-        return candidates.filter { item in
-            return [item.title, item.subtitle, item.album?.title ?? "", item.artist?.title ?? ""]
-                .contains {
-                    $0.localizedStandardContains(query)
-                }
-        }.sorted {
-            let order = $0.title.localizedStandardCompare($1.title)
-            return order == .orderedSame
-                ? collectionKey($0) < collectionKey($1) : order == .orderedAscending
-        }
+        return FoundationOfflineCatalogProjection.searchItems(
+            matching: query, in: localCatalogItems(kind: kind))
     }
 
     func localSearch(
         query: String, kind: FoundationItem.Kind? = nil, startIndex: Int = 0, limit: Int = 50
     ) -> FoundationPage {
-        let results = localSearchItems(query: query, kind: kind)
-        let start = min(max(0, startIndex), results.count)
-        let end = start + min(max(1, min(limit, 10_000)), results.count - start)
-        return FoundationPage(
-            items: Array(results[start..<end]), nextStartIndex: end < results.count ? end : nil)
+        FoundationOfflineCatalogProjection.page(
+            of: localSearchItems(query: query, kind: kind), startIndex: startIndex, limit: limit)
     }
 
     private func collectionKey(_ item: FoundationItem) -> String {
@@ -765,6 +1083,7 @@ final class FoundationDownloads: ObservableObject {
         let key = collectionKey(item)
         if let model = collectionModels[key] { return model }
         let model = FoundationBrowseModel()
+        model.configureCollectionOccurrences(sourceScope: accountScope, collection: item)
         collectionModels[key] = model
         let tracks = snapshotTracks(for: item)
         let hasSnapshot = hasCompleteCollectionSnapshot(for: item)
@@ -774,11 +1093,17 @@ final class FoundationDownloads: ObservableObject {
 
     /// Known membership includes excluded and unavailable occurrences, in saved/server order.
     func knownCollectionTracks(for item: FoundationItem) -> [FoundationItem] {
+        knownCollectionTracks(for: item, membership: nil)
+    }
+
+    private func knownCollectionTracks(
+        for item: FoundationItem, membership: CatalogMembership?
+    ) -> [FoundationItem] {
         guard isLive else { return [] }
         if let model = collectionModels[collectionKey(item)], model.loaded || !model.items.isEmpty {
             return model.items
         }
-        return snapshotTracks(for: item)
+        return snapshotTracks(for: item, membership: membership)
     }
 
     func hasCompleteCollectionSnapshot(for item: FoundationItem) -> Bool {
@@ -845,7 +1170,8 @@ final class FoundationDownloads: ObservableObject {
 
     /// Explicit collection removal releases its owner; unowned groups remove their known shared songs.
     func removeDownloads(for item: FoundationItem) {
-        guard isLive, storageUsable, [.track, .album, .playlist].contains(item.kind) else { return }
+        guard admitUserMutation(), storageUsable, [.track, .album, .playlist].contains(item.kind)
+        else { return }
         if item.kind == .track {
             removeTrack(item)
         } else if owners.contains(where: { $0.id == ownerID(item) }) {
@@ -856,9 +1182,38 @@ final class FoundationDownloads: ObservableObject {
         }
     }
 
-    private func snapshotTracks(for item: FoundationItem) -> [FoundationItem] {
+    /// A single catalog invocation reuses raw-owner membership without retaining an account cache.
+    /// Group before deduplicating: the same ID can carry different membership in another owner.
+    private struct CatalogMembership {
+        var albums: [String: [FoundationItem]] = [:]
+        var artists: [String: [FoundationItem]] = [:]
+
+        init(owners: [FoundationDownloadOwner]) {
+            var albumIDs: [String: Set<String>] = [:]
+            var artistIDs: [String: Set<String>] = [:]
+            for owner in owners {
+                for track in owner.tracks {
+                    if let albumID = track.album?.id,
+                        albumIDs[albumID, default: []].insert(track.id).inserted
+                    {
+                        albums[albumID, default: []].append(track)
+                    }
+                    if let artistID = track.artist?.id,
+                        artistIDs[artistID, default: []].insert(track.id).inserted
+                    {
+                        artists[artistID, default: []].append(track)
+                    }
+                }
+            }
+        }
+    }
+
+    private func snapshotTracks(
+        for item: FoundationItem, membership: CatalogMembership? = nil
+    ) -> [FoundationItem] {
         if item.kind == .track { return [item] }
         if item.kind == .artist {
+            if let membership { return membership.artists[item.id] ?? [] }
             var seen: Set<String> = []
             return owners.flatMap(\.tracks).filter {
                 $0.artist?.id == item.id && seen.insert($0.id).inserted
@@ -872,6 +1227,7 @@ final class FoundationDownloads: ObservableObject {
             return owner.tracks
         }
         if item.kind == .album {
+            if let membership { return membership.albums[item.id] ?? [] }
             var seen: Set<String> = []
             return owners.flatMap(\.tracks).filter {
                 $0.album?.id == item.id && seen.insert($0.id).inserted
@@ -887,9 +1243,16 @@ final class FoundationDownloads: ObservableObject {
     }
 
     func availability(for item: FoundationItem) -> FoundationDownloadAvailability {
+        availability(for: item, membership: nil)
+    }
+
+    private func availability(
+        for item: FoundationItem, membership: CatalogMembership?
+    ) -> FoundationDownloadAvailability {
         if item.kind == .track { return isReady(item) ? .ready : .unavailable }
         let tracks = projectTracks(
-            knownCollectionTracks(for: item), item.kind == .album ? item.id : nil)
+            knownCollectionTracks(for: item, membership: membership),
+            item.kind == .album ? item.id : nil)
         let ready = tracks.filter { isReady($0) }.count
         guard ready > 0 else { return .unavailable }
         // Partial derived groups do not prove complete membership; a full server snapshot does.
@@ -934,7 +1297,7 @@ final class FoundationDownloads: ObservableObject {
 
     /// Local exclusions preserve collection snapshots/order and survive successful reconciliation.
     func removeSelected(ownerIDs: Set<String>, trackIDs: Set<String>) {
-        guard isLive, storageUsable else { return }
+        guard admitUserMutation(), storageUsable else { return }
         let previousOwners = owners
         let previousPaused = paused
         let previousExpanded = expanded
@@ -961,11 +1324,13 @@ final class FoundationDownloads: ObservableObject {
         worker?.cancel()
         collectUnusedFiles()
         refreshStates()
+        if !ownerIDs.isEmpty || !trackIDs.isEmpty { offlineTrackCatalogRevision &+= 1 }
         schedule()
     }
 
     func downloadAgain(_ item: FoundationItem) {
-        guard isLive, storageUsable, [.track, .album, .playlist].contains(item.kind) else { return }
+        guard admitUserMutation(), storageUsable, [.track, .album, .playlist].contains(item.kind)
+        else { return }
         let previousManifest = manifest
         let previousOwners = owners
         let previousPaused = paused
@@ -1016,8 +1381,13 @@ final class FoundationDownloads: ObservableObject {
             })
         errorMessage = nil
         refreshStates()
+        if !ids.isEmpty { offlineTrackCatalogRevision &+= 1 }
         scheduleArtwork()
         schedule()
+    }
+
+    var hasPendingNativeCleanup: Bool {
+        isLive && !(manifest.nativePendingSessions?.isEmpty ?? true)
     }
 
     func isReady(_ item: FoundationItem) -> Bool {
@@ -1051,6 +1421,7 @@ final class FoundationDownloads: ObservableObject {
         let readyRevision = verifiedReadyRevision
         worker = Task { [weak self] in
             guard let self else { return }
+            defer { self.finishHandoffWorkIfIdle() }
             await self.run()
             self.worker = nil
             self.activeOwner = nil
@@ -1135,6 +1506,7 @@ final class FoundationDownloads: ObservableObject {
                         reacquiring = previousReacquiring
                         throw error
                     }
+                    if before != tracks { offlineTrackCatalogRevision &+= 1 }
                     rememberCollection(owner.item, tracks: tracks, complete: true)
                     readyFileIDs.formUnion(reusable.keys.filter { !isExcluded($0) })
                     installCollectionSnapshot(owner.item, tracks: tracks)
@@ -1183,6 +1555,9 @@ final class FoundationDownloads: ObservableObject {
                         let progress: @Sendable (Int64, Int64?) -> Void = {
                             [weak self] bytes, total in
                             Task { @MainActor [weak self] in
+                                #if DEBUG
+                                    defer { self?.progressCallbackSettledForTesting?() }
+                                #endif
                                 guard let self, self.isLive, self.generation == epoch,
                                     self.transferRevision == revision, self.activeOwner == owner.id,
                                     let index = self.owners.firstIndex(where: { $0.id == owner.id })
@@ -1364,6 +1739,7 @@ final class FoundationDownloads: ObservableObject {
         let directory = directory
         let epoch = generation
         inventoryTask = Task { [weak self] in
+            defer { self?.finishHandoffWorkIfIdle() }
             do {
                 let verified = try await verifier(candidates, directory)
                 guard let self, self.isLive, self.generation == epoch, !Task.isCancelled else {
@@ -1409,6 +1785,7 @@ final class FoundationDownloads: ObservableObject {
         // Workers/session retirement have completed before account/bulk cleanup calls
         // this method. Consume protected receipts only after proved removal or absence.
         for session in manifest.nativePendingSessions ?? [] {
+            guard allowNativeCleanup else { throw FoundationDownloadError.cleanup }
             try FoundationNativeAllocationStore(directory: directory, sessionIdentifier: session)
                 .retire()
             retired.insert(session)
@@ -1418,6 +1795,7 @@ final class FoundationDownloads: ObservableObject {
         for file in manifest.files.values {
             guard let package = file.nativePackage, !retired.contains(package.sessionIdentifier)
             else { continue }
+            guard allowNativeCleanup else { throw FoundationDownloadError.cleanup }
             switch nativeResolution(package, directory.lastPathComponent) {
             case .available(let url): try FileManager.default.removeItem(at: url)
             case .provenMissing: break
@@ -1428,6 +1806,7 @@ final class FoundationDownloads: ObservableObject {
         for url in try FileManager.default.contentsOfDirectory(
             at: directory, includingPropertiesForKeys: nil)
         where url.lastPathComponent.hasPrefix("native-receipt-") {
+            guard allowNativeCleanup else { throw FoundationDownloadError.cleanup }
             try FoundationNativeAllocationStore.existingReceipt(at: url, directory: directory)
                 .retire()
         }
@@ -1470,11 +1849,20 @@ final class FoundationDownloads: ObservableObject {
         }
         let file: FoundationDownloadManifest.File
         do {
-            file = try await nativeTransfer(
-                proposal,
-                FoundationNativeAllocationStore(
-                    directory: directory, sessionIdentifier: session, trackID: track.id),
-                allowsCellular, { _, _ in })
+            let store = FoundationNativeAllocationStore(
+                directory: directory, sessionIdentifier: session, trackID: track.id)
+            if let nativeTransfer {
+                file = try await nativeTransfer(proposal, store, allowsCellular, { _, _ in })
+            } else {
+                file = try await FoundationNativeDownloadTransport.transfer(
+                    proposal, store: store, allowsCellular: allowsCellular, progress: { _, _ in },
+                    onTerminalNoAllocationFinality: { [weak self] identifier in
+                        guard let self, self.knownNativeSessions.contains(identifier) else {
+                            return
+                        }
+                        self.terminalNativeFinalitySessions.insert(identifier)
+                    })
+            }
         } catch {
             // Keep the durable receipt if cleanup was not proved; cold recovery owns it.
             if (error as? FoundationDownloadError) != .cleanup {
@@ -1498,6 +1886,7 @@ final class FoundationDownloads: ObservableObject {
                 manifest.files.removeValue(forKey: track.id)
                 throw error
             }
+            if nativeTransferProvesFinality { finalizedNativeSessions.insert(session) }
             readyFileIDs.insert(track.id)
             refreshBytes()
             published = true
@@ -1551,6 +1940,7 @@ final class FoundationDownloads: ObservableObject {
                 systemManaged: $0.systemManaged ? true : nil)
         }
         try FoundationDownloadStorage.save(manifest, directory: directory)
+        manifestRevision &+= 1
     }
 
     private func reportStorageFailure() {
@@ -1573,8 +1963,15 @@ final class FoundationDownloads: ObservableObject {
         }
     }
 
-    private func collectUnusedFiles(only selected: Set<String>? = nil) {
+    private func collectUnusedFiles(
+        only selected: Set<String>? = nil, manifestAlreadySaved: Bool = false
+    ) {
         guard !isLoading else { return }
+        // Only inventory calls immediately after a successful save, without suspension.
+        // This collector only removes file/artwork records; unchanged counts prove that
+        // its already-published manifest still describes the same retained resources.
+        let fileCount = manifest.files.count
+        let artworkCount = manifest.artwork?.count ?? 0
         let referenced = retainedTrackIDs
         readyFileIDs.formIntersection(referenced)
         for id in Array(manifest.files.keys)
@@ -1614,7 +2011,11 @@ final class FoundationDownloads: ObservableObject {
             }
         }
         if selected == nil { collectUnusedArtwork() }
-        do { try save() } catch { reportStorageFailure() }
+        if !manifestAlreadySaved || manifest.files.count != fileCount
+            || (manifest.artwork?.count ?? 0) != artworkCount
+        {
+            do { try save() } catch { reportStorageFailure() }
+        }
         refreshBytes()
     }
 
@@ -1650,15 +2051,24 @@ final class FoundationDownloads: ObservableObject {
 
     /// Local-only read. A failed tag refresh can keep the last validated rendition for this identity.
     func retainedArtwork(for item: FoundationItem) async -> Data? {
-        guard isLive, storageUsable, !isLoading,
+        guard admitsAccountWork, storageUsable, !isLoading,
             retainedArtworkItems.contains(where: { artworkKey($0) == artworkKey(item) }),
             let record = manifest.artwork?[artworkKey(item)],
             let url = FoundationDownloadStorage.fileURL(record.file, directory: directory)
         else { return nil }
+        let operation = UUID()
+        handoffOperations.insert(operation)
+        defer { finishHandoffOperation(operation) }
         let epoch = generation
         let file = record.file
         let maximumBytes = FoundationCurrentArtwork.maximumBytes
+        #if FOUNDATION_ISOLATED_TEST_HOST
+            let readStarted = isolatedArtworkReadStarted
+        #endif
         let task = Task.detached(priority: .utility) {
+            #if FOUNDATION_ISOLATED_TEST_HOST
+                await readStarted?()
+            #endif
             guard file.bytes > 0, file.bytes <= Int64(maximumBytes),
                 let values = try? url.resourceValues(forKeys: [.fileSizeKey, .isSymbolicLinkKey]),
                 values.isSymbolicLink != true, Int64(values.fileSize ?? -1) == file.bytes
@@ -1666,7 +2076,7 @@ final class FoundationDownloads: ObservableObject {
             return try? Data(contentsOf: url)
         }
         let data = await task.value
-        guard isLive, generation == epoch, !Task.isCancelled,
+        guard admitsAccountWork, generation == epoch, !Task.isCancelled,
             retainedArtworkItems.contains(where: { artworkKey($0) == artworkKey(item) })
         else { return nil }
         return data
@@ -1685,6 +2095,7 @@ final class FoundationDownloads: ObservableObject {
         let cellular = allowsCellular
         artworkTask = Task { [weak self] in
             guard let self else { return }
+            defer { self.finishHandoffWorkIfIdle() }
             for item in items {
                 guard self.isLive, self.allowed, self.generation == epoch, !Task.isCancelled else {
                     break
@@ -1692,11 +2103,16 @@ final class FoundationDownloads: ObservableObject {
                 let key = self.artworkKey(item)
                 let attempt = key + ":" + (item.primaryImageTag ?? "")
                 do {
-                    guard
-                        let data = try await self.library.downloadArtwork(
-                            for: item, size: 640, allowsCellular: cellular),
-                        let rendition = try await Self.normalizeArtwork(data)
-                    else {
+                    let data = try await self.library.downloadArtwork(
+                        for: item, size: 640, allowsCellular: cellular)
+                    try Task.checkCancellation()
+                    guard let data else {
+                        self.attemptedArtwork.insert(attempt)
+                        continue
+                    }
+                    let rendition = try await Self.normalizeArtwork(data)
+                    try Task.checkCancellation()
+                    guard let rendition else {
                         self.attemptedArtwork.insert(attempt)
                         continue
                     }
@@ -1814,7 +2230,7 @@ final class FoundationDownloads: ObservableObject {
     func playbackResource(for item: FoundationItem, allowsRemoteFallback: Bool = true) async throws
         -> FoundationPlaybackResource
     {
-        guard isLive else { throw CancellationError() }
+        guard admitsAccountWork else { throw CancellationError() }
         if isReady(item), !fileIsPresent(item) {
             if manifest.files[item.id]?.nativePackage != nil { reconcileSystemRemovals() }
             readyFileIDs.remove(item.id)
@@ -1823,28 +2239,49 @@ final class FoundationDownloads: ObservableObject {
         if isReady(item), let file = manifest.files[item.id],
             let url = FoundationDownloadStorage.fileURL(file, directory: directory)
         {
-            leases[item.id, default: 0] += 1
-            return FoundationPlaybackResource(url: url) { [self] in
-                await releaseLease(item.id)
-            }
+            return leasedResource(url: url, trackID: item.id)
         }
         guard allowsRemoteFallback else { throw FoundationLibraryError.unavailable }
+        let operation = UUID()
+        handoffOperations.insert(operation)
+        var transferred = false
+        defer { if !transferred { finishHandoffOperation(operation) } }
         let epoch = generation
         let resource = try await library.playbackResource(for: item)
-        guard isLive, epoch == generation, !Task.isCancelled else {
+        guard admitsAccountWork, epoch == generation, !Task.isCancelled else {
             await resource.release()
             throw CancellationError()
         }
-        return resource
+        transferred = true
+        #if FOUNDATION_ISOLATED_TEST_HOST
+            let joined = isolatedRemoteReleaseJoined
+        #else
+            let joined: (@Sendable () -> Void)? = nil
+        #endif
+        let release = FoundationHandoffRemoteRelease(resource: resource, joined: joined) { [self] in
+            await finishHandoffOperation(operation)
+        }
+        return FoundationPlaybackResource(url: resource.url, source: resource.source) {
+            await release.perform()
+        }
+    }
+
+    private func leasedResource(url: URL, trackID: String) -> FoundationPlaybackResource {
+        leases[trackID, default: 0] += 1
+        return FoundationPlaybackResource(url: url) { [self] in
+            await releaseLease(trackID)
+        }
     }
 
     private func releaseLease(_ id: String) {
         leases[id] = max(0, (leases[id] ?? 0) - 1)
         if leases.values.allSatisfy({ $0 == 0 }), !leaseWaiters.isEmpty {
+            let onlyHandoffWaiter = handoffLeaseWaiterID != nil && leaseWaiters.count == 1
             let waiters = leaseWaiters.values
             leaseWaiters.removeAll()
+            handoffLeaseWaiterID = nil
             for waiter in waiters { waiter.resume(returning: true) }
-            return
+            if !onlyHandoffWaiter { return }
         }
         if pendingClear, leases.values.allSatisfy({ $0 == 0 }) {
             do {
@@ -1859,6 +2296,10 @@ final class FoundationDownloads: ObservableObject {
 
     func reconcilePlaylists() {
         guard isLive, storageUsable else { return }
+        if handoffAdmission != nil {
+            deferredReconciliation = true
+            return
+        }
         reconcileSystemRemovals()
         syncPending = true
         offlinePreparationPending =
@@ -1880,6 +2321,7 @@ final class FoundationDownloads: ObservableObject {
         else { return }
         syncTask = Task { [weak self] in
             guard let self else { return }
+            defer { self.finishHandoffWorkIfIdle() }
             await self.runReconciliation()
             self.syncTask = nil
             if self.syncPending || self.offlinePreparationPending { self.startSynchronization() }
@@ -1887,6 +2329,12 @@ final class FoundationDownloads: ObservableObject {
     }
 
     #if DEBUG
+        /// Snapshot of all currently owned download/reconciliation work and pending follow-up.
+        var downloadWorkSettledForTesting: Bool {
+            isLive && !isLoading && worker == nil && artworkTask == nil && syncTask == nil
+                && inventoryTask == nil && !syncPending && !offlinePreparationPending
+        }
+
         /// Joins only the current work for deterministic lifecycle regression fixtures.
         func waitForCurrentReconciliationForTesting() async {
             let current = syncTask
@@ -1925,6 +2373,9 @@ final class FoundationDownloads: ObservableObject {
                         do { try save() } catch {
                             owners[index] = previous
                             throw error
+                        }
+                        if previous.tracks != owners[index].tracks {
+                            offlineTrackCatalogRevision &+= 1
                         }
                         rememberCollection(item, tracks: entries.map(\.item), complete: true)
                         installCollectionSnapshot(
@@ -2120,6 +2571,14 @@ final class FoundationDownloads: ObservableObject {
     }
 
     func invalidate() {
+        cancelHandoffLeaseWait()
+        cancelHandoffOperationsWait()
+        cancelHandoffWorkWait()
+        handoffAdmission = nil
+        handoffOriginalLibrary = nil
+        deferredAllowsCellular = nil
+        deferredReconciliation = false
+        deferredPresentationRefresh = false
         for model in collectionModels.values { model.clearRetainedData() }
         collectionModels.removeAll()
         artworkTask?.cancel()
@@ -2134,7 +2593,7 @@ final class FoundationDownloads: ObservableObject {
 
     /// Explicit recovery also works when an unreadable manifest cannot supply individual rows.
     func removeAll() async -> Bool {
-        guard isLive, !resetting else { return false }
+        guard admitUserMutation(), !resetting else { return false }
         resetting = true
         defer { resetting = false }
         let previouslyUsable = storageUsable
@@ -2233,7 +2692,121 @@ final class FoundationDownloads: ObservableObject {
         await inventoryTask?.value
     }
 
+    /// Joins the owner tasks present after fencing, not native callbacks or other resources.
+    func waitForHandoffOwnerTasks(_ token: UUID) async -> Bool {
+        guard isLive, handoffAdmission == token, handoffWorkWaiter == nil else { return false }
+        guard worker != nil || artworkTask != nil || syncTask != nil || inventoryTask != nil else {
+            return !Task.isCancelled
+        }
+        let id = UUID()
+        let finished = await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                if Task.isCancelled || !isLive || handoffAdmission != token {
+                    continuation.resume(returning: false)
+                    return
+                }
+                handoffWorkWaiter = (id, continuation)
+                #if FOUNDATION_ISOLATED_TEST_HOST
+                    isolatedHandoffWorkWaitStarted?()
+                #endif
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                guard let self, self.handoffWorkWaiter?.0 == id else { return }
+                self.cancelHandoffWorkWait()
+            }
+        }
+        return finished && isLive && handoffAdmission == token && !Task.isCancelled
+    }
+
+    private func finishHandoffWorkIfIdle() {
+        guard worker == nil, artworkTask == nil, syncTask == nil, inventoryTask == nil,
+            let waiter = handoffWorkWaiter
+        else { return }
+        handoffWorkWaiter = nil
+        waiter.1.resume(returning: true)
+    }
+
+    private func cancelHandoffWorkWait() {
+        guard let waiter = handoffWorkWaiter else { return }
+        handoffWorkWaiter = nil
+        waiter.1.resume(returning: false)
+    }
+
     /// Account teardown has already stopped playback; wait for its asynchronous lease releases.
+    /// Joins only admitted remote resources and detached artwork reads.
+    func waitForHandoffOperations(_ token: UUID) async -> Bool {
+        guard isLive, handoffAdmission == token, handoffOperationsWaiter == nil else {
+            return false
+        }
+        let id = UUID()
+        let finished = await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                if Task.isCancelled || !isLive || handoffAdmission != token {
+                    continuation.resume(returning: false)
+                } else if handoffOperations.isEmpty {
+                    continuation.resume(returning: true)
+                } else {
+                    handoffOperationsWaiter = (id, continuation)
+                    #if FOUNDATION_ISOLATED_TEST_HOST
+                        isolatedHandoffOperationsWaitStarted?()
+                    #endif
+                }
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                guard let self, self.handoffOperationsWaiter?.0 == id else { return }
+                self.cancelHandoffOperationsWait()
+            }
+        }
+        return finished && isLive && handoffAdmission == token && !Task.isCancelled
+    }
+
+    private func finishHandoffOperation(_ id: UUID) {
+        guard handoffOperations.remove(id) != nil, handoffOperations.isEmpty,
+            let waiter = handoffOperationsWaiter
+        else { return }
+        handoffOperationsWaiter = nil
+        waiter.1.resume(returning: true)
+    }
+
+    private func cancelHandoffOperationsWait() {
+        guard let waiter = handoffOperationsWaiter else { return }
+        handoffOperationsWaiter = nil
+        waiter.1.resume(returning: false)
+    }
+
+    /// This joins only playback leases; it does not establish full owner quiescence.
+    func waitForHandoffPlaybackLeases(_ token: UUID) async -> Bool {
+        guard isLive, handoffAdmission == token, handoffLeaseWaiterID == nil else { return false }
+        let id = UUID()
+        let released = await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                if Task.isCancelled || !isLive || handoffAdmission != token {
+                    continuation.resume(returning: false)
+                } else if leases.values.allSatisfy({ $0 == 0 }) {
+                    continuation.resume(returning: true)
+                } else {
+                    handoffLeaseWaiterID = id
+                    leaseWaiters[id] = continuation
+                    leaseWaitStarted?()
+                }
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                guard let self, self.handoffLeaseWaiterID == id else { return }
+                self.cancelHandoffLeaseWait()
+            }
+        }
+        return released && isLive && handoffAdmission == token && !Task.isCancelled
+    }
+
+    private func cancelHandoffLeaseWait() {
+        guard let id = handoffLeaseWaiterID else { return }
+        handoffLeaseWaiterID = nil
+        leaseWaiters.removeValue(forKey: id)?.resume(returning: false)
+    }
+
     private func waitForPlaybackLeases() async -> Bool {
         let id = UUID()
         return await withTaskCancellationHandler {
@@ -2244,6 +2817,7 @@ final class FoundationDownloads: ObservableObject {
                     continuation.resume(returning: true)
                 } else {
                     leaseWaiters[id] = continuation
+                    leaseWaitStarted?()
                 }
             }
         } onCancel: {
@@ -2253,8 +2827,18 @@ final class FoundationDownloads: ObservableObject {
         }
     }
 
-    func clearAccount(waitForPlayback: Bool = false) async -> Bool {
+    func clearAccount(
+        waitForPlayback: Bool = false, requireOrdinaryFiles: Bool = false,
+        nativeRecovery: SignOutNativeRecovery? = nil,
+        mayContinue: @MainActor () -> Bool = { true }
+    ) async -> Bool {
+        if requireOrdinaryFiles {
+            guard !accountClearInProgress else { return false }
+            accountClearInProgress = true
+        }
+        defer { if requireOrdinaryFiles { accountClearInProgress = false } }
         invalidate()
+        let retirementGeneration = generation
         await artworkTask?.value
         await worker?.value
         await syncTask?.value
@@ -2265,18 +2849,195 @@ final class FoundationDownloads: ObservableObject {
             pendingClear = false
             let released = await waitForPlaybackLeases()
             if !released, leases.values.contains(where: { $0 > 0 }) {
-                pendingClear = true
+                pendingClear = !requireOrdinaryFiles
                 return false
             }
         }
         guard leases.values.allSatisfy({ $0 == 0 }) else {
-            pendingClear = true
+            pendingClear = !requireOrdinaryFiles
             return false
         }
         do {
-            try removeNativePackages()
-            if FileManager.default.fileExists(atPath: directory.path) {
-                try FileManager.default.removeItem(at: directory)
+            if requireOrdinaryFiles {
+                guard !Task.isCancelled, generation == retirementGeneration,
+                    !isLive, mayContinue()
+                else { throw FoundationDownloadError.cleanup }
+                let known = knownNativeSessions
+                let required = known.subtracting(consumedNoFactorySessions)
+                let revision = manifestRevision
+                guard liveNativeSessions.isEmpty,
+                    manifest.artwork?.values.allSatisfy({ $0.file.nativePackage == nil }) ?? true
+                else { throw FoundationDownloadError.cleanup }
+                if let nativeRecovery,
+                    manifest.files.values.contains(where: { $0.nativePackage != nil })
+                {
+                    // Recheck even when a prior attempt already consumed the exact
+                    // proof. A replacement marker never inherits cached authority.
+                    guard await nativeRecovery.current(), !Task.isCancelled,
+                        generation == retirementGeneration, manifestRevision == revision,
+                        !isLive, mayContinue()
+                    else { throw FoundationDownloadError.cleanup }
+                    let missing = manifest.files.filter { track, file in
+                        guard let package = file.nativePackage else { return false }
+                        let liveProof =
+                            finalizedNativeSessions.contains(package.sessionIdentifier)
+                            && drainedNativeSessions.contains(package.sessionIdentifier)
+                        let recovered = hasRecoveredSignOutFinality(
+                            store: FoundationNativeAllocationStore(
+                                directory: directory, sessionIdentifier: package.sessionIdentifier),
+                            track: track, package: package, operation: nativeRecovery.operation)
+                        return !liveProof && !recovered
+                    }
+                    if !missing.isEmpty {
+                        guard await nativeRecovery.current(), !Task.isCancelled,
+                            generation == retirementGeneration, manifestRevision == revision,
+                            !isLive, mayContinue(),
+                            let candidates =
+                                await FoundationScopedAccountRemoval.coldAllocatedCandidates(
+                                    root: directory.deletingLastPathComponent(),
+                                    scope: directory.lastPathComponent,
+                                    operation: nativeRecovery.operation)
+                        else { throw FoundationDownloadError.cleanup }
+                        for (track, file) in missing {
+                            guard let package = file.nativePackage,
+                                let candidate = candidates.first(where: {
+                                    $0.identifier == package.sessionIdentifier
+                                        && $0.trackID == track
+                                        && $0.package.nativeURL == package.nativeURL
+                                        && $0.package.bookmark == package.bookmark
+                                        && $0.package.namespaceBookmark == package.namespaceBookmark
+                                }),
+                                known.contains(candidate.identifier),
+                                generation == retirementGeneration, manifestRevision == revision,
+                                !Task.isCancelled, !isLive, liveNativeSessions.isEmpty,
+                                await nativeRecovery.current()
+                            else { throw FoundationDownloadError.cleanup }
+                            let store = FoundationNativeAllocationStore(
+                                directory: directory, sessionIdentifier: candidate.identifier)
+                            let alreadyProved = hasRecoveredSignOutFinality(
+                                store: store, track: track, package: package,
+                                operation: nativeRecovery.operation)
+                            if !alreadyProved {
+                                guard await nativeRecovery.retireAllocated(store, candidate) else {
+                                    throw FoundationDownloadError.cleanup
+                                }
+                            }
+                            guard await nativeRecovery.current(), !Task.isCancelled,
+                                generation == retirementGeneration, manifestRevision == revision,
+                                !isLive, liveNativeSessions.isEmpty, mayContinue(),
+                                hasRecoveredSignOutFinality(
+                                    store: store, track: track, package: package,
+                                    operation: nativeRecovery.operation)
+                            else { throw FoundationDownloadError.cleanup }
+                        }
+                    }
+                }
+                var allocated: [String: FoundationScopedAccountRemoval.AuthorizedAllocated] = [:]
+                var seenAllocated: Set<String> = []
+                var recoveredProofs: [String: ConsumedAllocatedSignOutProof] = [:]
+                #if FOUNDATION_ISOLATED_TEST_HOST
+                    var allAllocatedAlreadyRetired = true
+                #endif
+                for (track, file) in manifest.files {
+                    guard let package = file.nativePackage else { continue }
+                    let identifier = package.sessionIdentifier
+                    let store = FoundationNativeAllocationStore(
+                        directory: directory, sessionIdentifier: identifier)
+                    let recovered =
+                        nativeRecovery.map {
+                            hasRecoveredSignOutFinality(
+                                store: store, track: track, package: package,
+                                operation: $0.operation)
+                        } ?? false
+                    guard known.contains(identifier), seenAllocated.insert(identifier).inserted,
+                        (finalizedNativeSessions.contains(identifier)
+                            && drainedNativeSessions.contains(identifier))
+                            || recovered
+                    else { throw FoundationDownloadError.cleanup }
+                    if consumedNoFactorySessions.contains(identifier) {
+                        // Do not pass consumed allocations as authority for any
+                        // newly appeared receipt. The remover must prove absence.
+                        continue
+                    }
+                    if recovered, let nativeRecovery,
+                        let receipt = try? store.load(), let proof = receipt.coldSignOutProof,
+                        receipt.hasProvenRetirement,
+                        (try? store.coldFinalityMatches(
+                            operation: nativeRecovery.operation, expectedTrackID: track,
+                            expectedPackage: package)) == true
+                    {
+                        recoveredProofs[identifier] = .init(finality: proof, package: package)
+                    }
+                    #if FOUNDATION_ISOLATED_TEST_HOST
+                        allAllocatedAlreadyRetired = allAllocatedAlreadyRetired && recovered
+                    #endif
+                    allocated[identifier] = .init(
+                        trackID: track, package: package,
+                        expectedFinalityProof: recoveredProofs[identifier]?.finality)
+                }
+                #if FOUNDATION_ISOLATED_TEST_HOST
+                    let checkpoint = isolatedNoFactoryCheckpoint
+                    guard
+                        allocated.isEmpty || isolatedAllocatedRetirement != nil
+                            || allAllocatedAlreadyRetired
+                    else { throw FoundationDownloadError.cleanup }
+                    let retireAllocated =
+                        isolatedAllocatedRetirement ?? { @Sendable _ in
+                            throw FoundationDownloadError.cleanup
+                        }
+                #else
+                    let checkpoint: FoundationScopedAccountRemoval.NoFactoryCheckpoint? = nil
+                    let retireAllocated:
+                        @Sendable (FoundationNativeAllocationStore) throws -> Void = {
+                            try $0.retire()
+                        }
+                #endif
+                let outcome = await FoundationScopedAccountRemoval.removeNoFactoryAsync(
+                    root: directory.deletingLastPathComponent(), scope: directory.lastPathComponent,
+                    requiredSessions: required, checkpoint: checkpoint,
+                    expectedAbsentSessions: consumedNoFactorySessions,
+                    authorizedAllocatedSessions: allocated,
+                    authorizedTerminalSessions: terminalNativeFinalitySessions.intersection(known),
+                    retireAllocated: retireAllocated)
+                // The worker reports only exact no-factory tombstones it has actually
+                // unlinked. Retain that scoped proof if a later step fails or is cancelled.
+                if !isLive {
+                    let consumed = outcome.consumedSessions.intersection(known)
+                    consumedNoFactorySessions.formUnion(consumed)
+                    if let nativeRecovery {
+                        for identifier in consumed {
+                            removedNativeSessionOperations[identifier] = nativeRecovery.operation
+                        }
+                    }
+                    for identifier in consumed {
+                        if let proof = recoveredProofs[identifier] {
+                            consumedAllocatedSignOutProofs[identifier] = proof
+                        }
+                    }
+                    nativeInventoryRetired(consumed)
+                }
+                guard outcome.removed, generation == retirementGeneration, !isLive,
+                    manifestRevision == revision, knownNativeSessions == known,
+                    liveNativeSessions.isEmpty, !Task.isCancelled, mayContinue()
+                else { throw FoundationDownloadError.cleanup }
+                if let nativeRecovery {
+                    for identifier in known {
+                        removedNativeSessionOperations[identifier] = nativeRecovery.operation
+                    }
+                }
+                nativeInventoryRetired(known)
+                #if FOUNDATION_ISOLATED_TEST_HOST
+                    await isolatedAfterAccountRemoval?()
+                #endif
+                knownNativeSessions.removeAll()
+                terminalNativeFinalitySessions.removeAll()
+                consumedNoFactorySessions.removeAll()
+                consumedAllocatedSignOutProofs.removeAll()
+            } else {
+                try removeNativePackages()
+                if FileManager.default.fileExists(atPath: directory.path) {
+                    try FileManager.default.removeItem(at: directory)
+                }
             }
             owners = []
             reacquiring = []
@@ -2291,11 +3052,39 @@ final class FoundationDownloads: ObservableObject {
         }
     }
 
-    static func clearStoredDownloads(retaining scope: String? = nil) -> Bool {
-        let base = FoundationDownloadStorage.base
+    private func hasRecoveredSignOutFinality(
+        store: FoundationNativeAllocationStore, track: String,
+        package: FoundationNativeDownloadPackage, operation: UUID
+    ) -> Bool {
+        if consumedNoFactorySessions.contains(package.sessionIdentifier) {
+            guard let retained = consumedAllocatedSignOutProofs[package.sessionIdentifier],
+                retained.finality.operation == operation, retained.finality.trackID == track,
+                retained.finality.scope == directory.lastPathComponent,
+                retained.finality.sessionIdentifier == package.sessionIdentifier,
+                retained.finality.taskIdentifier > 0,
+                retained.package.sessionIdentifier == package.sessionIdentifier,
+                retained.package.nativeURL == package.nativeURL,
+                retained.package.bookmark == package.bookmark,
+                retained.package.namespaceBookmark == package.namespaceBookmark
+            else { return false }
+            // This authorizes only an absence check, never a replacement receipt.
+            // removeNoFactory verifies expectedAbsentSessions in its pinned,
+            // no-follow directory before any deletion or manifest mutation.
+            return true
+        }
+        guard (try? store.load().hasProvenRetirement) == true else { return false }
+        return
+            (try? store.coldFinalityMatches(
+                operation: operation, expectedTrackID: track, expectedPackage: package)) == true
+    }
+
+    static func clearStoredDownloads(retaining scope: String? = nil, root: URL? = nil) -> Bool {
+        // A custom root does not authorize access to system-owned native packages or receipts.
+        let allowNativeCleanup = root == nil
+        let base = root ?? FoundationDownloadStorage.base
         guard FileManager.default.fileExists(atPath: base.path) else { return true }
         let retained = scope.map {
-            FoundationDownloadStorage.directory(scope: $0, root: nil).lastPathComponent
+            FoundationDownloadStorage.directory(scope: $0, root: root).lastPathComponent
         }
         do {
             var success = true
@@ -2309,12 +3098,14 @@ final class FoundationDownloads: ObservableObject {
                     }
                     for file in stored.files.values {
                         if let package = file.nativePackage {
+                            guard allowNativeCleanup else { throw FoundationDownloadError.cleanup }
                             try package.removeOwnedPackage(scope: url.lastPathComponent)
                         }
                     }
                     for receiptURL in try FileManager.default.contentsOfDirectory(
                         at: url, includingPropertiesForKeys: nil)
                     where receiptURL.lastPathComponent.hasPrefix("native-receipt-") {
+                        guard allowNativeCleanup else { throw FoundationDownloadError.cleanup }
                         try FoundationNativeAllocationStore.existingReceipt(
                             at: receiptURL, directory: url
                         ).retire()
@@ -2324,5 +3115,38 @@ final class FoundationDownloads: ObservableObject {
             }
             return success
         } catch { return false }
+    }
+}
+
+/// All copies join the same underlying release before the owner reports it complete.
+private actor FoundationHandoffRemoteRelease {
+    private let resource: FoundationPlaybackResource
+    private let finished: @Sendable () async -> Void
+    private let joined: (@Sendable () -> Void)?
+    private var task: Task<Void, Never>?
+
+    init(
+        resource: FoundationPlaybackResource, joined: (@Sendable () -> Void)?,
+        finished: @escaping @Sendable () async -> Void
+    ) {
+        self.resource = resource
+        self.joined = joined
+        self.finished = finished
+    }
+
+    func perform() async {
+        if let task {
+            joined?()
+            await task.value
+            return
+        }
+        let resource = resource
+        let finished = finished
+        let task = Task {
+            await resource.release()
+            await finished()
+        }
+        self.task = task
+        await task.value
     }
 }

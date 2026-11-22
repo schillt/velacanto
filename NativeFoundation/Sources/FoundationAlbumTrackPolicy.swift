@@ -39,24 +39,39 @@ enum FoundationAlbumTrackPolicy {
         _ tracks: [FoundationItem], albumID: String? = nil, showDuplicates: Bool,
         isAvailable: (FoundationItem) -> Bool = { _ in true }
     ) -> [FoundationItem] {
-        guard !showDuplicates else { return tracks }
+        visibleSourceIndices(
+            tracks, albumID: albumID, showDuplicates: showDuplicates,
+            isAvailable: isAvailable
+        ).map { tracks[$0] }
+    }
+
+    /// The one existing copy policy retains provenance of the actual selected
+    /// raw occurrence, including a later available alternate file.
+    static func visibleSourceIndices(
+        _ tracks: [FoundationItem], albumID: String? = nil, showDuplicates: Bool,
+        isAvailable: (FoundationItem) -> Bool = { _ in true }
+    ) -> [Int] {
+        guard !showDuplicates else { return Array(tracks.indices) }
         var positions: [Key: Int] = [:]
-        var result: [FoundationItem] = []
-        for item in tracks {
+        var result: [Int] = []
+        for (index, item) in tracks.enumerated() {
             guard let key = key(for: item, albumID: albumID) else {
-                result.append(item)
+                result.append(index)
                 continue
             }
             if let position = positions[key] {
-                if result[position].id == item.id {
-                    result.append(item)
+                if tracks[result[position]].id == item.id {
+                    result.append(index)
                     continue
                 }
-                // Offline callers may prefer a playable copy without moving its logical album slot.
-                if !isAvailable(result[position]), isAvailable(item) { result[position] = item }
+                // Keep the existing logical slot, but return the chosen file's
+                // actual raw occurrence rather than trying to recover by songID.
+                if !isAvailable(tracks[result[position]]), isAvailable(item) {
+                    result[position] = index
+                }
             } else {
                 positions[key] = result.count
-                result.append(item)
+                result.append(index)
             }
         }
         return result

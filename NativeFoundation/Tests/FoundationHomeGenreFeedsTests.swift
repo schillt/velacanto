@@ -99,22 +99,40 @@ final class FoundationHomeGenreFeedsTests: XCTestCase {
         owner.reconcile(selected)
         let old = try XCTUnwrap(owner.feed(for: "one", selection: selected))
         let gate = HomeGenreFeedGate()
-        let entered = expectation(description: "Old visible feed entered its provider")
+        let entered = XCTestExpectation(description: "Old visible feed entered its provider")
+        let finished = XCTestExpectation(description: "Old visible feed returned")
         let task = Task {
+            defer { finished.fulfill() }
             await old.model.refreshVisible(allowsNetwork: true) { _ in
                 entered.fulfill()
                 return await gate.wait()
             }
         }
-        await fulfillment(of: [entered], timeout: 2)
-        let changed = try selection(account: "new-account")
+        guard await XCTWaiter.fulfillment(of: [entered], timeout: 2) == .completed else {
+            task.cancel()
+            await gate.release(.init(items: [], nextStartIndex: nil))
+            XCTFail("Old visible feed did not enter its provider within 2 seconds")
+            return
+        }
+        let changed: FoundationHomeGenreFeeds.Selection
+        do {
+            changed = try selection(account: "new-account")
+        } catch {
+            task.cancel()
+            await gate.release(.init(items: [], nextStartIndex: nil))
+            throw error
+        }
         owner.reconcile(changed)
         await gate.release(
             .init(
                 items: [
                     .init(id: "late", title: "Synthetic", subtitle: "", kind: .track, duration: nil)
                 ], nextStartIndex: nil))
-        await task.value
+        guard await XCTWaiter.fulfillment(of: [finished], timeout: 5) == .completed else {
+            task.cancel()
+            XCTFail("Old visible feed did not finish within 5 seconds")
+            return
+        }
         XCTAssertTrue(old.model.items.isEmpty)
         XCTAssertTrue(owner.feed(for: "one", selection: changed)?.model.items.isEmpty == true)
     }

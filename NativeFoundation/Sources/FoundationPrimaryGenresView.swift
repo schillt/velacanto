@@ -3,6 +3,9 @@ import SwiftUI
 /// Search and Library render one completed genre snapshot with context-specific native layout.
 struct FoundationPrimaryGenresView: View {
     enum Context: Equatable { case cards, libraryRows }
+    @Environment(\.scenePhase) private var scenePhase
+    @ScaledMetric(relativeTo: .headline) private var minimumCardWidth: CGFloat = 160
+    @ScaledMetric(relativeTo: .headline) private var maximumCardWidth: CGFloat = 240
     @EnvironmentObject private var genres: FoundationPrimaryGenresModel
     @EnvironmentObject private var connectivity: FoundationConnectivity
     @EnvironmentObject private var actions: FoundationLibraryActions
@@ -15,6 +18,7 @@ struct FoundationPrimaryGenresView: View {
     @State private var visibleCount = 50
     @State private var openedGenre: FoundationItem?
     @State private var visible = false
+    @State private var pageDemand = FoundationCatalogPageDemand()
 
     init(
         library: any FoundationLibrary, player: FoundationPlayer, isActive: Bool,
@@ -32,11 +36,7 @@ struct FoundationPrimaryGenresView: View {
         genres.items(query: query, localOnly: connectivity.localOnly)
     }
     private var columns: [GridItem] {
-        #if os(macOS)
-            [GridItem(.adaptive(minimum: 128, maximum: 168), spacing: 12)]
-        #else
-            [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)]
-        #endif
+        [GridItem(.adaptive(minimum: minimumCardWidth, maximum: maximumCardWidth), spacing: 12)]
     }
 
     var body: some View {
@@ -88,6 +88,12 @@ struct FoundationPrimaryGenresView: View {
                 .foundationBottomChromeScrollClearance()
             }
         }
+        .onScrollPhaseChange { _, phase in
+            pageDemand.scrollPhaseChanged(
+                to: phase, footerVisible: pageDemand.footerVisible,
+                active: isActive && visible && scenePhase == .active, allowsNetwork: true,
+                isLoading: false, hasError: false)
+        }
         #if os(iOS)
             .refreshable { await refreshSavedGenres() }
         #endif
@@ -114,13 +120,25 @@ struct FoundationPrimaryGenresView: View {
         if genres.record == nil {
             if connectivity.localOnly {
                 Text("Connect to load genres.").foregroundStyle(.secondary)
-            } else if genres.errorMessage != nil {
-                Text("Genres aren’t available right now. You can try again in Library Settings.")
-                    .foregroundStyle(.secondary)
+            } else if let error = genres.errorMessage {
+                Text(error).foregroundStyle(.secondary)
+                Text("Open Library Settings for genre preparation details and rebuild controls.")
+                    .font(.caption).foregroundStyle(.secondary)
             } else if !genres.isSupported {
                 Text("Genres aren’t available for this library.").foregroundStyle(.secondary)
+            } else if genres.isBuilding {
+                if let total = genres.totalSongs {
+                    ProgressView(
+                        "Preparing genres…", value: Double(genres.processedSongs),
+                        total: Double(max(1, total)))
+                    Text("\(genres.processedSongs) of \(total) songs checked")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else {
+                    ProgressView("Preparing genres…")
+                }
             } else {
-                ProgressView("Loading genres…")
+                Text("Genres are not prepared yet. Open Library Settings to rebuild them.")
+                    .foregroundStyle(.secondary)
             }
         } else if items.isEmpty {
             Text(
@@ -134,7 +152,17 @@ struct FoundationPrimaryGenresView: View {
     }
 
     @ViewBuilder private var more: some View {
-        if items.count > visibleCount { Button("Load more") { visibleCount += 50 } }
+        if items.count > visibleCount {
+            FoundationPaginationFooter(
+                demand: $pageDemand, isLoading: false,
+                isEnabled: isActive && visible && scenePhase == .active,
+                hasError: false
+            ) {
+                guard !Task.isCancelled else { return }
+                visibleCount += 50
+            }
+            .id("\(query)-\(genres.publicationRevision)")
+        }
     }
 
     private func open(_ item: FoundationItem) {

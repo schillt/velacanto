@@ -3,6 +3,1197 @@ import CryptoKit
 import Darwin
 import Foundation
 
+/// Removes only one opaque account directory inside an app-owned root. Native package
+/// authority is deliberately excluded; cooperating store owners must retire writers first.
+nonisolated enum FoundationScopedAccountRemoval {
+    private static let maximumDepth = 32
+    static func removeAsync(
+        root: URL, scope: String, entryLimit: Int = 200_000,
+        requireOrdinaryDownloadManifest: Bool = false
+    ) async -> Bool {
+        guard !Task<Never, Never>.isCancelled else { return false }
+        let work = Task.detached(priority: .utility) {
+            remove(
+                root: root, scope: scope, entryLimit: entryLimit,
+                requireOrdinaryDownloadManifest: requireOrdinaryDownloadManifest)
+        }
+        return await withTaskCancellationHandler {
+            await work.value
+        } onCancel: {
+            work.cancel()
+        }
+    }
+
+    static func remove(
+        root: URL, scope: String, entryLimit: Int = 200_000,
+        requireOrdinaryDownloadManifest: Bool = false
+    ) -> Bool {
+        guard scope.utf8.count == 64,
+            scope.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }),
+            entryLimit > 0
+        else { return false }
+        let parent: Int32
+        switch openRoot(root) {
+        case .missing: return true
+        case .unavailable: return false
+        case .directory(let fd): parent = fd
+        }
+        defer { close(parent) }
+        let target = openat(parent, scope, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+        if target < 0 { return errno == ENOENT }
+        defer { close(target) }
+        var targetInfo = stat()
+        guard fstat(target, &targetInfo) == 0 else { return false }
+        if requireOrdinaryDownloadManifest && !ordinaryDownloadManifest(target) { return false }
+        var checked = 0
+        guard
+            walk(
+                target, device: targetInfo.st_dev, depth: 0, count: &checked,
+                limit: entryLimit, deleting: false)
+        else { return false }
+        var removed = 0
+        guard
+            walk(
+                target, device: targetInfo.st_dev, depth: 0, count: &removed,
+                limit: entryLimit, deleting: true)
+        else { return false }
+        var current = stat()
+        guard fstatat(parent, scope, &current, AT_SYMLINK_NOFOLLOW) == 0,
+            current.st_dev == targetInfo.st_dev, current.st_ino == targetInfo.st_ino,
+            (current.st_mode & mode_t(S_IFMT)) == mode_t(S_IFDIR)
+        else { return false }
+        return unlinkat(parent, scope, AT_REMOVEDIR) == 0
+    }
+
+    /// Read only the already-open account directory. No native payload is resolved.
+    private static func ordinaryDownloadManifest(_ directory: Int32) -> Bool {
+        let fd = openat(directory, "manifest.json", O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK)
+        if fd < 0 { return errno == ENOENT }
+        defer { close(fd) }
+        var info = stat()
+        let maximum = 16 * 1_024 * 1_024
+        guard fstat(fd, &info) == 0, (info.st_mode & mode_t(S_IFMT)) == mode_t(S_IFREG),
+            info.st_size >= 0, info.st_size <= off_t(maximum)
+        else { return false }
+        var data = Data(count: Int(info.st_size) + 1)
+        let count = data.withUnsafeMutableBytes { buffer -> Int in
+            guard let base = buffer.baseAddress else { return -1 }
+            var total = 0
+            while total < buffer.count {
+                guard !Task<Never, Never>.isCancelled else { return -1 }
+                let n = Darwin.read(fd, base.advanced(by: total), buffer.count - total)
+                if n == 0 { break }
+                if n < 0 {
+                    if errno == EINTR { continue }
+                    return -1
+                }
+                total += n
+            }
+            return total
+        }
+        guard count == Int(info.st_size) else { return false }
+        data.count = count
+        guard let manifest = try? FoundationDownloadStorage.decodeManifest(data),
+            manifest.nativePendingSessions?.isEmpty ?? true,
+            manifest.files.values.allSatisfy({ $0.nativePackage == nil }),
+            manifest.artwork?.values.allSatisfy({ $0.file.nativePackage == nil }) ?? true
+        else { return false }
+        return true
+    }
+
+    struct AuthorizedAllocated: Sendable {
+        let trackID: String
+        let package: FoundationNativeDownloadPackage
+        let expectedFinalityProof: FoundationNativeAllocationStore.Receipt.ColdSignOutProof?
+
+        init(
+            trackID: String, package: FoundationNativeDownloadPackage,
+            expectedFinalityProof: FoundationNativeAllocationStore.Receipt.ColdSignOutProof? = nil
+        ) {
+            self.trackID = trackID
+            self.package = package
+            self.expectedFinalityProof = expectedFinalityProof
+        }
+    }
+
+    struct ColdAllocatedCandidate: Sendable {
+        let identifier: String
+        let trackID: String
+        let package: FoundationNativeDownloadPackage
+        let manifestAlreadyPublished: Bool
+    }
+
+    struct ColdTerminalCandidate: Sendable {
+        let identifier: String
+        let taskIdentifier: Int
+        let finalityProved: Bool
+    }
+
+    static func coldTerminalCandidates(
+        root: URL, scope: String, operation: UUID
+    ) async -> [ColdTerminalCandidate]? {
+        let task = Task.detached(priority: .utility) {
+            coldTerminalCandidatesSync(root: root, scope: scope, operation: operation)
+        }
+        return await withTaskCancellationHandler {
+            await task.value
+        } onCancel: {
+            task.cancel()
+        }
+    }
+
+    private static func coldTerminalCandidatesSync(
+        root: URL, scope: String, operation: UUID
+    ) -> [ColdTerminalCandidate]? {
+        guard scope.utf8.count == 64,
+            scope.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) })
+        else { return nil }
+        let parent: Int32
+        switch openRoot(root) {
+        case .missing: return []
+        case .unavailable: return nil
+        case .directory(let fd): parent = fd
+        }
+        defer { close(parent) }
+        let target = openat(parent, scope, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        if target < 0 { return errno == ENOENT ? [] : nil }
+        defer { close(target) }
+        var info = stat()
+        guard fstat(target, &info) == 0 else { return nil }
+        do {
+            guard
+                let file = try readBoundedFile(
+                    target, name: "manifest.json", maximum: 16 * 1_024 * 1_024)
+            else {
+                return !Task<Never, Never>.isCancelled
+                    && pinnedDirectory(parent: parent, scope: scope, expected: info) ? [] : nil
+            }
+            guard let manifest = try? FoundationDownloadStorage.decodeManifest(file.data),
+                manifest.artwork?.values.allSatisfy({ $0.file.nativePackage == nil }) ?? true
+            else { return nil }
+            var allocated: [String: AuthorizedAllocated] = [:]
+            for (track, file) in manifest.files {
+                guard let package = file.nativePackage else { continue }
+                guard allocated[package.sessionIdentifier] == nil else { return nil }
+                allocated[package.sessionIdentifier] = .init(trackID: track, package: package)
+            }
+            let directory = root.appendingPathComponent(scope, isDirectory: true)
+            let receipts = try readNoFactoryReceipts(
+                target, directory: directory,
+                authorizedAllocatedSessions: allocated, coldOperation: operation,
+                discoverTerminals: true)
+            guard Set(receipts.map(\.identifier)).count == receipts.count,
+                Set(allocated.keys).isSubset(
+                    of: Set(receipts.filter(\.allocated).map(\.identifier))),
+                (manifest.nativePendingSessions ?? []).isSubset(
+                    of: Set(receipts.map(\.identifier))),
+                !Task<Never, Never>.isCancelled,
+                pinnedDirectory(parent: parent, scope: scope, expected: info)
+            else { return nil }
+            return receipts.filter(\.terminal).map {
+                .init(
+                    identifier: $0.identifier, taskIdentifier: $0.taskIdentifier,
+                    finalityProved: $0.terminalFinalityProved)
+            }.sorted { $0.identifier < $1.identifier }
+        } catch { return nil }
+    }
+
+    /// Nil means the bounded inventory failed. An empty result says only that no
+    /// manifest-backed candidates were found; strict scoped cleanup still examines
+    /// orphan receipts and native artifacts before it may remove anything.
+    static func coldAllocatedCandidates(
+        root: URL, scope: String, operation: UUID
+    ) async -> [ColdAllocatedCandidate]? {
+        let task = Task.detached(priority: .utility) {
+            coldAllocatedCandidatesSync(root: root, scope: scope, operation: operation)
+        }
+        return await withTaskCancellationHandler {
+            await task.value
+        } onCancel: {
+            task.cancel()
+        }
+    }
+
+    private static func coldAllocatedCandidatesSync(
+        root: URL, scope: String, operation: UUID
+    ) -> [ColdAllocatedCandidate]? {
+        guard scope.utf8.count == 64,
+            scope.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) })
+        else { return nil }
+        let parent: Int32
+        switch openRoot(root) {
+        case .missing: return []
+        case .unavailable: return nil
+        case .directory(let fd): parent = fd
+        }
+        defer { close(parent) }
+        let target = openat(parent, scope, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        if target < 0 { return errno == ENOENT ? [] : nil }
+        defer { close(target) }
+        var targetInfo = stat()
+        guard fstat(target, &targetInfo) == 0 else { return nil }
+        do {
+            guard
+                let file = try readBoundedFile(
+                    target, name: "manifest.json", maximum: 16 * 1_024 * 1_024)
+            else {
+                return !Task<Never, Never>.isCancelled
+                    && pinnedDirectory(parent: parent, scope: scope, expected: targetInfo)
+                    ? [] : nil
+            }
+            let manifest = try FoundationDownloadStorage.decodeManifest(file.data)
+            guard manifest.artwork?.values.allSatisfy({ $0.file.nativePackage == nil }) ?? true
+            else { return nil }
+            var authorized: [String: AuthorizedAllocated] = [:]
+            for (track, file) in manifest.files {
+                guard let package = file.nativePackage else { continue }
+                guard authorized[package.sessionIdentifier] == nil else { return nil }
+                authorized[package.sessionIdentifier] = .init(trackID: track, package: package)
+            }
+            let directory = root.appendingPathComponent(scope, isDirectory: true)
+            let receipts = try readNoFactoryReceipts(
+                target, directory: directory, authorizedAllocatedSessions: authorized,
+                coldOperation: operation, discoverTerminals: true)
+            let allocated = receipts.filter(\.allocated)
+            guard Set(authorized.keys).isSubset(of: Set(allocated.map(\.identifier))),
+                Set(receipts.map(\.identifier)).count == receipts.count,
+                (manifest.nativePendingSessions ?? []).isSubset(of: Set(receipts.map(\.identifier)))
+            else { return nil }
+            var result: [ColdAllocatedCandidate] = []
+            for receipt in allocated {
+                guard let track = receipt.trackID, let package = receipt.package else { return nil }
+                let expected = authorized[receipt.identifier]
+                if let expected {
+                    guard track == expected.trackID,
+                        package.sessionIdentifier == expected.package.sessionIdentifier,
+                        package.nativeURL == expected.package.nativeURL,
+                        package.bookmark == expected.package.bookmark,
+                        package.namespaceBookmark == expected.package.namespaceBookmark
+                    else { return nil }
+                } else {
+                    guard manifest.files[track] == nil, receipt.retired else { return nil }
+                }
+                result.append(
+                    .init(
+                        identifier: receipt.identifier, trackID: track, package: package,
+                        manifestAlreadyPublished: expected == nil))
+            }
+            guard !Task<Never, Never>.isCancelled,
+                pinnedDirectory(parent: parent, scope: scope, expected: targetInfo)
+            else { return nil }
+            return result.sorted { $0.identifier < $1.identifier }
+        } catch { return nil }
+    }
+
+    enum ColdPublicationCheckpoint: Sendable { case afterAuthorization, afterManifest }
+
+    static func publishColdTerminalRetirement(
+        root: URL, scope: String, operation: UUID, candidate: ColdTerminalCandidate,
+        checkpoint: ColdPublicationCheckpoint? = nil
+    ) async -> Bool {
+        let task = Task.detached(priority: .utility) {
+            publishColdTerminalRetirementSync(
+                root: root, scope: scope, operation: operation,
+                candidate: candidate, checkpoint: checkpoint)
+        }
+        return await withTaskCancellationHandler {
+            await task.value
+        } onCancel: {
+            task.cancel()
+        }
+    }
+
+    private static func publishColdTerminalRetirementSync(
+        root: URL, scope: String, operation: UUID, candidate: ColdTerminalCandidate,
+        checkpoint: ColdPublicationCheckpoint?
+    ) -> Bool {
+        guard scope.utf8.count == 64,
+            scope.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }),
+            case .directory(let parent) = openRoot(root)
+        else { return false }
+        defer { close(parent) }
+        let target = openat(parent, scope, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard target >= 0 else { return false }
+        defer { close(target) }
+        var info = stat()
+        guard fstat(target, &info) == 0 else { return false }
+        let directory = root.appendingPathComponent(scope, isDirectory: true)
+        let store = FoundationNativeAllocationStore(
+            directory: directory, sessionIdentifier: candidate.identifier)
+        do {
+            guard !Task<Never, Never>.isCancelled,
+                pinnedDirectory(parent: parent, scope: scope, expected: info),
+                let file = try readBoundedFile(
+                    target, name: "manifest.json", maximum: 16 * 1_024 * 1_024),
+                var manifest = try? FoundationDownloadStorage.decodeManifest(file.data),
+                let receiptFile = try readBoundedFile(
+                    target, name: store.receiptURL.lastPathComponent, maximum: 1_048_576),
+                let receipt = try? JSONDecoder().decode(
+                    FoundationNativeAllocationStore.Receipt.self, from: receiptFile.data),
+                receipt.taskIdentifier == candidate.taskIdentifier, receipt.hasProvenRetirement,
+                try store.coldTerminalFinalityMatches(operation: operation),
+                !manifest.files.values.contains(where: {
+                    $0.nativePackage?.sessionIdentifier == candidate.identifier
+                }),
+                manifest.artwork?.values.allSatisfy({
+                    $0.file.nativePackage?.sessionIdentifier != candidate.identifier
+                }) ?? true,
+                pinnedDirectory(parent: parent, scope: scope, expected: info)
+            else { return false }
+            try store.authorizeColdTerminalManifestRemoval(operation: operation)
+            if checkpoint == .afterAuthorization { return false }
+            manifest.nativePendingSessions?.remove(candidate.identifier)
+            guard !Task<Never, Never>.isCancelled,
+                pinnedDirectory(parent: parent, scope: scope, expected: info)
+            else { return false }
+            try FoundationDownloadStorage.save(manifest, directory: directory)
+            guard !Task<Never, Never>.isCancelled,
+                pinnedDirectory(parent: parent, scope: scope, expected: info),
+                FoundationDownloadStorage.synchronizeManifest(directory: directory),
+                pinnedDirectory(parent: parent, scope: scope, expected: info)
+            else { return false }
+            return checkpoint != .afterManifest
+        } catch { return false }
+    }
+
+    static func publishColdAllocatedRetirement(
+        root: URL, scope: String, operation: UUID, candidate: ColdAllocatedCandidate,
+        checkpoint: ColdPublicationCheckpoint? = nil
+    ) async -> Bool {
+        let task = Task.detached(priority: .utility) {
+            publishColdAllocatedRetirementSync(
+                root: root, scope: scope, operation: operation,
+                candidate: candidate, checkpoint: checkpoint)
+        }
+        return await withTaskCancellationHandler {
+            await task.value
+        } onCancel: {
+            task.cancel()
+        }
+    }
+
+    private static func publishColdAllocatedRetirementSync(
+        root: URL, scope: String, operation: UUID, candidate: ColdAllocatedCandidate,
+        checkpoint: ColdPublicationCheckpoint? = nil
+    ) -> Bool {
+        guard scope.utf8.count == 64,
+            scope.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }),
+            case .directory(let parent) = openRoot(root)
+        else { return false }
+        defer { close(parent) }
+        let target = openat(parent, scope, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard target >= 0 else { return false }
+        defer { close(target) }
+        var info = stat()
+        guard fstat(target, &info) == 0 else { return false }
+        let directory = root.appendingPathComponent(scope, isDirectory: true)
+        let store = FoundationNativeAllocationStore(
+            directory: directory, sessionIdentifier: candidate.identifier)
+        do {
+            guard !Task<Never, Never>.isCancelled,
+                pinnedDirectory(parent: parent, scope: scope, expected: info),
+                let manifestFile = try readBoundedFile(
+                    target, name: "manifest.json", maximum: 16 * 1_024 * 1_024),
+                var manifest = try? FoundationDownloadStorage.decodeManifest(manifestFile.data),
+                let receiptFile = try readBoundedFile(
+                    target, name: store.receiptURL.lastPathComponent, maximum: 1_048_576),
+                let receipt = try? JSONDecoder().decode(
+                    FoundationNativeAllocationStore.Receipt.self, from: receiptFile.data),
+                receipt.hasProvenRetirement,
+                try store.coldFinalityMatches(
+                    operation: operation, expectedTrackID: candidate.trackID,
+                    expectedPackage: candidate.package)
+            else { return false }
+            if let saved = manifest.files[candidate.trackID]?.nativePackage {
+                guard saved.sessionIdentifier == candidate.identifier,
+                    saved.nativeURL == candidate.package.nativeURL,
+                    saved.bookmark == candidate.package.bookmark,
+                    saved.namespaceBookmark == candidate.package.namespaceBookmark,
+                    pinnedDirectory(parent: parent, scope: scope, expected: info)
+                else { return false }
+                try store.authorizeColdManifestRemoval(
+                    operation: operation,
+                    expectedTrackID: candidate.trackID, expectedPackage: candidate.package)
+                if checkpoint == .afterAuthorization { return false }
+                manifest.files.removeValue(forKey: candidate.trackID)
+            } else {
+                guard manifest.files[candidate.trackID] == nil,
+                    try store.coldFinalityMatches(
+                        operation: operation, expectedTrackID: candidate.trackID,
+                        expectedPackage: candidate.package, requireManifestAuthorization: true)
+                else { return false }
+            }
+            guard
+                !manifest.files.values.contains(where: {
+                    $0.nativePackage?.sessionIdentifier == candidate.identifier
+                }),
+                !Task<Never, Never>.isCancelled,
+                pinnedDirectory(parent: parent, scope: scope, expected: info)
+            else { return false }
+            manifest.nativePendingSessions?.remove(candidate.identifier)
+            try FoundationDownloadStorage.save(manifest, directory: directory)
+            guard !Task<Never, Never>.isCancelled,
+                pinnedDirectory(parent: parent, scope: scope, expected: info),
+                FoundationDownloadStorage.synchronizeManifest(directory: directory),
+                pinnedDirectory(parent: parent, scope: scope, expected: info)
+            else { return false }
+            return checkpoint != .afterManifest
+        } catch { return false }
+    }
+
+    /// Read-only absence of this exact session, not permission to mutate a
+    /// directory or acknowledge an event. Native empty/drain/finality evidence
+    /// and stable account/owner fences are separate caller requirements.
+    static func nativeSessionIsUnrepresented(root: URL, identifier: String) async -> Bool {
+        guard
+            FoundationNativeAllocationStore.directoryScope(forSessionIdentifier: identifier) != nil,
+            !Task<Never, Never>.isCancelled
+        else { return false }
+        let task = Task.detached(priority: .utility) {
+            nativeSessionIsUnrepresentedSync(root: root, identifier: identifier)
+        }
+        return await withTaskCancellationHandler {
+            await task.value
+        } onCancel: {
+            task.cancel()
+        }
+    }
+
+    struct CompletedNativeSession: Sendable {
+        let trackID: String
+        let package: FoundationNativeDownloadPackage
+    }
+
+    /// Read-only receipt/manifest identity, never native finality or deletion authority.
+    static func nativeSessionMetadataProof(
+        root: URL, identifier: String, expected: CompletedNativeSession?,
+        retirementOperation: UUID? = nil
+    ) async -> Data? {
+        let task = Task.detached(priority: .utility) {
+            nativeSessionMetadataProofSync(
+                root: root, identifier: identifier, expected: expected,
+                retirementOperation: retirementOperation)
+        }
+        return await withTaskCancellationHandler {
+            await task.value
+        } onCancel: {
+            task.cancel()
+        }
+    }
+
+    private static func nativeSessionMetadataProofSync(
+        root: URL, identifier: String, expected: CompletedNativeSession?,
+        retirementOperation: UUID?
+    ) -> Data? {
+        guard
+            let scope = FoundationNativeAllocationStore.directoryScope(
+                forSessionIdentifier: identifier),
+            !Task<Never, Never>.isCancelled, case .directory(let parent) = openRoot(root)
+        else { return nil }
+        defer { close(parent) }
+        let target = openat(parent, scope, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard target >= 0 else { return nil }
+        defer { close(target) }
+        var info = stat()
+        guard fstat(target, &info) == 0 else { return nil }
+        let store = FoundationNativeAllocationStore(
+            directory: root.appendingPathComponent(scope, isDirectory: true),
+            sessionIdentifier: identifier)
+        func samePackage(_ a: FoundationNativeDownloadPackage, _ b: FoundationNativeDownloadPackage)
+            -> Bool
+        {
+            a.sessionIdentifier == b.sessionIdentifier && a.nativeURL == b.nativeURL
+                && a.bookmark == b.bookmark && a.namespaceBookmark == b.namespaceBookmark
+        }
+        do {
+            guard
+                let file = try readBoundedFile(
+                    target, name: "manifest.json", maximum: 16 * 1_024 * 1_024),
+                let saved = try readBoundedFile(
+                    target, name: store.receiptURL.lastPathComponent, maximum: 1_024 * 1_024)
+            else { return nil }
+            let manifest = try FoundationDownloadStorage.decodeManifest(file.data)
+            let receipt = try JSONDecoder().decode(
+                FoundationNativeAllocationStore.Receipt.self, from: saved.data)
+            guard manifest.nativePendingSessions?.contains(identifier) != true,
+                receipt.scope == scope, receipt.sessionIdentifier == identifier,
+                !(manifest.artwork?.values.contains(where: {
+                    $0.file.nativePackage?.sessionIdentifier == identifier
+                }) ?? false)
+            else { return nil }
+            if let retirementOperation {
+                guard receipt.hasProvenRetirement, let proof = receipt.coldSignOutProof,
+                    proof.operation == retirementOperation,
+                    proof.scope == scope, proof.sessionIdentifier == identifier,
+                    proof.taskIdentifier == receipt.taskIdentifier,
+                    proof.trackID == (receipt.trackID ?? "")
+                else { return nil }
+                if receipt.phase == .allocated {
+                    guard proof.version == 1, receipt.completionAttempted == true,
+                        let package = receipt.package, package.sessionIdentifier == identifier,
+                        package.nativeURL == receipt.nativeURL,
+                        package.namespaceBookmark == receipt.namespaceBookmark,
+                        let track = receipt.trackID
+                    else { return nil }
+                    let encoder = JSONEncoder()
+                    encoder.outputFormatting = [.sortedKeys]
+                    guard
+                        proof.packageDigest == Data(SHA256.hash(data: try encoder.encode(package)))
+                    else { return nil }
+                    if let file = manifest.files[track] {
+                        guard let persisted = file.nativePackage, samePackage(package, persisted)
+                        else { return nil }
+                    }
+                    guard
+                        !manifest.files.contains(where: {
+                            $0.value.nativePackage?.sessionIdentifier == identifier
+                                && $0.key != track
+                        })
+                    else { return nil }
+                } else {
+                    guard proof.version == 2, receipt.phase == .terminalNoAllocation,
+                        receipt.creationVersion == 1, receipt.taskIdentifier > 0,
+                        receipt.nativeURL == nil, receipt.package == nil,
+                        receipt.namespaceBookmark == nil, receipt.completionAttempted != true,
+                        proof.packageDigest.isEmpty,
+                        !manifest.files.values.contains(where: {
+                            $0.nativePackage?.sessionIdentifier == identifier
+                        })
+                    else { return nil }
+                }
+            } else {
+                guard receipt.phase == .allocated, receipt.creationVersion == 1,
+                    receipt.taskIdentifier > 0, receipt.completionAttempted == true,
+                    receipt.retired != true, receipt.coldSignOutProof == nil,
+                    let track = receipt.trackID, let package = receipt.package,
+                    let persisted = manifest.files[track]?.nativePackage,
+                    package.sessionIdentifier == identifier, receipt.nativeURL == package.nativeURL,
+                    let namespace = package.namespaceBookmark,
+                    receipt.namespaceBookmark == namespace,
+                    samePackage(package, persisted),
+                    manifest.files.values.filter({
+                        $0.nativePackage?.sessionIdentifier == identifier
+                    }).count == 1
+                else { return nil }
+                if let expected {
+                    guard expected.trackID == track, samePackage(expected.package, package) else {
+                        return nil
+                    }
+                }
+            }
+            guard
+                let again = try readBoundedFile(
+                    target, name: "manifest.json", maximum: 16 * 1_024 * 1_024),
+                let againReceipt = try readBoundedFile(
+                    target, name: store.receiptURL.lastPathComponent, maximum: 1_024 * 1_024),
+                again.device == file.device, again.inode == file.inode, again.data == file.data,
+                againReceipt.device == saved.device, againReceipt.inode == saved.inode,
+                againReceipt.data == saved.data,
+                pinnedDirectory(parent: parent, scope: scope, expected: info),
+                !Task<Never, Never>.isCancelled
+            else { return nil }
+            var digest = Data(SHA256.hash(data: file.data))
+            digest.append(Data(SHA256.hash(data: saved.data)))
+            return digest
+        } catch { return nil }
+    }
+
+    private static func nativeSessionIsUnrepresentedSync(root: URL, identifier: String) -> Bool {
+        guard
+            let scope = FoundationNativeAllocationStore.directoryScope(
+                forSessionIdentifier: identifier),
+            !Task<Never, Never>.isCancelled
+        else { return false }
+        let parent: Int32
+        switch openRoot(root) {
+        case .missing: return !Task<Never, Never>.isCancelled
+        case .unavailable: return false
+        case .directory(let value): parent = value
+        }
+        defer { close(parent) }
+        let target = openat(parent, scope, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        if target < 0 { return errno == ENOENT && !Task<Never, Never>.isCancelled }
+        defer { close(target) }
+        var info = stat()
+        guard fstat(target, &info) == 0 else { return false }
+        let directory = root.appendingPathComponent(scope, isDirectory: true)
+        let store = FoundationNativeAllocationStore(
+            directory: directory, sessionIdentifier: identifier)
+        func receiptAbsent() -> Bool {
+            var status = stat()
+            return fstatat(target, store.receiptURL.lastPathComponent, &status, AT_SYMLINK_NOFOLLOW)
+                == -1
+                && errno == ENOENT
+        }
+        do {
+            guard receiptAbsent() else { return false }
+            let first = try readBoundedFile(
+                target, name: "manifest.json", maximum: 16 * 1_024 * 1_024)
+            if let first {
+                let manifest = try FoundationDownloadStorage.decodeManifest(first.data)
+                guard manifest.nativePendingSessions?.contains(identifier) != true,
+                    !manifest.files.values.contains(where: {
+                        $0.nativePackage?.sessionIdentifier == identifier
+                    }),
+                    !(manifest.artwork?.values.contains(where: {
+                        $0.file.nativePackage?.sessionIdentifier == identifier
+                    }) ?? false),
+                    let repeatFile = try readBoundedFile(
+                        target, name: "manifest.json", maximum: 16 * 1_024 * 1_024),
+                    repeatFile.device == first.device, repeatFile.inode == first.inode,
+                    repeatFile.data == first.data
+                else { return false }
+            } else {
+                guard
+                    case nil = try readBoundedFile(
+                        target, name: "manifest.json", maximum: 16 * 1_024 * 1_024)
+                else { return false }
+            }
+            return !Task<Never, Never>.isCancelled && receiptAbsent()
+                && pinnedDirectory(parent: parent, scope: scope, expected: info)
+        } catch { return false }
+    }
+
+    private struct ValidatedNoFactoryReceipt {
+        let identifier: String
+        let name: String
+        let retired: Bool
+        let allocated: Bool
+        let terminal: Bool
+        let terminalFinalityProved: Bool
+        let taskIdentifier: Int
+        let trackID: String?
+        let package: FoundationNativeDownloadPackage?
+        let device: dev_t
+        let inode: ino_t
+        let digest: Data
+    }
+
+    private struct BoundedFile {
+        let data: Data
+        let device: dev_t
+        let inode: ino_t
+    }
+
+    enum NoFactoryCheckpoint: Sendable {
+        case afterFirstTombstone, afterManifest, afterFirstReceiptUnlink, afterDirectoryRemoval
+    }
+
+    struct NoFactoryRemoval: Sendable {
+        let removed: Bool
+        let consumedSessions: Set<String>
+    }
+
+    #if FOUNDATION_ISOLATED_TEST_HOST
+        static func isolatedRemoveNoFactory(
+            root: URL, scope: String, requiredSessions: Set<String> = [],
+            stopAfterFirstTombstone: Bool = false, stopAfterManifest: Bool = false
+        ) -> NoFactoryRemoval {
+            let checkpoint: NoFactoryCheckpoint? =
+                stopAfterFirstTombstone
+                ? .afterFirstTombstone : stopAfterManifest ? .afterManifest : nil
+            return removeNoFactory(
+                root: root, scope: scope, requiredSessions: requiredSessions,
+                checkpoint: checkpoint)
+        }
+    #endif
+
+    /// Reconciles only the versioned proof that no native factory was entered.
+    /// Caller must own the account and drain all workers/leases before invoking.
+    static func removeNoFactoryAsync(
+        root: URL, scope: String, requiredSessions: Set<String> = [],
+        checkpoint: NoFactoryCheckpoint? = nil,
+        expectedAbsentSessions: Set<String> = [],
+        authorizedAllocatedSessions: [String: AuthorizedAllocated] = [:],
+        authorizedTerminalSessions: Set<String> = [],
+        retireAllocated: @escaping @Sendable (FoundationNativeAllocationStore) throws -> Void = {
+            try $0.retire()
+        }
+    ) async -> NoFactoryRemoval {
+        guard !Task<Never, Never>.isCancelled else {
+            return NoFactoryRemoval(removed: false, consumedSessions: [])
+        }
+        let task = Task.detached(priority: .utility) {
+            removeNoFactory(
+                root: root, scope: scope, requiredSessions: requiredSessions,
+                checkpoint: checkpoint, expectedAbsentSessions: expectedAbsentSessions,
+                authorizedAllocatedSessions: authorizedAllocatedSessions,
+                authorizedTerminalSessions: authorizedTerminalSessions,
+                retireAllocated: retireAllocated)
+        }
+        return await withTaskCancellationHandler {
+            await task.value
+        } onCancel: {
+            task.cancel()
+        }
+    }
+
+    private static func removeNoFactory(
+        root: URL, scope: String, requiredSessions: Set<String>,
+        checkpoint: NoFactoryCheckpoint? = nil,
+        expectedAbsentSessions: Set<String> = [],
+        authorizedAllocatedSessions: [String: AuthorizedAllocated] = [:],
+        authorizedTerminalSessions: Set<String> = [],
+        retireAllocated: @Sendable (FoundationNativeAllocationStore) throws -> Void = {
+            try $0.retire()
+        }
+    ) -> NoFactoryRemoval {
+        var consumed: Set<String> = []
+        func result(_ removed: Bool) -> NoFactoryRemoval {
+            NoFactoryRemoval(removed: removed, consumedSessions: consumed)
+        }
+        guard scope.utf8.count == 64,
+            scope.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) })
+        else { return result(false) }
+        let parent: Int32
+        switch openRoot(root) {
+        case .missing: return result(requiredSessions.isEmpty)
+        case .unavailable: return result(false)
+        case .directory(let fd): parent = fd
+        }
+        defer { close(parent) }
+        let target = openat(parent, scope, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        if target < 0 { return result(errno == ENOENT && requiredSessions.isEmpty) }
+        defer { close(target) }
+        var targetInfo = stat()
+        guard fstat(target, &targetInfo) == 0 else { return result(false) }
+        let directory = root.appendingPathComponent(scope, isDirectory: true)
+        do {
+            let manifestData = try readBoundedFile(
+                target, name: "manifest.json", maximum: 16 * 1_024 * 1_024)
+            var manifest = try manifestData.map {
+                try FoundationDownloadStorage.decodeManifest($0.data)
+            }
+            guard manifest?.artwork?.values.allSatisfy({ $0.file.nativePackage == nil }) ?? true
+            else { return result(false) }
+            let pending = manifest?.nativePendingSessions ?? []
+            let receipts = try readNoFactoryReceipts(
+                target, directory: directory,
+                authorizedAllocatedSessions: authorizedAllocatedSessions,
+                authorizedTerminalSessions: authorizedTerminalSessions)
+            let allocated = receipts.filter(\.allocated)
+            guard
+                allocated.allSatisfy({ receipt in
+                    guard let track = receipt.trackID, let package = receipt.package,
+                        let expected = authorizedAllocatedSessions[receipt.identifier],
+                        expected.trackID == track,
+                        expected.package.sessionIdentifier == receipt.identifier,
+                        expected.package.nativeURL == package.nativeURL,
+                        expected.package.bookmark == package.bookmark,
+                        expected.package.namespaceBookmark == package.namespaceBookmark
+                    else { return false }
+                    if let proof = expected.expectedFinalityProof {
+                        let store = FoundationNativeAllocationStore(
+                            directory: directory, sessionIdentifier: receipt.identifier)
+                        guard receipt.taskIdentifier == proof.taskIdentifier,
+                            let current = try? store.load(), current.hasProvenRetirement,
+                            current.coldSignOutProof == proof
+                        else { return false }
+                    }
+                    guard let saved = manifest?.files[track]?.nativePackage else {
+                        return receipt.retired
+                    }
+                    return saved.sessionIdentifier == receipt.identifier
+                        && saved.nativeURL == package.nativeURL
+                        && saved.bookmark == package.bookmark
+                        && saved.namespaceBookmark == package.namespaceBookmark
+                }),
+                manifest?.files.allSatisfy({ track, file in
+                    guard let package = file.nativePackage else { return true }
+                    return allocated.contains {
+                        $0.identifier == package.sessionIdentifier && $0.trackID == track
+                    }
+                }) ?? true
+            else { return result(false) }
+            let ids = Set(receipts.map(\.identifier))
+            guard ids.count == receipts.count, requiredSessions.isSubset(of: ids),
+                ids.isDisjoint(with: expectedAbsentSessions),
+                pending.isSubset(of: ids),
+                receipts.allSatisfy({
+                    pending.contains($0.identifier) || $0.retired || $0.allocated
+                })
+            else { return result(false) }
+            let allowed = Dictionary(uniqueKeysWithValues: receipts.map { ($0.name, $0) })
+            var checked = 0
+            guard
+                walk(
+                    target, device: targetInfo.st_dev, depth: 0, count: &checked,
+                    limit: 200_000, deleting: false, allowedNoFactoryReceipts: allowed)
+            else { return result(false) }
+            for receipt in receipts {
+                guard !Task<Never, Never>.isCancelled,
+                    pinnedDirectory(parent: parent, scope: scope, expected: targetInfo)
+                else { return result(false) }
+                if !receipt.retired {
+                    let store = FoundationNativeAllocationStore(
+                        directory: directory, sessionIdentifier: receipt.identifier)
+                    if receipt.allocated { try retireAllocated(store) } else { try store.retire() }
+                }
+                guard pinnedDirectory(parent: parent, scope: scope, expected: targetInfo) else {
+                    return result(false)
+                }
+                if checkpoint == .afterFirstTombstone { return result(false) }
+            }
+            let tombstones = try readNoFactoryReceipts(
+                target, directory: directory,
+                authorizedAllocatedSessions: authorizedAllocatedSessions,
+                authorizedTerminalSessions: authorizedTerminalSessions)
+            guard Set(tombstones.map(\.identifier)) == ids,
+                tombstones.allSatisfy(\.retired)
+            else { return result(false) }
+            let allowedTombstones = Dictionary(
+                uniqueKeysWithValues: tombstones.map { ($0.name, $0) })
+            if var current = manifest, !pending.isEmpty || !allocated.isEmpty {
+                guard pinnedDirectory(parent: parent, scope: scope, expected: targetInfo) else {
+                    return result(false)
+                }
+                current.nativePendingSessions?.subtract(pending)
+                for receipt in allocated {
+                    guard let track = receipt.trackID else { return result(false) }
+                    current.files.removeValue(forKey: track)
+                }
+                try FoundationDownloadStorage.save(current, directory: directory)
+                guard pinnedDirectory(parent: parent, scope: scope, expected: targetInfo) else {
+                    return result(false)
+                }
+                manifest = current
+            }
+            if manifest != nil {
+                guard pinnedDirectory(parent: parent, scope: scope, expected: targetInfo),
+                    FoundationDownloadStorage.synchronizeManifest(directory: directory),
+                    pinnedDirectory(parent: parent, scope: scope, expected: targetInfo)
+                else { return result(false) }
+            }
+            if checkpoint == .afterManifest { return result(false) }
+            guard !Task<Never, Never>.isCancelled else { return result(false) }
+            var removed = 0
+            guard
+                walk(
+                    target, device: targetInfo.st_dev, depth: 0, count: &removed,
+                    limit: 200_000, deleting: true, allowedNoFactoryReceipts: allowedTombstones,
+                    onNoFactoryReceiptUnlinked: { receipt in
+                        consumed.insert(receipt.identifier)
+                        return checkpoint != .afterFirstReceiptUnlink
+                    })
+            else { return result(false) }
+            var current = stat()
+            guard fstatat(parent, scope, &current, AT_SYMLINK_NOFOLLOW) == 0,
+                current.st_dev == targetInfo.st_dev, current.st_ino == targetInfo.st_ino,
+                (current.st_mode & mode_t(S_IFMT)) == mode_t(S_IFDIR)
+            else { return result(false) }
+            let removedDirectory = unlinkat(parent, scope, AT_REMOVEDIR) == 0
+            if checkpoint == .afterDirectoryRemoval { return result(false) }
+            return result(removedDirectory)
+        } catch { return result(false) }
+    }
+
+    private static func readNoFactoryReceipts(
+        _ directoryFD: Int32, directory: URL,
+        authorizedAllocatedSessions: [String: AuthorizedAllocated] = [:],
+        authorizedTerminalSessions: Set<String> = [], coldOperation: UUID? = nil,
+        discoverTerminals: Bool = false
+    ) throws -> [ValidatedNoFactoryReceipt] {
+        let duplicate = openat(directoryFD, ".", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard duplicate >= 0, let stream = fdopendir(duplicate) else {
+            if duplicate >= 0 { close(duplicate) }
+            throw CocoaError(.fileReadUnknown)
+        }
+        defer { closedir(stream) }
+        var result: [ValidatedNoFactoryReceipt] = []
+        var count = 0
+        var receiptBytes = 0
+        while true {
+            errno = 0
+            guard let entry = readdir(stream) else {
+                guard errno == 0 else { throw CocoaError(.fileReadUnknown) }
+                return result
+            }
+            let name = withUnsafePointer(to: &entry.pointee.d_name) {
+                $0.withMemoryRebound(to: CChar.self, capacity: Int(NAME_MAX) + 1) {
+                    String(cString: $0)
+                }
+            }
+            if name == "." || name == ".." { continue }
+            count += 1
+            guard count <= 200_000, !Task<Never, Never>.isCancelled else {
+                throw CocoaError(.fileReadUnknown)
+            }
+            guard name.hasPrefix("native-receipt-") else { continue }
+            guard let file = try readBoundedFile(directoryFD, name: name, maximum: 1_048_576),
+                let receipt = try? JSONDecoder().decode(
+                    FoundationNativeAllocationStore.Receipt.self, from: file.data)
+            else { throw CocoaError(.fileReadCorruptFile) }
+            receiptBytes += file.data.count
+            guard result.count < 10_000, receiptBytes <= 16 * 1_024 * 1_024 else {
+                throw CocoaError(.fileReadCorruptFile)
+            }
+            let store = FoundationNativeAllocationStore(
+                directory: directory, sessionIdentifier: receipt.sessionIdentifier)
+            guard store.validSession, store.receiptURL.lastPathComponent == name,
+                receipt.scope == directory.lastPathComponent
+            else { throw CocoaError(.fileReadCorruptFile) }
+            let noFactory =
+                receipt.phase == .reserved && receipt.creationVersion == 1
+                && receipt.taskIdentifier == 0 && receipt.nativeURL == nil && receipt.package == nil
+                && receipt.namespaceBookmark == nil && receipt.completionAttempted != true
+            let coldAuthorized: Bool
+            if let operation = coldOperation, receipt.retired == true,
+                let track = receipt.trackID, let package = receipt.package
+            {
+                coldAuthorized =
+                    (try? store.coldFinalityMatches(
+                        operation: operation, expectedTrackID: track,
+                        expectedPackage: package, requireManifestAuthorization: true)) == true
+            } else {
+                coldAuthorized = false
+            }
+            let allocated =
+                (authorizedAllocatedSessions[receipt.sessionIdentifier] != nil || coldAuthorized)
+                && receipt.phase == .allocated && receipt.isRetirementEligible
+                && receipt.package?.sessionIdentifier == receipt.sessionIdentifier
+                && receipt.package?.nativeURL == receipt.nativeURL && receipt.trackID != nil
+                && receipt.completionAttempted == true
+            let terminal =
+                receipt.phase == .terminalNoAllocation && receipt.creationVersion == 1
+                && receipt.taskIdentifier > 0 && receipt.nativeURL == nil && receipt.package == nil
+                && receipt.namespaceBookmark == nil && receipt.completionAttempted != true
+            let terminalAuthorized =
+                terminal
+                && (discoverTerminals
+                    || (authorizedTerminalSessions.contains(receipt.sessionIdentifier)
+                        && receipt.hasProvenRetirement))
+            let terminalFinalityProved: Bool
+            if terminal, receipt.hasProvenRetirement, let operation = coldOperation {
+                terminalFinalityProved =
+                    (try? store.coldTerminalFinalityMatches(operation: operation)) == true
+            } else {
+                terminalFinalityProved = false
+            }
+            guard noFactory || allocated || terminalAuthorized else {
+                throw CocoaError(.fileReadCorruptFile)
+            }
+            result.append(
+                .init(
+                    identifier: receipt.sessionIdentifier, name: name,
+                    retired: receipt.retired == true, allocated: allocated, terminal: terminal,
+                    terminalFinalityProved: terminalFinalityProved,
+                    taskIdentifier: receipt.taskIdentifier,
+                    trackID: receipt.trackID, package: receipt.package, device: file.device,
+                    inode: file.inode,
+                    digest: Data(SHA256.hash(data: file.data))))
+        }
+    }
+
+    private static func pinnedDirectory(parent: Int32, scope: String, expected: stat) -> Bool {
+        var current = stat()
+        return fstatat(parent, scope, &current, AT_SYMLINK_NOFOLLOW) == 0
+            && current.st_dev == expected.st_dev && current.st_ino == expected.st_ino
+            && (current.st_mode & mode_t(S_IFMT)) == mode_t(S_IFDIR)
+    }
+
+    /// `nil` means a genuinely absent file; all other lookup or decoding errors fail closed.
+    private static func readBoundedFile(_ directory: Int32, name: String, maximum: Int) throws
+        -> BoundedFile?
+    {
+        let fd = openat(directory, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK)
+        if fd < 0 {
+            if errno == ENOENT { return nil }
+            throw CocoaError(.fileReadUnknown)
+        }
+        defer { close(fd) }
+        var info = stat()
+        guard fstat(fd, &info) == 0, (info.st_mode & mode_t(S_IFMT)) == mode_t(S_IFREG),
+            info.st_size >= 0, info.st_size <= off_t(maximum)
+        else { throw CocoaError(.fileReadCorruptFile) }
+        var data = Data(count: Int(info.st_size) + 1)
+        let count = data.withUnsafeMutableBytes { buffer -> Int in
+            guard let base = buffer.baseAddress else { return -1 }
+            var total = 0
+            while total < buffer.count {
+                guard !Task<Never, Never>.isCancelled else { return -1 }
+                let n = Darwin.read(fd, base.advanced(by: total), buffer.count - total)
+                if n == 0 { break }
+                if n < 0 {
+                    if errno == EINTR { continue }
+                    return -1
+                }
+                total += n
+            }
+            return total
+        }
+        guard count == Int(info.st_size) else { throw CocoaError(.fileReadCorruptFile) }
+        data.count = count
+        var current = stat()
+        guard fstatat(directory, name, &current, AT_SYMLINK_NOFOLLOW) == 0,
+            current.st_dev == info.st_dev, current.st_ino == info.st_ino,
+            (current.st_mode & mode_t(S_IFMT)) == mode_t(S_IFREG)
+        else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+        return BoundedFile(data: data, device: info.st_dev, inode: info.st_ino)
+    }
+
+    private enum RootResult {
+        case missing
+        case unavailable
+        case directory(Int32)
+    }
+
+    private static func openRoot(_ root: URL) -> RootResult {
+        guard root.isFileURL else { return .unavailable }
+        let files = FileManager.default
+        let anchors = [
+            files.urls(for: .applicationSupportDirectory, in: .userDomainMask).first,
+            files.urls(for: .cachesDirectory, in: .userDomainMask).first,
+            files.temporaryDirectory,
+        ].compactMap { $0 }
+        let anchor: String
+        let components: [String]
+        if let match = anchors.compactMap({ candidate -> (URL, [String])? in
+            FoundationTrustedAccountPath.components(root, below: candidate).map { (candidate, $0) }
+        }).first {
+            anchor = match.0.path
+            components = match.1
+        } else {
+            var path = root.standardizedFileURL.path
+            if path == "/var" || path.hasPrefix("/var/") || path == "/tmp"
+                || path.hasPrefix("/tmp/")
+            {
+                path = "/private" + path
+            }
+            guard path.hasPrefix("/") else { return .unavailable }
+            anchor = "/"
+            components = path.split(separator: "/").map(String.init)
+        }
+        var parent = Darwin.open(anchor, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        if parent < 0 { return errno == ENOENT ? .missing : .unavailable }
+        for name in components {
+            let next = openat(parent, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+            if next < 0 {
+                let missing = errno == ENOENT
+                close(parent)
+                return missing ? .missing : .unavailable
+            }
+            close(parent)
+            parent = next
+        }
+        return .directory(parent)
+    }
+
+    /// Bounded, no-follow inventory used only for deciding whether an upgrade needs consent.
+    static func inventory(root: URL, retained: String, limit: Int = 4096) throws -> (Bool, Bool) {
+        let parent: Int32
+        switch openRoot(root) {
+        case .missing: return (false, false)
+        case .unavailable: throw FoundationLibraryError.credentials
+        case .directory(let fd): parent = fd
+        }
+        defer { close(parent) }
+        let descriptor = openat(parent, ".", O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+        guard descriptor >= 0, let stream = fdopendir(descriptor) else {
+            if descriptor >= 0 { close(descriptor) }
+            throw FoundationLibraryError.credentials
+        }
+        defer { closedir(stream) }
+        var matching = false
+        var unrelated = false
+        var count = 0
+        while true {
+            errno = 0
+            guard let entry = readdir(stream) else {
+                guard errno == 0 else { throw FoundationLibraryError.credentials }
+                return (matching, unrelated)
+            }
+            let name = withUnsafePointer(to: &entry.pointee.d_name) {
+                $0.withMemoryRebound(to: CChar.self, capacity: Int(NAME_MAX) + 1) {
+                    String(cString: $0)
+                }
+            }
+            if name == "." || name == ".." { continue }
+            count += 1
+            guard count <= limit else { throw FoundationLibraryError.credentials }
+            var info = stat()
+            guard fstatat(parent, name, &info, AT_SYMLINK_NOFOLLOW) == 0,
+                (info.st_mode & mode_t(S_IFMT)) == mode_t(S_IFDIR)
+            else { throw FoundationLibraryError.credentials }
+            if name == retained { matching = true } else { unrelated = true }
+        }
+    }
+
+    private static func walk(
+        _ directory: Int32, device: dev_t, depth: Int, count: inout Int,
+        limit: Int, deleting: Bool,
+        allowedNoFactoryReceipts: [String: ValidatedNoFactoryReceipt] = [:],
+        onNoFactoryReceiptUnlinked: (ValidatedNoFactoryReceipt) -> Bool = { _ in true }
+    ) -> Bool {
+        guard depth <= maximumDepth, !Task<Never, Never>.isCancelled else { return false }
+        let duplicate = openat(directory, ".", O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+        guard duplicate >= 0, let stream = fdopendir(duplicate) else {
+            if duplicate >= 0 { close(duplicate) }
+            return false
+        }
+        defer { closedir(stream) }
+        while true {
+            errno = 0
+            guard let entry = readdir(stream) else { return errno == 0 }
+            let name = withUnsafePointer(to: &entry.pointee.d_name) {
+                $0.withMemoryRebound(to: CChar.self, capacity: Int(NAME_MAX) + 1) {
+                    String(cString: $0)
+                }
+            }
+            if name == "." || name == ".." { continue }
+            count += 1
+            guard count <= limit, !name.hasPrefix("stage-native-"),
+                !name.lowercased().hasSuffix(".movpkg"),
+                !Task<Never, Never>.isCancelled
+            else { return false }
+            var info = stat()
+            guard fstatat(directory, name, &info, AT_SYMLINK_NOFOLLOW) == 0,
+                info.st_dev == device
+            else { return false }
+            if name.hasPrefix("native-receipt-") {
+                guard depth == 0, let expected = allowedNoFactoryReceipts[name],
+                    !deleting || expected.retired,
+                    info.st_dev == expected.device, info.st_ino == expected.inode,
+                    let file = try? readBoundedFile(directory, name: name, maximum: 1_048_576),
+                    file.device == expected.device, file.inode == expected.inode,
+                    Data(SHA256.hash(data: file.data)) == expected.digest
+                else { return false }
+            }
+            switch info.st_mode & mode_t(S_IFMT) {
+            case mode_t(S_IFREG):
+                if deleting {
+                    guard unlinkat(directory, name, 0) == 0 else { return false }
+                    if let receipt = allowedNoFactoryReceipts[name],
+                        !onNoFactoryReceiptUnlinked(receipt)
+                    {
+                        return false
+                    }
+                }
+            case mode_t(S_IFDIR):
+                let child = openat(directory, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+                guard child >= 0 else { return false }
+                var opened = stat()
+                let matches =
+                    fstat(child, &opened) == 0 && opened.st_dev == info.st_dev
+                    && opened.st_ino == info.st_ino
+                let success =
+                    matches
+                    && walk(
+                        child, device: device, depth: depth + 1, count: &count,
+                        limit: limit, deleting: deleting,
+                        allowedNoFactoryReceipts: allowedNoFactoryReceipts,
+                        onNoFactoryReceiptUnlinked: onNoFactoryReceiptUnlinked)
+                close(child)
+                guard success else { return false }
+                if deleting, unlinkat(directory, name, AT_REMOVEDIR) != 0 { return false }
+            default:
+                return false
+            }
+        }
+    }
+}
+
 /// Private, recoverable download metadata. Requests and credentials never enter this representation.
 nonisolated struct FoundationStoredDownloadItem: Codable, Equatable, Sendable {
     let id: String
@@ -253,6 +1444,27 @@ nonisolated enum FoundationDownloadStorage {
         guard result == 0 else { throw CocoaError(.fileWriteUnknown) }
     }
 
+    /// Confirms that the currently published manifest and its directory reached the filesystem.
+    /// A false result is uncertain publication, not evidence that the previous state survived.
+    static func synchronizeManifest(directory: URL) -> Bool {
+        let parent = open(directory.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+        guard parent >= 0 else { return false }
+        defer { close(parent) }
+        let file = openat(parent, "manifest.json", O_RDONLY | O_NOFOLLOW)
+        guard file >= 0 else { return false }
+        defer { close(file) }
+        var opened = stat()
+        var current = stat()
+        guard fstat(file, &opened) == 0,
+            (opened.st_mode & mode_t(S_IFMT)) == mode_t(S_IFREG),
+            fsync(file) == 0, fsync(parent) == 0,
+            fstatat(parent, "manifest.json", &current, AT_SYMLINK_NOFOLLOW) == 0,
+            current.st_dev == opened.st_dev, current.st_ino == opened.st_ino,
+            (current.st_mode & mode_t(S_IFMT)) == mode_t(S_IFREG)
+        else { return false }
+        return true
+    }
+
     static func load(directory: URL) throws -> FoundationDownloadManifest {
         let manifestURL = directory.appendingPathComponent("manifest.json")
         guard FileManager.default.fileExists(atPath: manifestURL.path) else {
@@ -263,8 +1475,11 @@ nonisolated enum FoundationDownloadStorage {
         else {
             throw CocoaError(.fileReadCorruptFile)
         }
-        var manifest = try JSONDecoder().decode(
-            FoundationDownloadManifest.self, from: Data(contentsOf: manifestURL))
+        return try decodeManifest(Data(contentsOf: manifestURL))
+    }
+
+    static func decodeManifest(_ data: Data) throws -> FoundationDownloadManifest {
+        var manifest = try JSONDecoder().decode(FoundationDownloadManifest.self, from: data)
         guard (1...3).contains(manifest.version), manifest.owners.count <= 10_000,
             (manifest.nativePendingSessions?.count ?? 0) <= 10_000,
             (manifest.excludedTrackIDs?.count ?? 0) <= 100_000,
@@ -746,6 +1961,31 @@ nonisolated struct FoundationNativeAllocationStore: Sendable {
         // Missing on older receipts: reserved could already have issued a factory.
         var creationVersion: Int? = nil
         var completionAttempted: Bool? = nil
+
+        struct ColdSignOutProof: Codable, Equatable, Sendable {
+            let version: Int
+            let operation: UUID
+            let scope: String
+            let sessionIdentifier: String
+            let taskIdentifier: Int
+            let trackID: String
+            let packageDigest: Data
+            var manifestRemovalAuthorized: Bool
+        }
+        var coldSignOutProof: ColdSignOutProof? = nil
+
+        var isRetirementEligible: Bool {
+            if nativeURL == nil {
+                return (phase == .reserved && creationVersion == 1)
+                    || phase == .terminalNoAllocation
+            }
+            guard phase == .allocated, creationVersion == 1, taskIdentifier > 0,
+                let namespaceBookmark
+            else { return false }
+            return package == nil || package?.namespaceBookmark == namespaceBookmark
+        }
+
+        var hasProvenRetirement: Bool { retired == true && isRetirementEligible }
     }
     let directory: URL
     let sessionIdentifier: String
@@ -1149,6 +2389,23 @@ nonisolated struct FoundationNativeAllocationStore: Sendable {
         }
     }
 
+    /// Parse only this app's fixed identifier grammar. The returned directory
+    /// scope is not account authorization and the original identifier is unchanged.
+    static func directoryScope(forSessionIdentifier identifier: String) -> String? {
+        let prefix = "dev.novoluxor.velacanto.offline."
+        guard identifier.hasPrefix(prefix), identifier.utf8.count == prefix.utf8.count + 64 + 1 + 36
+        else {
+            return nil
+        }
+        let suffix = identifier.dropFirst(prefix.count)
+        let scope = String(suffix.prefix(64))
+        let token = suffix.dropFirst(65)
+        guard scope.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }),
+            suffix.dropFirst(64).first == ".", UUID(uuidString: String(token)) != nil
+        else { return nil }
+        return scope
+    }
+
     var validSession: Bool {
         let prefix = "dev.novoluxor.velacanto.offline." + scope + "."
         return sessionIdentifier.hasPrefix(prefix)
@@ -1257,6 +2514,145 @@ nonisolated struct FoundationNativeAllocationStore: Sendable {
         return store
     }
 
+    private static func coldPackageDigest(_ package: FoundationNativeDownloadPackage) throws -> Data
+    {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return Data(SHA256.hash(data: try encoder.encode(package)))
+    }
+
+    private func coldProofMatches(
+        _ proof: Receipt.ColdSignOutProof, receipt: Receipt, operation: UUID,
+        expectedTrackID: String, expectedPackage: FoundationNativeDownloadPackage
+    ) throws -> Bool {
+        guard proof.version == 1, proof.operation == operation, proof.scope == scope,
+            proof.sessionIdentifier == sessionIdentifier,
+            proof.taskIdentifier == receipt.taskIdentifier,
+            proof.trackID == expectedTrackID, receipt.trackID == expectedTrackID,
+            receipt.phase == .allocated, receipt.isRetirementEligible,
+            receipt.completionAttempted == true,
+            let package = receipt.package,
+            package.sessionIdentifier == expectedPackage.sessionIdentifier,
+            package.nativeURL == expectedPackage.nativeURL,
+            package.bookmark == expectedPackage.bookmark,
+            package.namespaceBookmark == expectedPackage.namespaceBookmark
+        else { return false }
+        return proof.packageDigest == (try Self.coldPackageDigest(package))
+    }
+
+    func recordColdFinality(
+        operation: UUID, expectedTrackID: String, expectedPackage: FoundationNativeDownloadPackage
+    ) throws {
+        var receipt = try load()
+        guard receipt.phase == .allocated, receipt.isRetirementEligible,
+            receipt.completionAttempted == true, receipt.trackID == expectedTrackID,
+            let package = receipt.package,
+            package.sessionIdentifier == expectedPackage.sessionIdentifier,
+            package.nativeURL == expectedPackage.nativeURL,
+            package.bookmark == expectedPackage.bookmark,
+            package.namespaceBookmark == expectedPackage.namespaceBookmark
+        else { throw FoundationDownloadError.cleanup }
+        let proof = Receipt.ColdSignOutProof(
+            version: 1, operation: operation, scope: scope, sessionIdentifier: sessionIdentifier,
+            taskIdentifier: receipt.taskIdentifier, trackID: expectedTrackID,
+            packageDigest: try Self.coldPackageDigest(package), manifestRemovalAuthorized: false)
+        if let existing = receipt.coldSignOutProof, existing != proof {
+            guard existing.version == proof.version, existing.operation == proof.operation,
+                existing.scope == proof.scope,
+                existing.sessionIdentifier == proof.sessionIdentifier,
+                existing.taskIdentifier == proof.taskIdentifier, existing.trackID == proof.trackID,
+                existing.packageDigest == proof.packageDigest
+            else { throw FoundationDownloadError.cleanup }
+            return
+        }
+        receipt.coldSignOutProof = proof
+        try write(receipt)
+        guard try load().coldSignOutProof == proof else { throw FoundationDownloadError.cleanup }
+    }
+
+    func coldFinalityMatches(
+        operation: UUID, expectedTrackID: String, expectedPackage: FoundationNativeDownloadPackage,
+        requireManifestAuthorization: Bool = false
+    ) throws -> Bool {
+        let receipt = try load()
+        guard let proof = receipt.coldSignOutProof,
+            !requireManifestAuthorization || proof.manifestRemovalAuthorized
+        else { return false }
+        return try coldProofMatches(
+            proof, receipt: receipt, operation: operation,
+            expectedTrackID: expectedTrackID, expectedPackage: expectedPackage)
+    }
+
+    /// The caller must first validate the exact entry in a descriptor-pinned manifest.
+    fileprivate func authorizeColdManifestRemoval(
+        operation: UUID, expectedTrackID: String, expectedPackage: FoundationNativeDownloadPackage
+    ) throws {
+        var receipt = try load()
+        guard receipt.hasProvenRetirement, var proof = receipt.coldSignOutProof,
+            try coldProofMatches(
+                proof, receipt: receipt, operation: operation,
+                expectedTrackID: expectedTrackID, expectedPackage: expectedPackage)
+        else { throw FoundationDownloadError.cleanup }
+        if proof.manifestRemovalAuthorized { return }
+        proof.manifestRemovalAuthorized = true
+        receipt.coldSignOutProof = proof
+        try write(receipt)
+        guard try load().coldSignOutProof == proof else { throw FoundationDownloadError.cleanup }
+    }
+
+    private func coldTerminalProofMatches(
+        _ proof: Receipt.ColdSignOutProof, receipt: Receipt, operation: UUID
+    ) -> Bool {
+        proof.version == 2 && proof.operation == operation && proof.scope == scope
+            && proof.sessionIdentifier == sessionIdentifier
+            && proof.taskIdentifier == receipt.taskIdentifier
+            && proof.trackID == (receipt.trackID ?? "") && proof.packageDigest.isEmpty
+            && receipt.phase == .terminalNoAllocation && receipt.creationVersion == 1
+            && receipt.taskIdentifier > 0 && receipt.nativeURL == nil && receipt.package == nil
+            && receipt.namespaceBookmark == nil && receipt.completionAttempted != true
+    }
+
+    func recordColdTerminalFinality(operation: UUID) throws {
+        var receipt = try load()
+        let proof = Receipt.ColdSignOutProof(
+            version: 2, operation: operation, scope: scope,
+            sessionIdentifier: sessionIdentifier, taskIdentifier: receipt.taskIdentifier,
+            trackID: receipt.trackID ?? "", packageDigest: Data(), manifestRemovalAuthorized: false)
+        guard coldTerminalProofMatches(proof, receipt: receipt, operation: operation)
+        else { throw FoundationDownloadError.cleanup }
+        if let existing = receipt.coldSignOutProof {
+            guard coldTerminalProofMatches(existing, receipt: receipt, operation: operation)
+            else { throw FoundationDownloadError.cleanup }
+            return
+        }
+        receipt.coldSignOutProof = proof
+        try write(receipt)
+        guard try load().coldSignOutProof == proof else { throw FoundationDownloadError.cleanup }
+    }
+
+    func coldTerminalFinalityMatches(operation: UUID, requireManifestAuthorization: Bool = false)
+        throws -> Bool
+    {
+        let receipt = try load()
+        guard let proof = receipt.coldSignOutProof,
+            !requireManifestAuthorization || proof.manifestRemovalAuthorized
+        else { return false }
+        return coldTerminalProofMatches(proof, receipt: receipt, operation: operation)
+    }
+
+    /// Caller must hold the scoped operation and validate the existing manifest first.
+    fileprivate func authorizeColdTerminalManifestRemoval(operation: UUID) throws {
+        var receipt = try load()
+        guard receipt.hasProvenRetirement, var proof = receipt.coldSignOutProof,
+            coldTerminalProofMatches(proof, receipt: receipt, operation: operation)
+        else { throw FoundationDownloadError.cleanup }
+        if proof.manifestRemovalAuthorized { return }
+        proof.manifestRemovalAuthorized = true
+        receipt.coldSignOutProof = proof
+        try write(receipt)
+        guard try load().coldSignOutProof == proof else { throw FoundationDownloadError.cleanup }
+    }
+
     func completedPackage(taskIdentifier: Int) throws -> FoundationNativeDownloadPackage {
         let receipt = try load()
         guard receipt.taskIdentifier == taskIdentifier, receipt.retired != true,
@@ -1275,6 +2671,8 @@ nonisolated struct FoundationNativeAllocationStore: Sendable {
         remove: (URL) throws -> Void = { try FileManager.default.removeItem(at: $0) }
     ) throws {
         var receipt = try load()
+        // Ambiguous legacy allocations are retained before any resolution or deletion.
+        guard receipt.isRetirementEligible else { throw FoundationDownloadError.cleanup }
         if receipt.nativeURL == nil {
             // Check the proof before trusting a legacy tombstone. An older reserved
             // receipt (even retired) may have issued a factory without recording it.
@@ -1284,12 +2682,18 @@ nonisolated struct FoundationNativeAllocationStore: Sendable {
             else {
                 throw FoundationDownloadError.cleanup
             }
-            if receipt.retired == true { return }
+            if receipt.retired == true {
+                guard receipt.hasProvenRetirement else { throw FoundationDownloadError.cleanup }
+                return
+            }
             receipt.retired = true
             try write(receipt)
             return
         }
-        if receipt.retired == true { return }
+        if receipt.retired == true {
+            guard receipt.hasProvenRetirement else { throw FoundationDownloadError.cleanup }
+            return
+        }
         guard let nativeURL = receipt.nativeURL else { throw FoundationDownloadError.cleanup }
         let package =
             receipt.package

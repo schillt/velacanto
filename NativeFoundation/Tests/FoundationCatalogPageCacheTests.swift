@@ -73,6 +73,43 @@ final class FoundationCatalogPageCacheTests: XCTestCase {
         XCTAssertEqual(model.items, [album])
     }
 
+    @MainActor
+    private final class HeldPage {
+        let entered = XCTestExpectation(description: "catalog read entered hold")
+        private var continuation: CheckedContinuation<FoundationPage, Never>?
+        private var released: FoundationPage?
+
+        func hold() async -> FoundationPage {
+            entered.fulfill()
+            if let released { return released }
+            return await withCheckedContinuation { continuation = $0 }
+        }
+
+        func release(_ page: FoundationPage) {
+            released = page
+            continuation?.resume(returning: page)
+            continuation = nil
+        }
+    }
+
+    private func completeWhilePageHeld(
+        gate: HeldPage, old: Task<Void, Never>, operation: @escaping @MainActor () async -> Void
+    ) async -> Bool {
+        let finished = XCTestExpectation(description: "replacement catalog operation returned")
+        let task = Task {
+            await operation()
+            finished.fulfill()
+        }
+        guard await XCTWaiter.fulfillment(of: [finished], timeout: 5) == .completed else {
+            task.cancel()
+            old.cancel()
+            gate.release(.init(items: [], nextStartIndex: nil))
+            XCTFail("Replacement catalog operation did not finish within 5 seconds")
+            return false
+        }
+        return true
+    }
+
     func testHistoryShelfDispatchDropsCancelledOldAccountResponseBeforeReactivation() async {
         let directory = root()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -80,21 +117,28 @@ final class FoundationCatalogPageCacheTests: XCTestCase {
         let newCache = FoundationCatalogPageCache(scope: "history-account-b", root: directory)
         let model = FoundationBrowseModel()
         model.configureCache(oldCache, key: "home-history")
-        let started = expectation(description: "history read held")
-        var release: CheckedContinuation<FoundationPage, Never>?
+        let gate = HeldPage()
+        let finished = XCTestExpectation(description: "held catalog read returned")
         let old = Task {
+            defer { finished.fulfill() }
             await FoundationHomeShelfRefresh.history.load(model: model, allowsNetwork: true) { _ in
-                await withCheckedContinuation { continuation in
-                    release = continuation
-                    started.fulfill()
-                }
+                await gate.hold()
             }
         }
-        await fulfillment(of: [started], timeout: 2)
+        guard await XCTWaiter.fulfillment(of: [gate.entered], timeout: 2) == .completed else {
+            old.cancel()
+            gate.release(.init(items: [], nextStartIndex: nil))
+            XCTFail("Catalog read did not enter its hold within 2 seconds")
+            return
+        }
         old.cancel()
         model.configureCache(newCache, key: "home-history")
-        release?.resume(returning: .init(items: [album], nextStartIndex: nil))
-        await old.value
+        gate.release(.init(items: [album], nextStartIndex: nil))
+        guard await XCTWaiter.fulfillment(of: [finished], timeout: 5) == .completed else {
+            old.cancel()
+            XCTFail("Held catalog read did not finish within 5 seconds")
+            return
+        }
         XCTAssertTrue(model.items.isEmpty)
         let oldRecord = await oldCache.read("home-history")
         let newRecord = await newCache.read("home-history")
@@ -245,21 +289,36 @@ final class FoundationCatalogPageCacheTests: XCTestCase {
         let cache = FoundationCatalogPageCache(scope: "fixture", root: directory)
         let model = FoundationBrowseModel()
         model.configureCache(cache, key: "home")
-        let started = expectation(description: "request suspended")
-        var release: CheckedContinuation<FoundationPage, Never>?
+        let gate = HeldPage()
+        let finished = XCTestExpectation(description: "held catalog read returned")
         let old = Task {
+            defer { finished.fulfill() }
             await model.loadPending { _ in
-                await withCheckedContinuation { continuation in
-                    release = continuation
-                    started.fulfill()
-                }
+                await gate.hold()
             }
         }
-        await fulfillment(of: [started], timeout: 2)
+        guard await XCTWaiter.fulfillment(of: [gate.entered], timeout: 2) == .completed else {
+            old.cancel()
+            gate.release(.init(items: [], nextStartIndex: nil))
+            XCTFail("Catalog read did not enter its hold within 2 seconds")
+            return
+        }
         old.cancel()
-        await model.load(.refresh) { _ in FoundationPage(items: [self.album], nextStartIndex: nil) }
-        release?.resume(returning: FoundationPage(items: [], nextStartIndex: nil))
-        await old.value
+        guard
+            await completeWhilePageHeld(
+                gate: gate, old: old,
+                operation: {
+                    await model.load(.refresh) { _ in
+                        FoundationPage(items: [self.album], nextStartIndex: nil)
+                    }
+                })
+        else { return }
+        gate.release(FoundationPage(items: [], nextStartIndex: nil))
+        guard await XCTWaiter.fulfillment(of: [finished], timeout: 5) == .completed else {
+            old.cancel()
+            XCTFail("Held catalog read did not finish within 5 seconds")
+            return
+        }
         let record = await cache.read("home")
         XCTAssertEqual(record?.page.items, [album])
         let permit = FoundationPageWritePermit()
@@ -276,30 +335,43 @@ final class FoundationCatalogPageCacheTests: XCTestCase {
         let cache = FoundationCatalogPageCache(scope: "fixture", root: directory)
         let model = FoundationBrowseModel()
         model.configureCache(cache, key: "home")
-        let started = expectation(description: "old read suspended")
-        var release: CheckedContinuation<FoundationPage, Never>?
+        let gate = HeldPage()
+        let finished = XCTestExpectation(description: "held catalog read returned")
         let old = Task {
+            defer { finished.fulfill() }
             await model.loadPending { _ in
-                await withCheckedContinuation { continuation in
-                    release = continuation
-                    started.fulfill()
-                }
+                await gate.hold()
             }
         }
-        await fulfillment(of: [started], timeout: 2)
+        guard await XCTWaiter.fulfillment(of: [gate.entered], timeout: 2) == .completed else {
+            old.cancel()
+            gate.release(.init(items: [], nextStartIndex: nil))
+            XCTFail("Catalog read did not enter its hold within 2 seconds")
+            return
+        }
         XCTAssertTrue(model.isLoading)
         model.request(.refresh)
         var refreshReads = 0
-        await model.loadPending { offset in
-            XCTAssertEqual(offset, 0)
-            refreshReads += 1
-            return FoundationPage(items: [self.album], nextStartIndex: nil)
-        }
+        guard
+            await completeWhilePageHeld(
+                gate: gate, old: old,
+                operation: {
+                    await model.loadPending { offset in
+                        XCTAssertEqual(offset, 0)
+                        refreshReads += 1
+                        return FoundationPage(items: [self.album], nextStartIndex: nil)
+                    }
+                })
+        else { return }
         XCTAssertEqual(refreshReads, 1)
         XCTAssertEqual(model.items, [album])
         XCTAssertFalse(model.isLoading)
-        release?.resume(returning: FoundationPage(items: [], nextStartIndex: 24))
-        await old.value
+        gate.release(FoundationPage(items: [], nextStartIndex: 24))
+        guard await XCTWaiter.fulfillment(of: [finished], timeout: 5) == .completed else {
+            old.cancel()
+            XCTFail("Held catalog read did not finish within 5 seconds")
+            return
+        }
         XCTAssertEqual(model.items, [album])
         XCTAssertNil(model.nextStartIndex)
         let persisted = await cache.read("home")
@@ -336,34 +408,53 @@ final class FoundationCatalogPageCacheTests: XCTestCase {
         let cache = FoundationCatalogPageCache(scope: "fixture", root: directory)
         let model = FoundationBrowseModel()
         model.configureCache(cache, key: "home")
-        let started = expectation(description: "cancelled load suspended")
-        var release: CheckedContinuation<FoundationPage, Never>?
+        let gate = HeldPage()
+        let finished = XCTestExpectation(description: "held catalog read returned")
         let old = Task {
+            defer { finished.fulfill() }
             await model.loadPending { _ in
-                await withCheckedContinuation { continuation in
-                    release = continuation
-                    started.fulfill()
-                }
+                await gate.hold()
             }
         }
-        await fulfillment(of: [started], timeout: 2)
-        XCTAssertTrue(model.isLoading)
-        await model.loadPending { _ in
-            XCTFail("A genuinely live shared owner must not start a duplicate load")
-            return FoundationPage(items: [], nextStartIndex: nil)
+        guard await XCTWaiter.fulfillment(of: [gate.entered], timeout: 2) == .completed else {
+            old.cancel()
+            gate.release(.init(items: [], nextStartIndex: nil))
+            XCTFail("Catalog read did not enter its hold within 2 seconds")
+            return
         }
+        XCTAssertTrue(model.isLoading)
+        guard
+            await completeWhilePageHeld(
+                gate: gate, old: old,
+                operation: {
+                    await model.loadPending { _ in
+                        XCTFail("A genuinely live shared owner must not start a duplicate load")
+                        return FoundationPage(items: [], nextStartIndex: nil)
+                    }
+                })
+        else { return }
         old.cancel()
         var replacementReads = 0
-        await model.loadPending { offset in
-            XCTAssertEqual(offset, 0)
-            replacementReads += 1
-            return FoundationPage(items: [self.album], nextStartIndex: nil)
-        }
+        guard
+            await completeWhilePageHeld(
+                gate: gate, old: old,
+                operation: {
+                    await model.loadPending { offset in
+                        XCTAssertEqual(offset, 0)
+                        replacementReads += 1
+                        return FoundationPage(items: [self.album], nextStartIndex: nil)
+                    }
+                })
+        else { return }
         XCTAssertEqual(replacementReads, 1)
         XCTAssertEqual(model.items, [album])
         XCTAssertFalse(model.isLoading)
-        release?.resume(returning: FoundationPage(items: [], nextStartIndex: 24))
-        await old.value
+        gate.release(FoundationPage(items: [], nextStartIndex: 24))
+        guard await XCTWaiter.fulfillment(of: [finished], timeout: 5) == .completed else {
+            old.cancel()
+            XCTFail("Held catalog read did not finish within 5 seconds")
+            return
+        }
         XCTAssertEqual(model.items, [album])
         XCTAssertNil(model.nextStartIndex)
         let persisted = await cache.read("home")

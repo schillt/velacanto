@@ -157,6 +157,7 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
         private var queueSnapshot: UIImageView?
         private var queueAnimator: UIViewPropertyAnimator?
         private var queueToken: UUID?
+        private var queueCancellationRevision: UInt = 0
         private var queueImage: Artwork?
         private weak var queueContainer: UIView?
         fileprivate weak var queueArtworkLayer: UIView?
@@ -448,21 +449,23 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
             return targets
         }
 
-        private func clearMetadataLabels() {
+        private func clearMetadataLabels(resetVisibility: Bool = true) {
             for label in metadataLabels.values { label.removeFromSuperview() }
             metadataLabels.removeAll()
-            queueHiddenMetadataIdentity = nil
+            if resetVisibility { queueHiddenMetadataIdentity = nil }
         }
 
         fileprivate func retireQueueTransitionLayer(_ view: UIView) {
             guard queueArtworkLayer === view || queueMetadataLayer === view else { return }
-            cancelQueueTransition()
+            cancelQueueTransition(deferVisibilityReset: true)
             if queueArtworkLayer === view { queueArtworkLayer = nil }
             if queueMetadataLayer === view { queueMetadataLayer = nil }
         }
 
-        func cancelQueueTransition() {
-            clearMetadataLabels()
+        func cancelQueueTransition(deferVisibilityReset: Bool = false) {
+            queueCancellationRevision &+= 1
+            let revision = queueCancellationRevision
+            clearMetadataLabels(resetVisibility: !deferVisibilityReset)
             queueToken = nil
             queueTarget = nil
             queueGeometryScheduled = false
@@ -472,7 +475,25 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
             queueSnapshot = nil
             queueImage = nil
             queueContainer = nil
-            queueHiddenArtworkIdentity = nil
+            if deferVisibilityReset {
+                guard queueHiddenArtworkIdentity != nil || queueHiddenMetadataIdentity != nil else {
+                    return
+                }
+                // Representable teardown runs during a SwiftUI update. Retire the
+                // UIKit transition synchronously, but publish visibility after it.
+                // Any newer cancellation or transition supersedes this reset.
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, self.queueCancellationRevision == revision else { return }
+                    if self.queueHiddenMetadataIdentity != nil {
+                        self.queueHiddenMetadataIdentity = nil
+                    }
+                    if self.queueHiddenArtworkIdentity != nil {
+                        self.queueHiddenArtworkIdentity = nil
+                    }
+                }
+            } else {
+                queueHiddenArtworkIdentity = nil
+            }
         }
 
         fileprivate func register(
@@ -857,81 +878,6 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
                         || (role != .compact && identity != nil
                             && model.queueHiddenArtworkIdentity == identity)
                         ? 0 : 1)
-        }
-    }
-
-    // Native navigation views can receive taps through a SwiftUI-only accessory.
-    // Keep SwiftUI's existing appearance/accessibility, with native controls owning
-    // the same three touch regions above the native navigation view.
-    struct FoundationMiniPlayerTouchLayer: UIViewRepresentable {
-        let showsNext: Bool
-        let allowsToggle: Bool
-        let allowsNext: Bool
-        let onOpen: @MainActor @Sendable () -> Void
-        let onToggle: @MainActor @Sendable () -> Void
-        let onNext: @MainActor @Sendable () -> Void
-
-        func makeUIView(context: Context) -> TouchView { TouchView() }
-        func updateUIView(_ view: TouchView, context: Context) {
-            view.onOpen = onOpen
-            view.onToggle = onToggle
-            view.onNext = onNext
-            view.showsNext = showsNext
-            view.toggle.isEnabled = allowsToggle
-            view.nextButton.isEnabled = allowsNext
-            view.semanticContentAttribute =
-                context.environment.layoutDirection == .rightToLeft
-                ? .forceRightToLeft : .forceLeftToRight
-            view.setNeedsLayout()
-        }
-        static func dismantleUIView(_ view: TouchView, coordinator: ()) {
-            view.onOpen = {}
-            view.onToggle = {}
-            view.onNext = {}
-        }
-
-        @MainActor final class TouchView: UIView {
-            let open = UIButton(type: .custom)
-            let toggle = UIButton(type: .custom)
-            let nextButton = UIButton(type: .custom)
-            var showsNext = true
-            var onOpen: @MainActor @Sendable () -> Void = {}
-            var onToggle: @MainActor @Sendable () -> Void = {}
-            var onNext: @MainActor @Sendable () -> Void = {}
-
-            init() {
-                super.init(frame: .zero)
-                backgroundColor = .clear
-                accessibilityElementsHidden = true
-                for button in [open, toggle, nextButton] { addSubview(button) }
-                open.addAction(UIAction { [weak self] _ in self?.onOpen() }, for: .touchUpInside)
-                toggle.addAction(
-                    UIAction { [weak self] _ in self?.onToggle() }, for: .touchUpInside)
-                nextButton.addAction(
-                    UIAction { [weak self] _ in self?.onNext() }, for: .touchUpInside)
-            }
-            required init?(coder: NSCoder) { fatalError("Not implemented") }
-            override func layoutSubviews() {
-                super.layoutSubviews()
-                let y = (bounds.height - 44) / 2
-                let toggleX = bounds.width - 54 - (showsNext ? 54 : 0)
-                var frames = [
-                    CGRect(x: 10, y: 0, width: max(0, toggleX - 20), height: bounds.height),
-                    CGRect(x: toggleX, y: y, width: 44, height: 44),
-                    CGRect(x: bounds.width - 54, y: y, width: 44, height: 44),
-                ]
-                if effectiveUserInterfaceLayoutDirection == .rightToLeft {
-                    frames = frames.map {
-                        CGRect(
-                            x: bounds.width - $0.maxX, y: $0.minY, width: $0.width,
-                            height: $0.height)
-                    }
-                }
-                for (button, frame) in zip([open, toggle, nextButton], frames) {
-                    button.frame = frame
-                }
-                nextButton.isHidden = !showsNext
-            }
         }
     }
 

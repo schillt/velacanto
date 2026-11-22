@@ -1,11 +1,59 @@
 import Combine
 import Foundation
 
+/// A bounded-search notice belongs only to the query and catalog that produced it.
+struct FoundationSearchFallbackCoverage: Equatable {
+    let query: String
+    let metadataScope: String
+    let localOnly: Bool
+    let kinds: Set<FoundationItem.Kind>
+
+    func hasUnwalkedPages(query: String, metadataScope: String, localOnly: Bool) -> Bool {
+        self.query == query && self.metadataScope == metadataScope && self.localOnly == localOnly
+            && !kinds.isEmpty
+    }
+}
+
+/// A first-page snapshot is retired only after its owning browse model settles.
+@MainActor final class FoundationSearchSeedLease {
+    private let page: FoundationPage
+    private(set) var pending = true
+    private var offered = false
+
+    init(page: FoundationPage) { self.page = page }
+
+    func matches(_ candidate: FoundationPage) -> Bool {
+        page.items == candidate.items && page.nextStartIndex == candidate.nextStartIndex
+    }
+
+    func offer(eligible: Bool) -> FoundationPage? {
+        guard pending, eligible else { return nil }
+        offered = true
+        return page
+    }
+
+    func settle() {
+        guard offered else { return }
+        pending = false
+        offered = false
+    }
+
+    func invalidate() {
+        pending = false
+        offered = false
+    }
+}
+
 /// Resolves a bounded query snapshot. Callers own cancellation and source/query identity.
 /// At most ten direct/fallback reads plus four relationship reads. Discovery adds
 /// one similar read for album/artist, or up to three song-context reads when existing
 /// relationship pages refer to different identities. No cursor is walked automatically.
 struct FoundationSearchResolver: Sendable {
+    struct FallbackCursor: Equatable, Sendable {
+        let term: String
+        let nextStartIndex: Int
+    }
+
     struct DirectSection: Sendable {
         let kind: FoundationItem.Kind
         /// Pagination belongs to the original provider query, never to related/fuzzy results.
@@ -13,6 +61,22 @@ struct FoundationSearchResolver: Sendable {
         let includesFuzzyMatches: Bool
         /// Preserve provider failure categories for existing catalog error/retry presentation.
         let error: FoundationLibraryError?
+        /// IDs from the provider page that owns `nextStartIndex`.
+        let originalIDs: Set<String>
+        let fallbackCursor: FallbackCursor?
+
+        init(
+            kind: FoundationItem.Kind, page: FoundationPage, includesFuzzyMatches: Bool,
+            error: FoundationLibraryError?, originalIDs: Set<String> = [],
+            fallbackCursor: FallbackCursor? = nil
+        ) {
+            self.kind = kind
+            self.page = page
+            self.includesFuzzyMatches = includesFuzzyMatches
+            self.error = error
+            self.originalIDs = originalIDs
+            self.fallbackCursor = fallbackCursor
+        }
     }
 
     struct RelatedSection: Sendable {
@@ -34,6 +98,8 @@ struct FoundationSearchResolver: Sendable {
         let direct: [DirectSection]
         let related: [RelatedSection]
         let failures: [Failure]
+        /// Fallback cursors are independent of the original provider cursor and are not walked.
+        let unwalkedFallbackKinds: Set<FoundationItem.Kind>
         let discovery: [FoundationItem]
         let playlistContents: FoundationPlaylistContentPage?
         let musicContext: FoundationMusicSearchContext
@@ -41,6 +107,7 @@ struct FoundationSearchResolver: Sendable {
 
         init(
             direct: [DirectSection], related: [RelatedSection], failures: [Failure],
+            unwalkedFallbackKinds: Set<FoundationItem.Kind> = [],
             discovery: [FoundationItem] = [],
             playlistContents: FoundationPlaylistContentPage? = nil,
             musicContext: FoundationMusicSearchContext = .init(),
@@ -49,6 +116,7 @@ struct FoundationSearchResolver: Sendable {
             self.direct = direct
             self.related = related
             self.failures = failures
+            self.unwalkedFallbackKinds = unwalkedFallbackKinds
             self.discovery = discovery
             self.playlistContents = playlistContents
             self.musicContext = musicContext
@@ -91,6 +159,143 @@ struct FoundationSearchResolver: Sendable {
             if !items.isEmpty { result.append(.init(role: role, kind: kind, items: items)) }
         }
         return result
+    }
+
+    /// Category snapshots include the overview's top row as well as typed rows.
+    /// The provider cursor still belongs to the direct section, not these projections.
+    static func categoryItems(
+        direct: [DirectSection], related: [RelatedSection], kind: FoundationItem.Kind,
+        query: String
+    ) -> [FoundationItem] {
+        displaySections(direct: direct, related: related, query: query)
+            .flatMap(\.items).filter { $0.kind == kind }
+    }
+
+    static func continuationCoverageMessage(_ message: String?, hasFallback: Bool) -> String? {
+        let sentence = "More close matches may exist. Narrow your search."
+        let retained = message?.replacingOccurrences(of: sentence, with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let parts = [
+            retained,
+            hasFallback
+                ? "More close matches may exist. Continue scrolling to search further." : nil,
+        ]
+        .compactMap { $0 }.filter { !$0.isEmpty }
+        return parts.isEmpty ? nil : parts.joined(separator: " ")
+    }
+
+    struct CategorySeed: Sendable {
+        let page: FoundationPage
+        let remaining: [FoundationItem]
+        let kind: FoundationItem.Kind?
+        let cost: (items: Int, bytes: Int)
+
+        // Only the whole-membership validator below may create this payload.
+        fileprivate init(
+            page: FoundationPage, remaining: [FoundationItem],
+            kind: FoundationItem.Kind?, cost: (items: Int, bytes: Int)
+        ) {
+            self.page = page
+            self.remaining = remaining
+            self.kind = kind
+            self.cost = cost
+        }
+    }
+
+    /// Validate every retained row before publishing any prefix. Query/folder/
+    /// account lifetime remains fenced by the selection's metadataScope lease;
+    /// a concrete Jellyfin adapter also supplies its canonical source identity.
+    static func categorySeed(
+        _ page: FoundationPage, kind: FoundationItem.Kind? = nil,
+        source: FoundationCatalogSource? = nil,
+        limits: FoundationCatalogBudget = FoundationCatalogBudget()
+    ) -> CategorySeed? {
+        guard page.items.count <= FoundationCatalogComposition.itemLimit else { return nil }
+        let kind = kind ?? page.items.first?.kind
+        let inferredSource = source ?? page.items.lazy.compactMap(\.catalogSource).first
+        var identities: Set<String> = []
+        for item in page.items {
+            guard item.kind == kind, !item.id.isEmpty, item.id.utf8.count <= 4096,
+                identities.insert(item.id).inserted,
+                item.catalogSource == nil || item.catalogSource == inferredSource
+            else { return nil }
+            if let inferredSource,
+                (try? item.catalogKey(legacyJellyfinSource: inferredSource)) == nil
+            {
+                return nil
+            }
+            for reference in [item.album, item.artist].compactMap({ $0 }) + item.genres {
+                guard reference.catalogSource == nil || reference.catalogSource == inferredSource
+                else { return nil }
+            }
+        }
+        var budget = limits
+        var bytes = 0
+        for offset in stride(
+            from: 0, to: page.items.count, by: FoundationCatalogComposition.pageLimit)
+        {
+            let chunk = FoundationPage(
+                items: Array(
+                    page.items[
+                        offset..<min(
+                            offset + FoundationCatalogComposition.pageLimit, page.items.count)]),
+                nextStartIndex: nil)
+            guard let cost = budget.cost(of: chunk), budget.canRetain(cost) else { return nil }
+            budget.retainedItems += cost.items
+            budget.retainedBytes += cost.bytes
+            bytes += cost.bytes
+        }
+        return .init(
+            page: .init(
+                items: Array(page.items.prefix(FoundationCatalogComposition.pageLimit)),
+                nextStartIndex: page.nextStartIndex),
+            remaining: Array(page.items.dropFirst(FoundationCatalogComposition.pageLimit)),
+            kind: kind, cost: (page.items.count, bytes))
+    }
+
+    static func categoryCoverageMessage(
+        hasPartialFailure: Bool, itemCount: Int, hasUnwalkedFallback: Bool = false
+    ) -> String? {
+        let exceedsPage = itemCount > FoundationCatalogComposition.itemLimit
+        let bounded =
+            hasUnwalkedFallback
+            ? "More close matches may exist. Narrow your search." : nil
+        let existing: String?
+        if exceedsPage && hasPartialFailure {
+            existing =
+                "Some matches could not be loaded, and this category is too large to show "
+                + "all related results. Return to Search to retry or narrow your search."
+        } else if exceedsPage {
+            existing =
+                "This category is too large to show all related results. "
+                + "Return to Search and narrow your search."
+        } else if hasPartialFailure {
+            existing =
+                "Some close or related matches could not be loaded. Return to Search to retry."
+        } else {
+            existing = nil
+        }
+        let parts = [existing, bounded].compactMap { $0 }
+        return parts.isEmpty ? nil : parts.joined(separator: " ")
+    }
+
+    /// Any missing direct kind can also suppress relationships in another category.
+    static func categoryHasPartialFailure(
+        direct: [DirectSection], kind: FoundationItem.Kind, hasOtherFailures: Bool
+    ) -> Bool {
+        hasOtherFailures || !direct.contains { $0.kind == kind }
+            || direct.contains { $0.error != nil }
+    }
+
+    /// Keep a category entry reachable even when its projected first page is empty.
+    static func showsCategoryContinuationPlaceholder(
+        hasOriginalPage: Bool, hasFallbackPage: Bool, hasVisibleSection: Bool
+    ) -> Bool {
+        !hasVisibleSection && (hasOriginalPage || hasFallbackPage)
+    }
+
+    static func canSeedCategory(directSucceeded: Bool, itemCount: Int, hasNextPage: Bool) -> Bool {
+        directSucceeded && itemCount <= FoundationCatalogComposition.itemLimit
     }
 
     private static func displayRanked(_ items: [FoundationItem], query: String) -> [FoundationItem]
@@ -168,63 +373,82 @@ struct FoundationSearchResolver: Sendable {
         self.localOnly = localOnly
     }
 
-    func resolve(query: String) async throws -> Result {
+    struct DirectResolution: Sendable {
+        let section: DirectSection
+        let failures: [Failure]
+        let fallbackHasMore: Bool
+    }
+
+    /// At most two bounded reads for one kind, shared with offline category refresh.
+    func resolveDirect(query: String, kind: FoundationItem.Kind) async throws -> DirectResolution {
         try Task.checkCancellation()
         let term = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !term.isEmpty else { return .init(direct: [], related: [], failures: []) }
-        var direct: [DirectSection] = []
         var failures: [Failure] = []
-        for kind in Self.kinds {
+        var original = FoundationPage(items: [], nextStartIndex: nil)
+        var directError: FoundationLibraryError?
+        var fallbackCursor: FallbackCursor?
+        if !term.isEmpty {
             try Task.checkCancellation()
-            var original = FoundationPage(items: [], nextStartIndex: nil)
-            var directError: FoundationLibraryError?
             do { original = try await search(term, kind, 50) } catch {
                 try Task.checkCancellation()
                 if error is CancellationError { throw error }
                 directError = FoundationLibraryError.category(error)
                 failures.append(.direct(kind))
             }
-            try Task.checkCancellation()
-            var candidates = Array(original.items.filter { $0.kind == kind }.prefix(50))
-            var fuzzy = false
-            if directError == nil,
-                !candidates.contains(where: { Self.titleScore($0.title, query: term) >= 80 }),
-                let fallback = Self.fallbackQuery(term)
-            {
-                do {
-                    let page = try await search(fallback, kind, 50)
-                    try Task.checkCancellation()
-                    let recovered = page.items.prefix(50).filter {
-                        $0.kind == kind && Self.titleScore($0.title, query: term) >= 60
-                    }
-                    let existing = Set(candidates.map(Self.key))
-                    fuzzy = recovered.contains { !existing.contains(Self.key($0)) }
-                    candidates += recovered
-                } catch {
-                    try Task.checkCancellation()
-                    if error is CancellationError { throw error }
-                    failures.append(.fallback(kind))
-                }
-            }
-            direct.append(
-                .init(
-                    kind: kind,
-                    page: .init(
-                        items: Self.ranked(candidates, query: term),
-                        nextStartIndex: original.nextStartIndex),
-                    includesFuzzyMatches: fuzzy, error: directError))
         }
         try Task.checkCancellation()
+        var candidates = Array(original.items.filter { $0.kind == kind }.prefix(50))
+        var fuzzy = false
+        if directError == nil, !term.isEmpty,
+            !candidates.contains(where: { Self.titleScore($0.title, query: term) >= 80 }),
+            let fallback = Self.fallbackQuery(term)
+        {
+            do {
+                let page = try await search(fallback, kind, 50)
+                try Task.checkCancellation()
+                if let next = page.nextStartIndex {
+                    fallbackCursor = .init(term: fallback, nextStartIndex: next)
+                }
+                let recovered = page.items.prefix(50).filter {
+                    $0.kind == kind && Self.titleScore($0.title, query: term) >= 60
+                }
+                let existing = Set(candidates.map(Self.key))
+                fuzzy = recovered.contains { !existing.contains(Self.key($0)) }
+                candidates += recovered
+            } catch {
+                try Task.checkCancellation()
+                if error is CancellationError { throw error }
+                failures.append(.fallback(kind))
+            }
+        }
+        let section = DirectSection(
+            kind: kind,
+            page: .init(
+                items: Self.ranked(candidates, query: term),
+                nextStartIndex: original.nextStartIndex),
+            includesFuzzyMatches: fuzzy, error: directError,
+            originalIDs: Set(original.items.filter { $0.kind == kind }.prefix(50).map(\.id)),
+            fallbackCursor: fallbackCursor)
+        return .init(section: section, failures: failures, fallbackHasMore: fallbackCursor != nil)
+    }
+
+    /// Resolve only first relationship pages needed by the selected category.
+    private func resolveRelationships(
+        direct: [DirectSection], query term: String, targetKind: FoundationItem.Kind? = nil
+    ) async throws -> (related: [RelatedSection], failures: [Failure], incomplete: Bool) {
+        try Task.checkCancellation()
+        var failures: [Failure] = []
+        var incomplete = false
         var related: [RelatedSection] = []
         let matchingTracks =
             direct.first { $0.kind == .track }?.page.items.filter {
                 Self.titleScore($0.title, query: term) >= 60
             } ?? []
         for track in matchingTracks {
-            if let album = track.relatedAlbum {
+            if targetKind == nil || targetKind == .album, let album = track.relatedAlbum {
                 related.append(.init(role: .trackAlbum, source: track, items: [album]))
             }
-            if let artist = track.relatedArtist {
+            if targetKind == nil || targetKind == .artist, let artist = track.relatedArtist {
                 related.append(.init(role: .trackArtist, source: track, items: [artist]))
             }
         }
@@ -234,57 +458,74 @@ struct FoundationSearchResolver: Sendable {
         let artist = direct.first { $0.kind == .artist }?.page.items.first {
             Self.titleScore($0.title, query: term) >= 60
         }
-        if let album, let reference = album.relatedArtist {
+        if targetKind == nil || targetKind == .artist,
+            let album, let reference = album.relatedArtist
+        {
             related.append(.init(role: .albumArtist, source: album, items: [reference]))
         }
         if !localOnly {
             if let artist {
-                do {
-                    let page = try await artistAlbums(artist.id)
-                    try Task.checkCancellation()
-                    related.append(
-                        .init(
-                            role: .artistAlbums, source: artist,
-                            items: Array(
-                                Self.unique(
-                                    Array(page.items.prefix(50)).filter { $0.kind == .album }
-                                ).prefix(12))))
-                } catch {
-                    try Task.checkCancellation()
-                    if error is CancellationError { throw error }
-                    failures.append(.artistAlbums)
-                }
-                var tracks: [FoundationItem] = []
-                do {
-                    let page = try await artistMostPlayed(artist.id)
-                    try Task.checkCancellation()
-                    tracks = Array(page.items.prefix(12)).filter { $0.kind == .track }
-                } catch {
-                    try Task.checkCancellation()
-                    if error is CancellationError { throw error }
-                    failures.append(.artistMostPlayed)
-                }
-                if tracks.isEmpty {
+                if targetKind == nil || targetKind == .album {
                     do {
-                        let page = try await artistTracks(artist.id)
                         try Task.checkCancellation()
-                        tracks = Array(page.items.prefix(100)).filter { $0.kind == .track }
+                        let page = try await artistAlbums(artist.id)
+                        incomplete =
+                            incomplete || page.nextStartIndex != nil || page.items.count > 12
+                        try Task.checkCancellation()
+                        related.append(
+                            .init(
+                                role: .artistAlbums, source: artist,
+                                items: Array(
+                                    Self.unique(
+                                        Array(page.items.prefix(50)).filter { $0.kind == .album }
+                                    ).prefix(12))))
                     } catch {
                         try Task.checkCancellation()
                         if error is CancellationError { throw error }
-                        failures.append(.artistTracks)
+                        failures.append(.artistAlbums)
                     }
                 }
-                tracks = Self.unique(tracks).sorted {
-                    $0.playCount == $1.playCount
-                        ? Self.key($0) < Self.key($1) : $0.playCount > $1.playCount
+                if targetKind == nil || targetKind == .track {
+                    var tracks: [FoundationItem] = []
+                    do {
+                        try Task.checkCancellation()
+                        let page = try await artistMostPlayed(artist.id)
+                        incomplete =
+                            incomplete || page.nextStartIndex != nil || page.items.count > 12
+                        try Task.checkCancellation()
+                        tracks = Array(page.items.prefix(12)).filter { $0.kind == .track }
+                    } catch {
+                        try Task.checkCancellation()
+                        if error is CancellationError { throw error }
+                        failures.append(.artistMostPlayed)
+                    }
+                    if tracks.isEmpty {
+                        do {
+                            try Task.checkCancellation()
+                            let page = try await artistTracks(artist.id)
+                            incomplete =
+                                incomplete || page.nextStartIndex != nil || page.items.count > 20
+                            try Task.checkCancellation()
+                            tracks = Array(page.items.prefix(100)).filter { $0.kind == .track }
+                        } catch {
+                            try Task.checkCancellation()
+                            if error is CancellationError { throw error }
+                            failures.append(.artistTracks)
+                        }
+                    }
+                    tracks = Self.unique(tracks).sorted {
+                        $0.playCount == $1.playCount
+                            ? Self.key($0) < Self.key($1) : $0.playCount > $1.playCount
+                    }
+                    related.append(
+                        .init(role: .artistTracks, source: artist, items: Array(tracks.prefix(20))))
                 }
-                related.append(
-                    .init(role: .artistTracks, source: artist, items: Array(tracks.prefix(20))))
             }
-            if let album {
+            if targetKind == nil || targetKind == .track, let album {
                 do {
+                    try Task.checkCancellation()
                     let page = try await albumTracks(album.id)
+                    incomplete = incomplete || page.nextStartIndex != nil || page.items.count > 20
                     try Task.checkCancellation()
                     related.append(
                         .init(
@@ -300,6 +541,77 @@ struct FoundationSearchResolver: Sendable {
                 }
             }
         }
+        return (related, failures, incomplete)
+    }
+
+    struct CategoryResolution: Sendable {
+        let page: FoundationPage
+        let direct: DirectSection
+        let failures: [Failure]
+        let incomplete: Bool
+    }
+
+    /// Fresh typed results retain related rows without re-running all five overview kinds.
+    /// Direct/fallback anchors cost at most six reads. Albums add one relation,
+    /// Artists none, Tracks at most three; Playlists/Genres use their own two reads.
+    /// Every relation is one first page; no continuation is walked here.
+    func resolveCategory(query: String, kind: FoundationItem.Kind) async throws
+        -> CategoryResolution
+    {
+        let term = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let primary = try await resolveDirect(query: term, kind: kind)
+        if let error = primary.section.error { throw error }
+        var direct = [primary.section]
+        var failures = primary.failures
+        var incomplete = primary.fallbackHasMore
+        if [.track, .album, .artist].contains(kind), !term.isEmpty {
+            for anchor in [FoundationItem.Kind.track, .album, .artist] where anchor != kind {
+                let resolved = try await resolveDirect(query: term, kind: anchor)
+                direct.append(resolved.section)
+                failures += resolved.failures
+                incomplete =
+                    incomplete || resolved.fallbackHasMore
+                    || resolved.section.page.nextStartIndex != nil
+            }
+        }
+        let relations = try await resolveRelationships(
+            direct: direct, query: term, targetKind: kind)
+        try Task.checkCancellation()
+        failures += relations.failures
+        return .init(
+            page: .init(
+                items: Self.categoryItems(
+                    direct: direct, related: relations.related, kind: kind, query: term),
+                nextStartIndex: primary.section.page.nextStartIndex),
+            direct: primary.section, failures: failures,
+            incomplete: incomplete || relations.incomplete || !failures.isEmpty)
+    }
+
+    /// Publish each completed bounded direct/fallback section without waiting for later kinds.
+    /// A retiring owner may throw cancellation; publication adds no reads or cursor walking.
+    func resolve(
+        query: String,
+        onDirectSection: (@MainActor @Sendable (DirectResolution) async throws -> Void)? = nil
+    ) async throws -> Result {
+        try Task.checkCancellation()
+        let term = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !term.isEmpty else { return .init(direct: [], related: [], failures: []) }
+        var direct: [DirectSection] = []
+        var failures: [Failure] = []
+        var unwalkedFallbackKinds: Set<FoundationItem.Kind> = []
+        for kind in Self.kinds {
+            let resolved = try await resolveDirect(query: term, kind: kind)
+            direct.append(resolved.section)
+            failures += resolved.failures
+            if resolved.fallbackHasMore { unwalkedFallbackKinds.insert(kind) }
+            try Task.checkCancellation()
+            try await onDirectSection?(resolved)
+            try Task.checkCancellation()
+        }
+        try Task.checkCancellation()
+        let relationships = try await resolveRelationships(direct: direct, query: term)
+        let related = relationships.related
+        failures += relationships.failures
         try Task.checkCancellation()
         var discovery: [FoundationItem] = []
         let directItems = Self.unique(direct.flatMap { $0.page.items })
@@ -431,6 +743,7 @@ struct FoundationSearchResolver: Sendable {
         return .init(
             direct: direct, related: related.filter { !$0.items.isEmpty },
             failures: failures.reduce(into: [Failure]()) { if !$0.contains($1) { $0.append($1) } },
+            unwalkedFallbackKinds: unwalkedFallbackKinds,
             discovery: discovery, playlistContents: contentPage, musicContext: context,
             playlistContentError: contentError)
     }
@@ -518,6 +831,22 @@ struct FoundationSearchResolver: Sendable {
         return 0
     }
 
+    /// A low-confidence title match must not be presented as an exact result.
+    static func titleMatchExplanation(_ title: String, query: String) -> String? {
+        titleScore(title, query: query) == 60 ? "Possible match" : nil
+    }
+
+    static func explainedSubtitle(_ subtitle: String?, item: FoundationItem, query: String)
+        -> String?
+    {
+        guard let explanation = titleMatchExplanation(item.title, query: query) else {
+            return subtitle
+        }
+        let base = subtitle ?? item.subtitle
+        // Lead with confidence so a one-line truncation does not hide it.
+        return base.isEmpty ? explanation : explanation + " · " + base
+    }
+
     static func normalize(_ value: String) -> String {
         value.folding(
             options: [.caseInsensitive, .diacriticInsensitive],
@@ -538,42 +867,76 @@ struct FoundationSearchResolver: Sendable {
 
     private static func fuzzyTokens(title: String, query: String) -> Bool {
         let queryTokens = query.split(separator: " ").map(String.init)
-        var available = title.split(separator: " ").map(String.init)
+        let available = title.split(separator: " ").map(String.init)
         guard queryTokens.count > 1, queryTokens.count <= 8,
             queryTokens.count <= available.count
         else { return false }
-        var totalEdits = 0
-        for token in queryTokens {
-            let limit = token.count < 4 ? 0 : (token.count >= 8 ? 2 : 1)
-            guard
-                let best = available.indices.min(by: {
-                    editDistance(available[$0], token, limit: limit)
-                        < editDistance(available[$1], token, limit: limit)
-                })
-            else { return false }
-            let distance = editDistance(available[best], token, limit: limit)
-            guard distance <= limit else { return false }
-            totalEdits += distance
-            guard totalEdits <= 2 else { return false }
-            available.remove(at: best)
+        // Each title token may explain one query token. Greedy pairing can consume
+        // the only suitable word too early and change recall when words are reordered.
+        // At most 256 states retain the cheapest assignment, capped at two edits.
+        let complete = (1 << queryTokens.count) - 1
+        var costs = Array(repeating: 3, count: complete + 1)
+        costs[0] = 0
+        for word in available {
+            let distances = queryTokens.map { token in
+                let limit = token.count < 4 ? 0 : (token.count >= 8 ? 2 : 1)
+                let distance = editDistance(word, token, limit: limit)
+                return distance <= limit ? distance : 3
+            }
+            var next = costs
+            for mask in costs.indices where costs[mask] <= 2 {
+                for index in queryTokens.indices where mask & (1 << index) == 0 {
+                    let cost = costs[mask] + distances[index]
+                    if cost <= 2 {
+                        let assigned = mask | (1 << index)
+                        next[assigned] = min(next[assigned], cost)
+                    }
+                }
+            }
+            costs = next
         }
-        return true
+        return costs[complete] <= 2
     }
 
+    /// Adjacent transpositions are one common typo; other edits retain unit cost.
+    /// This bounded optimal-string-alignment distance does not reuse transposed text.
     private static func editDistance(_ lhs: String, _ rhs: String, limit: Int) -> Int {
+        if lhs == rhs { return 0 }
+        guard limit > 0 else { return 1 }
         let left = Array(lhs)
         let right = Array(rhs)
-        guard abs(left.count - right.count) <= limit else { return limit + 1 }
-        var previous = Array(0...right.count)
+        let unreachable = limit + 1
+        guard abs(left.count - right.count) <= limit else { return unreachable }
+        if left.isEmpty { return right.count }
+        if right.isEmpty { return left.count }
+        // A path within the edit limit cannot leave this diagonal band: its
+        // insertion/deletion cost alone would already exceed the limit. Keep
+        // two preceding rows so adjacent transpositions retain their unit cost.
+        var previous = Array(repeating: unreachable, count: right.count + 1)
+        for column in 0...min(limit, right.count) { previous[column] = column }
+        var beforePrevious = previous
         for (index, character) in left.enumerated() {
-            var row = [index + 1]
-            for (column, other) in right.enumerated() {
-                row.append(
-                    min(
-                        row[column] + 1, previous[column + 1] + 1,
-                        previous[column] + (character == other ? 0 : 1)))
+            let rowIndex = index + 1
+            var row = Array(repeating: unreachable, count: right.count + 1)
+            row[0] = min(rowIndex, unreachable)
+            let lower = max(1, rowIndex - limit)
+            let upper = min(right.count, rowIndex + limit)
+            guard lower <= upper else { return unreachable }
+            var best = row[0]
+            for column in lower...upper {
+                var cost = min(
+                    row[column - 1] + 1, previous[column] + 1,
+                    previous[column - 1] + (character == right[column - 1] ? 0 : 1))
+                if index > 0, column > 1,
+                    character == right[column - 2], left[index - 1] == right[column - 1]
+                {
+                    cost = min(cost, beforePrevious[column - 2] + 1)
+                }
+                row[column] = cost
+                best = min(best, cost)
             }
-            if row.min()! > limit { return limit + 1 }
+            if best > limit { return unreachable }
+            beforePrevious = previous
             previous = row
         }
         return previous[right.count]

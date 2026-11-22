@@ -459,15 +459,38 @@ final class FoundationPlaylistTests: XCTestCase {
     @MainActor
     func testCancelledLateCompletionCannotReplaceNewOperationState() async {
         let operation = FoundationPlaylistOperation()
-        let suspended = PlaylistSuspension()
-        operation.run { await suspended.wait() }
-        await Task.yield()
+        let entered = XCTestExpectation(description: "old playlist operation entered")
+        let completed = XCTestExpectation(description: "old playlist operation returned")
+        let replacement = XCTestExpectation(description: "replacement playlist operation returned")
+        let suspended = PlaylistSuspension(entered: entered)
+        operation.run {
+            defer { completed.fulfill() }
+            await suspended.wait()
+        }
+        guard await XCTWaiter.fulfillment(of: [entered], timeout: 5) == .completed else {
+            await suspended.resume()
+            operation.cancel()
+            XCTFail("Old playlist operation did not enter its hold within 5 seconds")
+            return
+        }
         operation.cancel()
-        operation.run { throw FoundationLibraryError.authentication }
-        for _ in 0..<10 { await Task.yield() }
+        operation.run {
+            defer { replacement.fulfill() }
+            throw FoundationLibraryError.authentication
+        }
+        guard await XCTWaiter.fulfillment(of: [replacement], timeout: 5) == .completed else {
+            await suspended.resume()
+            operation.cancel()
+            XCTFail("Replacement playlist operation did not return within 5 seconds")
+            return
+        }
         let message = operation.message
         await suspended.resume()
-        for _ in 0..<10 { await Task.yield() }
+        guard await XCTWaiter.fulfillment(of: [completed], timeout: 5) == .completed else {
+            operation.cancel()
+            XCTFail("Old playlist operation did not return within 5 seconds")
+            return
+        }
         XCTAssertFalse(operation.succeeded)
         XCTAssertFalse(operation.isPending)
         XCTAssertEqual(operation.message, message)
@@ -785,9 +808,22 @@ private actor PlaylistRecorder {
 }
 
 private actor PlaylistSuspension {
+    private let entered: XCTestExpectation
     private var continuation: CheckedContinuation<Void, Never>?
-    func wait() async { await withCheckedContinuation { continuation = $0 } }
+    private var released = false
+
+    init(entered: XCTestExpectation) { self.entered = entered }
+
+    func wait() async {
+        guard !released else { return }
+        await withCheckedContinuation {
+            continuation = $0
+            entered.fulfill()
+        }
+    }
+
     func resume() {
+        released = true
         continuation?.resume()
         continuation = nil
     }

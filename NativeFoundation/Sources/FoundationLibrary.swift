@@ -899,6 +899,10 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
     private let hlsCleanup = FoundationHLSCleanup()
     #if DEBUG
         @TaskLocal static var hlsCleanupLoad: Load?
+        #if FOUNDATION_ISOLATED_TEST_HOST
+            // Metadata fixtures must supply their transport; native HLS remains unavailable.
+            @TaskLocal static var isolatedHLSMetadataLoad: Load?
+        #endif
         // Internal fixture seam only; persisted comparison preferences have no authority.
         @TaskLocal static var hlsOriginalPreferred = true
     #endif
@@ -974,7 +978,8 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
         networkAdmission: FoundationNetworkAdmission = FoundationNetworkAdmission()
     ) {
         self.init(
-            session: session, deviceName: deviceName, streamingQuality: { .original }, load: load,
+            session: session, deviceName: deviceName, streamingQuality: { .original },
+            load: load,
             artworkCache: artworkCache, catalogPageCache: catalogPageCache,
             networkAdmission: networkAdmission)
     }
@@ -1021,86 +1026,91 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
     func observeRemoteListeningActivity(
         receive: @escaping @Sendable ([FoundationRemoteListeningActivity]) async -> Void
     ) async throws {
-        try Task.checkCancellation()
-        let request = try Self.remoteListeningSocketRequest(
-            session: session, deviceName: deviceName)
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.waitsForConnectivity = false
-        configuration.timeoutIntervalForRequest = 60
-        configuration.httpCookieStorage = nil
-        configuration.urlCredentialStorage = nil
-        let transport = URLSession(
-            configuration: configuration, delegate: RejectRedirects(), delegateQueue: nil)
-        let socket = transport.webSocketTask(with: request)
-        socket.maximumMessageSize = 1_048_576
-        defer {
-            socket.cancel(with: .goingAway, reason: nil)
-            transport.invalidateAndCancel()
-        }
-        let source = try FoundationCatalogSource.jellyfin(scope: catalogAccountIdentity)
-        let accountSession = session
-        let encoder = JSONEncoder()
-        let start = try encoder.encode(
-            InboundWebSocketMessage.sessionsStartMessage(
-                .init(data: "0,15000", messageType: .sessionsStart)))
-        let keepAlive = try encoder.encode(
-            InboundWebSocketMessage.inboundKeepAliveMessage(.init(messageType: .keepAlive)))
-        do {
-            try await withTaskCancellationHandler {
-                socket.resume()
-                try Task.checkCancellation()
-                try await socket.send(.data(start))
-                try await withThrowingTaskGroup(of: Void.self) { group in
-                    defer {
-                        socket.cancel(with: .goingAway, reason: nil)
-                        group.cancelAll()
-                    }
-                    group.addTask {
-                        while !Task.isCancelled {
-                            let frame = try await socket.receive()
-                            try Task.checkCancellation()
-                            let data: Data
-                            switch frame {
-                            case .data(let value): data = value
-                            case .string(let value):
-                                guard value.utf8.count <= 1_048_576 else {
-                                    throw FoundationLibraryError.invalidResponse
-                                }
-                                data = Data(value.utf8)
-                            @unknown default: throw FoundationLibraryError.invalidResponse
-                            }
-                            let update = try Self.remoteListeningSocketUpdate(
-                                data, session: accountSession, catalogSource: source, now: Date())
-                            switch update {
-                            case .sessions(let activities): await receive(activities)
-                            case .keepAlive: try await socket.send(.data(keepAlive))
-                            case .ignored: break
-                            }
-                        }
-                    }
-                    group.addTask {
-                        while !Task.isCancelled {
-                            try await Task.sleep(for: .seconds(20))
-                            try Task.checkCancellation()
-                            try await socket.send(.data(keepAlive))
-                        }
-                    }
-                    try await group.next()
-                }
-            } onCancel: {
-                // URLSessionWebSocketTask.receive does not honor Swift cancellation alone.
+        #if FOUNDATION_ISOLATED_TEST_HOST
+            throw FoundationLibraryError.unavailable
+        #else
+            try Task.checkCancellation()
+            let request = try Self.remoteListeningSocketRequest(
+                session: session, deviceName: deviceName)
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.waitsForConnectivity = false
+            configuration.timeoutIntervalForRequest = 60
+            configuration.httpCookieStorage = nil
+            configuration.urlCredentialStorage = nil
+            let transport = URLSession(
+                configuration: configuration, delegate: RejectRedirects(), delegateQueue: nil)
+            let socket = transport.webSocketTask(with: request)
+            socket.maximumMessageSize = 1_048_576
+            defer {
                 socket.cancel(with: .goingAway, reason: nil)
                 transport.invalidateAndCancel()
             }
-        } catch {
-            if Task.isCancelled { throw CancellationError() }
-            if let response = socket.response as? HTTPURLResponse,
-                response.statusCode == 401 || response.statusCode == 403
-            {
-                throw FoundationLibraryError.authentication
+            let source = try FoundationCatalogSource.jellyfin(scope: catalogAccountIdentity)
+            let accountSession = session
+            let encoder = JSONEncoder()
+            let start = try encoder.encode(
+                InboundWebSocketMessage.sessionsStartMessage(
+                    .init(data: "0,15000", messageType: .sessionsStart)))
+            let keepAlive = try encoder.encode(
+                InboundWebSocketMessage.inboundKeepAliveMessage(.init(messageType: .keepAlive)))
+            do {
+                try await withTaskCancellationHandler {
+                    socket.resume()
+                    try Task.checkCancellation()
+                    try await socket.send(.data(start))
+                    try await withThrowingTaskGroup(of: Void.self) { group in
+                        defer {
+                            socket.cancel(with: .goingAway, reason: nil)
+                            group.cancelAll()
+                        }
+                        group.addTask {
+                            while !Task.isCancelled {
+                                let frame = try await socket.receive()
+                                try Task.checkCancellation()
+                                let data: Data
+                                switch frame {
+                                case .data(let value): data = value
+                                case .string(let value):
+                                    guard value.utf8.count <= 1_048_576 else {
+                                        throw FoundationLibraryError.invalidResponse
+                                    }
+                                    data = Data(value.utf8)
+                                @unknown default: throw FoundationLibraryError.invalidResponse
+                                }
+                                let update = try Self.remoteListeningSocketUpdate(
+                                    data, session: accountSession, catalogSource: source,
+                                    now: Date())
+                                switch update {
+                                case .sessions(let activities): await receive(activities)
+                                case .keepAlive: try await socket.send(.data(keepAlive))
+                                case .ignored: break
+                                }
+                            }
+                        }
+                        group.addTask {
+                            while !Task.isCancelled {
+                                try await Task.sleep(for: .seconds(20))
+                                try Task.checkCancellation()
+                                try await socket.send(.data(keepAlive))
+                            }
+                        }
+                        try await group.next()
+                    }
+                } onCancel: {
+                    // URLSessionWebSocketTask.receive does not honor Swift cancellation alone.
+                    socket.cancel(with: .goingAway, reason: nil)
+                    transport.invalidateAndCancel()
+                }
+            } catch {
+                if Task.isCancelled { throw CancellationError() }
+                if let response = socket.response as? HTTPURLResponse,
+                    response.statusCode == 401 || response.statusCode == 403
+                {
+                    throw FoundationLibraryError.authentication
+                }
+                throw error
             }
-            throw error
-        }
+        #endif
     }
 
     static func remoteListeningSocketRequest(
@@ -2782,18 +2792,32 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
     private func hlsResource(
         for item: FoundationItem, quality: FoundationStreamingQuality, resolveMetadata: Bool = true
     ) async throws -> FoundationPlaybackResource {
+        #if FOUNDATION_ISOLATED_TEST_HOST
+            #if DEBUG
+                let metadataLoad = Self.isolatedHLSMetadataLoad
+            #else
+                let metadataLoad: Load? = nil
+            #endif
+            guard resolveMetadata, let metadataLoad else {
+                throw FoundationLibraryError.unavailable
+            }
+        #else
+            let metadataLoad = load
+        #endif
         guard acceptsCatalogItem(item) else { throw FoundationLibraryError.unavailable }
         try Task.checkCancellation()
         guard item.kind == .track, Self.validID(item.id) else {
             throw FoundationLibraryError.unavailable
         }
-        var selectedSource: MediaSourceInfo?
-        var selectedAudio: MediaStream?
-        var copyCodec: String?
-        var container = "ts"
+        #if !FOUNDATION_ISOLATED_TEST_HOST
+            var selectedSource: MediaSourceInfo?
+            var selectedAudio: MediaStream?
+            var copyCodec: String?
+            var container = "ts"
+        #endif
         if resolveMetadata {
             let metadataData = try await responseData(
-                Paths.getItem(itemID: item.id, userID: session.userID), loadOverride: load)
+                Paths.getItem(itemID: item.id, userID: session.userID), loadOverride: metadataLoad)
             try Task.checkCancellation()
             let metadata = try Self.decodePlaybackMetadata(metadataData)
             guard metadata.id == item.id, metadata.type == .audio,
@@ -2808,166 +2832,174 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
             guard audio.count == 1, audio[0].isExternal != true,
                 let index = audio[0].index, index >= 0
             else { throw FoundationLibraryError.unavailable }
-            selectedSource = source
-            selectedAudio = audio[0]
-            copyCodec = quality == .original ? Self.hlsCopyCodec(audio[0]) : nil
-            if let copyCodec { container = copyCodec == "mp3" ? "ts" : "mp4" }
-            #if DEBUG
-                FoundationJournal.shared.record(
-                    "player.hls.selection delivery=\(copyCodec == nil ? "aac" : "copy") "
-                        + "reason=\(quality == .original ? Self.hlsCopyReason(audio[0]) : "fixedQuality")"
-                )
-            #endif
-        }
-        let copyOnly = copyCodec != nil
-        let bitrate = copyOnly ? 50_000_000 : (quality.aacBitrate ?? 320_000)
-        let profile = DeviceProfile(
-            directPlayProfiles: [], maxStreamingBitrate: bitrate,
-            musicStreamingTranscodingBitrate: bitrate,
-            transcodingProfiles: [
-                TranscodingProfile(
-                    protocol: .hls, audioCodec: copyCodec ?? "aac",
-                    container: container,
-                    context: .streaming, type: .audio)
-            ])
-        let info: PlaybackInfoResponse
-        do {
-            info = try await send(
-                Paths.getPostedPlaybackInfo(
-                    itemID: item.id,
-                    PlaybackInfoDto(
-                        allowAudioStreamCopy: copyOnly, audioStreamIndex: selectedAudio?.index,
-                        deviceProfile: profile,
-                        enableDirectPlay: false, enableDirectStream: false,
-                        enableTranscoding: true,
-                        isAutoOpenLiveStream: false, maxStreamingBitrate: bitrate,
-                        mediaSourceID: selectedSource?.id, userID: session.userID)))
-        } catch {
-            #if DEBUG
-                FoundationJournal.shared.record(
-                    "player.hls.negotiation outcome=failed stage=response decode=\(error is DecodingError ? 1 : 0)"
-                )
-            #endif
-            throw error
-        }
-        #if DEBUG
-            FoundationJournal.shared.record(
-                "player.hls.negotiation outcome=decoded error=\(info.errorCode == nil ? 0 : 1) "
-                    + "session=\(info.playSessionID?.isEmpty == false ? 1 : 0) sources=\(info.mediaSources?.count ?? 0)"
-            )
-        #endif
-        #if DEBUG
-            for source in (info.mediaSources ?? []).prefix(4) {
-                FoundationJournal.shared.record(
-                    "player.hls.source transcode=\(source.isSupportsTranscoding == true ? 1 : 0) "
-                        + "hls=\(source.transcodingSubProtocol == .hls ? 1 : 0) "
-                        + "opening=\(source.requiresOpening == true ? 1 : 0) closing=\(source.requiresClosing == true ? 1 : 0) "
-                        + "headers=\((source.requiredHTTPHeaders ?? [:]).count) "
-                        + "identity=\(source.id?.isEmpty == false ? 1 : 0) url=\(source.transcodingURL == nil ? 0 : 1)"
-                )
-            }
-        #endif
-        guard info.errorCode == nil,
-            let serverSession = info.playSessionID, !serverSession.isEmpty,
-            let source = info.mediaSources?.first(where: {
-                $0.isSupportsTranscoding == true && $0.transcodingSubProtocol == .hls
-                    && $0.requiresOpening != true && $0.requiresClosing != true
-                    && ($0.requiredHTTPHeaders ?? [:]).isEmpty
-            }), let sourceID = source.id, !sourceID.isEmpty,
-            let returnedURL = source.transcodingURL
-        else { throw FoundationLibraryError.unavailable }
-        let url = try Self.hlsURL(
-            returnedURL, itemID: item.id, sourceID: sourceID, serverSession: serverSession,
-            base: session.serverURL, token: session.accessToken, deviceID: session.deviceID)
-        #if DEBUG
-            let cleanupLoad = Self.hlsCleanupLoad ?? Self.signOutLoad
-        #else
-            let cleanupLoad = Self.signOutLoad
-        #endif
-        let lease = FoundationHLSLease(owner: hlsCleanup, key: serverSession) {
-            // One exact-session attempt using the existing bounded 8-second transport.
-            // A completed DELETE does not prove late segment requests cannot restart work.
-            do {
-                let endpoint = Request<Data>(
-                    path: "/Videos/ActiveEncodings", method: "DELETE",
-                    query: [("deviceId", session.deviceID), ("playSessionId", serverSession)])
-                _ = try await responseData(endpoint, loadOverride: cleanupLoad)
+            #if !FOUNDATION_ISOLATED_TEST_HOST
+                selectedSource = source
+                selectedAudio = audio[0]
+                copyCodec = quality == .original ? Self.hlsCopyCodec(audio[0]) : nil
+                if let copyCodec { container = copyCodec == "mp3" ? "ts" : "mp4" }
                 #if DEBUG
-                    FoundationJournal.shared.record("player.hls.cleanup outcome=returned")
+                    FoundationJournal.shared.record(
+                        "player.hls.selection delivery=\(copyCodec == nil ? "aac" : "copy") "
+                            + "reason=\(quality == .original ? Self.hlsCopyReason(audio[0]) : "fixedQuality")"
+                    )
                 #endif
+            #endif
+        }
+        #if FOUNDATION_ISOLATED_TEST_HOST
+            // Even explicitly injected metadata cannot negotiate, create a lease, or publish a URL.
+            throw FoundationLibraryError.unavailable
+        #else
+            let copyOnly = copyCodec != nil
+            let bitrate = copyOnly ? 50_000_000 : (quality.aacBitrate ?? 320_000)
+            let profile = DeviceProfile(
+                directPlayProfiles: [], maxStreamingBitrate: bitrate,
+                musicStreamingTranscodingBitrate: bitrate,
+                transcodingProfiles: [
+                    TranscodingProfile(
+                        protocol: .hls, audioCodec: copyCodec ?? "aac",
+                        container: container,
+                        context: .streaming, type: .audio)
+                ])
+            let info: PlaybackInfoResponse
+            do {
+                info = try await send(
+                    Paths.getPostedPlaybackInfo(
+                        itemID: item.id,
+                        PlaybackInfoDto(
+                            allowAudioStreamCopy: copyOnly, audioStreamIndex: selectedAudio?.index,
+                            deviceProfile: profile,
+                            enableDirectPlay: false, enableDirectStream: false,
+                            enableTranscoding: true,
+                            isAutoOpenLiveStream: false, maxStreamingBitrate: bitrate,
+                            mediaSourceID: selectedSource?.id, userID: session.userID)))
             } catch {
                 #if DEBUG
                     FoundationJournal.shared.record(
-                        "player.hls.cleanup outcome=failed category=\(FoundationLibraryError.category(error).rawValue)"
+                        "player.hls.negotiation outcome=failed stage=response decode=\(error is DecodingError ? 1 : 0)"
                     )
                 #endif
+                throw error
             }
-        }
-        do {
-            try Task.checkCancellation()
-            var playbackURL = url
-            if resolveMetadata {
-                let audio = (source.mediaStreams ?? []).filter { $0.type == .audio }
-                guard source.id == selectedSource?.id, audio.count == 1,
-                    let expected = selectedAudio,
-                    audio[0].index == expected.index,
-                    audio[0].codec?.lowercased() == expected.codec?.lowercased(),
-                    audio[0].bitRate == expected.bitRate,
-                    audio[0].sampleRate == expected.sampleRate,
-                    audio[0].channels == expected.channels,
-                    audio[0].bitDepth == expected.bitDepth,
-                    audio[0].profile == expected.profile
-                else {
+            #if DEBUG
+                FoundationJournal.shared.record(
+                    "player.hls.negotiation outcome=decoded error=\(info.errorCode == nil ? 0 : 1) "
+                        + "session=\(info.playSessionID?.isEmpty == false ? 1 : 0) sources=\(info.mediaSources?.count ?? 0)"
+                )
+            #endif
+            #if DEBUG
+                for source in (info.mediaSources ?? []).prefix(4) {
+                    FoundationJournal.shared.record(
+                        "player.hls.source transcode=\(source.isSupportsTranscoding == true ? 1 : 0) "
+                            + "hls=\(source.transcodingSubProtocol == .hls ? 1 : 0) "
+                            + "opening=\(source.requiresOpening == true ? 1 : 0) closing=\(source.requiresClosing == true ? 1 : 0) "
+                            + "headers=\((source.requiredHTTPHeaders ?? [:]).count) "
+                            + "identity=\(source.id?.isEmpty == false ? 1 : 0) url=\(source.transcodingURL == nil ? 0 : 1)"
+                    )
+                }
+            #endif
+            guard info.errorCode == nil,
+                let serverSession = info.playSessionID, !serverSession.isEmpty,
+                let source = info.mediaSources?.first(where: {
+                    $0.isSupportsTranscoding == true && $0.transcodingSubProtocol == .hls
+                        && $0.requiresOpening != true && $0.requiresClosing != true
+                        && ($0.requiredHTTPHeaders ?? [:]).isEmpty
+                }), let sourceID = source.id, !sourceID.isEmpty,
+                let returnedURL = source.transcodingURL
+            else { throw FoundationLibraryError.unavailable }
+            let url = try Self.hlsURL(
+                returnedURL, itemID: item.id, sourceID: sourceID, serverSession: serverSession,
+                base: session.serverURL, token: session.accessToken, deviceID: session.deviceID)
+            #if DEBUG
+                let cleanupLoad = Self.hlsCleanupLoad ?? Self.signOutLoad
+            #else
+                let cleanupLoad = Self.signOutLoad
+            #endif
+            let lease = FoundationHLSLease(owner: hlsCleanup, key: serverSession) {
+                // One exact-session attempt using the existing bounded 8-second transport.
+                // A completed DELETE does not prove late segment requests cannot restart work.
+                do {
+                    let endpoint = Request<Data>(
+                        path: "/Videos/ActiveEncodings", method: "DELETE",
+                        query: [("deviceId", session.deviceID), ("playSessionId", serverSession)])
+                    _ = try await responseData(endpoint, loadOverride: cleanupLoad)
+                    #if DEBUG
+                        FoundationJournal.shared.record("player.hls.cleanup outcome=returned")
+                    #endif
+                } catch {
                     #if DEBUG
                         FoundationJournal.shared.record(
-                            "player.hls.copy outcome=rejected stage=sourceDrift")
+                            "player.hls.cleanup outcome=failed category=\(FoundationLibraryError.category(error).rawValue)"
+                        )
                     #endif
-                    throw FoundationLibraryError.unavailable
                 }
             }
-            if let cap = quality.aacBitrate {
-                let fixedURL = try Self.validateFixedAACURL(
-                    returnedURL, cap: cap, audioIndex: selectedAudio?.index)
-                playbackURL = try Self.hlsURL(
-                    fixedURL, itemID: item.id, sourceID: sourceID, serverSession: serverSession,
-                    base: session.serverURL, token: session.accessToken, deviceID: session.deviceID)
-            }
-            if let copyCodec, let expected = selectedAudio {
-                let audio = [expected]
-                #if DEBUG
-                    FoundationJournal.shared.record(
-                        "player.hls.copy.source bitrate=\(audio[0].bitRate ?? -1) "
-                            + "sampleRate=\(audio[0].sampleRate ?? -1) channels=\(audio[0].channels ?? -1)"
-                    )
-                #endif
-                let master = try Self.hlsCopyMaster(
-                    returnedURL, audio: audio[0], codec: copyCodec, container: container)
-                let endpoint = Request<Data>(
-                    path: master.path, method: "GET",
-                    query: (master.queryItems ?? []).filter {
-                        !["api_key", "apikey"].contains($0.name.lowercased())
-                    }.map { ($0.name, $0.value) })
-                // Audio preparation uses the existing transport directly, never optional GET admission.
-                let data = try await responseData(
-                    endpoint, accept: "application/vnd.apple.mpegurl", loadOverride: load)
+            do {
                 try Task.checkCancellation()
-                playbackURL = try Self.hlsCopyURL(
-                    data, container: container, audio: expected, codec: copyCodec,
-                    itemID: item.id, sourceID: sourceID, serverSession: serverSession,
-                    base: session.serverURL, token: session.accessToken,
-                    deviceID: session.deviceID)
+                var playbackURL = url
+                if resolveMetadata {
+                    let audio = (source.mediaStreams ?? []).filter { $0.type == .audio }
+                    guard source.id == selectedSource?.id, audio.count == 1,
+                        let expected = selectedAudio,
+                        audio[0].index == expected.index,
+                        audio[0].codec?.lowercased() == expected.codec?.lowercased(),
+                        audio[0].bitRate == expected.bitRate,
+                        audio[0].sampleRate == expected.sampleRate,
+                        audio[0].channels == expected.channels,
+                        audio[0].bitDepth == expected.bitDepth,
+                        audio[0].profile == expected.profile
+                    else {
+                        #if DEBUG
+                            FoundationJournal.shared.record(
+                                "player.hls.copy outcome=rejected stage=sourceDrift")
+                        #endif
+                        throw FoundationLibraryError.unavailable
+                    }
+                }
+                if let cap = quality.aacBitrate {
+                    let fixedURL = try Self.validateFixedAACURL(
+                        returnedURL, cap: cap, audioIndex: selectedAudio?.index)
+                    playbackURL = try Self.hlsURL(
+                        fixedURL, itemID: item.id, sourceID: sourceID, serverSession: serverSession,
+                        base: session.serverURL, token: session.accessToken,
+                        deviceID: session.deviceID)
+                }
+                if let copyCodec, let expected = selectedAudio {
+                    let audio = [expected]
+                    #if DEBUG
+                        FoundationJournal.shared.record(
+                            "player.hls.copy.source bitrate=\(audio[0].bitRate ?? -1) "
+                                + "sampleRate=\(audio[0].sampleRate ?? -1) channels=\(audio[0].channels ?? -1)"
+                        )
+                    #endif
+                    let master = try Self.hlsCopyMaster(
+                        returnedURL, audio: audio[0], codec: copyCodec, container: container)
+                    let endpoint = Request<Data>(
+                        path: master.path, method: "GET",
+                        query: (master.queryItems ?? []).filter {
+                            !["api_key", "apikey"].contains($0.name.lowercased())
+                        }.map { ($0.name, $0.value) })
+                    // Audio preparation uses the existing transport directly, never optional GET admission.
+                    let data = try await responseData(
+                        endpoint, accept: "application/vnd.apple.mpegurl", loadOverride: load)
+                    try Task.checkCancellation()
+                    playbackURL = try Self.hlsCopyURL(
+                        data, container: container, audio: expected, codec: copyCodec,
+                        itemID: item.id, sourceID: sourceID, serverSession: serverSession,
+                        base: session.serverURL, token: session.accessToken,
+                        deviceID: session.deviceID)
+                }
+                try Task.checkCancellation()
+                return FoundationPlaybackResource(
+                    url: playbackURL,
+                    source: .init(
+                        delivery: copyOnly ? .hlsCopy : .hlsAAC,
+                        mediaSourceID: sourceID, serverSessionID: serverSession)
+                ) { await lease.release() }
+            } catch {
+                await lease.release()
+                throw error
             }
-            try Task.checkCancellation()
-            return FoundationPlaybackResource(
-                url: playbackURL,
-                source: .init(
-                    delivery: copyOnly ? .hlsCopy : .hlsAAC,
-                    mediaSourceID: sourceID, serverSessionID: serverSession)
-            ) { await lease.release() }
-        } catch {
-            await lease.release()
-            throw error
-        }
+        #endif
     }
 
     /// Reject a server decision that would bypass the explicit fixed AAC policy.

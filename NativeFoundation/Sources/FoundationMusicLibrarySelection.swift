@@ -196,6 +196,10 @@ struct FoundationMusicLibraryStore {
         #endif
     }
 
+    static func clearScope(_ scope: String, root: URL = defaultRoot) async -> Bool {
+        await FoundationScopedAccountRemoval.removeAsync(root: root, scope: scope)
+    }
+
     static func clear(retaining scope: String? = nil, root: URL = defaultRoot) -> Bool {
         do {
             try rejectSymbolicLinks(root)

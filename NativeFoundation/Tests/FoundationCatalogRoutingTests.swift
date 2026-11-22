@@ -203,22 +203,23 @@ final class FoundationCatalogRoutingTests: XCTestCase {
     }
 
     private actor HeldTransport {
-        var started = false
-        var startWaiter: CheckedContinuation<Void, Never>?
-        var finishWaiters: [CheckedContinuation<Void, Never>] = []
+        private var started = false
+        private var released = false
+        private var finishWaiters: [CheckedContinuation<Void, Never>] = []
         func hold() async {
-            await withCheckedContinuation { continuation in
-                finishWaiters.append(continuation)
-                started = true
-                startWaiter?.resume()
-                startWaiter = nil
-            }
+            started = true
+            guard !released else { return }
+            await withCheckedContinuation { finishWaiters.append($0) }
         }
-        func waitForStart() async {
-            if started { return }
-            await withCheckedContinuation { startWaiter = $0 }
+        func waitForStart() async -> Bool {
+            let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+            while !started && !Task.isCancelled && ContinuousClock.now < deadline {
+                try? await Task.sleep(for: .milliseconds(10))
+            }
+            return started && !Task.isCancelled
         }
         func release() {
+            released = true
             for waiter in finishWaiters { waiter.resume() }
             finishWaiters.removeAll()
         }
@@ -239,11 +240,24 @@ final class FoundationCatalogRoutingTests: XCTestCase {
         }
         let artist = item(.artist)
         let matching = Task { try await library.overview(for: artist) }
-        await gate.waitForStart()
-        let completed = expectation(
+        guard await gate.waitForStart() else {
+            matching.cancel()
+            await gate.release()
+            XCTFail("Matching catalog request did not enter its hold within 5 seconds")
+            return
+        }
+        let completed = XCTestExpectation(
             description: "Foreign and local rejection precedes transport release")
         completed.expectedFulfillmentCount = 2
-        let foreign = item(.artist, source: try .jellyfin(scope: String(repeating: "b", count: 64)))
+        let foreignSource: FoundationCatalogSource
+        do {
+            foreignSource = try .jellyfin(scope: String(repeating: "b", count: 64))
+        } catch {
+            matching.cancel()
+            await gate.release()
+            throw error
+        }
+        let foreign = item(.artist, source: foreignSource)
         let local = item(.artist, source: .local(sourceID: UUID()))
         let checks = [foreign, local].map { candidate in
             Task {
@@ -256,9 +270,31 @@ final class FoundationCatalogRoutingTests: XCTestCase {
                 completed.fulfill()
             }
         }
-        await fulfillment(of: [completed], timeout: 2)
+        guard await XCTWaiter.fulfillment(of: [completed], timeout: 2) == .completed else {
+            matching.cancel()
+            for check in checks { check.cancel() }
+            await gate.release()
+            XCTFail("Foreign catalog rejections did not complete within 2 seconds")
+            return
+        }
         await gate.release()
-        _ = try await matching.value
+        let finished = XCTestExpectation(description: "matching catalog request returned")
+        var outcome: Result<String?, Error>?
+        let observer = Task {
+            outcome = await matching.result
+            finished.fulfill()
+        }
+        guard await XCTWaiter.fulfillment(of: [finished], timeout: 5) == .completed else {
+            matching.cancel()
+            observer.cancel()
+            XCTFail("Matching catalog request did not finish within 5 seconds")
+            return
+        }
+        switch outcome {
+        case .some(.success): break
+        case .some(.failure(let error)): throw error
+        case nil: XCTFail("Matching catalog request returned without an outcome")
+        }
         for check in checks { await check.value }
         let count = await requests.value
         XCTAssertEqual(count, 1)

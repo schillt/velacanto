@@ -11,6 +11,86 @@ Evaluation date: 2026-10-26 America/New_York; live issue verification at
 2026-10-27 02:18 UTC. Evaluated local base:
 `58b5cfe33445f2ffc9f01138ec4f52c515a5a3fc`.
 
+## 0.7.0 app-relay feasibility review — 2026-11-02
+
+Owner direction: preserve stock Jellyfin support and investigate an app-side relay
+as a bounded feasibility exercise. This authorizes no production transport change,
+server modification, new player, installation or distribution. The synthetic proof
+below is independent of VelaCanto production source; no real Jellyfin server,
+account or physical route experiment has been used.
+
+Current source on local base `18b47aa6fbcd2aa290a075e414bc78ccac910d0f`
+negotiates copy/AAC HLS in `FoundationLibrary` and hands its authenticated URL to
+an `AVURLAsset`; the existing playback resource owns a scoped HLS cleanup lease.
+A relay would have to preserve those selection, cancellation, ownership and lease
+contracts while serving playlists and all referenced media resources without
+putting Jellyfin credentials in downstream URLs. HTTP status, ranges, MIME types,
+redirects, HLS child/key/init references and origin checks require explicit proof;
+forwarding a master manifest alone cannot establish token elimination.
+
+Apple's [resource-loader guidance](https://developer.apple.com/forums/thread/113063)
+states that AVFoundation needs to load HLS media segments directly. A resource
+loader is therefore not proof that the app can transparently intercept the full HLS
+path. [Apple's background-mode guidance](https://developer.apple.com/documentation/Xcode/configuring-background-execution-modes)
+permits audio background execution but does not establish an always-available relay;
+[Apple DTS](https://developer.apple.com/forums/thread/840808) distinguishes active
+background audio from suspension and describes listener failure on suspension.
+Whether this app's relay stays usable during lock, interruptions, pause/resume and
+route transitions remains unmeasured. Apple's [AirPlay guidance](https://developer.apple.com/documentation/avfoundation/implementing-simple-enhanced-buffering-for-your-content)
+describes player-based enhanced buffering, but does not establish that an external
+receiver can reach an app's loopback URL. Avoid assuming either success or failure.
+
+### Initial independent synthetic Mac proof
+
+At local candidate `89cc5a1bec8adcaa6071e3ed6d24f964539150da`, the coordinator
+ran a standalone disposable harness independent of the app source and generated
+audio locally. Its fixture-specific loopback relay used a synthetic upstream token,
+finite request/read/lifetime limits and allowlisted paths; the self-check passed
+manifest rewriting, downstream synthetic-token exclusion, a byte-range response,
+request rejection, upstream authentication and cleanup. This is not a general HLS
+parser or a production security assessment.
+
+A muted macOS AVPlayer probe observed playback time advance, a successful seek
+callback and time advance after seeking. Its relay recorded 3 playlist requests,
+4 segment requests and **0 range requests**; the separate synthetic HTTP self-check,
+not AVPlayer, exercised a range response. The server exited cleanly and removed its
+generated audio. This does not establish audible playback, actual Jellyfin
+compatibility, copy/transcode parity, iOS, background/lock, AirPlay, per-hop secrecy,
+or security. The private retained harness and sanitized results are kept in the
+local `relay-feasibility` evidence category; they are not an app build or release
+artifact.
+
+### Independent synthetic iOS simulator proof
+
+The coordinator ran a separate disposable in-app loopback fixture on an iOS 27
+simulator while the development checkout HEAD was
+`45dc890d6628ad56310c3666349032e43babe916`; the independent fixture was not the
+app and other local test work may have been present. The first fixture launch
+produced no result, and its preserved crash report showed a UIKit scene-lifecycle
+trap. After the fixture adopted scenes and structured result capture, its listener
+became ready, muted AVPlayer time advanced, a seek callback succeeded, and time
+advanced after seeking. The app reported 2 playlist requests, 4 segment requests
+and **0 range requests**; the runner validated the final result and its disposable
+simulator app was removed. The listener was asked to cancel; no background lifetime
+is established.
+
+This fixture serves fixed generated audio with no authenticated upstream or manifest
+rewriting. It does not establish a working iOS app relay, physical audibility,
+background/lock, AirPlay, stock Jellyfin, credential elimination or security. The
+exact corrected fixture, sanitized results and original failed evidence are retained
+privately in the relay evidence directory; no media, capability URL or raw success
+log is included with the corrected fixture.
+
+Recommendation: no production relay yet. On authorized test hardware compare
+copy/AAC, seeking,
+queue changes, background/lock and actual AirPlay receiver behavior; check local
+listener reachability and app lifetime independently. A synthetic proof is not
+stock-server compatibility or credential-elimination acceptance. A later real-server
+candidate would additionally require a reviewed security design, exact server
+version, per-hop URL/log checks and separate owner authorization for the concrete
+transport change. Stop and report any failed route or unsupported behavior rather
+than silently falling back or weakening existing playback protections.
+
 ## Result and scope
 
 **#25 remains open, P1, in milestone9 (v0.6.0).** The live

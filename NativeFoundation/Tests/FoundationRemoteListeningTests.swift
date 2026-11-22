@@ -5,6 +5,39 @@ import XCTest
 
 @testable import VelacantoFoundation
 
+/// Observes the captured production task, including bounded failure cleanup.
+/// Cancellation cannot force arbitrary production work to terminate.
+@MainActor
+private func requireRemoteTask<Success: Sendable, Failure: Error>(
+    _ task: Task<Success, Failure>, context: String,
+    stopOnCancellation: Bool = true, cleanup: @MainActor () async -> Void
+) async -> Bool {
+    var returnedAt: ContinuousClock.Instant?
+    let observer = Task {
+        _ = await task.result
+        returnedAt = .now
+    }
+    let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+    while returnedAt == nil, ContinuousClock.now < deadline,
+        !stopOnCancellation || !Task.isCancelled
+    {
+        await Task.yield()
+    }
+    if let returnedAt, returnedAt <= deadline, !stopOnCancellation || !Task.isCancelled {
+        return true
+    }
+    task.cancel()
+    await cleanup()
+    let cleanupDeadline = ContinuousClock.now.advanced(by: .seconds(5))
+    while returnedAt == nil, ContinuousClock.now < cleanupDeadline { await Task.yield() }
+    observer.cancel()
+    XCTFail("Timed out or cancelled waiting for \(context)")
+    if !(returnedAt.map { $0 <= cleanupDeadline } ?? false) {
+        XCTFail("Captured task did not return during cleanup: \(context)")
+    }
+    return false
+}
+
 final class FoundationRemoteListeningTests: XCTestCase {
     private static let owner = "00000000000000000000000000000002"
     private static let itemID = "00000000000000000000000000000001"
@@ -144,14 +177,25 @@ final class FoundationRemoteListeningTests: XCTestCase {
                 try await library.remoteListeningActivity()
             }
         }
+        addTeardownBlock { @MainActor in
+            task.cancel()
+            await admission.retire()
+            _ = await requireRemoteTask(
+                task, context: "remote admission teardown", stopOnCancellation: false,
+                cleanup: { await admission.retire() })
+        }
         // Match the existing admission tests: wait for the actual queued state,
         // bounded by elapsed time rather than assuming a scheduler yield count.
         let deadline = ContinuousClock.now.advanced(by: .seconds(5))
         while await admission.pendingCount != 1 {
             guard ContinuousClock.now < deadline else {
                 task.cancel()
-                _ = try? await task.value
                 await admission.release(held)
+                guard
+                    await requireRemoteTask(
+                        task, context: "task completion", cleanup: { await admission.retire() })
+                else { return }
+                _ = try? await task.value
                 XCTFail("Activity read did not enter ordinary admission within the test deadline")
                 return
             }
@@ -163,6 +207,10 @@ final class FoundationRemoteListeningTests: XCTestCase {
         XCTAssertEqual(requestCount, 0)
         task.cancel()
         do {
+            guard
+                await requireRemoteTask(
+                    task, context: "task completion", cleanup: { await admission.retire() })
+            else { return }
             _ = try await task.value
             XCTFail("Cancelled read succeeded")
         } catch {}
@@ -285,7 +333,9 @@ final class FoundationRemoteListeningTests: XCTestCase {
     func testSubscriptionPublishesChangedSnapshotsAndRejectsRetiredCallbacks() async {
         let model = FoundationRemoteListeningModel()
         await model.refresh { [Self.activity] }
-        let gate = RemoteListeningGate()
+        let entered = expectation(description: "remote subscription callback held")
+        let gate = RemoteListeningAcknowledgedGate(entered: entered)
+        let finished = RemoteListeningSignal()
         let updated = FoundationRemoteListeningActivity(
             id: Self.activity.id, deviceKey: Self.activity.deviceKey, deviceLabel: "Mac",
             checkedInAt: Self.now, item: Self.activity.item, albumTitle: "Album", elapsed: 110)
@@ -295,22 +345,75 @@ final class FoundationRemoteListeningTests: XCTestCase {
                 await gate.wait()
                 await receive([])
             }
+            await finished.signal()
         }
-        await gate.waitForStart()
+        let entry = await XCTWaiter.fulfillment(of: [entered], timeout: 5)
+        guard entry == .completed, !Task.isCancelled else {
+            XCTFail("Timed out or cancelled waiting for the held remote subscription callback")
+            task.cancel()
+            model.suspend()
+            await gate.release()
+            await requireRemoteListeningTaskFinished(
+                finished, context: "remote subscription entry cleanup")
+            let stillHeld = await gate.isHeld
+            XCTAssertFalse(stillHeld, "Subscription cleanup must release every callback entrant")
+            return
+        }
         XCTAssertEqual(model.activities, [updated])
         model.suspend()
         await gate.release()
-        await task.value
+        guard
+            await requireRemoteListeningTaskFinished(
+                finished, context: "retired remote subscription completion",
+                stopOnCancellation: true)
+        else {
+            task.cancel()
+            model.suspend()
+            await gate.release()
+            await requireRemoteListeningTaskFinished(
+                finished, context: "retired remote subscription cleanup")
+            let stillHeld = await gate.isHeld
+            XCTAssertFalse(stillHeld, "Subscription cleanup must release every callback entrant")
+            return
+        }
+        let stillHeld = await gate.isHeld
+        XCTAssertFalse(stillHeld, "Completed subscription must not retain a held callback")
         XCTAssertEqual(
             model.activities, [updated], "An old subscription cannot clear a newer context")
+    }
+
+    @MainActor
+    @discardableResult
+    private func requireRemoteListeningTaskFinished(
+        _ finished: RemoteListeningSignal, context: String, stopOnCancellation: Bool = false
+    ) async -> Bool {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while !(await finished.value) {
+            if stopOnCancellation, Task.isCancelled {
+                XCTFail("Cancelled while waiting for \(context)")
+                return false
+            }
+            guard ContinuousClock.now < deadline else {
+                XCTFail("Timed out waiting for \(context)")
+                return false
+            }
+            await Task.yield()
+        }
+        if stopOnCancellation, Task.isCancelled {
+            XCTFail("Cancelled while waiting for \(context)")
+            return false
+        }
+        return true
     }
 
     @MainActor
     func testSubscriptionCancellationEndsLifetimeWithoutClearingSnapshot() async {
         let model = FoundationRemoteListeningModel()
         await model.refresh { [Self.activity] }
-        let started = RemoteListeningGate()
+        let entered = expectation(description: "cancellable remote subscription callback held")
+        let started = RemoteListeningAcknowledgedGate(entered: entered)
         let closed = RemoteListeningSignal()
+        let finished = RemoteListeningSignal()
         let task = Task {
             await model.observe { receive in
                 await started.wait()
@@ -318,11 +421,39 @@ final class FoundationRemoteListeningTests: XCTestCase {
                 await closed.signal()
                 await receive([])
             }
+            await finished.signal()
         }
-        await started.waitForStart()
+        let entry = await XCTWaiter.fulfillment(of: [entered], timeout: 5)
+        guard entry == .completed, !Task.isCancelled else {
+            XCTFail(
+                "Timed out or cancelled waiting for the cancellable remote subscription callback")
+            task.cancel()
+            model.suspend()
+            await started.release()
+            await requireRemoteListeningTaskFinished(
+                finished, context: "cancelled remote subscription entry cleanup")
+            let stillHeld = await started.isHeld
+            XCTAssertFalse(stillHeld, "Cancellation cleanup must release every callback entrant")
+            return
+        }
         task.cancel()
         await started.release()
-        await task.value
+        guard
+            await requireRemoteListeningTaskFinished(
+                finished, context: "cancelled remote subscription completion",
+                stopOnCancellation: true)
+        else {
+            task.cancel()
+            model.suspend()
+            await started.release()
+            await requireRemoteListeningTaskFinished(
+                finished, context: "cancelled remote subscription cleanup")
+            let stillHeld = await started.isHeld
+            XCTAssertFalse(stillHeld, "Cancellation cleanup must release every callback entrant")
+            return
+        }
+        let stillHeld = await started.isHeld
+        XCTAssertFalse(stillHeld, "Completed cancellation must not retain a held callback")
         let didClose = await closed.value
         XCTAssertTrue(didClose)
         XCTAssertEqual(model.activities, [Self.activity])
@@ -333,11 +464,13 @@ final class FoundationRemoteListeningTests: XCTestCase {
     func testSubscriptionReconnectsOnceWithReconciliationAndCancellationStopsIt() async {
         let model = FoundationRemoteListeningModel()
         await model.refresh { [Self.activity] }
-        let gate = RemoteListeningGate()
+        let gateEntered = expectation(description: "remote gate callback held")
+        let gate = RemoteListeningAcknowledgedGate(entered: gateEntered)
         let probe = RemoteListeningSubscriptionProbe()
         let updated = FoundationRemoteListeningActivity(
             id: Self.activity.id, deviceKey: Self.activity.deviceKey, deviceLabel: "Mac",
             checkedInAt: Self.now, item: Self.activity.item, albumTitle: "Album", elapsed: 110)
+        let taskFinished = RemoteListeningSignal()
         let task = Task {
             await model.observe(
                 reconcile: {
@@ -352,12 +485,36 @@ final class FoundationRemoteListeningTests: XCTestCase {
                     await gate.wait()
                     throw CancellationError()
                 })
+            await taskFinished.signal()
         }
-        await gate.waitForStart()
+        let gateEntry = await XCTWaiter.fulfillment(of: [gateEntered], timeout: 5)
+        guard gateEntry == .completed, !Task.isCancelled else {
+            XCTFail("Timed out or cancelled waiting for gate callback entry")
+            task.cancel()
+            model.suspend()
+            await gate.release()
+            await requireRemoteListeningTaskFinished(
+                taskFinished, context: "task failure cleanup")
+            let gateStillHeld = await gate.isHeld
+            XCTAssertFalse(gateStillHeld, "Failure cleanup must release gate")
+            return
+        }
         XCTAssertEqual(model.activities, [updated])
         task.cancel()
         await gate.release()
-        await task.value
+        guard
+            await requireRemoteListeningTaskFinished(
+                taskFinished, context: "task completion", stopOnCancellation: true)
+        else {
+            task.cancel()
+            model.suspend()
+            await gate.release()
+            await requireRemoteListeningTaskFinished(
+                taskFinished, context: "task failure cleanup")
+            let gateStillHeld = await gate.isHeld
+            XCTAssertFalse(gateStillHeld, "Failure cleanup must release gate")
+            return
+        }
         let count = await probe.count
         let reconciles = await probe.reconciles
         let intervals = await probe.intervals
@@ -483,43 +640,130 @@ final class FoundationRemoteListeningTests: XCTestCase {
 
     @MainActor
     func testRetiredContextNeverPublishesLateResponseOrError() async {
-        let gate = RemoteListeningGate()
+        let gateEntered = expectation(description: "remote gate callback held")
+        let gate = RemoteListeningAcknowledgedGate(entered: gateEntered)
         let model = FoundationRemoteListeningModel()
+        let oldFinished = RemoteListeningSignal()
         let old = Task {
             await model.refresh {
                 await gate.wait()
                 return [Self.activity]
             }
+            await oldFinished.signal()
         }
-        await gate.waitForStart()
+        let gateEntry = await XCTWaiter.fulfillment(of: [gateEntered], timeout: 5)
+        guard gateEntry == .completed, !Task.isCancelled else {
+            XCTFail("Timed out or cancelled waiting for gate callback entry")
+            old.cancel()
+            model.suspend()
+            await gate.release()
+            await requireRemoteListeningTaskFinished(
+                oldFinished, context: "old failure cleanup")
+            let gateStillHeld = await gate.isHeld
+            XCTAssertFalse(gateStillHeld, "Failure cleanup must release gate")
+            return
+        }
         model.cancel()
         await model.refresh { [] }
         await gate.release()
-        await old.value
+        guard
+            await requireRemoteListeningTaskFinished(
+                oldFinished, context: "old completion", stopOnCancellation: true)
+        else {
+            old.cancel()
+            model.suspend()
+            await gate.release()
+            await requireRemoteListeningTaskFinished(
+                oldFinished, context: "old failure cleanup")
+            let gateStillHeld = await gate.isHeld
+            XCTAssertFalse(gateStillHeld, "Failure cleanup must release gate")
+            return
+        }
         XCTAssertTrue(model.activities.isEmpty)
         XCTAssertFalse(model.unavailable)
-        let failingGate = RemoteListeningGate()
+        let failingGateEntered = expectation(description: "remote failingGate callback held")
+        let failingGate = RemoteListeningAcknowledgedGate(entered: failingGateEntered)
+        let staleFailureFinished = RemoteListeningSignal()
         let staleFailure = Task {
             await model.refresh {
                 await failingGate.wait()
                 throw FoundationLibraryError.unavailable
             }
+            await staleFailureFinished.signal()
         }
-        await failingGate.waitForStart()
+        let failingGateEntry = await XCTWaiter.fulfillment(of: [failingGateEntered], timeout: 5)
+        guard failingGateEntry == .completed, !Task.isCancelled else {
+            XCTFail("Timed out or cancelled waiting for failingGate callback entry")
+            old.cancel()
+            staleFailure.cancel()
+            model.suspend()
+            await gate.release()
+            await failingGate.release()
+            await requireRemoteListeningTaskFinished(
+                oldFinished, context: "old failure cleanup")
+            await requireRemoteListeningTaskFinished(
+                staleFailureFinished, context: "staleFailure failure cleanup")
+            let gateStillHeld = await gate.isHeld
+            XCTAssertFalse(gateStillHeld, "Failure cleanup must release gate")
+            let failingGateStillHeld = await failingGate.isHeld
+            XCTAssertFalse(failingGateStillHeld, "Failure cleanup must release failingGate")
+            return
+        }
         await model.refresh { [Self.activity] }
         await failingGate.release()
-        await staleFailure.value
+        guard
+            await requireRemoteListeningTaskFinished(
+                staleFailureFinished, context: "staleFailure completion", stopOnCancellation: true)
+        else {
+            old.cancel()
+            staleFailure.cancel()
+            model.suspend()
+            await gate.release()
+            await failingGate.release()
+            await requireRemoteListeningTaskFinished(
+                oldFinished, context: "old failure cleanup")
+            await requireRemoteListeningTaskFinished(
+                staleFailureFinished, context: "staleFailure failure cleanup")
+            let gateStillHeld = await gate.isHeld
+            XCTAssertFalse(gateStillHeld, "Failure cleanup must release gate")
+            let failingGateStillHeld = await failingGate.isHeld
+            XCTAssertFalse(failingGateStillHeld, "Failure cleanup must release failingGate")
+            return
+        }
         XCTAssertEqual(model.activities, [Self.activity])
         XCTAssertFalse(model.unavailable)
         model.cancel()
+        let cancelledFinished = RemoteListeningSignal()
         let cancelled = Task {
             await model.refresh {
                 try await Task.sleep(for: .seconds(60))
                 return [Self.activity]
             }
+            await cancelledFinished.signal()
         }
         cancelled.cancel()
-        await cancelled.value
+        guard
+            await requireRemoteListeningTaskFinished(
+                cancelledFinished, context: "cancelled completion", stopOnCancellation: true)
+        else {
+            old.cancel()
+            staleFailure.cancel()
+            cancelled.cancel()
+            model.suspend()
+            await gate.release()
+            await failingGate.release()
+            await requireRemoteListeningTaskFinished(
+                oldFinished, context: "old failure cleanup")
+            await requireRemoteListeningTaskFinished(
+                staleFailureFinished, context: "staleFailure failure cleanup")
+            await requireRemoteListeningTaskFinished(
+                cancelledFinished, context: "cancelled failure cleanup")
+            let gateStillHeld = await gate.isHeld
+            XCTAssertFalse(gateStillHeld, "Failure cleanup must release gate")
+            let failingGateStillHeld = await failingGate.isHeld
+            XCTAssertFalse(failingGateStillHeld, "Failure cleanup must release failingGate")
+            return
+        }
         XCTAssertTrue(model.activities.isEmpty)
         XCTAssertFalse(model.unavailable)
     }
@@ -528,20 +772,46 @@ final class FoundationRemoteListeningTests: XCTestCase {
     func testRefreshRetainsCardUntilAuthoritativeTrackAndProgressReplaceIt() async {
         let model = FoundationRemoteListeningModel()
         await model.refresh { [Self.activity] }
-        let gate = RemoteListeningGate()
+        let gateEntered = expectation(description: "remote gate callback held")
+        let gate = RemoteListeningAcknowledgedGate(entered: gateEntered)
         let updated = FoundationRemoteListeningActivity(
             id: Self.activity.id, deviceKey: Self.activity.deviceKey, deviceLabel: "Mac",
             checkedInAt: Self.now, item: Self.activity.item, albumTitle: "Album", elapsed: 110)
+        let refreshFinished = RemoteListeningSignal()
         let refresh = Task {
             await model.refresh {
                 await gate.wait()
                 return [updated]
             }
+            await refreshFinished.signal()
         }
-        await gate.waitForStart()
+        let gateEntry = await XCTWaiter.fulfillment(of: [gateEntered], timeout: 5)
+        guard gateEntry == .completed, !Task.isCancelled else {
+            XCTFail("Timed out or cancelled waiting for gate callback entry")
+            refresh.cancel()
+            model.suspend()
+            await gate.release()
+            await requireRemoteListeningTaskFinished(
+                refreshFinished, context: "refresh failure cleanup")
+            let gateStillHeld = await gate.isHeld
+            XCTAssertFalse(gateStillHeld, "Failure cleanup must release gate")
+            return
+        }
         XCTAssertEqual(model.activities, [Self.activity], "Refreshing must not remove the card")
         await gate.release()
-        await refresh.value
+        guard
+            await requireRemoteListeningTaskFinished(
+                refreshFinished, context: "refresh completion", stopOnCancellation: true)
+        else {
+            refresh.cancel()
+            model.suspend()
+            await gate.release()
+            await requireRemoteListeningTaskFinished(
+                refreshFinished, context: "refresh failure cleanup")
+            let gateStillHeld = await gate.isHeld
+            XCTAssertFalse(gateStillHeld, "Failure cleanup must release gate")
+            return
+        }
         XCTAssertEqual(model.activities, [updated])
         XCTAssertEqual(model.activities.first?.id, Self.activity.id)
         XCTAssertEqual(model.activities.first?.progress.label, "1:50 / 3:00")
@@ -553,18 +823,44 @@ final class FoundationRemoteListeningTests: XCTestCase {
     func testSceneSuspensionRetainsFreshCardAndRejectsRetiredResponse() async {
         let model = FoundationRemoteListeningModel()
         await model.refresh { [Self.activity] }
-        let gate = RemoteListeningGate()
+        let gateEntered = expectation(description: "remote gate callback held")
+        let gate = RemoteListeningAcknowledgedGate(entered: gateEntered)
+        let refreshFinished = RemoteListeningSignal()
         let refresh = Task {
             await model.refresh {
                 await gate.wait()
                 return []
             }
+            await refreshFinished.signal()
         }
-        await gate.waitForStart()
+        let gateEntry = await XCTWaiter.fulfillment(of: [gateEntered], timeout: 5)
+        guard gateEntry == .completed, !Task.isCancelled else {
+            XCTFail("Timed out or cancelled waiting for gate callback entry")
+            refresh.cancel()
+            model.suspend()
+            await gate.release()
+            await requireRemoteListeningTaskFinished(
+                refreshFinished, context: "refresh failure cleanup")
+            let gateStillHeld = await gate.isHeld
+            XCTAssertFalse(gateStillHeld, "Failure cleanup must release gate")
+            return
+        }
         model.suspend()
         XCTAssertEqual(model.activities, [Self.activity])
         await gate.release()
-        await refresh.value
+        guard
+            await requireRemoteListeningTaskFinished(
+                refreshFinished, context: "refresh completion", stopOnCancellation: true)
+        else {
+            refresh.cancel()
+            model.suspend()
+            await gate.release()
+            await requireRemoteListeningTaskFinished(
+                refreshFinished, context: "refresh failure cleanup")
+            let gateStillHeld = await gate.isHeld
+            XCTAssertFalse(gateStillHeld, "Failure cleanup must release gate")
+            return
+        }
         XCTAssertEqual(model.activities, [Self.activity])
         await model.refresh { throw FoundationLibraryError.unavailable }
         XCTAssertTrue(model.unavailable)
@@ -580,25 +876,95 @@ final class FoundationRemoteListeningTests: XCTestCase {
     func testRefreshDoesNotRetireAcceptedSnapshotsIndependentExpiry() async {
         let model = FoundationRemoteListeningModel()
         await model.refresh { [Self.activity] }
-        let expiryGate = RemoteListeningGate()
+        let expiryGateEntered = expectation(description: "remote expiryGate callback held")
+        let expiryGate = RemoteListeningAcknowledgedGate(entered: expiryGateEntered)
+        let expiryFinished = RemoteListeningSignal()
         let expiry = Task {
             await model.expireVisibleActivity(now: { Self.now }) { _ in await expiryGate.wait() }
+            await expiryFinished.signal()
         }
-        await expiryGate.waitForStart()
-        let refreshGate = RemoteListeningGate()
+        let expiryGateEntry = await XCTWaiter.fulfillment(of: [expiryGateEntered], timeout: 5)
+        guard expiryGateEntry == .completed, !Task.isCancelled else {
+            XCTFail("Timed out or cancelled waiting for expiryGate callback entry")
+            expiry.cancel()
+            model.suspend()
+            await expiryGate.release()
+            await requireRemoteListeningTaskFinished(
+                expiryFinished, context: "expiry failure cleanup")
+            let expiryGateStillHeld = await expiryGate.isHeld
+            XCTAssertFalse(expiryGateStillHeld, "Failure cleanup must release expiryGate")
+            return
+        }
+        let refreshGateEntered = expectation(description: "remote refreshGate callback held")
+        let refreshGate = RemoteListeningAcknowledgedGate(entered: refreshGateEntered)
+        let refreshFinished = RemoteListeningSignal()
         let refresh = Task {
             await model.refresh {
                 await refreshGate.wait()
                 throw FoundationLibraryError.unavailable
             }
+            await refreshFinished.signal()
         }
-        await refreshGate.waitForStart()
+        let refreshGateEntry = await XCTWaiter.fulfillment(of: [refreshGateEntered], timeout: 5)
+        guard refreshGateEntry == .completed, !Task.isCancelled else {
+            XCTFail("Timed out or cancelled waiting for refreshGate callback entry")
+            expiry.cancel()
+            refresh.cancel()
+            model.suspend()
+            await expiryGate.release()
+            await refreshGate.release()
+            await requireRemoteListeningTaskFinished(
+                expiryFinished, context: "expiry failure cleanup")
+            await requireRemoteListeningTaskFinished(
+                refreshFinished, context: "refresh failure cleanup")
+            let expiryGateStillHeld = await expiryGate.isHeld
+            XCTAssertFalse(expiryGateStillHeld, "Failure cleanup must release expiryGate")
+            let refreshGateStillHeld = await refreshGate.isHeld
+            XCTAssertFalse(refreshGateStillHeld, "Failure cleanup must release refreshGate")
+            return
+        }
         XCTAssertEqual(model.activities, [Self.activity])
         await expiryGate.release()
-        await expiry.value
+        guard
+            await requireRemoteListeningTaskFinished(
+                expiryFinished, context: "expiry completion", stopOnCancellation: true)
+        else {
+            expiry.cancel()
+            refresh.cancel()
+            model.suspend()
+            await expiryGate.release()
+            await refreshGate.release()
+            await requireRemoteListeningTaskFinished(
+                expiryFinished, context: "expiry failure cleanup")
+            await requireRemoteListeningTaskFinished(
+                refreshFinished, context: "refresh failure cleanup")
+            let expiryGateStillHeld = await expiryGate.isHeld
+            XCTAssertFalse(expiryGateStillHeld, "Failure cleanup must release expiryGate")
+            let refreshGateStillHeld = await refreshGate.isHeld
+            XCTAssertFalse(refreshGateStillHeld, "Failure cleanup must release refreshGate")
+            return
+        }
         XCTAssertTrue(model.activities.isEmpty, "A stalled refresh must not extend freshness")
         await refreshGate.release()
-        await refresh.value
+        guard
+            await requireRemoteListeningTaskFinished(
+                refreshFinished, context: "refresh completion", stopOnCancellation: true)
+        else {
+            expiry.cancel()
+            refresh.cancel()
+            model.suspend()
+            await expiryGate.release()
+            await refreshGate.release()
+            await requireRemoteListeningTaskFinished(
+                expiryFinished, context: "expiry failure cleanup")
+            await requireRemoteListeningTaskFinished(
+                refreshFinished, context: "refresh failure cleanup")
+            let expiryGateStillHeld = await expiryGate.isHeld
+            XCTAssertFalse(expiryGateStillHeld, "Failure cleanup must release expiryGate")
+            let refreshGateStillHeld = await refreshGate.isHeld
+            XCTAssertFalse(refreshGateStillHeld, "Failure cleanup must release refreshGate")
+            return
+        }
         XCTAssertTrue(model.activities.isEmpty)
     }
 
@@ -621,15 +987,41 @@ final class FoundationRemoteListeningTests: XCTestCase {
         await model.expireVisibleActivity(now: { Self.now }, sleep: { _ in })
         XCTAssertTrue(model.activities.isEmpty)
         await model.refresh { [Self.activity] }
-        let gate = RemoteListeningGate()
+        let gateEntered = expectation(description: "remote gate callback held")
+        let gate = RemoteListeningAcknowledgedGate(entered: gateEntered)
+        let oldExpiryFinished = RemoteListeningSignal()
         let oldExpiry = Task {
             await model.expireVisibleActivity(now: { Self.now }) { _ in await gate.wait() }
+            await oldExpiryFinished.signal()
         }
-        await gate.waitForStart()
+        let gateEntry = await XCTWaiter.fulfillment(of: [gateEntered], timeout: 5)
+        guard gateEntry == .completed, !Task.isCancelled else {
+            XCTFail("Timed out or cancelled waiting for gate callback entry")
+            oldExpiry.cancel()
+            model.suspend()
+            await gate.release()
+            await requireRemoteListeningTaskFinished(
+                oldExpiryFinished, context: "oldExpiry failure cleanup")
+            let gateStillHeld = await gate.isHeld
+            XCTAssertFalse(gateStillHeld, "Failure cleanup must release gate")
+            return
+        }
         model.cancel()
         await model.refresh { [Self.activity] }
         await gate.release()
-        await oldExpiry.value
+        guard
+            await requireRemoteListeningTaskFinished(
+                oldExpiryFinished, context: "oldExpiry completion", stopOnCancellation: true)
+        else {
+            oldExpiry.cancel()
+            model.suspend()
+            await gate.release()
+            await requireRemoteListeningTaskFinished(
+                oldExpiryFinished, context: "oldExpiry failure cleanup")
+            let gateStillHeld = await gate.isHeld
+            XCTAssertFalse(gateStillHeld, "Failure cleanup must release gate")
+            return
+        }
         XCTAssertEqual(model.activities, [Self.activity])
     }
 
@@ -637,26 +1029,73 @@ final class FoundationRemoteListeningTests: XCTestCase {
     func testPreCancelledRefreshPreservesFreshRowsAndExistingExpiryGeneration() async {
         let model = FoundationRemoteListeningModel()
         await model.refresh { [Self.activity] }
-        let gate = RemoteListeningGate()
+        let gateEntered = expectation(description: "remote gate callback held")
+        let gate = RemoteListeningAcknowledgedGate(entered: gateEntered)
+        let existingExpiryFinished = RemoteListeningSignal()
         let existingExpiry = Task {
             await model.expireVisibleActivity(now: { Self.now }) { _ in await gate.wait() }
+            await existingExpiryFinished.signal()
         }
-        await gate.waitForStart()
+        let gateEntry = await XCTWaiter.fulfillment(of: [gateEntered], timeout: 5)
+        guard gateEntry == .completed, !Task.isCancelled else {
+            XCTFail("Timed out or cancelled waiting for gate callback entry")
+            existingExpiry.cancel()
+            model.suspend()
+            await gate.release()
+            await requireRemoteListeningTaskFinished(
+                existingExpiryFinished, context: "existingExpiry failure cleanup")
+            let gateStillHeld = await gate.isHeld
+            XCTAssertFalse(gateStillHeld, "Failure cleanup must release gate")
+            return
+        }
         let loadCalled = RemoteListeningSignal()
+        let staleRefreshFinished = RemoteListeningSignal()
         let staleRefresh = Task {
             withUnsafeCurrentTask { $0?.cancel() }
             await model.refresh {
                 await loadCalled.signal()
                 return []
             }
+            await staleRefreshFinished.signal()
         }
-        await staleRefresh.value
+        guard
+            await requireRemoteListeningTaskFinished(
+                staleRefreshFinished, context: "staleRefresh completion", stopOnCancellation: true)
+        else {
+            existingExpiry.cancel()
+            staleRefresh.cancel()
+            model.suspend()
+            await gate.release()
+            await requireRemoteListeningTaskFinished(
+                existingExpiryFinished, context: "existingExpiry failure cleanup")
+            await requireRemoteListeningTaskFinished(
+                staleRefreshFinished, context: "staleRefresh failure cleanup")
+            let gateStillHeld = await gate.isHeld
+            XCTAssertFalse(gateStillHeld, "Failure cleanup must release gate")
+            return
+        }
         XCTAssertEqual(model.activities, [Self.activity])
         XCTAssertFalse(model.unavailable)
         let called = await loadCalled.value
         XCTAssertFalse(called)
         await gate.release()
-        await existingExpiry.value
+        guard
+            await requireRemoteListeningTaskFinished(
+                existingExpiryFinished, context: "existingExpiry completion",
+                stopOnCancellation: true)
+        else {
+            existingExpiry.cancel()
+            staleRefresh.cancel()
+            model.suspend()
+            await gate.release()
+            await requireRemoteListeningTaskFinished(
+                existingExpiryFinished, context: "existingExpiry failure cleanup")
+            await requireRemoteListeningTaskFinished(
+                staleRefreshFinished, context: "staleRefresh failure cleanup")
+            let gateStillHeld = await gate.isHeld
+            XCTAssertFalse(gateStillHeld, "Failure cleanup must release gate")
+            return
+        }
         // The cancelled refresh must not silently advance generation: the valid
         // already-owned expiry still removes this activity when its deadline arrives.
         XCTAssertTrue(model.activities.isEmpty)
@@ -667,14 +1106,25 @@ final class FoundationRemoteListeningTests: XCTestCase {
         let model = FoundationRemoteListeningModel()
         await model.refresh { [Self.activity] }
         let sleepCalled = RemoteListeningSignal()
+        let finished = RemoteListeningSignal()
         let staleExpiry = Task {
             withUnsafeCurrentTask { $0?.cancel() }
             await model.expireVisibleActivity(now: { Self.now }) { _ in
                 await sleepCalled.signal()
                 try Task.checkCancellation()
             }
+            await finished.signal()
         }
-        await staleExpiry.value
+        guard
+            await requireRemoteListeningTaskFinished(
+                finished, context: "pre-cancelled expiry completion", stopOnCancellation: true)
+        else {
+            staleExpiry.cancel()
+            model.suspend()
+            await requireRemoteListeningTaskFinished(
+                finished, context: "pre-cancelled expiry cleanup")
+            return
+        }
         XCTAssertEqual(model.activities, [Self.activity])
         XCTAssertFalse(model.unavailable)
         let called = await sleepCalled.value
@@ -878,6 +1328,35 @@ private actor RemoteListeningSignal {
     private(set) var value = false
     func signal() { value = true }
 }
+/// Owns every held fake callback; cleanup also releases callbacks that arrive later.
+private actor RemoteListeningAcknowledgedGate {
+    private let entered: XCTestExpectation
+    private var continuations: [CheckedContinuation<Void, Never>] = []
+    private var announced = false
+    private var released = false
+    var isHeld: Bool { !continuations.isEmpty }
+
+    init(entered: XCTestExpectation) { self.entered = entered }
+
+    func wait(announce: Bool = true) async {
+        guard !released else { return }
+        await withCheckedContinuation { continuation in
+            continuations.append(continuation)
+            if announce, !announced {
+                announced = true
+                entered.fulfill()
+            }
+        }
+    }
+
+    func release() {
+        released = true
+        let pending = continuations
+        continuations.removeAll()
+        for continuation in pending { continuation.resume() }
+    }
+}
+
 private actor RemoteListeningGate {
     private var continuation: CheckedContinuation<Void, Never>?
     private var started: CheckedContinuation<Void, Never>?
@@ -992,19 +1471,25 @@ final class FoundationRemoteContinuationTests: XCTestCase {
 
         func testRemoteContinuationDiagnosticRejectsPrivateErrorFields() {
             let secret = "private-token-host-track"
-            let underlying = NSError(domain: NSURLErrorDomain, code: -1001, userInfo: [
-                NSLocalizedDescriptionKey: secret,
-                NSURLErrorFailingURLErrorKey: URL(string: "https://example.invalid/" + secret)!,
-                NSUnderlyingErrorKey: NSError(domain: secret, code: 999, userInfo: [:]),
-            ])
-            let error = NSError(domain: secret, code: 123, userInfo: [
-                NSLocalizedDescriptionKey: secret, NSUnderlyingErrorKey: underlying,
-            ])
+            let underlying = NSError(
+                domain: NSURLErrorDomain, code: -1001,
+                userInfo: [
+                    NSLocalizedDescriptionKey: secret,
+                    NSURLErrorFailingURLErrorKey: URL(string: "https://example.invalid/" + secret)!,
+                    NSUnderlyingErrorKey: NSError(domain: secret, code: 999, userInfo: [:]),
+                ])
+            let error = NSError(
+                domain: secret, code: 123,
+                userInfo: [
+                    NSLocalizedDescriptionKey: secret, NSUnderlyingErrorKey: underlying,
+                ])
             let fields = FoundationRemoteContinuationDiagnostic.fields(
-                .withheld, outcome: .failed, selection: .fullQueue, failedAt: .command, error: error)
+                .withheld, outcome: .failed, selection: .fullQueue, failedAt: .command, error: error
+            )
             XCTAssertEqual(
                 fields,
-                "remote-continuation stage=withheld outcome=failed command=Stop failedAt=command error=other:0 underlying=url:-1001")
+                "remote-continuation stage=withheld outcome=failed command=Stop failedAt=command error=other:0 underlying=url:-1001"
+            )
             XCTAssertFalse(fields.contains(secret))
             XCTAssertFalse(fields.contains("https"))
             XCTAssertFalse(fields.contains("999"))
@@ -1174,17 +1659,20 @@ final class FoundationRemoteContinuationTests: XCTestCase {
         for key in ["DeviceId", "Client", "PlaylistItemId"] {
             var changed = row
             changed[key] = "different"
-            XCTAssertThrowsError(try CrossClientFixtures.offer(changed, selection: .currentSong).matching(expected))
+            XCTAssertThrowsError(
+                try CrossClientFixtures.offer(changed, selection: .currentSong).matching(expected))
         }
         var changed = row
         state["MediaSourceId"] = "source-version-two"
         changed["PlayState"] = state
-        XCTAssertThrowsError(try CrossClientFixtures.offer(changed, selection: .currentSong).matching(expected))
+        XCTAssertThrowsError(
+            try CrossClientFixtures.offer(changed, selection: .currentSong).matching(expected))
         changed = row
         changed["UserId"] = CrossClientFixtures.first
         XCTAssertThrowsError(try CrossClientFixtures.offer(changed, selection: .currentSong))
         changed = row
-        changed["LastPlaybackCheckIn"] = ISO8601DateFormatter().string(from: Date(timeIntervalSinceNow: -120))
+        changed["LastPlaybackCheckIn"] = ISO8601DateFormatter().string(
+            from: Date(timeIntervalSinceNow: -120))
         XCTAssertThrowsError(try CrossClientFixtures.offer(changed, selection: .currentSong))
     }
 
@@ -1205,11 +1693,17 @@ final class FoundationRemoteContinuationTests: XCTestCase {
         let metadata = requests.filter { $0.url?.path.hasSuffix("/Items") == true }
         XCTAssertEqual(metadata.count, 2)
         for request in metadata {
-            let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
-            XCTAssertEqual(query.filter { $0.name == "ids" }.compactMap(\.value), [CrossClientFixtures.current])
-            XCTAssertEqual(query.first(where: { $0.name == "userId" })?.value, CrossClientFixtures.owner)
+            let query =
+                URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
+            XCTAssertEqual(
+                query.filter { $0.name == "ids" }.compactMap(\.value), [CrossClientFixtures.current]
+            )
+            XCTAssertEqual(
+                query.first(where: { $0.name == "userId" })?.value, CrossClientFixtures.owner)
         }
-        XCTAssertEqual(requests.filter { $0.httpMethod == "POST" }.map { $0.url?.lastPathComponent }, ["Pause"])
+        XCTAssertEqual(
+            requests.filter { $0.httpMethod == "POST" }.map { $0.url?.lastPathComponent }, ["Pause"]
+        )
     }
 
     func testOpaqueRemoteDeviceByteBoundariesApplyToDiscoveryAndQueuePreparation() throws {
@@ -1752,19 +2246,89 @@ final class FoundationRemoteContinuationTests: XCTestCase {
     }
 }
 
+@MainActor
+private func requireCrossClientEntry(
+    _ gate: CrossClientResourceGate, controller: FoundationHandoffController,
+    player: FoundationPlayer, timeout: TimeInterval
+) async -> Bool {
+    // Capture the driver's real task before awaiting entry; retirement clears it.
+    #if DEBUG
+        let driver = controller.remoteTaskForTesting
+    #endif
+    let entry = await XCTWaiter.fulfillment(of: [gate.entered], timeout: timeout)
+    guard entry == .completed, !Task.isCancelled else {
+        #if DEBUG
+            let owners = [
+                driver, controller.remoteTaskForTesting, player.selectionTask, player.playTask,
+            ]
+        #else
+            let owners = [player.selectionTask, player.playTask]
+        #endif
+        controller.invalidate()
+        player.stop()
+        await gate.release()
+        for owner in owners {
+            if let owner {
+                _ = await requireRemoteTask(
+                    owner, context: "remote held-phase entry cleanup", stopOnCancellation: false,
+                    cleanup: {
+                        controller.invalidate()
+                        player.stop()
+                        await gate.release()
+                    })
+            }
+        }
+        XCTFail("Remote phase did not enter its actual held operation within the deadline")
+        return false
+    }
+    return true
+}
+
+#if DEBUG
+    @MainActor
+    private func requireCrossClientOwners(
+        _ owners: [Task<Void, Never>], gate: CrossClientResourceGate,
+        controller: FoundationHandoffController, player: FoundationPlayer,
+        stopOnCancellation: Bool = true
+    ) async -> Bool {
+        var allReturned = true
+        for owner in owners {
+            if !(await requireRemoteTask(
+                owner, context: "captured remote phase completion",
+                stopOnCancellation: stopOnCancellation,
+                cleanup: {
+                    controller.invalidate()
+                    player.stop()
+                    await gate.release()
+                }
+            )) {
+                allReturned = false
+            }
+        }
+        return allReturned
+    }
+#endif
+
 private actor CrossClientResourceGate {
     nonisolated let entered = XCTestExpectation(description: "remote resource held")
-    private var continuation: CheckedContinuation<Void, Never>?
+    private var continuation: [CheckedContinuation<Void, Never>] = []
     private var released = false
+    private var announced = false
     func wait() async {
-        entered.fulfill()
-        if released { return }
-        await withCheckedContinuation { continuation = $0 }
+        guard !released else { return }
+        await withCheckedContinuation {
+            continuation.append($0)
+            if !announced {
+                announced = true
+                entered.fulfill()
+            }
+        }
     }
     func release() {
         released = true
-        continuation?.resume()
-        continuation = nil
+        let pending = continuation
+        continuation.removeAll()
+        for continuation in pending { continuation.resume() }
     }
 }
 
@@ -1876,6 +2440,38 @@ private actor CrossClientTransport {
 
 @MainActor
 final class FoundationRemoteContinuationControllerTests: XCTestCase {
+    #if DEBUG
+        private func captureHeldRemoteOwners(
+            phase: Task<Void, Never>?, gate: CrossClientResourceGate,
+            controller: FoundationHandoffController, player: FoundationPlayer
+        ) async -> [Task<Void, Never>]? {
+            guard let phase else {
+                let otherOwners = [
+                    controller.remoteTaskForTesting, player.selectionTask, player.playTask,
+                ].compactMap { $0 }
+                controller.invalidate()
+                player.stop()
+                await gate.release()
+                _ = await requireCrossClientOwners(
+                    otherOwners, gate: gate, controller: controller, player: player,
+                    stopOnCancellation: false)
+                XCTFail("Entered remote phase has no actual captured owner task")
+                return nil
+            }
+            var owners = [phase]
+            if let driver = controller.remoteTaskForTesting { owners.append(driver) }
+            let captured = owners
+            addTeardownBlock { @MainActor in
+                controller.invalidate()
+                player.stop()
+                await gate.release()
+                _ = await requireCrossClientOwners(
+                    captured, gate: gate, controller: controller, player: player,
+                    stopOnCancellation: false)
+            }
+            return captured
+        }
+    #endif
     private let scope = String(repeating: "a", count: 64)
     private func make(
         _ transport: CrossClientTransport, resourceGate: CrossClientResourceGate? = nil,
@@ -1941,12 +2537,17 @@ final class FoundationRemoteContinuationControllerTests: XCTestCase {
     func testExplicitSongActualStartPausesOnceAndKeepsOneSongReceiverQueue() async throws {
         let transport = CrossClientTransport(confirmsStop: true, songOnly: true)
         let (controller, player, library) = make(transport)
-        defer { controller.invalidate(); player.stop() }
+        defer {
+            controller.invalidate()
+            player.stop()
+        }
         await transport.observeStop {
             await MainActor.run {
                 XCTAssertEqual(player.nativePlayer.timeControlStatus, .playing)
-                XCTAssertTrue(player.isNativeContinuationPlaying(
-                    generation: player.continuationGeneration, occurrence: player.selectedEntryID!))
+                XCTAssertTrue(
+                    player.isNativeContinuationPlaying(
+                        generation: player.continuationGeneration,
+                        occurrence: player.selectedEntryID!))
                 XCTAssertEqual(player.nativePlayer.currentTime().seconds, 3, accuracy: 0.75)
             }
         }
@@ -1959,13 +2560,18 @@ final class FoundationRemoteContinuationControllerTests: XCTestCase {
         XCTAssertFalse(player.shuffleEnabled)
         XCTAssertEqual(player.repeatMode, .off)
         let requests = await transport.requests
-        XCTAssertEqual(requests.filter { $0.httpMethod == "POST" }.map { $0.url?.lastPathComponent }, ["Pause"])
+        XCTAssertEqual(
+            requests.filter { $0.httpMethod == "POST" }.map { $0.url?.lastPathComponent }, ["Pause"]
+        )
     }
 
     func testSongNativeResourceFailureSendsNoSourcePause() async throws {
         let transport = CrossClientTransport(songOnly: true)
         let (controller, player, library) = make(transport, failResolution: true)
-        defer { controller.invalidate(); player.stop() }
+        defer {
+            controller.invalidate()
+            player.stop()
+        }
         try await prepare(controller, library: library, selection: .currentSong)
         controller.acceptPending()
         await notice(controller)
@@ -1983,12 +2589,29 @@ final class FoundationRemoteContinuationControllerTests: XCTestCase {
         }
         try await prepare(controller, library: library, selection: .currentSong)
         controller.acceptPending()
-        await fulfillment(of: [gate.entered], timeout: 5)
-        player.pause()
-        await gate.release()
-        let noStart = expectation(description: "no start after explicit receiving pause")
+        guard
+            await requireCrossClientEntry(gate, controller: controller, player: player, timeout: 5)
+        else { return }
+        #if DEBUG
+            guard
+                let heldOwners = await captureHeldRemoteOwners(
+                    phase: player.selectionTask, gate: gate, controller: controller, player: player
+                )
+            else { return }
+        #endif
+
+        let noStart = XCTestExpectation(description: "no start after explicit receiving pause")
         noStart.isInverted = true
         let token = player.$state.filter { $0 == .playing }.sink { _ in noStart.fulfill() }
+        player.pause()
+        await gate.release()
+        #if DEBUG
+            guard
+                await requireCrossClientOwners(
+                    heldOwners, gate: gate, controller: controller, player: player
+                )
+            else { return }
+        #endif
         await fulfillment(of: [noStart], timeout: 0.2)
         token.cancel()
         let commands = await transport.stopCount
@@ -2000,7 +2623,10 @@ final class FoundationRemoteContinuationControllerTests: XCTestCase {
     func testUnsupportedSongPauseStillAllowsReceiverStartWithHonestNotice() async throws {
         let transport = CrossClientTransport(supportsControl: false, songOnly: true)
         let (controller, player, library) = make(transport)
-        defer { controller.invalidate(); player.stop() }
+        defer {
+            controller.invalidate()
+            player.stop()
+        }
         try await prepare(controller, library: library, selection: .currentSong)
         controller.acceptPending()
         await notice(controller)
@@ -2013,7 +2639,10 @@ final class FoundationRemoteContinuationControllerTests: XCTestCase {
     func testExplicitSongCancellationDoesNotReplaceQueueOrPause() async throws {
         let transport = CrossClientTransport(songOnly: true)
         let (controller, player, library) = make(transport)
-        defer { controller.invalidate(); player.stop() }
+        defer {
+            controller.invalidate()
+            player.stop()
+        }
         let original = player.persistedQueue
         try await prepare(controller, library: library, selection: .currentSong)
         controller.dismissPending()
@@ -2025,7 +2654,10 @@ final class FoundationRemoteContinuationControllerTests: XCTestCase {
     func testSongReceiverFailureBeforeStartCannotPauseSource() async throws {
         let transport = CrossClientTransport(changedAtRead: 2, songOnly: true)
         let (controller, player, library) = make(transport)
-        defer { controller.invalidate(); player.stop() }
+        defer {
+            controller.invalidate()
+            player.stop()
+        }
         let original = player.persistedQueue
         try await prepare(controller, library: library, selection: .currentSong)
         controller.acceptPending()
@@ -2038,7 +2670,10 @@ final class FoundationRemoteContinuationControllerTests: XCTestCase {
     func testChangedSongAfterReceiverStartNeverPausesNewSource() async throws {
         let transport = CrossClientTransport(changedAtRead: 4, songOnly: true)
         let (controller, player, library) = make(transport)
-        defer { controller.invalidate(); player.stop() }
+        defer {
+            controller.invalidate()
+            player.stop()
+        }
         try await prepare(controller, library: library, selection: .currentSong)
         controller.acceptPending()
         await notice(controller)
@@ -2050,12 +2685,17 @@ final class FoundationRemoteContinuationControllerTests: XCTestCase {
     func testFailedSongPauseDoesNotRetryOrClaimSourceStopped() async throws {
         let transport = CrossClientTransport(failStop: true, songOnly: true)
         let (controller, player, library) = make(transport)
-        defer { controller.invalidate(); player.stop() }
+        defer {
+            controller.invalidate()
+            player.stop()
+        }
         try await prepare(controller, library: library, selection: .currentSong)
         controller.acceptPending()
         await notice(controller)
         let requests = await transport.requests
-        XCTAssertEqual(requests.filter { $0.httpMethod == "POST" }.map { $0.url?.lastPathComponent }, ["Pause"])
+        XCTAssertEqual(
+            requests.filter { $0.httpMethod == "POST" }.map { $0.url?.lastPathComponent }, ["Pause"]
+        )
         XCTAssertTrue(controller.notice?.contains("pausing") == true)
         XCTAssertEqual(player.persistedQueue.count, 1)
     }
@@ -2142,13 +2782,32 @@ final class FoundationRemoteContinuationControllerTests: XCTestCase {
         }
         let activity = try CrossClientFixtures.activity(CrossClientFixtures.row())
         let original = player.persistedQueue
-        let noPending = expectation(description: "no late confirmation after card dismissal")
+        let noPending = XCTestExpectation(description: "no late confirmation after card dismissal")
         noPending.isInverted = true
         let token = controller.$pending.compactMap { $0 }.sink { _ in noPending.fulfill() }
+        defer { token.cancel() }
         controller.prepareRemoteContinuation(activity, library: library)
-        await fulfillment(of: [gate.entered], timeout: 5)
+        guard
+            await requireCrossClientEntry(gate, controller: controller, player: player, timeout: 5)
+        else { return }
+        #if DEBUG
+            guard
+                let heldOwners = await captureHeldRemoteOwners(
+                    phase: controller.remoteTaskForTesting, gate: gate, controller: controller,
+                    player: player
+                )
+            else { return }
+        #endif
+
         controller.cancelRemotePreparation(activityID: activity.id)
         await gate.release()
+        #if DEBUG
+            guard
+                await requireCrossClientOwners(
+                    heldOwners, gate: gate, controller: controller, player: player
+                )
+            else { return }
+        #endif
         await fulfillment(of: [noPending], timeout: 0.2)
         token.cancel()
         XCTAssertEqual(player.persistedQueue, original)
@@ -2256,9 +2915,26 @@ final class FoundationRemoteContinuationControllerTests: XCTestCase {
         }
         try await prepare(controller, library: library, allowsNetworking: { policy.allowed })
         controller.acceptPending()
-        await fulfillment(of: [gate.entered], timeout: 5)
+        guard
+            await requireCrossClientEntry(gate, controller: controller, player: player, timeout: 5)
+        else { return }
+        #if DEBUG
+            guard
+                let heldOwners = await captureHeldRemoteOwners(
+                    phase: player.selectionTask, gate: gate, controller: controller, player: player
+                )
+            else { return }
+        #endif
+
         policy.allowed = false
         await gate.release()
+        #if DEBUG
+            guard
+                await requireCrossClientOwners(
+                    heldOwners, gate: gate, controller: controller, player: player
+                )
+            else { return }
+        #endif
         await notice(controller)
         XCTAssertFalse(player.nativePlayer.timeControlStatus == .playing)
         let reads = await transport.readCount
@@ -2277,10 +2953,27 @@ final class FoundationRemoteContinuationControllerTests: XCTestCase {
         }
         try await prepare(controller, library: library)
         controller.acceptPending()
-        await fulfillment(of: [gate.entered], timeout: 5)
+        guard
+            await requireCrossClientEntry(gate, controller: controller, player: player, timeout: 5)
+        else { return }
+        #if DEBUG
+            guard
+                let heldOwners = await captureHeldRemoteOwners(
+                    phase: player.selectionTask, gate: gate, controller: controller, player: player
+                )
+            else { return }
+        #endif
+
         let observedCount8 = await transport.readCount
         XCTAssertEqual(observedCount8, 2)
         await gate.release()
+        #if DEBUG
+            guard
+                await requireCrossClientOwners(
+                    heldOwners, gate: gate, controller: controller, player: player
+                )
+            else { return }
+        #endif
         await notice(controller)
         XCTAssertFalse(player.nativePlayer.timeControlStatus == .playing)
         let observedCount9 = await transport.stopCount
@@ -2351,14 +3044,35 @@ final class FoundationRemoteContinuationControllerTests: XCTestCase {
             player.stop()
         }
         let original = player.persistedQueue
-        let noPending = expectation(description: "no confirmation after account retirement")
+        let noPending = XCTestExpectation(description: "no confirmation after account retirement")
         noPending.isInverted = true
         let token = controller.$pending.compactMap { $0 }.sink { _ in noPending.fulfill() }
+        defer {
+            token.cancel()
+        }
         controller.prepareRemoteContinuation(
             try CrossClientFixtures.activity(row), library: library)
-        await fulfillment(of: [gate.entered], timeout: 5)
+        guard
+            await requireCrossClientEntry(gate, controller: controller, player: player, timeout: 5)
+        else { return }
+        #if DEBUG
+            guard
+                let heldOwners = await captureHeldRemoteOwners(
+                    phase: controller.remoteTaskForTesting, gate: gate, controller: controller,
+                    player: player
+                )
+            else { return }
+        #endif
+
         controller.invalidate()
         await gate.release()
+        #if DEBUG
+            guard
+                await requireCrossClientOwners(
+                    heldOwners, gate: gate, controller: controller, player: player
+                )
+            else { return }
+        #endif
         await fulfillment(of: [noPending], timeout: 0.2)
         token.cancel()
         XCTAssertEqual(player.persistedQueue, original)
@@ -2379,12 +3093,29 @@ final class FoundationRemoteContinuationControllerTests: XCTestCase {
         }
         try await prepare(controller, library: library)
         controller.acceptPending()
-        await fulfillment(of: [gate.entered], timeout: 8)
-        controller.invalidate()
-        await gate.release()
-        let noStart = expectation(description: "no retired playback start")
+        guard
+            await requireCrossClientEntry(gate, controller: controller, player: player, timeout: 8)
+        else { return }
+        #if DEBUG
+            guard
+                let heldOwners = await captureHeldRemoteOwners(
+                    phase: player.playTask, gate: gate, controller: controller, player: player
+                )
+            else { return }
+        #endif
+
+        let noStart = XCTestExpectation(description: "no retired playback start")
         noStart.isInverted = true
         let token = player.$state.filter { $0 == .playing }.sink { _ in noStart.fulfill() }
+        controller.invalidate()
+        await gate.release()
+        #if DEBUG
+            guard
+                await requireCrossClientOwners(
+                    heldOwners, gate: gate, controller: controller, player: player
+                )
+            else { return }
+        #endif
         await fulfillment(of: [noStart], timeout: 0.2)
         token.cancel()
         let observedCount13 = await transport.stopCount
@@ -2400,7 +3131,21 @@ final class FoundationRemoteContinuationControllerTests: XCTestCase {
         }
         try await prepare(controller, library: library)
         controller.acceptPending()
-        await fulfillment(of: [gate.entered], timeout: 8)
+        guard
+            await requireCrossClientEntry(gate, controller: controller, player: player, timeout: 8)
+        else { return }
+        #if DEBUG
+            guard
+                let heldOwners = await captureHeldRemoteOwners(
+                    phase: controller.remoteTaskForTesting, gate: gate, controller: controller,
+                    player: player
+                )
+            else { return }
+        #endif
+
+        let noStop = XCTestExpectation(description: "no Stop after new receiver intent")
+        noStop.isInverted = true
+        await transport.observeStop { noStop.fulfill() }
         let replacement = FoundationQueueEntry(item: FoundationTestTones.items[1])
         player.restoreSession(
             .init(
@@ -2408,9 +3153,13 @@ final class FoundationRemoteContinuationControllerTests: XCTestCase {
                 shuffleEnabled: false, repeatMode: .off))
         let newer = player.persistedQueue
         await gate.release()
-        let noStop = expectation(description: "no Stop after new receiver intent")
-        noStop.isInverted = true
-        await transport.observeStop { noStop.fulfill() }
+        #if DEBUG
+            guard
+                await requireCrossClientOwners(
+                    heldOwners, gate: gate, controller: controller, player: player
+                )
+            else { return }
+        #endif
         await fulfillment(of: [noStop], timeout: 0.2)
         XCTAssertEqual(player.persistedQueue, newer)
         let observedCount14 = await transport.stopCount

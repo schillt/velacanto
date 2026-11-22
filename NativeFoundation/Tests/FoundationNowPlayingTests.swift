@@ -396,8 +396,22 @@ final class FoundationNowPlayingTests: XCTestCase {
         XCTAssertEqual(player.state, .loading)
         XCTAssertTrue(player.wantsPlayback)
         XCTAssertEqual(requests, 1)
+        let selection = try XCTUnwrap(player.selectionTask)
         await source.complete()
-        await player.selectionTask?.value
+        let returned = XCTestExpectation(description: "handoff selection returned")
+        let observer = Task {
+            await selection.value
+            returned.fulfill()
+        }
+        guard await XCTWaiter.fulfillment(of: [returned], timeout: 5) == .completed else {
+            player.stop()
+            bridge.invalidate()
+            selection.cancel()
+            await source.complete()
+            observer.cancel()
+            XCTFail("Handoff selection did not return within 5 seconds")
+            return
+        }
         await waitForPlayback(player)
         await bridge.updateTask?.value
         await bridge.primacyTask?.value
@@ -520,6 +534,7 @@ private actor NowPlayingHandoffProbe {
     let file: URL
     private(set) var calls = 0
     private var pending: CheckedContinuation<URL, Error>?
+    private var released = false
     private let pendingEvent = XCTestExpectation(description: "Second source resolve reached")
     var isPending: Bool { pending != nil }
 
@@ -528,7 +543,7 @@ private actor NowPlayingHandoffProbe {
     func resolve() async throws -> URL {
         try Task.checkCancellation()
         calls += 1
-        guard calls == 2 else { return file }
+        guard calls == 2, !released else { return file }
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 pending = continuation
@@ -544,11 +559,13 @@ private actor NowPlayingHandoffProbe {
     }
 
     private func cancelPending() {
+        released = true
         pending?.resume(throwing: CancellationError())
         pending = nil
     }
 
     func complete() {
+        released = true
         pending?.resume(returning: file)
         pending = nil
     }

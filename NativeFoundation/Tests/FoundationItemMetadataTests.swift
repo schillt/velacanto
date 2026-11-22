@@ -112,14 +112,32 @@ final class FoundationItemMetadataTests: XCTestCase {
         }
         let item = item
         let task = Task { try await library.itemMetadata(for: item) }
-        await gate.waitUntilStarted()
+        guard await gate.waitUntilStarted() else {
+            task.cancel()
+            await gate.finish()
+            XCTFail("Metadata request did not enter its hold within 5 seconds")
+            return
+        }
         task.cancel()
         await gate.finish()
-        do {
-            _ = try await task.value
+        let finished = XCTestExpectation(description: "cancelled metadata request returned")
+        var outcome: Result<FoundationItemMetadata?, Error>?
+        let observer = Task {
+            outcome = await task.result
+            finished.fulfill()
+        }
+        guard await XCTWaiter.fulfillment(of: [finished], timeout: 5) == .completed else {
+            observer.cancel()
+            XCTFail("Cancelled metadata request did not return within 5 seconds")
+            return
+        }
+        switch outcome {
+        case .some(.success):
             XCTFail("Cancelled optional work must not publish")
-        } catch {
+        case .some(.failure(let error)):
             XCTAssertEqual(FoundationLibraryError.category(error), .cancelled)
+        case nil:
+            XCTFail("Cancelled metadata request returned without an outcome")
         }
     }
 
@@ -137,19 +155,22 @@ final class FoundationItemMetadataTests: XCTestCase {
 
     private actor Gate {
         private var continuation: CheckedContinuation<Void, Never>?
-        private var started: CheckedContinuation<Void, Never>?
+        private var started = false
+        private var released = false
         func wait() async {
-            await withCheckedContinuation {
-                continuation = $0
-                started?.resume()
-                started = nil
-            }
+            started = true
+            guard !released else { return }
+            await withCheckedContinuation { continuation = $0 }
         }
-        func waitUntilStarted() async {
-            if continuation != nil { return }
-            await withCheckedContinuation { started = $0 }
+        func waitUntilStarted() async -> Bool {
+            let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+            while !started && !Task.isCancelled && ContinuousClock.now < deadline {
+                try? await Task.sleep(for: .milliseconds(10))
+            }
+            return started && !Task.isCancelled
         }
         func finish() {
+            released = true
             continuation?.resume()
             continuation = nil
         }

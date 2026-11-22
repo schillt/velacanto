@@ -716,7 +716,8 @@ final class FoundationDownloadQualityTests: XCTestCase {
         let proposal = try await proposalLibrary().convertedDownloadProposal(
             for: proposalTrack, quality: .aac128)
         let fixture = try convertedFixture()
-        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        var safeToRemove = true
+        defer { if safeToRemove { try? FileManager.default.removeItem(at: fixture.root) } }
         try Data(repeating: 0, count: 64).write(to: fixture.temporary)
         let inspected = expectation(description: "Inspector reached")
         let cleanup = ConvertedDownloadCleanupRecorder()
@@ -742,12 +743,26 @@ final class FoundationDownloadQualityTests: XCTestCase {
                     return true
                 })
         }
-        await fulfillment(of: [inspected], timeout: 3)
+        let entered = await XCTWaiter.fulfillment(of: [inspected], timeout: 3)
         task.cancel()
-        do {
-            _ = try await task.value
-            XCTFail("Cancelled transfer must not return ready bytes")
-        } catch { XCTAssertEqual(error as? FoundationDownloadError, .cancelled) }
+        let finished = XCTestExpectation(description: "cancelled transfer returned")
+        let observer = Task {
+            let result = await task.result
+            finished.fulfill()
+            return result
+        }
+        guard await XCTWaiter.fulfillment(of: [finished], timeout: 5) == .completed else {
+            safeToRemove = false
+            observer.cancel()
+            XCTFail("Cancelled transfer did not return within 5 seconds; fixture retained")
+            return
+        }
+        XCTAssertEqual(entered, .completed)
+        switch await observer.value {
+        case .success: XCTFail("Cancelled transfer must not return ready bytes")
+        case .failure(let error):
+            XCTAssertEqual(error as? FoundationDownloadError, .cancelled)
+        }
         XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.destination.path))
         let calls = await cleanup.requests
         XCTAssertEqual(calls.count, 1)

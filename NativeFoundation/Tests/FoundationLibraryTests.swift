@@ -4,6 +4,39 @@ import XCTest
 
 @testable import VelacantoFoundation
 
+/// Observes the captured production task, including bounded failure cleanup.
+/// Cancellation cannot force arbitrary production work to terminate.
+@MainActor
+private func requireLibraryTask<Success: Sendable, Failure: Error>(
+    _ task: Task<Success, Failure>, context: String,
+    stopOnCancellation: Bool = true, cleanup: @MainActor () async -> Void
+) async -> Bool {
+    var returnedAt: ContinuousClock.Instant?
+    let observer = Task {
+        _ = await task.result
+        returnedAt = .now
+    }
+    let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+    while returnedAt == nil, ContinuousClock.now < deadline,
+        !stopOnCancellation || !Task.isCancelled
+    {
+        await Task.yield()
+    }
+    if let returnedAt, returnedAt <= deadline, !stopOnCancellation || !Task.isCancelled {
+        return true
+    }
+    task.cancel()
+    await cleanup()
+    let cleanupDeadline = ContinuousClock.now.advanced(by: .seconds(5))
+    while returnedAt == nil, ContinuousClock.now < cleanupDeadline { await Task.yield() }
+    observer.cancel()
+    XCTFail("Timed out or cancelled waiting for \(context)")
+    if !(returnedAt.map { $0 <= cleanupDeadline } ?? false) {
+        XCTFail("Captured task did not return during cleanup: \(context)")
+    }
+    return false
+}
+
 #if os(iOS)
     import SwiftUI
     import UIKit
@@ -24,6 +57,13 @@ final class FoundationLibraryTests: XCTestCase {
                 )
             }, networkAdmission: admission)
         let browsing = Task { try await library.songs(startIndex: 0) }
+        addTeardownBlock { @MainActor in
+            browsing.cancel()
+            await admission.retire()
+            _ = await requireLibraryTask(
+                browsing, context: "admission teardown", stopOnCancellation: false,
+                cleanup: { await admission.retire() })
+        }
         try await waitForPending(admission, count: 1)
         let track = FoundationItem(
             id: itemID, title: "Synthetic", subtitle: "", kind: .track, duration: nil)
@@ -38,6 +78,10 @@ final class FoundationLibraryTests: XCTestCase {
         let afterProtected = await recorder.requests.count
         XCTAssertEqual(afterProtected, 1)
         await admission.release(heldBrowse)
+        guard
+            await requireLibraryTask(
+                browsing, context: "browsing completion", cleanup: { await admission.retire() })
+        else { return }
         _ = try await browsing.value
         let finalCount = await recorder.requests.count
         XCTAssertEqual(finalCount, 2)
@@ -48,6 +92,13 @@ final class FoundationLibraryTests: XCTestCase {
         let first = try await admission.acquire()
         let second = try await admission.acquire()
         let queued = Task { try await admission.acquire() }
+        addTeardownBlock { @MainActor in
+            queued.cancel()
+            await admission.retire()
+            _ = await requireLibraryTask(
+                queued, context: "admission teardown", stopOnCancellation: false,
+                cleanup: { await admission.retire() })
+        }
         try await waitForPending(admission, count: 1)
         let protected = try await FoundationRequestIntent.$isPlayback.withValue(true) {
             try await admission.acquire()
@@ -55,6 +106,10 @@ final class FoundationLibraryTests: XCTestCase {
         let peak = await admission.activeCount
         XCTAssertEqual(peak, 3)
         await admission.release(first)
+        guard
+            await requireLibraryTask(
+                queued, context: "queued completion", cleanup: { await admission.retire() })
+        else { return }
         let third = try await queued.value
         await admission.release(second)
         await admission.release(third)
@@ -68,15 +123,37 @@ final class FoundationLibraryTests: XCTestCase {
         await admission.updatePlaybackProtection(true, revision: 2)
         let first = try await admission.acquire()
         let queued = Task { try await admission.acquire() }
+        addTeardownBlock { @MainActor in
+            queued.cancel()
+            await admission.retire()
+            _ = await requireLibraryTask(
+                queued, context: "admission teardown", stopOnCancellation: false,
+                cleanup: { await admission.retire() })
+        }
         try await waitForPending(admission, count: 1)
         await admission.updatePlaybackProtection(false, revision: 1)
         let pending = await admission.pendingCount
         XCTAssertEqual(pending, 1)
         await admission.release(first)
+        guard
+            await requireLibraryTask(
+                queued, context: "queued completion", cleanup: { await admission.retire() })
+        else { return }
         let next = try await queued.value
         let another = Task { try await admission.acquire() }
+        addTeardownBlock { @MainActor in
+            another.cancel()
+            await admission.retire()
+            _ = await requireLibraryTask(
+                another, context: "admission teardown", stopOnCancellation: false,
+                cleanup: { await admission.retire() })
+        }
         try await waitForPending(admission, count: 1)
         await admission.updatePlaybackProtection(false, revision: 3)
+        guard
+            await requireLibraryTask(
+                another, context: "another completion", cleanup: { await admission.retire() })
+        else { return }
         let resumed = try await another.value
         await admission.release(next)
         await admission.release(resumed)
@@ -86,16 +163,39 @@ final class FoundationLibraryTests: XCTestCase {
         let admission = FoundationNetworkAdmission(limit: 2)
         let first = try await admission.acquire()
         let cancelled = Task { try await admission.acquire() }
+        addTeardownBlock { @MainActor in
+            cancelled.cancel()
+            await admission.retire()
+            _ = await requireLibraryTask(
+                cancelled, context: "admission teardown", stopOnCancellation: false,
+                cleanup: { await admission.retire() })
+        }
         try await waitForPending(admission, count: 1)
         cancelled.cancel()
         do {
+            guard
+                await requireLibraryTask(
+                    cancelled, context: "cancelled completion",
+                    cleanup: { await admission.retire() })
+            else { return }
             _ = try await cancelled.value
             XCTFail("Cancelled admission succeeded")
         } catch is CancellationError {} catch { XCTFail("Unexpected error: \(error)") }
         let retired = Task { try await admission.acquire() }
+        addTeardownBlock { @MainActor in
+            retired.cancel()
+            await admission.retire()
+            _ = await requireLibraryTask(
+                retired, context: "admission teardown", stopOnCancellation: false,
+                cleanup: { await admission.retire() })
+        }
         try await waitForPending(admission, count: 1)
         await admission.retire()
         do {
+            guard
+                await requireLibraryTask(
+                    retired, context: "retired completion", cleanup: { await admission.retire() })
+            else { return }
             _ = try await retired.value
             XCTFail("Retired admission succeeded")
         } catch is CancellationError {} catch { XCTFail("Unexpected error: \(error)") }
@@ -119,7 +219,8 @@ final class FoundationLibraryTests: XCTestCase {
     }
 
     func testArtistMetadataPublishesWhileSuggestedSongsTransportIsSuspended() async throws {
-        let gate = FoundationAlphabetTestGate()
+        let entered = expectation(description: "suggested songs transport entered")
+        let gate = FoundationAcknowledgedTestGate(entered: entered)
         let library = FoundationJellyfinLibrary(session: session) { request in
             if request.url?.path.hasSuffix("/Items") == true {
                 await gate.suspend()
@@ -138,19 +239,61 @@ final class FoundationLibraryTests: XCTestCase {
         let artist = FoundationItem(
             id: itemID, title: "Artist", subtitle: "", kind: .artist, duration: nil)
         let songs = Task { try await library.suggestedSongs(artistID: artist.id) }
-        await gate.entered()
-        let overview = try await library.overview(for: artist)
-        let cached = await library.cachedArtistDetails(for: artist)
-        XCTAssertEqual(overview, "Ready before songs")
-        XCTAssertEqual(cached?.overview, overview)
+        let entry = await XCTWaiter.fulfillment(of: [entered], timeout: 5)
+        guard entry == .completed else {
+            XCTFail("Timed out waiting for suggested songs transport to enter")
+            songs.cancel()
+            await gate.release()
+            guard
+                await requireLibraryTask(
+                    songs, context: "songs completion", cleanup: { await gate.release() })
+            else { return }
+            _ = try? await songs.value
+            return
+        }
+        do {
+            let overview = try await library.overview(for: artist)
+            let cached = await library.cachedArtistDetails(for: artist)
+            XCTAssertEqual(overview, "Ready before songs")
+            XCTAssertEqual(cached?.overview, overview)
+        } catch {
+            songs.cancel()
+            await gate.release()
+            guard
+                await requireLibraryTask(
+                    songs, context: "songs completion", cleanup: { await gate.release() })
+            else { return }
+            _ = try? await songs.value
+            throw error
+        }
         await gate.release()
+        guard
+            await requireLibraryTask(
+                songs, context: "songs completion", cleanup: { await gate.release() })
+        else { return }
         let result = try await songs.value
         XCTAssertTrue(result.items.isEmpty)
     }
 
+    func testAcknowledgedGateMissingEventTimesOutAndDrains() async {
+        let entered = expectation(description: "deliberately missing artist loader event")
+        let gate = FoundationAcknowledgedTestGate(entered: entered)
+        let task = Task { await gate.suspend(announce: false) }
+        let result = await XCTWaiter.fulfillment(of: [entered], timeout: 0.1)
+        XCTAssertEqual(result, .timedOut, "Missing artist loader event must time out")
+        let held = await gate.isHeld
+        XCTAssertTrue(held, "Timeout must exercise an actually held operation")
+        task.cancel()
+        await gate.release()
+        await task.value
+        let stillHeld = await gate.isHeld
+        XCTAssertFalse(stillHeld, "Timeout cleanup must drain the held operation")
+    }
+
     func testArtistCachePeekNeverWaitsForPendingTransport() async throws {
         let memo = FoundationArtistDetailMemo()
-        let gate = FoundationAlphabetTestGate()
+        let entered = expectation(description: "artist memo loader entered")
+        let gate = FoundationAcknowledgedTestGate(entered: entered)
         let artist = FoundationItem(
             id: "artist", title: "Artist", subtitle: "", kind: .artist, duration: nil)
         let request = Task {
@@ -159,10 +302,33 @@ final class FoundationLibraryTests: XCTestCase {
                 return .init(item: artist, overview: "About")
             }
         }
-        await gate.entered()
+        let entry = await XCTWaiter.fulfillment(of: [entered], timeout: 5)
+        guard entry == .completed else {
+            XCTFail("Timed out waiting for artist memo loader to enter")
+            request.cancel()
+            await gate.release()
+            guard
+                await requireLibraryTask(
+                    request, context: "request completion",
+                    cleanup: {
+                        await memo.retire()
+                        await gate.release()
+                    })
+            else { return }
+            _ = try? await request.value
+            return
+        }
         let pending = await memo.cachedValue(key: "artist", revision: "current")
         XCTAssertNil(pending, "A cache miss returns while the network is still suspended")
         await gate.release()
+        guard
+            await requireLibraryTask(
+                request, context: "request completion",
+                cleanup: {
+                    await memo.retire()
+                    await gate.release()
+                })
+        else { return }
         _ = try await request.value
         let ready = await memo.cachedValue(key: "artist", revision: "current")
         XCTAssertEqual(ready?.overview, "About")
@@ -210,7 +376,9 @@ final class FoundationLibraryTests: XCTestCase {
             for kind in [FoundationItem.Kind.album, .artist] {
                 let recorder = Recorder()
                 let requestedID = itemID
-                let gate = FoundationAlphabetTestGate()
+                let entered = XCTestExpectation(
+                    description: "shared artist overview transport entered")
+                let gate = FoundationAcknowledgedTestGate(entered: entered)
                 let library = FoundationJellyfinLibrary(session: session) { request in
                     await recorder.append(request)
                     if kind == .artist { await gate.suspend() }
@@ -227,11 +395,45 @@ final class FoundationLibraryTests: XCTestCase {
                 let item = FoundationItem(
                     id: itemID, title: "Synthetic", subtitle: "", kind: kind, duration: nil)
                 if kind == .artist {
-                    async let overview = library.overview(for: item)
-                    async let details = library.itemDetails(for: item)
-                    await gate.entered()
+                    let overview = Task { try await library.overview(for: item) }
+                    let details = Task { try await library.itemDetails(for: item) }
+                    addTeardownBlock { @MainActor in
+                        details.cancel()
+                        overview.cancel()
+                        await gate.release()
+                        _ = await requireLibraryTask(
+                            details, context: "artist details teardown", stopOnCancellation: false,
+                            cleanup: { await gate.release() })
+                        _ = await requireLibraryTask(
+                            overview, context: "artist overview teardown",
+                            stopOnCancellation: false, cleanup: { await gate.release() })
+                    }
+                    let entry = await XCTWaiter.fulfillment(of: [entered], timeout: 5)
+                    guard entry == .completed, !Task.isCancelled else {
+                        XCTFail("Timed out or cancelled waiting for artist overview transport")
+                        await gate.release()
+                        return
+                    }
                     await gate.release()
-                    let (text, _) = try await (overview, details)
+                    guard
+                        await requireLibraryTask(
+                            overview, context: "shared artist overview completion",
+                            cleanup: {
+                                details.cancel()
+                                overview.cancel()
+                                await gate.release()
+                            })
+                    else { return }
+                    guard
+                        await requireLibraryTask(
+                            details, context: "shared artist details completion",
+                            cleanup: {
+                                details.cancel()
+                                overview.cancel()
+                                await gate.release()
+                            })
+                    else { return }
+                    let (text, _) = try await (overview.value, details.value)
                     XCTAssertEqual(text, expected)
                     let cached = await library.cachedArtistDetails(for: item)
                     XCTAssertEqual(cached?.overview, expected)
@@ -250,7 +452,8 @@ final class FoundationLibraryTests: XCTestCase {
 
     func testArtistDetailsAndOverviewShareOneReadAndExplicitInvalidationRefreshes() async throws {
         let recorder = Recorder()
-        let gate = FoundationAlphabetTestGate()
+        let entered = expectation(description: "shared artist details transport entered")
+        let gate = FoundationAcknowledgedTestGate(entered: entered)
         let library = FoundationJellyfinLibrary(session: session) { request in
             await recorder.append(request)
             if await recorder.requests.count == 1 { await gate.suspend() }
@@ -263,11 +466,45 @@ final class FoundationLibraryTests: XCTestCase {
         }
         let artist = FoundationItem(
             id: itemID, title: "Artist", subtitle: "", kind: .artist, duration: nil)
-        async let details = library.itemDetails(for: artist)
-        async let overview = library.overview(for: artist)
-        await gate.entered()
+        let details = Task { try await library.itemDetails(for: artist) }
+        let overview = Task { try await library.overview(for: artist) }
+        addTeardownBlock { @MainActor in
+            details.cancel()
+            overview.cancel()
+            await gate.release()
+            _ = await requireLibraryTask(
+                details, context: "artist details teardown", stopOnCancellation: false,
+                cleanup: { await gate.release() })
+            _ = await requireLibraryTask(
+                overview, context: "artist overview teardown", stopOnCancellation: false,
+                cleanup: { await gate.release() })
+        }
+        let entry = await XCTWaiter.fulfillment(of: [entered], timeout: 5)
+        guard entry == .completed, !Task.isCancelled else {
+            XCTFail("Timed out or cancelled waiting for shared artist details transport")
+            await gate.release()
+            return
+        }
         await gate.release()
-        let (item, text) = try await (details, overview)
+        guard
+            await requireLibraryTask(
+                overview, context: "shared artist overview completion",
+                cleanup: {
+                    details.cancel()
+                    overview.cancel()
+                    await gate.release()
+                })
+        else { return }
+        guard
+            await requireLibraryTask(
+                details, context: "shared artist details completion",
+                cleanup: {
+                    details.cancel()
+                    overview.cancel()
+                    await gate.release()
+                })
+        else { return }
+        let (item, text) = try await (details.value, overview.value)
         XCTAssertEqual(item?.logoImageTag, "logo-revision")
         XCTAssertEqual(text, "About the artist")
         _ = try await library.itemDetails(for: artist)
@@ -353,7 +590,8 @@ final class FoundationLibraryTests: XCTestCase {
 
     func testCancelledArtistReadDoesNotPublishOverItsReplacement() async throws {
         let memo = FoundationArtistDetailMemo()
-        let gate = FoundationAlphabetTestGate()
+        let entered = expectation(description: "cancelled artist memo transport entered")
+        let gate = FoundationAcknowledgedTestGate(entered: entered)
         let old = FoundationItem(
             id: "artist", title: "Old", subtitle: "", kind: .artist, duration: nil)
         let replacement = FoundationItem(
@@ -364,16 +602,66 @@ final class FoundationLibraryTests: XCTestCase {
                 return .init(item: old, overview: "Old")
             }
         }
-        await gate.entered()
+        let entry = await XCTWaiter.fulfillment(of: [entered], timeout: 5)
+        guard entry == .completed, !Task.isCancelled else {
+            XCTFail("Timed out or cancelled waiting for artist memo transport")
+            first.cancel()
+            await memo.retire()
+            await gate.release()
+            guard
+                await requireLibraryTask(
+                    first, context: "first completion",
+                    cleanup: {
+                        await memo.retire()
+                        await gate.release()
+                    })
+            else { return }
+            _ = try? await first.value
+            return
+        }
         first.cancel()
+        let finished = expectation(description: "cancelled artist consumer returned")
+        let observer = Task {
+            _ = await first.result
+            finished.fulfill()
+        }
+        let outcome = await XCTWaiter.fulfillment(of: [finished], timeout: 5)
+        guard outcome == .completed, !Task.isCancelled else {
+            XCTFail("Timed out or cancelled waiting for cancelled artist consumer")
+            await memo.retire()
+            await gate.release()
+            _ = await requireLibraryTask(
+                first, context: "cancelled memo failure cleanup", stopOnCancellation: false,
+                cleanup: {
+                    await memo.retire()
+                    await gate.release()
+                })
+            observer.cancel()
+            return
+        }
+        await observer.value
         do {
+            guard
+                await requireLibraryTask(
+                    first, context: "first completion",
+                    cleanup: {
+                        await memo.retire()
+                        await gate.release()
+                    })
+            else { return }
             _ = try await first.value
             XCTFail("The cancelled consumer must finish without waiting for transport")
         } catch { XCTAssertTrue(error is CancellationError) }
-        let current = try await memo.value(key: "artist") {
-            .init(item: replacement, overview: "Current")
+        do {
+            let current = try await memo.value(key: "artist") {
+                .init(item: replacement, overview: "Current")
+            }
+            XCTAssertEqual(current.item.title, "Current")
+        } catch {
+            await memo.retire()
+            await gate.release()
+            throw error
         }
-        XCTAssertEqual(current.item.title, "Current")
         await gate.release()
         let retained = try await memo.value(key: "artist") {
             XCTFail("Successful replacement should be retained")
@@ -406,7 +694,8 @@ final class FoundationLibraryTests: XCTestCase {
 
     func testArtistFavoriteMutationLetsVisibleMetadataFinishWithoutCachingStaleRead() async throws {
         let recorder = Recorder()
-        let gate = FoundationAlphabetTestGate()
+        let entered = expectation(description: "favorite mutation artist transport entered")
+        let gate = FoundationAcknowledgedTestGate(entered: entered)
         let library = FoundationJellyfinLibrary(session: session) { request in
             await recorder.append(request)
             let count = await recorder.requests.count
@@ -423,11 +712,39 @@ final class FoundationLibraryTests: XCTestCase {
         let artist = FoundationItem(
             id: itemID, title: "Artist", subtitle: "", kind: .artist, duration: nil)
         let visibleRead = Task { try await library.itemDetails(for: artist) }
-        await gate.entered()
-        try await library.setFavorite(for: artist, isFavorite: true)
-        let fresh = try await library.itemDetails(for: artist)
-        XCTAssertEqual(fresh?.isFavorite, true)
+        let entry = await XCTWaiter.fulfillment(of: [entered], timeout: 5)
+        guard entry == .completed, !Task.isCancelled else {
+            XCTFail("Timed out or cancelled waiting for favorite mutation artist transport")
+            visibleRead.cancel()
+            await gate.release()
+            guard
+                await requireLibraryTask(
+                    visibleRead, context: "visibleRead completion",
+                    cleanup: { await gate.release() })
+            else { return }
+            _ = try? await visibleRead.value
+            return
+        }
+        do {
+            try await library.setFavorite(for: artist, isFavorite: true)
+            let fresh = try await library.itemDetails(for: artist)
+            XCTAssertEqual(fresh?.isFavorite, true)
+        } catch {
+            visibleRead.cancel()
+            await gate.release()
+            guard
+                await requireLibraryTask(
+                    visibleRead, context: "visibleRead completion",
+                    cleanup: { await gate.release() })
+            else { return }
+            _ = try? await visibleRead.value
+            throw error
+        }
         await gate.release()
+        guard
+            await requireLibraryTask(
+                visibleRead, context: "visibleRead completion", cleanup: { await gate.release() })
+        else { return }
         let visible = try await visibleRead.value
         XCTAssertEqual(
             visible?.isFavorite, false,
@@ -547,7 +864,10 @@ final class FoundationLibraryTests: XCTestCase {
     @MainActor
     func testVisibleRefreshTakesOverAbandonedInitialLoadWithoutManualRefresh() async {
         let model = FoundationBrowseModel()
-        let abandonedGate = FoundationAlphabetTestGate()
+        let entered = expectation(description: "abandoned initial load entered")
+        let gate = FoundationCollectionHandoverGate(entered: entered)
+        let abandonedDone = FoundationCollectionTaskCompletion()
+        let visibleDone = FoundationCollectionTaskCompletion()
         let replacement = FoundationItem(
             id: "visible-replacement", title: "Replacement", subtitle: "Synthetic", kind: .track,
             duration: 1)
@@ -559,11 +879,20 @@ final class FoundationLibraryTests: XCTestCase {
                 activeRequests += 1
                 maximumActiveRequests = max(maximumActiveRequests, activeRequests)
                 defer { activeRequests -= 1 }
-                await abandonedGate.suspend()
+                await gate.suspend()
                 return .init(items: [], nextStartIndex: nil)
             }
+            await abandonedDone.finish()
         }
-        await abandonedGate.entered()
+        let entry = await XCTWaiter.fulfillment(of: [entered], timeout: 5)
+        guard entry == .completed, !Task.isCancelled else {
+            XCTFail("Timed out or cancelled waiting for abandoned initial load to enter")
+            abandoned.cancel()
+            model.clearRetainedData()
+            await gate.release()
+            await requireCollectionTasksFinished([abandonedDone], context: "abandoned load cleanup")
+            return
+        }
         let visible = Task {
             await model.refreshVisible(allowsNetwork: true) { _ in
                 replacementReads += 1
@@ -572,13 +901,34 @@ final class FoundationLibraryTests: XCTestCase {
                 defer { activeRequests -= 1 }
                 return .init(items: [replacement], nextStartIndex: nil)
             }
+            await visibleDone.finish()
         }
-        await waitForInitialDemands(1, in: model)
+        guard await initialDemandsRegistered(1, in: model) else {
+            XCTFail("Timed out or cancelled waiting for visible refresh demand")
+            abandoned.cancel()
+            visible.cancel()
+            model.clearRetainedData()
+            await gate.release()
+            await requireCollectionTasksFinished(
+                [abandonedDone, visibleDone], context: "visible refresh cleanup")
+            return
+        }
         abandoned.cancel()
         XCTAssertEqual(replacementReads, 0, "Wait for the abandoned transport to unwind")
-        await abandonedGate.release()
-        await abandoned.value
-        await visible.value
+        await gate.release()
+        guard
+            await requireCollectionTasksFinished(
+                [abandonedDone, visibleDone], context: "visible refresh handover",
+                stopOnCancellation: true)
+        else {
+            abandoned.cancel()
+            visible.cancel()
+            model.clearRetainedData()
+            await gate.release()
+            await requireCollectionTasksFinished(
+                [abandonedDone, visibleDone], context: "visible refresh cleanup after timeout")
+            return
+        }
         XCTAssertEqual(replacementReads, 1)
         XCTAssertEqual(maximumActiveRequests, 1)
         XCTAssertEqual(model.items.map(\.id), [replacement.id])
@@ -591,8 +941,13 @@ final class FoundationLibraryTests: XCTestCase {
     @MainActor
     func testCollectionInitialDemandTakesOverCancelledOwnerAfterTransportUnwinds() async {
         let model = FoundationBrowseModel()
-        let firstGate = FoundationAlphabetTestGate()
-        let secondGate = FoundationAlphabetTestGate()
+        let firstEntered = expectation(description: "first collection load entered")
+        let secondEntered = XCTestExpectation(description: "replacement collection load entered")
+        let firstGate = FoundationCollectionHandoverGate(entered: firstEntered)
+        let secondGate = FoundationCollectionHandoverGate(entered: secondEntered)
+        let firstDone = FoundationCollectionTaskCompletion()
+        let secondDone = FoundationCollectionTaskCompletion()
+        let thirdDone = FoundationCollectionTaskCompletion()
         let track = FoundationItem(
             id: "replacement", title: "Replacement", subtitle: "Synthetic", kind: .track,
             duration: 1)
@@ -607,8 +962,18 @@ final class FoundationLibraryTests: XCTestCase {
                 await firstGate.suspend()
                 return .init(items: [], nextStartIndex: nil)
             }
+            await firstDone.finish()
         }
-        await firstGate.entered()
+        let firstEntry = await XCTWaiter.fulfillment(of: [firstEntered], timeout: 5)
+        guard firstEntry == .completed, !Task.isCancelled else {
+            XCTFail("Timed out or cancelled waiting for first collection load to enter")
+            first.cancel()
+            model.clearRetainedData()
+            await firstGate.release()
+            await secondGate.release()
+            await requireCollectionTasksFinished([firstDone], context: "first collection cleanup")
+            return
+        }
         let second = Task {
             await model.loadPending(waitForInitialLoad: true) { _ in
                 replacementReads += 1
@@ -618,8 +983,19 @@ final class FoundationLibraryTests: XCTestCase {
                 await secondGate.suspend()
                 return .init(items: [track], nextStartIndex: nil)
             }
+            await secondDone.finish()
         }
-        await waitForInitialDemands(1, in: model)
+        guard await initialDemandsRegistered(1, in: model) else {
+            XCTFail("Timed out or cancelled waiting for second collection demand")
+            first.cancel()
+            second.cancel()
+            model.clearRetainedData()
+            await firstGate.release()
+            await secondGate.release()
+            await requireCollectionTasksFinished(
+                [firstDone, secondDone], context: "second collection demand cleanup")
+            return
+        }
         first.cancel()
         // The first synthetic transport ignores cancellation until explicitly released.
         let third = Task {
@@ -631,16 +1007,64 @@ final class FoundationLibraryTests: XCTestCase {
                 await secondGate.suspend()
                 return .init(items: [track], nextStartIndex: nil)
             }
+            await thirdDone.finish()
         }
-        await waitForInitialDemands(2, in: model)
+        guard await initialDemandsRegistered(2, in: model) else {
+            XCTFail("Timed out or cancelled waiting for third collection demand")
+            first.cancel()
+            second.cancel()
+            third.cancel()
+            model.clearRetainedData()
+            await firstGate.release()
+            await secondGate.release()
+            await requireCollectionTasksFinished(
+                [firstDone, secondDone, thirdDone], context: "third collection demand cleanup")
+            return
+        }
         XCTAssertEqual(replacementReads, 0)
         await firstGate.release()
-        await first.value
-        await secondGate.entered()
+        guard
+            await requireCollectionTasksFinished(
+                [firstDone], context: "first collection handover", stopOnCancellation: true)
+        else {
+            first.cancel()
+            second.cancel()
+            third.cancel()
+            model.clearRetainedData()
+            await firstGate.release()
+            await secondGate.release()
+            await requireCollectionTasksFinished(
+                [firstDone, secondDone, thirdDone], context: "first handover cleanup")
+            return
+        }
+        let secondEntry = await XCTWaiter.fulfillment(of: [secondEntered], timeout: 5)
+        guard secondEntry == .completed, !Task.isCancelled else {
+            XCTFail("Timed out or cancelled waiting for replacement collection load to enter")
+            second.cancel()
+            third.cancel()
+            model.clearRetainedData()
+            await firstGate.release()
+            await secondGate.release()
+            await requireCollectionTasksFinished(
+                [secondDone, thirdDone], context: "replacement collection cleanup")
+            return
+        }
         XCTAssertEqual(replacementReads, 1)
         await secondGate.release()
-        await second.value
-        await third.value
+        guard
+            await requireCollectionTasksFinished(
+                [secondDone, thirdDone], context: "replacement collection handover",
+                stopOnCancellation: true)
+        else {
+            second.cancel()
+            third.cancel()
+            model.clearRetainedData()
+            await firstGate.release()
+            await secondGate.release()
+            await requireCollectionTasksFinished(
+                [firstDone, secondDone, thirdDone], context: "replacement cleanup after timeout")
+            return
+        }
         XCTAssertEqual(maximumActiveRequests, 1)
         XCTAssertEqual(replacementReads, 1)
         XCTAssertEqual(model.items.map(\.id), ["replacement"])
@@ -650,10 +1074,54 @@ final class FoundationLibraryTests: XCTestCase {
     }
 
     @MainActor
+    private func initialDemandsRegistered(_ count: Int, in model: FoundationBrowseModel) async
+        -> Bool
+    {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while model.pendingInitialLoadDemandCount != count {
+            guard !Task.isCancelled, ContinuousClock.now < deadline else { return false }
+            await Task.yield()
+        }
+        return !Task.isCancelled
+    }
+
+    @MainActor
+    @discardableResult
+    private func requireCollectionTasksFinished(
+        _ completions: [FoundationCollectionTaskCompletion], context: String,
+        stopOnCancellation: Bool = false
+    ) async -> Bool {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while ContinuousClock.now < deadline {
+            if stopOnCancellation, Task.isCancelled {
+                XCTFail("Cancelled while waiting for tasks to finish: \(context)")
+                return false
+            }
+            var finished = true
+            for completion in completions where !(await completion.isFinished) {
+                finished = false
+            }
+            if finished {
+                if stopOnCancellation, Task.isCancelled {
+                    XCTFail("Cancelled while waiting for tasks to finish: \(context)")
+                    return false
+                }
+                return true
+            }
+            await Task.yield()
+        }
+        XCTFail("Timed out waiting for tasks to finish: \(context)")
+        return false
+    }
+
+    @MainActor
     func testCollectionInitialDemandDoesNotRetrySuccessfulOrFailedOwner() async {
         for fails in [false, true] {
             let model = FoundationBrowseModel()
-            let gate = FoundationAlphabetTestGate()
+            let entered = XCTestExpectation(description: "initial collection owner entered")
+            let gate = FoundationCollectionHandoverGate(entered: entered)
+            let firstDone = FoundationCollectionTaskCompletion()
+            let secondDone = FoundationCollectionTaskCompletion()
             let track = FoundationItem(
                 id: "original", title: "Original", subtitle: "Synthetic", kind: .track, duration: 1)
             let first = Task {
@@ -662,18 +1130,51 @@ final class FoundationLibraryTests: XCTestCase {
                     if fails { throw FoundationLibraryError.invalidResponse }
                     return .init(items: [track], nextStartIndex: nil)
                 }
+                await firstDone.finish()
             }
-            await gate.entered()
+            let entry = await XCTWaiter.fulfillment(of: [entered], timeout: 5)
+            guard entry == .completed, !Task.isCancelled else {
+                XCTFail(
+                    "Timed out or cancelled waiting for initial collection owner (fails: \(fails))")
+                first.cancel()
+                model.clearRetainedData()
+                await gate.release()
+                await requireCollectionTasksFinished([firstDone], context: "initial owner cleanup")
+                return
+            }
             let second = Task {
                 await model.loadPending(waitForInitialLoad: true) { _ in
                     XCTFail("Completed owner must satisfy initial demand without another request")
                     return .init(items: [], nextStartIndex: nil)
                 }
+                await secondDone.finish()
             }
-            await waitForInitialDemands(1, in: model)
+            guard await initialDemandsRegistered(1, in: model) else {
+                XCTFail(
+                    "Timed out or cancelled waiting for initial collection demand (fails: \(fails))"
+                )
+                first.cancel()
+                second.cancel()
+                model.clearRetainedData()
+                await gate.release()
+                await requireCollectionTasksFinished(
+                    [firstDone, secondDone], context: "initial demand cleanup")
+                return
+            }
             await gate.release()
-            await first.value
-            await second.value
+            guard
+                await requireCollectionTasksFinished(
+                    [firstDone, secondDone], context: "completed initial owner and waiter",
+                    stopOnCancellation: true)
+            else {
+                first.cancel()
+                second.cancel()
+                model.clearRetainedData()
+                await gate.release()
+                await requireCollectionTasksFinished(
+                    [firstDone, secondDone], context: "completed initial owner cleanup")
+                return
+            }
             XCTAssertEqual(model.loaded, !fails)
             XCTAssertEqual(model.errorMessage != nil, fails)
             XCTAssertEqual(model.pendingInitialLoadDemandCount, 0)
@@ -683,28 +1184,71 @@ final class FoundationLibraryTests: XCTestCase {
     @MainActor
     func testCancelledCollectionWaiterReturnsWithoutWaitingForNoncooperativeTransport() async {
         let model = FoundationBrowseModel()
-        let gate = FoundationAlphabetTestGate()
+        let entered = XCTestExpectation(description: "noncooperative collection owner entered")
+        let gate = FoundationCollectionHandoverGate(entered: entered)
+        let firstDone = FoundationCollectionTaskCompletion()
+        let secondDone = FoundationCollectionTaskCompletion()
         let first = Task {
             await model.loadPending(waitForInitialLoad: true) { _ in
                 await gate.suspend()
                 return .init(items: [], nextStartIndex: nil)
             }
+            await firstDone.finish()
         }
-        await gate.entered()
+        let entry = await XCTWaiter.fulfillment(of: [entered], timeout: 5)
+        guard entry == .completed, !Task.isCancelled else {
+            XCTFail("Timed out or cancelled waiting for noncooperative collection owner")
+            first.cancel()
+            model.clearRetainedData()
+            await gate.release()
+            await requireCollectionTasksFinished(
+                [firstDone], context: "cancelled waiter owner cleanup")
+            return
+        }
         let second = Task {
             await model.loadPending(waitForInitialLoad: true) { _ in
                 XCTFail("Cancelled destination must not take over")
                 return .init(items: [], nextStartIndex: nil)
             }
+            await secondDone.finish()
         }
-        await waitForInitialDemands(1, in: model)
+        guard await initialDemandsRegistered(1, in: model) else {
+            XCTFail("Timed out or cancelled waiting for cancellable collection demand")
+            first.cancel()
+            second.cancel()
+            model.clearRetainedData()
+            await gate.release()
+            await requireCollectionTasksFinished(
+                [firstDone, secondDone], context: "cancellable demand cleanup")
+            return
+        }
         second.cancel()
-        await second.value
+        guard
+            await requireCollectionTasksFinished(
+                [secondDone], context: "cancelled collection waiter", stopOnCancellation: true)
+        else {
+            first.cancel()
+            second.cancel()
+            model.clearRetainedData()
+            await gate.release()
+            await requireCollectionTasksFinished(
+                [firstDone, secondDone], context: "cancelled waiter cleanup")
+            return
+        }
         XCTAssertEqual(model.pendingInitialLoadDemandCount, 0)
         XCTAssertTrue(model.isLoading)
         first.cancel()
         await gate.release()
-        await first.value
+        guard
+            await requireCollectionTasksFinished(
+                [firstDone], context: "cancelled collection owner", stopOnCancellation: true)
+        else {
+            first.cancel()
+            model.clearRetainedData()
+            await gate.release()
+            await requireCollectionTasksFinished([firstDone], context: "cancelled owner cleanup")
+            return
+        }
         XCTAssertFalse(model.loaded)
         XCTAssertNil(model.errorMessage)
     }
@@ -713,21 +1257,47 @@ final class FoundationLibraryTests: XCTestCase {
     func testCollectionDemandInvalidationCannotResurrectRetiredModel() async {
         for invalidation in ["clear", "snapshot", "request"] {
             let model = FoundationBrowseModel()
-            let gate = FoundationAlphabetTestGate()
+            let entered = XCTestExpectation(
+                description: "collection owner entered before \(invalidation)")
+            let gate = FoundationCollectionHandoverGate(entered: entered)
+            let firstDone = FoundationCollectionTaskCompletion()
+            let secondDone = FoundationCollectionTaskCompletion()
             let first = Task {
                 await model.loadPending(waitForInitialLoad: true) { _ in
                     await gate.suspend()
                     return .init(items: [], nextStartIndex: nil)
                 }
+                await firstDone.finish()
             }
-            await gate.entered()
+            let entry = await XCTWaiter.fulfillment(of: [entered], timeout: 5)
+            guard entry == .completed, !Task.isCancelled else {
+                XCTFail(
+                    "Timed out or cancelled waiting for collection owner before \(invalidation)")
+                first.cancel()
+                model.clearRetainedData()
+                await gate.release()
+                await requireCollectionTasksFinished(
+                    [firstDone], context: "invalidation owner cleanup")
+                return
+            }
             let second = Task {
                 await model.loadPending(waitForInitialLoad: true) { _ in
                     XCTFail("Invalidated demand must not start another request")
                     return .init(items: [], nextStartIndex: nil)
                 }
+                await secondDone.finish()
             }
-            await waitForInitialDemands(1, in: model)
+            guard await initialDemandsRegistered(1, in: model) else {
+                XCTFail(
+                    "Timed out or cancelled waiting for collection demand before \(invalidation)")
+                first.cancel()
+                second.cancel()
+                model.clearRetainedData()
+                await gate.release()
+                await requireCollectionTasksFinished(
+                    [firstDone, secondDone], context: "invalidation demand cleanup")
+                return
+            }
             switch invalidation {
             case "clear": model.clearRetainedData()
             case "snapshot":
@@ -738,10 +1308,32 @@ final class FoundationLibraryTests: XCTestCase {
                 ])
             default: model.request(.refresh)
             }
-            await second.value
+            guard
+                await requireCollectionTasksFinished(
+                    [secondDone], context: "collection waiter after \(invalidation)",
+                    stopOnCancellation: true)
+            else {
+                first.cancel()
+                second.cancel()
+                model.clearRetainedData()
+                await gate.release()
+                await requireCollectionTasksFinished(
+                    [firstDone, secondDone], context: "invalidated waiter cleanup")
+                return
+            }
             first.cancel()
             await gate.release()
-            await first.value
+            guard
+                await requireCollectionTasksFinished(
+                    [firstDone], context: "invalidated collection owner", stopOnCancellation: true)
+            else {
+                first.cancel()
+                model.clearRetainedData()
+                await gate.release()
+                await requireCollectionTasksFinished(
+                    [firstDone], context: "invalidated owner cleanup")
+                return
+            }
             XCTAssertEqual(model.pendingInitialLoadDemandCount, 0)
             XCTAssertEqual(model.loaded, invalidation == "snapshot")
             XCTAssertNil(model.errorMessage)
@@ -766,31 +1358,77 @@ final class FoundationLibraryTests: XCTestCase {
 
             // Hold an older refresh across the explicit replacement request. The opt-in
             // handoff must not change existing refresh/retry supersession behavior.
-            let gate = FoundationAlphabetTestGate()
+            let entered = expectation(description: "older explicit refresh entered")
+            let gate = FoundationCollectionHandoverGate(entered: entered)
+            let staleDone = FoundationCollectionTaskCompletion()
             let stale = Task {
                 await model.load(.refresh) { _ in
                     await gate.suspend()
                     return .init(items: [original], nextStartIndex: nil)
                 }
+                await staleDone.finish()
             }
-            await gate.entered()
+            let entry = await XCTWaiter.fulfillment(of: [entered], timeout: 5)
+            guard entry == .completed, !Task.isCancelled else {
+                XCTFail("Timed out or cancelled waiting for the older refresh to enter")
+                stale.cancel()
+                model.clearRetainedData()
+                await gate.release()
+                await requireCollectionTasksFinished([staleDone], context: "older refresh cleanup")
+                let stillHeld = await gate.isHeld
+                XCTAssertFalse(stillHeld, "Older refresh cleanup must release every gate entrant")
+                return
+            }
             model.request(.refresh)
             var replacementReads = 0
+            let replacementEntered = expectation(
+                description: "explicit replacement refresh entered")
+            let currentDone = FoundationCollectionTaskCompletion()
             let current = Task {
                 await model.loadPending(waitForInitialLoad: true) { offset in
                     XCTAssertEqual(offset, 0)
                     replacementReads += 1
+                    if replacementReads == 1 { replacementEntered.fulfill() }
                     return .init(items: [replacement], nextStartIndex: nil)
                 }
+                await currentDone.finish()
             }
-            for _ in 0..<10_000 {
-                if replacementReads != 0 { break }
-                await Task.yield()
+            let replacementEntry = await XCTWaiter.fulfillment(of: [replacementEntered], timeout: 5)
+            guard replacementEntry == .completed, !Task.isCancelled else {
+                XCTFail("Timed out or cancelled waiting for the explicit replacement refresh")
+                stale.cancel()
+                current.cancel()
+                model.clearRetainedData()
+                await gate.release()
+                await requireCollectionTasksFinished(
+                    [staleDone, currentDone], context: "explicit refresh cleanup")
+                let stillHeld = await gate.isHeld
+                XCTAssertFalse(
+                    stillHeld, "Explicit refresh cleanup must release every gate entrant")
+                return
             }
             XCTAssertEqual(replacementReads, 1, "Explicit refresh must not wait for retired work")
             await gate.release()
-            await stale.value
-            await current.value
+            guard
+                await requireCollectionTasksFinished(
+                    [staleDone, currentDone], context: "explicit refresh completion",
+                    stopOnCancellation: true
+                )
+            else {
+                stale.cancel()
+                current.cancel()
+                model.clearRetainedData()
+                await gate.release()
+                await requireCollectionTasksFinished(
+                    [staleDone, currentDone], context: "explicit refresh completion cleanup")
+                let stillHeld = await gate.isHeld
+                XCTAssertFalse(
+                    stillHeld, "Explicit refresh completion cleanup must release every gate entrant"
+                )
+                return
+            }
+            let stillHeld = await gate.isHeld
+            XCTAssertFalse(stillHeld, "Explicit refresh completion must release every gate entrant")
             XCTAssertEqual(model.items.map(\.id), ["replacement"])
             XCTAssertTrue(model.loaded)
             XCTAssertNil(model.errorMessage)
@@ -1129,18 +1767,47 @@ final class FoundationLibraryTests: XCTestCase {
         let a = FoundationItem(id: "a", title: "Alpha", subtitle: "", kind: .track, duration: nil)
         let f = FoundationItem(id: "f", title: "Foxtrot", subtitle: "", kind: .track, duration: nil)
         await model.loadPending { _ in .init(items: [a], nextStartIndex: 50) }
-        let gate = FoundationAlphabetTestGate()
+        let entered = expectation(description: "cancelled songs page entered")
+        let gate = FoundationCollectionHandoverGate(entered: entered)
+        let oldDone = FoundationCollectionTaskCompletion()
         let old = Task {
             await model.drainDemandedPagesForTesting { offset in
                 XCTAssertEqual(offset, 50)
                 await gate.suspend()
                 return .init(items: [f], nextStartIndex: nil)
             }
+            await oldDone.finish()
         }
-        await gate.entered()
+        let entry = await XCTWaiter.fulfillment(of: [entered], timeout: 5)
+        guard entry == .completed, !Task.isCancelled else {
+            XCTFail("Timed out or cancelled waiting for the songs page to enter")
+            old.cancel()
+            model.clearRetainedData()
+            await gate.release()
+            await requireCollectionTasksFinished([oldDone], context: "cancelled songs page cleanup")
+            let stillHeld = await gate.isHeld
+            XCTAssertFalse(
+                stillHeld, "Cancelled songs page cleanup must release every gate entrant")
+            return
+        }
         old.cancel()
         await gate.release()
-        await old.value
+        guard
+            await requireCollectionTasksFinished(
+                [oldDone], context: "cancelled songs page", stopOnCancellation: true)
+        else {
+            old.cancel()
+            model.clearRetainedData()
+            await gate.release()
+            await requireCollectionTasksFinished(
+                [oldDone], context: "cancelled songs page final cleanup")
+            let stillHeld = await gate.isHeld
+            XCTAssertFalse(
+                stillHeld, "Cancelled songs page final cleanup must release every gate entrant")
+            return
+        }
+        let stillHeld = await gate.isHeld
+        XCTAssertFalse(stillHeld, "Cancelled songs page must release every gate entrant")
         XCTAssertEqual(model.items, [a])
         XCTAssertEqual(model.nextStartIndex, 50)
         XCTAssertFalse(model.isLoading)
@@ -1219,7 +1886,9 @@ final class FoundationLibraryTests: XCTestCase {
         let model = FoundationBrowseModel()
         model.configureCatalogPagination()
         let a = FoundationItem(id: "a", title: "Alpha", subtitle: "", kind: .track, duration: nil)
-        let gate = FoundationAlphabetTestGate()
+        let entered = expectation(description: "account reset catalog page entered")
+        let gate = FoundationCollectionHandoverGate(entered: entered)
+        let loadingDone = FoundationCollectionTaskCompletion()
         var requests = 0
         let loading = Task {
             await model.drainDemandedPagesForTesting { _ in
@@ -1227,11 +1896,37 @@ final class FoundationLibraryTests: XCTestCase {
                 await gate.suspend()
                 return .init(items: [a], nextStartIndex: 50)
             }
+            await loadingDone.finish()
         }
-        await gate.entered()
+        let entry = await XCTWaiter.fulfillment(of: [entered], timeout: 5)
+        guard entry == .completed, !Task.isCancelled else {
+            XCTFail("Timed out or cancelled waiting for the account reset catalog page")
+            loading.cancel()
+            model.clearRetainedData()
+            await gate.release()
+            await requireCollectionTasksFinished(
+                [loadingDone], context: "account reset page cleanup")
+            let stillHeld = await gate.isHeld
+            XCTAssertFalse(stillHeld, "Account reset cleanup must release every gate entrant")
+            return
+        }
         model.clearRetainedData()
         await gate.release()
-        await loading.value
+        guard
+            await requireCollectionTasksFinished(
+                [loadingDone], context: "account reset page", stopOnCancellation: true)
+        else {
+            loading.cancel()
+            model.clearRetainedData()
+            await gate.release()
+            await requireCollectionTasksFinished(
+                [loadingDone], context: "account reset final cleanup")
+            let stillHeld = await gate.isHeld
+            XCTAssertFalse(stillHeld, "Account reset final cleanup must release every gate entrant")
+            return
+        }
+        let stillHeld = await gate.isHeld
+        XCTAssertFalse(stillHeld, "Account reset must release every gate entrant")
         XCTAssertEqual(requests, 1)
         XCTAssertTrue(model.items.isEmpty)
         XCTAssertNil(model.nextStartIndex)
@@ -1567,9 +2262,12 @@ final class FoundationLibraryTests: XCTestCase {
         XCTAssertNotNil(Self.alphabetProbeData(requests[0]))
     }
 
+    @MainActor
     func testFailedAlphabetProbeCanExplicitlyRetryWithOneCoalescedAccountRequest() async {
         let recorder = Recorder()
-        let gate = FoundationAlphabetTestGate()
+        let entered = XCTestExpectation(description: "alphabet capability retry transport entered")
+        let gate = FoundationCollectionHandoverGate(entered: entered)
+        let retryDone = FoundationCollectionTaskCompletion()
         let library = FoundationJellyfinLibrary(session: session) { request in
             await recorder.append(request)
             let count = await recorder.requests.count
@@ -1584,12 +2282,61 @@ final class FoundationLibraryTests: XCTestCase {
                 for _ in 0..<10 {
                     group.addTask { await library.alphabetCapability() }
                 }
-                for await value in group { XCTAssertEqual(value, .verified) }
+                for await value in group {
+                    if !Task.isCancelled { XCTAssertEqual(value, .verified) }
+                }
             }
+            await retryDone.finish()
         }
-        await gate.entered()
+        let entry = await XCTWaiter.fulfillment(of: [entered], timeout: 5)
+        guard entry == .completed, !Task.isCancelled else {
+            XCTFail("Timed out or cancelled waiting for alphabet capability retry transport")
+            retry.cancel()
+            await gate.release()
+            let retirementDone = FoundationCollectionTaskCompletion()
+            let retirement = Task {
+                await library.retireAlphabetCapability()
+                await retirementDone.finish()
+            }
+            guard
+                await requireCollectionTasksFinished(
+                    [retryDone, retirementDone], context: "alphabet capability retry cleanup")
+            else {
+                retirement.cancel()
+                let stillHeld = await gate.isHeld
+                XCTAssertFalse(stillHeld, "Alphabet retry cleanup must release every gate entrant")
+                return
+            }
+            let stillHeld = await gate.isHeld
+            XCTAssertFalse(stillHeld, "Alphabet retry cleanup must release every gate entrant")
+            return
+        }
         await gate.release()
-        await retry.value
+        guard
+            await requireCollectionTasksFinished(
+                [retryDone], context: "alphabet capability retry completion",
+                stopOnCancellation: true)
+        else {
+            retry.cancel()
+            await gate.release()
+            let retirementDone = FoundationCollectionTaskCompletion()
+            let retirement = Task {
+                await library.retireAlphabetCapability()
+                await retirementDone.finish()
+            }
+            guard
+                await requireCollectionTasksFinished(
+                    [retryDone, retirementDone], context: "alphabet capability retry cleanup")
+            else {
+                retirement.cancel()
+                let stillHeld = await gate.isHeld
+                XCTAssertFalse(stillHeld, "Alphabet retry cleanup must release every gate entrant")
+                return
+            }
+            let stillHeld = await gate.isHeld
+            XCTAssertFalse(stillHeld, "Alphabet retry cleanup must release every gate entrant")
+            return
+        }
         let cached = await library.alphabetCapability()
         XCTAssertEqual(cached, .verified)
         let requests = await recorder.requests
@@ -1631,30 +2378,80 @@ final class FoundationLibraryTests: XCTestCase {
         XCTAssertEqual(requests.count, 3)
     }
 
+    @MainActor
     func testCancellingOneCapabilityWaiterKeepsAccountSingleflightAvailable() async {
         let recorder = Recorder()
-        let gate = FoundationAlphabetTestGate()
+        let entered = XCTestExpectation(description: "singleflight capability transport entered")
+        let gate = FoundationCollectionHandoverGate(entered: entered)
+        let firstDone = FoundationCollectionTaskCompletion()
+        let secondDone = FoundationCollectionTaskCompletion()
         let library = FoundationJellyfinLibrary(session: session) { request in
             await recorder.append(request)
             if await recorder.requests.count == 1 { await gate.suspend() }
             return (Self.alphabetProbeData(request)!, Self.response(request))
         }
-        let first = Task { await library.alphabetCapability() }
-        await gate.entered()
+        let first = Task {
+            _ = await library.alphabetCapability()
+            await firstDone.finish()
+        }
+        let entry = await XCTWaiter.fulfillment(of: [entered], timeout: 5)
+        guard entry == .completed, !Task.isCancelled else {
+            XCTFail("Timed out or cancelled waiting for singleflight capability transport")
+            await cleanupCapabilityWaiters(
+                library: library, gate: gate, tasks: [first], completions: [firstDone])
+            return
+        }
         first.cancel()
         let scopeID = itemID
-        let second = Task { await library.scoped(to: scopeID).alphabetCapability() }
+        var result: FoundationAlphabetCapability?
+        let second = Task {
+            result = await library.scoped(to: scopeID).alphabetCapability()
+            await secondDone.finish()
+        }
         await gate.release()
-        let result = await second.value
+        guard
+            await requireCollectionTasksFinished(
+                [firstDone, secondDone], context: "singleflight capability waiters",
+                stopOnCancellation: true)
+        else {
+            await cleanupCapabilityWaiters(
+                library: library, gate: gate, tasks: [first, second],
+                completions: [firstDone, secondDone])
+            return
+        }
         XCTAssertEqual(result, .verified)
-        _ = await first.value
         let requests = await recorder.requests
         XCTAssertEqual(requests.count, 2)
     }
 
+    @MainActor
+    private func cleanupCapabilityWaiters(
+        library: FoundationJellyfinLibrary, gate: FoundationCollectionHandoverGate,
+        tasks: [Task<Void, Never>], completions: [FoundationCollectionTaskCompletion]
+    ) async {
+        for task in tasks { task.cancel() }
+        await gate.release()
+        let retirementDone = FoundationCollectionTaskCompletion()
+        let retirement = Task {
+            await library.retireAlphabetCapability()
+            await retirementDone.finish()
+        }
+        if !(await requireCollectionTasksFinished(
+            completions + [retirementDone], context: "singleflight capability cleanup"))
+        {
+            retirement.cancel()
+        }
+        let stillHeld = await gate.isHeld
+        XCTAssertFalse(stillHeld, "Singleflight cleanup must release every gate entrant")
+    }
+
+    @MainActor
     func testLogoutWhileCapabilityInflightRejectsLateCompletionAndNewReads() async throws {
         let recorder = Recorder()
-        let gate = FoundationAlphabetTestGate()
+        let entered = XCTestExpectation(description: "logout capability transport entered")
+        let gate = FoundationCollectionHandoverGate(entered: entered)
+        let pendingDone = FoundationCollectionTaskCompletion()
+        let logoutDone = FoundationCollectionTaskCompletion()
         let library = FoundationJellyfinLibrary(session: session) { request in
             await recorder.append(request)
             if let data = Self.alphabetProbeData(request) {
@@ -1663,11 +2460,48 @@ final class FoundationLibraryTests: XCTestCase {
             }
             return (Data(), Self.response(request, status: 204))
         }
-        let pending = Task { await library.alphabetCapability() }
-        await gate.entered()
-        try await library.endSession()
+        var late: FoundationAlphabetCapability?
+        let pending = Task {
+            late = await library.alphabetCapability()
+            await pendingDone.finish()
+        }
+        let entry = await XCTWaiter.fulfillment(of: [entered], timeout: 5)
+        guard entry == .completed, !Task.isCancelled else {
+            XCTFail("Timed out or cancelled waiting for logout capability transport")
+            await cleanupCapabilityWaiters(
+                library: library, gate: gate, tasks: [pending], completions: [pendingDone])
+            return
+        }
+        var logoutError: Error?
+        let logout = Task {
+            do { try await library.endSession() } catch { logoutError = error }
+            await logoutDone.finish()
+        }
+        guard
+            await requireCollectionTasksFinished(
+                [logoutDone], context: "capability logout completion", stopOnCancellation: true)
+        else {
+            await cleanupCapabilityWaiters(
+                library: library, gate: gate, tasks: [pending, logout],
+                completions: [pendingDone, logoutDone])
+            return
+        }
+        if let logoutError {
+            await cleanupCapabilityWaiters(
+                library: library, gate: gate, tasks: [pending, logout],
+                completions: [pendingDone, logoutDone])
+            throw logoutError
+        }
         await gate.release()
-        let late = await pending.value
+        guard
+            await requireCollectionTasksFinished(
+                [pendingDone], context: "late capability completion", stopOnCancellation: true)
+        else {
+            await cleanupCapabilityWaiters(
+                library: library, gate: gate, tasks: [pending, logout],
+                completions: [pendingDone, logoutDone])
+            return
+        }
         XCTAssertEqual(late, .unavailable)
         let retired = await library.alphabetCapability()
         XCTAssertEqual(retired, .unavailable)
@@ -1785,7 +2619,9 @@ final class FoundationLibraryTests: XCTestCase {
         for boundaryChange in ["scope", "query"] {
             let model = FoundationBrowseModel()
             model.configureCatalogPagination()
-            let gate = FoundationAlphabetTestGate()
+            let entered = XCTestExpectation(description: "stale alphabet page entered")
+            let gate = FoundationCollectionHandoverGate(entered: entered)
+            let staleDone = FoundationCollectionTaskCompletion()
             let old = FoundationItem(
                 id: "old", title: "", subtitle: "", kind: .album, duration: nil)
             let current = FoundationItem(
@@ -1795,8 +2631,20 @@ final class FoundationLibraryTests: XCTestCase {
                     await gate.suspend()
                     return FoundationPage(items: [old], nextStartIndex: 50)
                 }
+                await staleDone.finish()
             }
-            await gate.entered()
+            let entry = await XCTWaiter.fulfillment(of: [entered], timeout: 5)
+            guard entry == .completed, !Task.isCancelled else {
+                XCTFail(
+                    "Timed out or cancelled waiting for stale alphabet page (\(boundaryChange))")
+                stale.cancel()
+                model.clearRetainedData()
+                await gate.release()
+                await requireCollectionTasksFinished([staleDone], context: "stale alphabet cleanup")
+                let stillHeld = await gate.isHeld
+                XCTAssertFalse(stillHeld, "Stale alphabet cleanup must release held pages")
+                return
+            }
             // This is the LibraryIndex ownership revocation on either scope or query change.
             model.clearRetainedData()
             stale.cancel()
@@ -1804,7 +2652,19 @@ final class FoundationLibraryTests: XCTestCase {
                 FoundationPage(items: [current], nextStartIndex: nil)
             }
             await gate.release()
-            await stale.value
+            guard
+                await requireCollectionTasksFinished(
+                    [staleDone], context: "stale alphabet page completion", stopOnCancellation: true
+                )
+            else {
+                stale.cancel()
+                model.clearRetainedData()
+                await gate.release()
+                await requireCollectionTasksFinished([staleDone], context: "stale alphabet cleanup")
+                let stillHeld = await gate.isHeld
+                XCTAssertFalse(stillHeld, "Stale alphabet cleanup must release held pages")
+                return
+            }
             XCTAssertEqual(model.items.map(\.id), [boundaryChange])
             XCTAssertNil(model.nextStartIndex)
             XCTAssertNil(model.errorMessage)
@@ -1821,7 +2681,9 @@ final class FoundationLibraryTests: XCTestCase {
         let offscreen = FoundationItem(
             id: "offscreen", title: "", subtitle: "", kind: .album, duration: nil)
         await model.loadPending { _ in FoundationPage(items: [first], nextStartIndex: 50) }
-        let gate = FoundationAlphabetTestGate()
+        let entered = XCTestExpectation(description: "keyed alphabet page entered")
+        let gate = FoundationCollectionHandoverGate(entered: entered)
+        let viewDone = FoundationCollectionTaskCompletion()
         // Native demand requests pending.more; the view's keyed task owns this await.
         model.request(.more)
         let viewTask = Task {
@@ -1830,11 +2692,33 @@ final class FoundationLibraryTests: XCTestCase {
                 await gate.suspend()
                 return FoundationPage(items: [offscreen], nextStartIndex: 100)
             }
+            await viewDone.finish()
         }
-        await gate.entered()
+        let entry = await XCTWaiter.fulfillment(of: [entered], timeout: 5)
+        guard entry == .completed, !Task.isCancelled else {
+            XCTFail("Timed out or cancelled waiting for keyed alphabet page")
+            viewTask.cancel()
+            model.clearRetainedData()
+            await gate.release()
+            await requireCollectionTasksFinished([viewDone], context: "keyed alphabet cleanup")
+            let stillHeld = await gate.isHeld
+            XCTAssertFalse(stillHeld, "Keyed alphabet cleanup must release held pages")
+            return
+        }
         viewTask.cancel()  // SwiftUI cancels its keyed owner on disappear or identity change.
         await gate.release()
-        await viewTask.value
+        guard
+            await requireCollectionTasksFinished(
+                [viewDone], context: "keyed alphabet page completion", stopOnCancellation: true)
+        else {
+            viewTask.cancel()
+            model.clearRetainedData()
+            await gate.release()
+            await requireCollectionTasksFinished([viewDone], context: "keyed alphabet cleanup")
+            let stillHeld = await gate.isHeld
+            XCTAssertFalse(stillHeld, "Keyed alphabet cleanup must release held pages")
+            return
+        }
         XCTAssertEqual(model.items.map(\.id), ["first"])
         XCTAssertEqual(model.nextStartIndex, 50)
         XCTAssertNil(model.errorMessage)
@@ -1852,22 +2736,60 @@ final class FoundationLibraryTests: XCTestCase {
             FoundationAlphabetSelectionPolicy.onlineSelection("F", capability: .verified), "F")
     }
 
+    @MainActor
     func testAccountLifecycleHookRetiresActualAdapterWithoutLogoutTransport() async {
         let recorder = Recorder()
-        let gate = FoundationAlphabetTestGate()
+        let entered = XCTestExpectation(
+            description: "account lifecycle capability transport entered")
+        let gate = FoundationCollectionHandoverGate(entered: entered)
+        let pendingDone = FoundationCollectionTaskCompletion()
+        let retirementDone = FoundationCollectionTaskCompletion()
         let library = FoundationJellyfinLibrary(session: session) { request in
             await recorder.append(request)
             if await recorder.requests.count == 1 { await gate.suspend() }
             return (Self.alphabetProbeData(request)!, Self.response(request))
         }
         let scopeID = itemID
-        let pending = Task { await library.scoped(to: scopeID).alphabetCapability() }
-        await gate.entered()
+        var late: FoundationAlphabetCapability?
+        let pending = Task {
+            late = await library.scoped(to: scopeID).alphabetCapability()
+            await pendingDone.finish()
+        }
+        let entry = await XCTWaiter.fulfillment(of: [entered], timeout: 5)
+        guard entry == .completed, !Task.isCancelled else {
+            XCTFail("Timed out or cancelled waiting for account lifecycle capability transport")
+            await cleanupCapabilityWaiters(
+                library: library, gate: gate, tasks: [pending], completions: [pendingDone])
+            return
+        }
         // This exact hook is called by App.open and successful local signOut.
         let retirement = FoundationAlphabetAccountLifecycle.retire(library)
-        await retirement?.value
+        let retirementObserver = Task {
+            await retirement?.value
+            await retirementDone.finish()
+        }
+        var tasks = [pending, retirementObserver]
+        if let retirement { tasks.append(retirement) }
+        guard
+            await requireCollectionTasksFinished(
+                [retirementDone], context: "account lifecycle retirement", stopOnCancellation: true)
+        else {
+            await cleanupCapabilityWaiters(
+                library: library, gate: gate, tasks: tasks,
+                completions: [pendingDone, retirementDone])
+            return
+        }
         await gate.release()
-        let late = await pending.value
+        guard
+            await requireCollectionTasksFinished(
+                [pendingDone], context: "account lifecycle late capability",
+                stopOnCancellation: true)
+        else {
+            await cleanupCapabilityWaiters(
+                library: library, gate: gate, tasks: tasks,
+                completions: [pendingDone, retirementDone])
+            return
+        }
         let ended = await library.alphabetCapability()
         XCTAssertEqual(late, .unavailable)
         XCTAssertEqual(ended, .unavailable)
@@ -2058,6 +2980,90 @@ final class FoundationLibraryTests: XCTestCase {
         }
         XCTAssertTrue(pinsFailed.localCleared)
         XCTAssertFalse(pinsFailed.pinsCleared)
+    }
+
+    @MainActor
+    func testHeldServerRevocationDoesNotDelayLocalSignOutAndPinCleanup() async {
+        let entered = expectation(description: "held sign-out revocation entered")
+        let gate = FoundationAcknowledgedTestGate(entered: entered)
+        var order: [String] = []
+        var pinsPresent = true
+        let attempt = FoundationSignOutPolicy.begin {
+            order.append("revocation started")
+            return Task {
+                await gate.suspend()
+                return false
+            }
+        } clear: {
+            order.append("credentials cleared")
+        } clearPins: {
+            order.append("pins cleared")
+            pinsPresent = false
+            return true
+        }
+
+        // The synchronous local result must exist before the held remote task ends.
+        XCTAssertTrue(attempt.localCleared)
+        XCTAssertTrue(attempt.pinsCleared)
+        XCTAssertFalse(pinsPresent)
+        XCTAssertEqual(order, ["revocation started", "credentials cleared", "pins cleared"])
+        let entry = await XCTWaiter.fulfillment(of: [entered], timeout: 5)
+        guard entry == .completed else {
+            XCTFail("Timed out waiting for held sign-out revocation to enter")
+            attempt.revocation.cancel()
+            await gate.release()
+            _ = await attempt.revocation.value
+            return
+        }
+        let isHeld = await gate.isHeld
+        XCTAssertTrue(isHeld, "Server revocation must still be held after local cleanup")
+        await gate.release()
+        let confirmed = await attempt.revocation.value
+        XCTAssertFalse(confirmed, "A failed server revocation must remain unconfirmed")
+        let stillHeld = await gate.isHeld
+        XCTAssertFalse(stillHeld, "Revocation cleanup must drain the held operation")
+    }
+
+    @MainActor
+    func testHeldServerRevocationAndFailedCredentialClearPreservePins() async {
+        let entered = expectation(description: "held failed-clear revocation entered")
+        let gate = FoundationAcknowledgedTestGate(entered: entered)
+        var order: [String] = []
+        var pinsPresent = true
+        let attempt = FoundationSignOutPolicy.begin {
+            order.append("revocation started")
+            return Task {
+                await gate.suspend()
+                return false
+            }
+        } clear: {
+            order.append("credential clear failed")
+            throw FoundationLibraryError.credentials
+        } clearPins: {
+            order.append("pins cleared")
+            pinsPresent = false
+            return true
+        }
+
+        XCTAssertFalse(attempt.localCleared)
+        XCTAssertFalse(attempt.pinsCleared)
+        XCTAssertTrue(pinsPresent, "Failed local sign-out must preserve saved pins")
+        XCTAssertEqual(order, ["revocation started", "credential clear failed"])
+        let entry = await XCTWaiter.fulfillment(of: [entered], timeout: 5)
+        guard entry == .completed else {
+            XCTFail("Timed out waiting for failed-clear revocation to enter")
+            attempt.revocation.cancel()
+            await gate.release()
+            _ = await attempt.revocation.value
+            return
+        }
+        let isHeld = await gate.isHeld
+        XCTAssertTrue(isHeld, "Server revocation must remain held after failed local clear")
+        await gate.release()
+        let confirmed = await attempt.revocation.value
+        XCTAssertFalse(confirmed, "A failed server revocation must remain unconfirmed")
+        let stillHeld = await gate.isHeld
+        XCTAssertFalse(stillHeld, "Failed-clear cleanup must drain the held revocation")
     }
 
     func testAlbumAndTrackPagesUseOneRequestEachAndExplicitBounds() async throws {
@@ -2663,6 +3669,7 @@ final class FoundationLibraryTests: XCTestCase {
             }
         }
 
+        @MainActor
         func testMP3CopyPreflightBypassesAdmissionAndCleansUpFailureOrCancellation() async throws {
             for cancel in [false, true] {
                 let recorder = Recorder()
@@ -2708,46 +3715,72 @@ final class FoundationLibraryTests: XCTestCase {
                 }
                 let item = FoundationItem(
                     id: itemID, title: "Synthetic", subtitle: "", kind: .track, duration: nil)
+                let preparationDone = FoundationCollectionTaskCompletion()
+                let preparationFinished = XCTestExpectation(
+                    description: "MP3 preflight preparation returned")
+                var published = false
+                var failure: FoundationLibraryError?
                 let preparation = Task {
-                    try await FoundationJellyfinLibrary.$hlsCleanupLoad.withValue(cleanup) {
-                        try await FoundationJellyfinLibrary.$hlsOriginalPreferred.withValue(
-                            true
-                        ) {
-                            try await library.playbackResource(for: item)
-                        }
+                    do {
+                        let resource = try await FoundationJellyfinLibrary.$hlsCleanupLoad
+                            .withValue(cleanup) {
+                                try await FoundationJellyfinLibrary.$hlsOriginalPreferred.withValue(
+                                    true
+                                ) {
+                                    try await library.playbackResource(for: item)
+                                }
+                            }
+                        published = true
+                        await resource.release()
+                    } catch {
+                        failure = FoundationLibraryError.category(error)
                     }
+                    await preparationDone.finish()
+                    preparationFinished.fulfill()
                 }
                 // The held ordinary slot must not block the master preflight.
-                // Poll finitely so an admission regression fails rather than hanging the suite.
-                for _ in 0..<100 {
-                    if await recorder.requests.contains(where: {
-                        $0.httpMethod == "GET" && $0.url?.path.hasSuffix("/master.m3u8") == true
-                    }) {
-                        break
-                    }
-                    try await Task.sleep(for: .milliseconds(10))
+                // Preserve the prior one-second entry budget as an elapsed deadline.
+                guard await gate.entered(timeout: .seconds(1)) else {
+                    preparation.cancel()
+                    await admission.release(held)
+                    await gate.release()
+                    await requireCollectionTasksFinished(
+                        [preparationDone], context: "abandoned MP3 preflight cleanup")
+                    XCTFail("Timed out or cancelled waiting for MP3 preflight entry (1 second)")
+                    return
                 }
                 let entered = await recorder.requests.contains(where: {
                     $0.httpMethod == "GET" && $0.url?.path.hasSuffix("/master.m3u8") == true
                 })
                 XCTAssertTrue(entered)
-                if entered { await gate.entered() }
                 await admission.release(held)
                 if cancel { preparation.cancel() }
                 await gate.release()
-                do {
-                    let resource = try await preparation.value
-                    await resource.release()
-                    XCTFail("Failed or cancelled preparation must not publish a resource")
-                } catch {
-                    XCTAssertEqual(
-                        FoundationLibraryError.category(error), cancel ? .cancelled : .network)
+                guard
+                    await XCTWaiter.fulfillment(of: [preparationFinished], timeout: 5)
+                        == .completed,
+                    !Task.isCancelled
+                else {
+                    preparation.cancel()
+                    await gate.release()
+                    await requireCollectionTasksFinished(
+                        [preparationDone], context: "abandoned MP3 preparation cleanup")
+                    XCTFail(
+                        "Timed out or cancelled waiting for MP3 preflight preparation (5 seconds)")
+                    return
                 }
-                for _ in 0..<100 {
+                if published {
+                    XCTFail("Failed or cancelled preparation must not publish a resource")
+                } else {
+                    XCTAssertEqual(failure, cancel ? .cancelled : .network)
+                }
+                let cleanupClock = ContinuousClock()
+                let cleanupDeadline = cleanupClock.now.advanced(by: .seconds(1))
+                while cleanupClock.now < cleanupDeadline && !Task.isCancelled {
                     if await recorder.requests.contains(where: { $0.httpMethod == "DELETE" }) {
                         break
                     }
-                    try await Task.sleep(for: .milliseconds(10))
+                    do { try await Task.sleep(for: .milliseconds(10)) } catch { break }
                 }
                 let requests = await recorder.requests
                 XCTAssertEqual(requests.filter { $0.httpMethod == "DELETE" }.count, 1)
@@ -2805,16 +3838,111 @@ final class FoundationLibraryTests: XCTestCase {
             }
         }
 
+        @MainActor
         func testOriginalPreferredMetadataCancellationDoesNotNegotiate() async throws {
             for quality in FoundationStreamingQuality.allCases {
                 let recorder = Recorder()
-                let gate = FoundationAlphabetTestGate()
+                let cleanupRecorder = Recorder()
+                let entered = XCTestExpectation(description: "HLS metadata transport entered")
+                let gate = FoundationCollectionHandoverGate(entered: entered)
+                let preparationDone = FoundationCollectionTaskCompletion()
                 let itemID = self.itemID
+                let metadataLoad: FoundationJellyfinLibrary.Load = { request in
+                    await recorder.append(request)
+                    await gate.suspend()
+                    return (
+                        Data(
+                            """
+                            {"Id":"\(itemID)","Type":"Audio","MediaSources":[{"Id":"source-a",
+                            "Protocol":"File","MediaStreams":[{"Type":"Audio","Codec":"mp3",
+                            "Index":0,"BitRate":256000,"SampleRate":44100,"Channels":2}]}]}
+                            """.utf8), Self.response(request)
+                    )
+                }
                 let library = FoundationJellyfinLibrary(
-                    session: session, streamingQuality: { quality },
-                    load: { request in
-                        await recorder.append(request)
-                        await gate.suspend()
+                    session: session, streamingQuality: { quality }, load: metadataLoad)
+                let cleanup: FoundationJellyfinLibrary.Load = { request in
+                    await cleanupRecorder.append(request)
+                    return (Data(), Self.response(request))
+                }
+                let item = FoundationItem(
+                    id: itemID, title: "Synthetic", subtitle: "", kind: .track, duration: nil)
+                var published = false
+                var failure: FoundationLibraryError?
+                let preparation = Task {
+                    do {
+                        let resource = try await FoundationJellyfinLibrary.$hlsCleanupLoad
+                            .withValue(cleanup) {
+                                try await FoundationJellyfinLibrary.$hlsOriginalPreferred
+                                    .withValue(true) {
+                                        #if FOUNDATION_ISOLATED_TEST_HOST
+                                            return
+                                                try await FoundationJellyfinLibrary
+                                                .$isolatedHLSMetadataLoad.withValue(metadataLoad) {
+                                                    try await library.playbackResource(for: item)
+                                                }
+                                        #else
+                                            return try await library.playbackResource(for: item)
+                                        #endif
+                                    }
+                            }
+                        published = true
+                        await resource.release()
+                    } catch {
+                        failure = FoundationLibraryError.category(error)
+                    }
+                    await preparationDone.finish()
+                }
+                let entry = await XCTWaiter.fulfillment(of: [entered], timeout: 5)
+                guard entry == .completed, !Task.isCancelled else {
+                    XCTFail("Timed out or cancelled waiting for HLS metadata transport")
+                    preparation.cancel()
+                    await gate.release()
+                    await requireCollectionTasksFinished(
+                        [preparationDone], context: "HLS metadata cleanup")
+                    let stillHeld = await gate.isHeld
+                    XCTAssertFalse(stillHeld, "HLS metadata cleanup must release held transport")
+                    return
+                }
+                preparation.cancel()
+                await gate.release()
+                guard
+                    await requireCollectionTasksFinished(
+                        [preparationDone], context: "cancelled HLS metadata preparation",
+                        stopOnCancellation: true)
+                else {
+                    preparation.cancel()
+                    await gate.release()
+                    await requireCollectionTasksFinished(
+                        [preparationDone], context: "HLS metadata cleanup")
+                    let stillHeld = await gate.isHeld
+                    XCTAssertFalse(stillHeld, "HLS metadata cleanup must release held transport")
+                    return
+                }
+                if published {
+                    XCTFail("Cancelled metadata cannot negotiate or publish")
+                } else {
+                    XCTAssertEqual(failure, .cancelled)
+                }
+                let requests = await recorder.requests
+                XCTAssertEqual(requests.count, 1)
+                XCTAssertEqual(requests.first?.httpMethod, "GET")
+                let cleanupRequests = await cleanupRecorder.requests
+                XCTAssertTrue(cleanupRequests.isEmpty, "Cancelled metadata must not start cleanup")
+            }
+        }
+
+        #if FOUNDATION_ISOLATED_TEST_HOST
+            @MainActor
+            func testIsolationHLSMetadataRemainsFailClosedBeforeNegotiation() async {
+                for mode in ["default", "metadataDisabled", "explicitMetadata"] {
+                    let metadataRecorder = Recorder()
+                    let fallbackRecorder = Recorder()
+                    let cleanupRecorder = Recorder()
+                    let done = FoundationCollectionTaskCompletion()
+                    let itemID = self.itemID
+                    let metadataLoad: FoundationJellyfinLibrary.Load = { request in
+                        await metadataRecorder.append(request)
                         return (
                             Data(
                                 """
@@ -2823,27 +3951,63 @@ final class FoundationLibraryTests: XCTestCase {
                                 "Index":0,"BitRate":256000,"SampleRate":44100,"Channels":2}]}]}
                                 """.utf8), Self.response(request)
                         )
-                    })
-                let item = FoundationItem(
-                    id: itemID, title: "Synthetic", subtitle: "", kind: .track, duration: nil)
-                let preparation = Task {
-                    try await FoundationJellyfinLibrary.$hlsOriginalPreferred.withValue(true) {
-                        try await library.playbackResource(for: item)
                     }
+                    let library = FoundationJellyfinLibrary(session: session) { request in
+                        await fallbackRecorder.append(request)
+                        throw FoundationLibraryError.unavailable
+                    }
+                    let cleanup: FoundationJellyfinLibrary.Load = { request in
+                        await cleanupRecorder.append(request)
+                        return (Data(), Self.response(request))
+                    }
+                    let item = FoundationItem(
+                        id: itemID, title: "Synthetic", subtitle: "", kind: .track, duration: nil)
+                    var published = false
+                    var failure: FoundationLibraryError?
+                    let operation = Task {
+                        do {
+                            let resource = try await FoundationJellyfinLibrary.$hlsCleanupLoad
+                                .withValue(cleanup) {
+                                    try await FoundationJellyfinLibrary.$hlsOriginalPreferred
+                                        .withValue(mode != "metadataDisabled") {
+                                            try await FoundationJellyfinLibrary
+                                                .$isolatedHLSMetadataLoad.withValue(
+                                                    mode == "default" ? nil : metadataLoad
+                                                ) {
+                                                    try await library.playbackResource(for: item)
+                                                }
+                                        }
+                                }
+                            published = true
+                            await resource.release()
+                        } catch {
+                            failure = FoundationLibraryError.category(error)
+                        }
+                        await done.finish()
+                    }
+                    guard
+                        await requireCollectionTasksFinished(
+                            [done], context: "isolated HLS metadata fence (\(mode))",
+                            stopOnCancellation: true)
+                    else {
+                        operation.cancel()
+                        await requireCollectionTasksFinished(
+                            [done], context: "isolated HLS metadata fence cleanup (\(mode))")
+                        return
+                    }
+                    XCTAssertFalse(published, mode)
+                    XCTAssertEqual(failure, .unavailable, mode)
+                    let metadataRequests = await metadataRecorder.requests
+                    XCTAssertEqual(metadataRequests.count, mode == "explicitMetadata" ? 1 : 0, mode)
+                    XCTAssertTrue(metadataRequests.allSatisfy { $0.httpMethod == "GET" }, mode)
+                    let fallbackRequests = await fallbackRecorder.requests
+                    XCTAssertTrue(
+                        fallbackRequests.isEmpty, "Must not use the instance transport: \(mode)")
+                    let cleanupRequests = await cleanupRecorder.requests
+                    XCTAssertTrue(cleanupRequests.isEmpty, "Must not create an HLS lease: \(mode)")
                 }
-                await gate.entered()
-                preparation.cancel()
-                await gate.release()
-                do {
-                    let resource = try await preparation.value
-                    await resource.release()
-                    XCTFail("Cancelled metadata cannot negotiate or publish")
-                } catch { XCTAssertEqual(FoundationLibraryError.category(error), .cancelled) }
-                let requests = await recorder.requests
-                XCTAssertEqual(requests.count, 1)
-                XCTAssertEqual(requests.first?.httpMethod, "GET")
             }
-        }
+        #endif
 
         func testOriginalPreferredRejectsNegotiatedSourceDriftAndCleansSession() async throws {
             for quality in FoundationStreamingQuality.allCases {
@@ -3770,22 +4934,46 @@ final class FoundationBrowsePaginationTests: XCTestCase {
         let model = FoundationBrowseModel()
         model.configureCatalogPagination()
         await model.loadPending { _ in .init(items: [self.item("a")], nextStartIndex: 1) }
-        var continuation: CheckedContinuation<FoundationPage, Never>?
+        let entered = expectation(description: "pagination loader entered its held response")
+        let gate = PaginationResponseGate(entered: entered)
         var calls = 0
         let task = Task {
             await model.loadNextPage { _ in
                 calls += 1
-                return await withCheckedContinuation { continuation = $0 }
+                return await gate.hold()
             }
         }
-        while continuation == nil { await Task.yield() }
+        let result = await XCTWaiter.fulfillment(of: [entered], timeout: 5)
+        guard result == .completed else {
+            XCTFail("Timed out waiting for pagination loader to enter its held response")
+            task.cancel()
+            gate.release(.init(items: [], nextStartIndex: nil))
+            guard
+                await requireLibraryTask(
+                    task, context: "task completion",
+                    cleanup: {
+                        model.clearRetainedData()
+                        gate.release(.init(items: [], nextStartIndex: nil))
+                    })
+            else { return }
+            await task.value
+            return
+        }
         await model.loadNextPage { _ in
             calls += 1
             return .init(items: [], nextStartIndex: nil)
         }
         XCTAssertEqual(calls, 1)
         task.cancel()
-        continuation?.resume(returning: .init(items: [item("stale")], nextStartIndex: nil))
+        gate.release(.init(items: [item("stale")], nextStartIndex: nil))
+        guard
+            await requireLibraryTask(
+                task, context: "task completion",
+                cleanup: {
+                    model.clearRetainedData()
+                    gate.release(.init(items: [], nextStartIndex: nil))
+                })
+        else { return }
         await task.value
         XCTAssertEqual(model.items.map(\.id), ["a"])
         XCTAssertEqual(model.nextStartIndex, 1)
@@ -3793,29 +4981,144 @@ final class FoundationBrowsePaginationTests: XCTestCase {
         await model.loadNextPage { _ in .init(items: [self.item("b")], nextStartIndex: nil) }
         XCTAssertEqual(model.items.map(\.id), ["a", "b"])
     }
+
+    func testPaginationGateMissingAcknowledgementTimesOutAndDrains() async {
+        let entered = expectation(description: "deliberately missing pagination acknowledgement")
+        let gate = PaginationResponseGate(entered: entered)
+        let task = Task { await gate.hold(announce: false) }
+        let result = await XCTWaiter.fulfillment(of: [entered], timeout: 0.1)
+        XCTAssertEqual(result, .timedOut, "Missing pagination acknowledgement must time out")
+        XCTAssertTrue(gate.isHeld, "Timeout must exercise an actually held response")
+        task.cancel()
+        gate.release(.init(items: [], nextStartIndex: nil))
+        let response = await task.value
+        XCTAssertTrue(response.items.isEmpty, "Timeout cleanup must drain the held response")
+    }
+}
+
+/// A single held response with an event acknowledgement and idempotent cleanup.
+@MainActor
+private final class PaginationResponseGate {
+    private let entered: XCTestExpectation
+    private var continuations: [CheckedContinuation<FoundationPage, Never>] = []
+    private var announced = false
+    private var released: FoundationPage?
+    var isHeld: Bool { !continuations.isEmpty }
+
+    init(entered: XCTestExpectation) { self.entered = entered }
+
+    func hold(announce: Bool = true) async -> FoundationPage {
+        if let released { return released }
+        return await withCheckedContinuation { continuation in
+            continuations.append(continuation)
+            if announce, !announced {
+                announced = true
+                entered.fulfill()
+            }
+        }
+    }
+
+    func release(_ response: FoundationPage) {
+        guard released == nil else { return }
+        released = response
+        let held = continuations
+        continuations.removeAll()
+        for continuation in held { continuation.resume(returning: response) }
+    }
+}
+
+/// Single held test operation with an event and release-before-entry cleanup.
+private actor FoundationAcknowledgedTestGate {
+    private let entered: XCTestExpectation
+    private var blocked: [CheckedContinuation<Void, Never>] = []
+    private var released = false
+    private var announced = false
+    var isHeld: Bool { !blocked.isEmpty }
+
+    init(entered: XCTestExpectation) { self.entered = entered }
+
+    func suspend(announce: Bool = true) async {
+        guard !released else { return }
+        await withCheckedContinuation { continuation in
+            blocked.append(continuation)
+            if announce, !announced {
+                announced = true
+                entered.fulfill()
+            }
+        }
+    }
+
+    func release() {
+        guard !released else { return }
+        released = true
+        let pending = blocked
+        blocked.removeAll()
+        for continuation in pending { continuation.resume() }
+    }
+}
+
+/// Releases every entrant, including unexpected duplicate transports and late arrivals.
+private actor FoundationCollectionHandoverGate {
+    private let entered: XCTestExpectation
+    private var blocked: [CheckedContinuation<Void, Never>] = []
+    private var announced = false
+    private var released = false
+    var isHeld: Bool { !blocked.isEmpty }
+
+    init(entered: XCTestExpectation) { self.entered = entered }
+
+    func suspend() async {
+        guard !released else { return }
+        await withCheckedContinuation { continuation in
+            blocked.append(continuation)
+            if !announced {
+                announced = true
+                entered.fulfill()
+            }
+        }
+    }
+
+    func release() {
+        released = true
+        let continuations = blocked
+        blocked.removeAll()
+        for continuation in continuations { continuation.resume() }
+    }
+}
+
+private actor FoundationCollectionTaskCompletion {
+    private(set) var isFinished = false
+    func finish() { isFinished = true }
 }
 
 /// Controlled synthetic transport suspension; no clock-dependent race or real network.
 private actor FoundationAlphabetTestGate {
-    private var blocked: CheckedContinuation<Void, Never>?
-    private var observer: CheckedContinuation<Void, Never>?
+    private var blocked: [CheckedContinuation<Void, Never>] = []
+    private var started = false
+    private var released = false
 
     func suspend() async {
+        guard !released else { return }
         await withCheckedContinuation { continuation in
-            blocked = continuation
-            observer?.resume()
-            observer = nil
+            blocked.append(continuation)
+            started = true
         }
     }
 
-    func entered() async {
-        if blocked != nil { return }
-        await withCheckedContinuation { observer = $0 }
+    func entered(timeout: Duration) async -> Bool {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        while !started && !Task.isCancelled && clock.now < deadline {
+            do { try await Task.sleep(for: .milliseconds(10)) } catch { return false }
+        }
+        return started && !Task.isCancelled
     }
 
     func release() {
-        blocked?.resume()
-        blocked = nil
+        released = true
+        let held = blocked
+        blocked.removeAll()
+        for continuation in held { continuation.resume() }
     }
 }
 

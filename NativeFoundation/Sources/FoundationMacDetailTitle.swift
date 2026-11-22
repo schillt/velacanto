@@ -66,7 +66,7 @@ import SwiftUI
             if let item, item.kind == .artist || item.kind == .album {
                 tracked.navigationTitle("")
                     .toolbar {
-                        ToolbarItem(placement: .principal) {
+                        ToolbarItem(placement: .navigation) {
                             FoundationMacRevealedTitle(item: item, reveal: reveal)
                         }.sharedBackgroundVisibility(.hidden)
                     }
@@ -100,13 +100,13 @@ import SwiftUI
         }
 
         private var title: some View {
-            VStack(spacing: 1) {
+            VStack(alignment: .leading, spacing: 1) {
                 Text(item.title).font(.headline).lineLimit(1)
                 if item.kind == .album, !item.subtitle.isEmpty {
                     Text(item.subtitle).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 }
             }
-            .multilineTextAlignment(.center)
+            .multilineTextAlignment(.leading)
             .padding(.horizontal, 16).padding(.vertical, 6)
         }
     }

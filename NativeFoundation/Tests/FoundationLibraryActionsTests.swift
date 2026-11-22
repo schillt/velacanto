@@ -52,10 +52,11 @@ final class FoundationLibraryActionsTests: XCTestCase {
                     return shouldAllow
                 })
             let preparation = try XCTUnwrap(actions.queueTask)
-            try await gate.waitUntilStarted()
+            try await requireCollectionStart(gate, actions: actions, player: player)
             XCTAssertEqual(checks, 0)
             await gate.release()
-            await preparation.value
+            try await requireCollectionCompletion(
+                preparation, gate: gate, actions: actions, player: player)
             XCTAssertEqual(checks, 1)
             XCTAssertEqual(player.selectedEntryID == priorID, !shouldAllow)
             XCTAssertEqual(
@@ -83,7 +84,13 @@ final class FoundationLibraryActionsTests: XCTestCase {
             let prior = FoundationItem(
                 id: "prior", title: "Prior", subtitle: "", kind: .track, duration: nil)
             player.setQueue([prior], selectedIndex: 0)
-            try await priorRead.waitUntilStarted()
+            do {
+                try await priorRead.waitUntilStarted()
+            } catch {
+                player.stop()
+                await priorRead.release()
+                throw error
+            }
             let priorID = player.selectedEntryID
             let actions = makeCollectionActions()
             let owner = UUID()
@@ -100,12 +107,13 @@ final class FoundationLibraryActionsTests: XCTestCase {
                     return true
                 })
             let preparation = try XCTUnwrap(actions.queueTask)
-            try await gate.waitUntilStarted()
+            try await requireCollectionStart(gate, actions: actions, player: player)
             player.pause()
             XCTAssertEqual(cancellations, 1)
             XCTAssertTrue(preparation.isCancelled)
             await gate.release()
-            await preparation.value
+            try await requireCollectionCompletion(
+                preparation, gate: gate, actions: actions, player: player)
             XCTAssertEqual(player.selectedEntryID, priorID)
             XCTAssertEqual(player.queue.map(\.item.id), ["prior"])
             XCTAssertFalse(player.wantsPlayback)
@@ -150,10 +158,11 @@ final class FoundationLibraryActionsTests: XCTestCase {
             collectionItem, shuffled: false, library: library, player: player,
             shouldCommit: { accountIsCurrent })
         let preparation = try XCTUnwrap(actions.queueTask)
-        try await gate.waitUntilStarted()
+        try await requireCollectionStart(gate, actions: actions, player: player)
         accountIsCurrent = false
         await gate.release()
-        await preparation.value
+        try await requireCollectionCompletion(
+            preparation, gate: gate, actions: actions, player: player)
         XCTAssertTrue(player.queue.isEmpty)
         XCTAssertNil(player.selectedEntryID)
         player.stop()
@@ -212,13 +221,14 @@ final class FoundationLibraryActionsTests: XCTestCase {
                     owner: destinationOwner)
             }
             let task = try XCTUnwrap(actions.queueTask)
-            try await gate.waitUntilStarted()
+            try await requireCollectionStart(gate, actions: actions, player: player)
             actions.cancelQueueAdditionOwned(by: UUID())
             actions.cancelQueueAdditionOwned(by: nil)
             XCTAssertFalse(task.isCancelled)
             XCTAssertNil(actions.queueNotice)
             await gate.release()
-            await task.value
+            try await requireCollectionCompletion(
+                task, gate: gate, actions: actions, player: player)
             XCTAssertEqual(player.queue.count, 1)
             player.stop()
         }
@@ -236,11 +246,12 @@ final class FoundationLibraryActionsTests: XCTestCase {
         let owner = UUID()
         actions.play(collectionItem, shuffled: true, library: library, player: player, owner: owner)
         let task = try XCTUnwrap(actions.queueTask)
-        try await gate.waitUntilStarted()
+        try await requireCollectionStart(gate, actions: actions, player: player)
         actions.cancelQueueAdditionOwned(by: owner)
         XCTAssertTrue(task.isCancelled)
         await gate.release()
-        await task.value
+        try await requireCollectionCompletion(
+            task, gate: gate, actions: actions, player: player)
         XCTAssertNil(actions.queueNotice)
         XCTAssertTrue(player.queue.isEmpty)
     }
@@ -282,7 +293,7 @@ final class FoundationLibraryActionsTests: XCTestCase {
                 }
                 XCTAssertEqual(actions.queueOperation, startsPlayback ? .playback : .enqueue)
                 let expansion = try XCTUnwrap(actions.queueTask)
-                try await gate.waitUntilStarted()
+                try await requireCollectionStart(gate, actions: actions, player: player)
                 let selected = player.selectedEntryID
                 if removesEntry {
                     player.removeUpcoming(player.upcoming[0].id)
@@ -294,7 +305,8 @@ final class FoundationLibraryActionsTests: XCTestCase {
                 XCTAssertTrue(actions.isQueueLoading)
                 XCTAssertEqual(actions.queueOperation, startsPlayback ? .playback : .enqueue)
                 await gate.release()
-                await expansion.value
+                try await requireCollectionCompletion(
+                    expansion, gate: gate, actions: actions, player: player)
                 XCTAssertEqual(player.queue, edited)
                 XCTAssertEqual(player.selectedEntryID, selected)
                 XCTAssertFalse(actions.isQueueLoading)
@@ -454,13 +466,14 @@ final class FoundationLibraryActionsTests: XCTestCase {
         let actions = makeCollectionActions()
         actions.enqueue(collectionItem, position: .last, library: library, player: player)
         let task = try XCTUnwrap(actions.queueTask)
-        try await gate.waitUntilStarted()
+        try await requireCollectionStart(gate, actions: actions, player: player)
         actions.cancelQueueAddition()
         XCTAssertTrue(task.isCancelled)
         XCTAssertTrue(actions.isQueueLoading)
         XCTAssertEqual(actions.queueOperation, .enqueue)
         await gate.release()
-        await task.value
+        try await requireCollectionCompletion(
+            task, gate: gate, actions: actions, player: player)
         XCTAssertFalse(actions.isQueueLoading)
         XCTAssertNil(actions.queueOperation)
         XCTAssertTrue(player.queue.isEmpty)
@@ -490,7 +503,7 @@ final class FoundationLibraryActionsTests: XCTestCase {
         let actions = makeCollectionActions()
         actions.play(collectionItem, shuffled: true, library: library, player: player)
         let task = try XCTUnwrap(actions.queueTask)
-        try await gate.waitUntilStarted()
+        try await requireCollectionStart(gate, actions: actions, player: player)
         actions.invalidate()
         XCTAssertTrue(task.isCancelled)
         XCTAssertTrue(actions.isQueueLoading)
@@ -499,7 +512,8 @@ final class FoundationLibraryActionsTests: XCTestCase {
         XCTAssertEqual(actions.queueOperation, .playback)
         XCTAssertEqual(player.queue, previous)
         await gate.release()
-        await task.value
+        try await requireCollectionCompletion(
+            task, gate: gate, actions: actions, player: player)
         XCTAssertFalse(actions.isQueueLoading)
         XCTAssertNil(actions.queueOperation)
         XCTAssertEqual(player.queue, previous)
@@ -562,20 +576,66 @@ final class FoundationLibraryActionsTests: XCTestCase {
         func count() -> Int { calls }
     }
 
+    private enum CollectionCompletionFailure: Error { case heldWorkDidNotFinish }
+
+    private func requireCollectionStart(
+        _ gate: CollectionGate, actions: FoundationLibraryActions, player: FoundationPlayer
+    ) async throws {
+        do {
+            try await gate.waitUntilStarted()
+        } catch {
+            actions.invalidate()
+            player.stop()
+            await gate.release()
+            throw error
+        }
+    }
+
+    private func requireCollectionCompletion(
+        _ task: Task<Void, Never>, gate: CollectionGate,
+        actions: FoundationLibraryActions, player: FoundationPlayer
+    ) async throws {
+        let finished = XCTestExpectation(description: "held collection work returned")
+        let observer = Task {
+            await task.value
+            finished.fulfill()
+        }
+        guard await XCTWaiter.fulfillment(of: [finished], timeout: 5) == .completed else {
+            task.cancel()
+            actions.invalidate()
+            player.stop()
+            await gate.release()
+            observer.cancel()
+            throw CollectionCompletionFailure.heldWorkDidNotFinish
+        }
+    }
+
     private actor CollectionGate {
-        private var held: CheckedContinuation<Void, Never>?
-        func hold() async { await withCheckedContinuation { held = $0 } }
+        private enum WaitFailure: Error { case collectionEntryTimedOut }
+        private var held: [CheckedContinuation<Void, Never>] = []
+        private var released = false
+        func hold() async {
+            guard !released else { return }
+            await withCheckedContinuation { held.append($0) }
+        }
         func waitUntilStarted() async throws {
             let clock = ContinuousClock()
             let deadline = clock.now.advanced(by: .seconds(5))
-            while held == nil {
-                guard clock.now < deadline else { throw Failure.synthetic }
-                try await Task.sleep(for: .milliseconds(10))
+            do {
+                while held.isEmpty {
+                    guard clock.now < deadline else { throw WaitFailure.collectionEntryTimedOut }
+                    try await Task.sleep(for: .milliseconds(10))
+                }
+            } catch {
+                release()
+                throw error
             }
         }
         func release() {
-            held?.resume()
-            held = nil
+            released = true
+            let pending = held
+            held.removeAll()
+            for continuation in pending { continuation.resume() }
         }
     }
 
@@ -818,20 +878,33 @@ final class FoundationLibraryActionsTests: XCTestCase {
     }
 
     func testReadsStartedDuringMutationCannotUndoSuccess() async {
-        let gate = MutationGate()
+        let gate = HeldFavoriteFixture()
         let actions = FoundationLibraryActions(
             sourceScope: "source", read: { _ in nil }, write: { _, _ in },
-            mutateFavorite: { _, _ in await gate.hold() })
+            mutateFavorite: { _, _ in
+                await gate.hold()
+                await gate.providerReturned()
+            })
         let item = album
-        let mutation = Task { await actions.setFavorite(for: item, isFavorite: true) }
-        await gate.waitUntilStarted()
+        let mutation = Task {
+            await actions.setFavorite(for: item, isFavorite: true)
+            await gate.publicReturned()
+        }
+        let context = "read during favorite mutation"
+        guard await gate.waitForEntry(context: context) else {
+            await gate.cleanUp(task: mutation, actions: actions, context: context)
+            return
+        }
         let duringMutation = actions.beginFavoriteRead()
         var external = album
         external.isFavorite = false
         actions.observeFavorites(in: [external], read: duringMutation)
         XCTAssertNil(actions.favoriteState(for: album, initial: nil))
         await gate.release()
-        await mutation.value
+        guard await gate.waitForReturn(context: context) else {
+            await gate.cleanUp(task: mutation, actions: actions, context: context)
+            return
+        }
         actions.observeFavorites(in: [external], read: duringMutation)
         XCTAssertEqual(actions.favoriteState(for: album, initial: nil), true)
         actions.observeFavorites(in: [external], read: actions.beginFavoriteRead())
@@ -900,7 +973,7 @@ final class FoundationLibraryActionsTests: XCTestCase {
 
     func testSupersededAndCancelledBrowsePagesCannotPublishFavoriteMetadata() async {
         for cancels in [false, true] {
-            let gate = MutationGate()
+            let gate = HeldFavoriteFixture()
             let actions = FoundationLibraryActions(
                 sourceScope: "source", read: { _ in nil }, write: { _, _ in },
                 mutateFavorite: { _, _ in })
@@ -910,13 +983,22 @@ final class FoundationLibraryActionsTests: XCTestCase {
             let task = Task {
                 await model.load(.initial) { _ in
                     await gate.hold()
+                    await gate.providerReturned()
                     return FoundationPage(items: [item], nextStartIndex: nil)
                 }
+                await gate.publicReturned()
             }
-            await gate.waitUntilStarted()
+            let context = "browse favorite page cancel=\(cancels)"
+            guard await gate.waitForEntry(context: context) else {
+                await gate.cleanUp(task: task, actions: actions, context: context)
+                return
+            }
             if cancels { task.cancel() } else { model.request(.refresh) }
             await gate.release()
-            await task.value
+            guard await gate.waitForReturn(context: context) else {
+                await gate.cleanUp(task: task, actions: actions, context: context)
+                return
+            }
             XCTAssertTrue(model.items.isEmpty)
             XCTAssertNil(actions.favoriteState(for: album, initial: nil))
         }
@@ -1023,7 +1105,7 @@ final class FoundationLibraryActionsTests: XCTestCase {
             id: "artist", title: "Artist", subtitle: "", kind: .artist, duration: nil)
         for item in [album, artist] {
             for mutates in [false, true] {
-                let gate = MutationGate()
+                let gate = HeldFavoriteFixture()
                 let actions = FoundationLibraryActions(
                     sourceScope: "source", read: { _ in nil }, write: { _, _ in },
                     mutateFavorite: { _, _ in })
@@ -1033,10 +1115,16 @@ final class FoundationLibraryActionsTests: XCTestCase {
                 let task = Task {
                     await actions.resolveFavorite(for: item) {
                         await gate.hold()
+                        await gate.providerReturned()
                         return response
                     }
+                    await gate.publicReturned()
                 }
-                await gate.waitUntilStarted()
+                let context = "late collection detail \(item.kind) mutation=\(mutates)"
+                guard await gate.waitForEntry(context: context) else {
+                    await gate.cleanUp(task: task, actions: actions, context: context)
+                    return
+                }
                 if mutates {
                     await actions.setFavorite(for: item, isFavorite: true)
                 } else {
@@ -1044,7 +1132,10 @@ final class FoundationLibraryActionsTests: XCTestCase {
                         in: [item], knownFavorites: true, read: actions.beginFavoriteRead())
                 }
                 await gate.release()
-                await task.value
+                guard await gate.waitForReturn(context: context) else {
+                    await gate.cleanUp(task: task, actions: actions, context: context)
+                    return
+                }
                 XCTAssertEqual(actions.favoriteState(for: item, initial: nil), true)
             }
         }
@@ -1055,7 +1146,7 @@ final class FoundationLibraryActionsTests: XCTestCase {
             id: "artist", title: "Artist", subtitle: "", kind: .artist, duration: nil)
         for item in [album, artist] {
             for invalidates in [false, true] {
-                let gate = MutationGate()
+                let gate = HeldFavoriteFixture()
                 let actions = FoundationLibraryActions(
                     sourceScope: "source", read: { _ in nil }, write: { _, _ in },
                     mutateFavorite: { _, _ in })
@@ -1065,13 +1156,22 @@ final class FoundationLibraryActionsTests: XCTestCase {
                 let task = Task {
                     await actions.resolveFavorite(for: item) {
                         await gate.hold()
+                        await gate.providerReturned()
                         return response
                     }
+                    await gate.publicReturned()
                 }
-                await gate.waitUntilStarted()
+                let context = "cancelled collection detail \(item.kind) invalidate=\(invalidates)"
+                guard await gate.waitForEntry(context: context) else {
+                    await gate.cleanUp(task: task, actions: actions, context: context)
+                    return
+                }
                 if invalidates { actions.invalidate() } else { task.cancel() }
                 await gate.release()
-                await task.value
+                guard await gate.waitForReturn(context: context) else {
+                    await gate.cleanUp(task: task, actions: actions, context: context)
+                    return
+                }
                 actions.observeFavorites(in: [], read: actions.beginFavoriteRead())
                 XCTAssertNil(actions.favoriteState(for: item, initial: nil))
             }
@@ -1106,36 +1206,78 @@ final class FoundationLibraryActionsTests: XCTestCase {
     }
 
     func testPendingFavoriteDeduplicatesAndPublishesOnlyAfterSuccess() async {
-        let gate = MutationGate()
+        let gate = HeldFavoriteFixture()
+        let mutations = MutationGate()
         let actions = FoundationLibraryActions(
             sourceScope: "source", read: { _ in nil }, write: { _, _ in },
-            mutateFavorite: { _, _ in await gate.hold() })
+            mutateFavorite: { _, _ in
+                await mutations.countCall()
+                await gate.hold()
+                await gate.providerReturned()
+            })
         let item = album
-        let task = Task { await actions.setFavorite(for: item, isFavorite: true) }
-        await gate.waitUntilStarted()
+        let task = Task {
+            await actions.setFavorite(for: item, isFavorite: true)
+            await gate.publicReturned()
+        }
+        let context = "pending favorite mutation"
+        guard await gate.waitForEntry(context: context) else {
+            await gate.cleanUp(task: task, actions: actions, context: context)
+            return
+        }
         XCTAssertTrue(actions.isPending(item))
         XCTAssertEqual(actions.favoriteState(for: item, initial: false), false)
-        await actions.setFavorite(for: item, isFavorite: false)
-        let calls = await gate.calls
+        // This call must return without admitting another held provider. A
+        // separate tail acknowledgement keeps a deduplication regression bounded.
+        let duplicate = HeldFavoriteFixture()
+        let duplicateTask = Task {
+            await actions.setFavorite(for: item, isFavorite: false)
+            await duplicate.publicReturned()
+        }
+        let duplicateContext = "deduplicated favorite request"
+        guard await duplicate.waitForReturn(context: duplicateContext) else {
+            duplicateTask.cancel()
+            await gate.cleanUp(task: task, actions: actions, context: context)
+            await duplicate.cleanUp(
+                task: duplicateTask, actions: actions, context: duplicateContext)
+            return
+        }
+        let calls = await mutations.calls
         XCTAssertEqual(calls, 1)
         await gate.release()
-        await task.value
+        guard await gate.waitForReturn(context: context) else {
+            await gate.cleanUp(task: task, actions: actions, context: context)
+            return
+        }
         XCTAssertEqual(actions.favoriteState(for: item, initial: false), true)
         XCTAssertFalse(actions.isPending(item))
         XCTAssertEqual(actions.favoriteRevision, 1)
     }
 
     func testSourceInvalidationDiscardsLateFavoriteCompletion() async {
-        let gate = MutationGate()
+        let gate = HeldFavoriteFixture()
         let actions = FoundationLibraryActions(
             sourceScope: "source", read: { _ in nil }, write: { _, _ in },
-            mutateFavorite: { _, _ in await gate.hold() })
+            mutateFavorite: { _, _ in
+                await gate.hold()
+                await gate.providerReturned()
+            })
         let item = album
-        let task = Task { await actions.setFavorite(for: item, isFavorite: true) }
-        await gate.waitUntilStarted()
+        let task = Task {
+            await actions.setFavorite(for: item, isFavorite: true)
+            await gate.publicReturned()
+        }
+        let context = "source invalidation during favorite mutation"
+        guard await gate.waitForEntry(context: context) else {
+            await gate.cleanUp(task: task, actions: actions, context: context)
+            return
+        }
         actions.invalidate()
         await gate.release()
-        await task.value
+        guard await gate.waitForReturn(context: context) else {
+            await gate.cleanUp(task: task, actions: actions, context: context)
+            return
+        }
         XCTAssertEqual(actions.favoriteState(for: item, initial: false), false)
         XCTAssertEqual(actions.favoriteRevision, 0)
         XCTAssertNil(actions.errorMessage(for: item))
@@ -1143,17 +1285,31 @@ final class FoundationLibraryActionsTests: XCTestCase {
     }
 
     func testSourceInvalidationCancelsUnderlyingFavoriteOperation() async {
-        let gate = CancellationGate()
+        let gate = HeldFavoriteFixture()
+        let cancellation = CancellationGate(held: gate)
         let actions = FoundationLibraryActions(
             sourceScope: "source", read: { _ in nil }, write: { _, _ in },
-            mutateFavorite: { _, _ in await gate.holdUntilCancelled() })
+            mutateFavorite: { _, _ in await cancellation.holdUntilCancelled() })
         let item = album
-        let task = Task { await actions.setFavorite(for: item, isFavorite: true) }
-        await gate.waitUntilStarted()
+        let task = Task {
+            await actions.setFavorite(for: item, isFavorite: true)
+            await gate.publicReturned()
+        }
+        let context = "source invalidation cancels favorite provider"
+        guard await gate.waitForEntry(context: context) else {
+            await gate.cleanUp(task: task, actions: actions, context: context)
+            return
+        }
         XCTAssertTrue(actions.isPending(item))
         actions.invalidate()
-        await gate.waitUntilCancelled()
-        await task.value
+        guard await cancellation.waitForCancellation(context: context) else {
+            await gate.cleanUp(task: task, actions: actions, context: context)
+            return
+        }
+        guard await gate.waitForReturn(context: context) else {
+            await gate.cleanUp(task: task, actions: actions, context: context)
+            return
+        }
         XCTAssertFalse(actions.isPending(item))
         XCTAssertEqual(actions.favoriteState(for: item, initial: false), false)
         XCTAssertEqual(actions.favoriteRevision, 0)
@@ -1161,90 +1317,157 @@ final class FoundationLibraryActionsTests: XCTestCase {
     }
 
     func testCallerCancellationCancelsUnderlyingFavoriteOperation() async {
-        let gate = CancellationGate()
+        let gate = HeldFavoriteFixture()
+        let cancellation = CancellationGate(held: gate)
         let actions = FoundationLibraryActions(
             sourceScope: "source", read: { _ in nil }, write: { _, _ in },
-            mutateFavorite: { _, _ in await gate.holdUntilCancelled() })
+            mutateFavorite: { _, _ in await cancellation.holdUntilCancelled() })
         let item = album
-        let task = Task { await actions.setFavorite(for: item, isFavorite: true) }
-        await gate.waitUntilStarted()
+        let task = Task {
+            await actions.setFavorite(for: item, isFavorite: true)
+            await gate.publicReturned()
+        }
+        let context = "caller cancellation cancels favorite provider"
+        guard await gate.waitForEntry(context: context) else {
+            await gate.cleanUp(task: task, actions: actions, context: context)
+            return
+        }
         XCTAssertTrue(actions.isPending(item))
         task.cancel()
-        await gate.waitUntilCancelled()
-        await task.value
+        guard await cancellation.waitForCancellation(context: context) else {
+            await gate.cleanUp(task: task, actions: actions, context: context)
+            return
+        }
+        guard await gate.waitForReturn(context: context) else {
+            await gate.cleanUp(task: task, actions: actions, context: context)
+            return
+        }
         XCTAssertFalse(actions.isPending(item))
         XCTAssertEqual(actions.favoriteState(for: item, initial: false), false)
         XCTAssertEqual(actions.favoriteRevision, 0)
         XCTAssertNil(actions.errorMessage(for: item))
     }
 
-    /// Only the actual provider task's cancellation handler can release this gate.
+    /// Used only by the bounded held favorite/detail and browse fixtures.
+    private actor HeldFavoriteFixture {
+        private let entered = XCTestExpectation(description: "favorite provider held")
+        private var held: [CheckedContinuation<Void, Never>] = []
+        private var released = false
+        private var announced = false
+        private var entries = 0
+        private var returns = 0
+        private var didPublicReturn = false
+        var isHeld: Bool { !held.isEmpty }
+        private var isRetired: Bool {
+            didPublicReturn && entries == returns && held.isEmpty
+        }
+
+        func hold(announce: Bool = true) async {
+            entries += 1
+            guard !released else { return }
+            await withCheckedContinuation { continuation in
+                held.append(continuation)
+                if announce, !announced {
+                    announced = true
+                    entered.fulfill()
+                }
+            }
+        }
+
+        func providerReturned() { returns += 1 }
+        func publicReturned() { didPublicReturn = true }
+
+        func release() {
+            released = true
+            let pending = held
+            held.removeAll()
+            for continuation in pending { continuation.resume() }
+        }
+
+        func waitForEntry(context: String) async -> Bool {
+            let result = await XCTWaiter.fulfillment(of: [entered], timeout: 5)
+            guard result == .completed, !Task.isCancelled else {
+                XCTFail("Timed out or cancelled waiting for \(context) entry")
+                return false
+            }
+            return true
+        }
+
+        func waitForReturn(context: String, stopOnCancellation: Bool = true) async -> Bool {
+            let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+            while !isRetired {
+                if stopOnCancellation, Task.isCancelled {
+                    XCTFail("Cancelled waiting for \(context) completion")
+                    return false
+                }
+                guard ContinuousClock.now < deadline else {
+                    XCTFail("Timed out waiting for \(context) completion")
+                    return false
+                }
+                await Task.yield()
+            }
+            if stopOnCancellation, Task.isCancelled {
+                XCTFail("Cancelled waiting for \(context) completion")
+                return false
+            }
+            return true
+        }
+
+        func cleanUp(
+            task: Task<Void, Never>, actions: FoundationLibraryActions, context: String
+        ) async {
+            await actions.invalidate()
+            task.cancel()
+            release()
+            _ = await waitForReturn(context: "cleanup \(context)", stopOnCancellation: false)
+            XCTAssertTrue(didPublicReturn, "Cleanup must observe the captured public task return")
+            XCTAssertEqual(returns, entries, "Cleanup must observe every admitted provider return")
+            XCTAssertTrue(held.isEmpty, "Cleanup must release every held provider")
+        }
+    }
+
+    /// Normal release and its acknowledgement come only from the actual provider
+    /// task's cancellation handler. Failed-test cleanup may separately force the
+    /// held fixture to release; that path never satisfies cancellation acceptance.
     private actor CancellationGate {
-        private var didStart = false
+        private let held: HeldFavoriteFixture
+        private let cancelled = XCTestExpectation(description: "favorite provider cancelled")
         private var didCancel = false
-        private var startWaiter: CheckedContinuation<Void, Never>?
-        private var cancelWaiter: CheckedContinuation<Void, Never>?
-        private var held: CheckedContinuation<Void, Never>?
+
+        init(held: HeldFavoriteFixture) { self.held = held }
 
         func holdUntilCancelled() async {
             await withTaskCancellationHandler {
-                await withCheckedContinuation { continuation in
-                    didStart = true
-                    startWaiter?.resume()
-                    startWaiter = nil
-                    if didCancel { continuation.resume() } else { held = continuation }
-                }
+                await held.hold()
+                await held.providerReturned()
             } onCancel: {
                 Task { await self.observeCancellation() }
             }
         }
 
-        func waitUntilStarted() async {
-            if didStart { return }
-            await withCheckedContinuation { startWaiter = $0 }
+        func waitForCancellation(context: String) async -> Bool {
+            let result = await XCTWaiter.fulfillment(of: [cancelled], timeout: 5)
+            guard result == .completed, !Task.isCancelled else {
+                XCTFail("Timed out or cancelled waiting for \(context) cancellation")
+                return false
+            }
+            return true
         }
 
-        func waitUntilCancelled() async {
-            if didCancel { return }
-            await withCheckedContinuation { cancelWaiter = $0 }
-        }
-
-        private func observeCancellation() {
+        private func observeCancellation() async {
+            guard !didCancel else { return }
             didCancel = true
-            held?.resume()
-            held = nil
-            cancelWaiter?.resume()
-            cancelWaiter = nil
+            await held.release()
+            cancelled.fulfill()
         }
     }
 
     private enum Failure: Error { case synthetic }
 
+    /// Also used by the unchanged immediate-failure and explicit-retry tests.
     private actor MutationGate {
         private(set) var calls = 0
-        private var started: CheckedContinuation<Void, Never>?
-        private var held: CheckedContinuation<Void, Never>?
-
         func countCall() { calls += 1 }
-
-        func hold() async {
-            calls += 1
-            await withCheckedContinuation { continuation in
-                held = continuation
-                started?.resume()
-                started = nil
-            }
-        }
-
-        func waitUntilStarted() async {
-            if held != nil { return }
-            await withCheckedContinuation { started = $0 }
-        }
-
-        func release() {
-            held?.resume()
-            held = nil
-        }
     }
 }
 

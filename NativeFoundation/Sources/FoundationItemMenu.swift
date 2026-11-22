@@ -83,7 +83,9 @@ struct FoundationItemMenu: View {
                     if connectivity.localOnly, item.kind != .track, let player {
                         let ready = actions.collectionTracks(
                             downloads.browseTracks(for: item), for: item)
-                        if !ready.isEmpty { player.setQueue(ready, selectedIndex: 0) }
+                        if !ready.isEmpty {
+                            player.setQueue(ready, selectedIndex: 0, collection: item)
+                        }
                     } else {
                         play()
                     }

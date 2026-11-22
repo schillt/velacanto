@@ -118,9 +118,13 @@ private struct FoundationPrimaryGenreContentView: View {
                     sortAndFilter
                 }
             #else
-                ToolbarItemGroup(placement: .topBarTrailing) {
-                    contentSelector
-                    sortAndFilter
+                ToolbarItem(placement: .topBarTrailing) {
+                    contentSelector.frame(minHeight: 44)
+                }
+                .sharedBackgroundVisibility(.hidden)
+                ToolbarSpacer(.fixed, placement: .topBarTrailing)
+                ToolbarItem(placement: .topBarTrailing) {
+                    sortAndFilter.frame(minWidth: 44, minHeight: 44)
                 }
             #endif
         }
@@ -239,7 +243,7 @@ private struct FoundationPrimaryGenreContentPage: View {
     var body: some View {
         FoundationCatalogView(
             title: title, model: items, library: library, player: player,
-            isActive: isActive, showsTrackArtwork: true, automaticallyLoadsPages: true,
+            isActive: isActive, showsTrackArtwork: true,
             collectionGrid: source.kind != .track, localItems: { localItems },
             loader: { try await source.page(startIndex: $0, library: library) })
     }

@@ -8,6 +8,27 @@ import XCTest
 
 @MainActor
 final class FoundationCurrentArtworkTests: XCTestCase {
+    private func requireArtworkTask<Success: Sendable, Failure: Error>(
+        _ task: Task<Success, Failure>?, probe: ArtworkProbe, name: String,
+        cleanup: @MainActor () -> Void
+    ) async -> Bool {
+        guard let task else { return true }
+        let finished = XCTestExpectation(description: name)
+        let observer = Task {
+            _ = await task.result
+            finished.fulfill()
+        }
+        guard await XCTWaiter.fulfillment(of: [finished], timeout: 5) == .completed else {
+            task.cancel()
+            cleanup()
+            await probe.retire()
+            observer.cancel()
+            XCTFail("\(name) did not finish within 5 seconds")
+            return false
+        }
+        return true
+    }
+
     private func track(_ album: String, tag: String? = "version") -> FoundationItem {
         FoundationItem(
             id: "track", title: "", subtitle: "", kind: .track, duration: nil,
@@ -38,9 +59,12 @@ final class FoundationCurrentArtworkTests: XCTestCase {
         return data as Data
     }
 
+    /// Three synthetic lossless WebP frames: red canvas, blue partial with
+    /// background disposal, then green partial. Created solely for this test.
     func testHeroAndSystemShareResultAcrossMetadataAndSameAlbumSelection() async throws {
         let data = try imageData()
         let probe = ArtworkProbe()
+        addTeardownBlock { await probe.retire() }
         let player = player()
         let owner = FoundationCurrentArtwork(player: player) { item in await probe.load(item) }
         let bridge = FoundationNowPlaying(player: player, artwork: owner)
@@ -52,12 +76,23 @@ final class FoundationCurrentArtworkTests: XCTestCase {
         let item = track("album")
         player.setQueue([item, item], selectedIndex: 0)
         await owner.updateTask?.value
-        await probe.waitForCount(1)
+        guard await probe.waitForCount(1) else {
+            XCTFail("Artwork request 1 did not enter within 5 seconds")
+            return
+        }
         XCTAssertNil(owner.result(for: item))
         await bridge.updateTask?.value
         let pendingArtworkID = try XCTUnwrap((bridge.content as? MusicContent)?.artwork?.id)
         await probe.complete(0, with: data)
-        await owner.loadTask?.value
+        guard
+            await requireArtworkTask(
+                owner.loadTask, probe: probe, name: "owner.loadTask",
+                cleanup: {
+                    bridge.invalidate()
+                    owner.invalidate()
+                    player.stop()
+                })
+        else { return }
         await bridge.updateTask?.value
         let result = try XCTUnwrap(owner.result(for: item))
         XCTAssertEqual((bridge.content as? MusicContent)?.artwork?.id, result.id.uuidString)
@@ -82,6 +117,7 @@ final class FoundationCurrentArtworkTests: XCTestCase {
     func testExplicitRefreshRetainsArtworkIdentityAndBytesOnOptionalFailure() async throws {
         let data = try imageData()
         let probe = ArtworkProbe()
+        addTeardownBlock { await probe.retire() }
         let player = player()
         let item = track("album")
         player.setQueue([item], selectedIndex: 0)
@@ -90,17 +126,46 @@ final class FoundationCurrentArtworkTests: XCTestCase {
             owner.invalidate()
             player.stop()
         }
-        await probe.waitForCount(1)
+        guard await probe.waitForCount(1) else {
+            XCTFail("Artwork request 1 did not enter within 5 seconds")
+            return
+        }
         await probe.complete(0, with: data)
-        await owner.loadTask?.value
+        guard
+            await requireArtworkTask(
+                owner.loadTask, probe: probe, name: "owner.loadTask",
+                cleanup: {
+                    owner.invalidate()
+                    player.stop()
+                })
+        else { return }
         let first = try XCTUnwrap(owner.result(for: item))
         owner.refreshRetainedArtwork()
-        await probe.waitForCount(2)
+        guard await probe.waitForCount(2) else {
+            XCTFail("Artwork request 2 did not enter within 5 seconds")
+            return
+        }
         XCTAssertEqual(owner.result(for: item)?.id, first.id)
         let provider = try XCTUnwrap(owner.provider(for: item))
-        _ = try await provider(CGSize(width: 640, height: 640))
+        let retainedProvider = Task { _ = try await provider(CGSize(width: 640, height: 640)) }
+        guard
+            await requireArtworkTask(
+                retainedProvider, probe: probe, name: "retained provider",
+                cleanup: {
+                    owner.invalidate()
+                    player.stop()
+                })
+        else { return }
+        try await retainedProvider.value
         await probe.complete(1, with: nil)
-        await owner.loadTask?.value
+        guard
+            await requireArtworkTask(
+                owner.loadTask, probe: probe, name: "owner.loadTask",
+                cleanup: {
+                    owner.invalidate()
+                    player.stop()
+                })
+        else { return }
         XCTAssertEqual(owner.result(for: item)?.data, data)
         XCTAssertEqual(owner.result(for: item)?.id, first.id)
         XCTAssertTrue(player.wantsPlayback)
@@ -109,6 +174,7 @@ final class FoundationCurrentArtworkTests: XCTestCase {
     func testCachedPreviewAppearsWhileUpgradeRunsAndSurvivesFailure() async throws {
         let data = try imageData(width: 160, height: 80)
         let probe = ArtworkProbe()
+        addTeardownBlock { await probe.retire() }
         let player = player()
         let item = track("album")
         player.setQueue([item], selectedIndex: 0)
@@ -118,11 +184,21 @@ final class FoundationCurrentArtworkTests: XCTestCase {
             owner.invalidate()
             player.stop()
         }
-        await probe.waitForCount(1)
+        guard await probe.waitForCount(1) else {
+            XCTFail("Artwork request 1 did not enter within 5 seconds")
+            return
+        }
         let preview = try XCTUnwrap(owner.result(for: item))
         XCTAssertEqual(preview.image.width, 160)
         await probe.complete(0, with: nil)
-        await owner.loadTask?.value
+        guard
+            await requireArtworkTask(
+                owner.loadTask, probe: probe, name: "owner.loadTask",
+                cleanup: {
+                    owner.invalidate()
+                    player.stop()
+                })
+        else { return }
         XCTAssertEqual(owner.result(for: item)?.id, preview.id)
         player.setQueue([track("album", tag: nil)], selectedIndex: 0)
         await owner.updateTask?.value
@@ -135,6 +211,7 @@ final class FoundationCurrentArtworkTests: XCTestCase {
         let previewData = try imageData(width: 160, height: 80)
         let heroData = try imageData(width: 640, height: 320)
         let probe = ArtworkProbe()
+        addTeardownBlock { await probe.retire() }
         let player = player()
         let item = track("album")
         player.setQueue([item], selectedIndex: 0)
@@ -144,11 +221,21 @@ final class FoundationCurrentArtworkTests: XCTestCase {
             owner.invalidate()
             player.stop()
         }
-        await probe.waitForCount(1)
+        guard await probe.waitForCount(1) else {
+            XCTFail("Artwork request 1 did not enter within 5 seconds")
+            return
+        }
         let preview = try XCTUnwrap(owner.result(for: item))
         let systemID = try XCTUnwrap(owner.artwork(for: item)?.id)
         await probe.complete(0, with: heroData)
-        await owner.loadTask?.value
+        guard
+            await requireArtworkTask(
+                owner.loadTask, probe: probe, name: "owner.loadTask",
+                cleanup: {
+                    owner.invalidate()
+                    player.stop()
+                })
+        else { return }
         let hero = try XCTUnwrap(owner.result(for: item))
         XCTAssertEqual(hero.image.width, 640)
         XCTAssertEqual(hero.id, preview.id)
@@ -162,6 +249,7 @@ final class FoundationCurrentArtworkTests: XCTestCase {
     {
         let data = try imageData()
         let probe = ArtworkProbe()
+        addTeardownBlock { await probe.retire() }
         let player = player()
         let item = track("album")
         let owner = FoundationCurrentArtwork(player: player) { await probe.load($0) }
@@ -171,7 +259,10 @@ final class FoundationCurrentArtworkTests: XCTestCase {
         }
         player.setQueue([item], selectedIndex: 0)
         await owner.updateTask?.value
-        await probe.waitForCount(1)
+        guard await probe.waitForCount(1) else {
+            XCTFail("Artwork request 1 did not enter within 5 seconds")
+            return
+        }
         let provider = try XCTUnwrap(owner.provider(for: item))
         let started = XCTestExpectation(description: "Both system providers await artwork")
         started.expectedFulfillmentCount = 2
@@ -184,18 +275,53 @@ final class FoundationCurrentArtworkTests: XCTestCase {
             _ = try await provider(CGSize(width: 1_024, height: 1_024))
         }
         let ready = await XCTWaiter.fulfillment(of: [started], timeout: 2)
-        XCTAssertEqual(ready, .completed)
+        guard ready == .completed else {
+            first.cancel()
+            second.cancel()
+            owner.invalidate()
+            player.stop()
+            await probe.retire()
+            XCTFail("System providers did not start within 2 seconds")
+            return
+        }
         first.cancel()
         XCTAssertFalse(owner.loadTask?.isCancelled == true)
         await probe.complete(0, with: data)
+        guard
+            await requireArtworkTask(
+                second, probe: probe, name: "second provider",
+                cleanup: {
+                    first.cancel()
+                    owner.invalidate()
+                    player.stop()
+                })
+        else { return }
         try await second.value
+        guard
+            await requireArtworkTask(
+                first, probe: probe, name: "cancelled provider",
+                cleanup: {
+                    second.cancel()
+                    owner.invalidate()
+                    player.stop()
+                })
+        else { return }
         do {
             try await first.value
             XCTFail("Cancelled provider published artwork")
         } catch is CancellationError {} catch { XCTFail("Unexpected cancellation outcome") }
         let count = await probe.count
         XCTAssertEqual(count, 1)
-        _ = try await provider(CGSize(width: 640, height: 640))
+        let retainedProvider = Task { _ = try await provider(CGSize(width: 640, height: 640)) }
+        guard
+            await requireArtworkTask(
+                retainedProvider, probe: probe, name: "retained provider",
+                cleanup: {
+                    owner.invalidate()
+                    player.stop()
+                })
+        else { return }
+        try await retainedProvider.value
         let finalCount = await probe.count
         XCTAssertEqual(finalCount, 1)
     }
@@ -203,6 +329,7 @@ final class FoundationCurrentArtworkTests: XCTestCase {
     func testPendingSystemProviderDoesNotRetainInvalidatedOwner() async throws {
         let data = try imageData()
         let probe = ArtworkProbe()
+        addTeardownBlock { await probe.retire() }
         let player = player()
         let item = track("album")
         var owner: FoundationCurrentArtwork? = FoundationCurrentArtwork(player: player) {
@@ -210,7 +337,12 @@ final class FoundationCurrentArtworkTests: XCTestCase {
         }
         player.setQueue([item], selectedIndex: 0)
         await owner?.updateTask?.value
-        await probe.waitForCount(1)
+        guard await probe.waitForCount(1) else {
+            owner?.invalidate()
+            player.stop()
+            XCTFail("Artwork request 1 did not enter within 5 seconds")
+            return
+        }
         let provider = try XCTUnwrap(owner?.provider(for: item))
         let started = XCTestExpectation(description: "Provider starts before account teardown")
         let request = Task { () throws -> Void in
@@ -218,12 +350,26 @@ final class FoundationCurrentArtworkTests: XCTestCase {
             _ = try await provider(CGSize(width: 640, height: 640))
         }
         let ready = await XCTWaiter.fulfillment(of: [started], timeout: 2)
-        XCTAssertEqual(ready, .completed)
+        guard ready == .completed else {
+            request.cancel()
+            owner?.invalidate()
+            player.stop()
+            await probe.retire()
+            XCTFail("System provider did not start within 2 seconds")
+            return
+        }
         weak let released = owner
         owner?.invalidate()
         owner = nil
         XCTAssertNil(released)
         await probe.complete(0, with: data)
+        guard
+            await requireArtworkTask(
+                request, probe: probe, name: "released provider",
+                cleanup: {
+                    player.stop()
+                })
+        else { return }
         do {
             try await request.value
             XCTFail("Released account published artwork")
@@ -235,12 +381,18 @@ final class FoundationCurrentArtworkTests: XCTestCase {
         let data = try imageData()
         for invalidateAccount in [false, true] {
             let probe = ArtworkProbe()
+            addTeardownBlock { await probe.retire() }
             let player = player()
             let item = track("album")
             let owner = FoundationCurrentArtwork(player: player) { await probe.load($0) }
             player.setQueue([item], selectedIndex: 0)
             await owner.updateTask?.value
-            await probe.waitForCount(1)
+            guard await probe.waitForCount(1) else {
+                owner.invalidate()
+                player.stop()
+                XCTFail("Artwork request 1 did not enter within 5 seconds")
+                return
+            }
             let provider = try XCTUnwrap(owner.provider(for: item))
             let started = XCTestExpectation(description: "System provider awaits current load")
             let request = Task { () throws -> Void in
@@ -248,7 +400,14 @@ final class FoundationCurrentArtworkTests: XCTestCase {
                 _ = try await provider(CGSize(width: 640, height: 640))
             }
             let ready = await XCTWaiter.fulfillment(of: [started], timeout: 2)
-            XCTAssertEqual(ready, .completed)
+            guard ready == .completed else {
+                request.cancel()
+                owner.invalidate()
+                player.stop()
+                await probe.retire()
+                XCTFail("System provider did not start within 2 seconds")
+                return
+            }
             if invalidateAccount {
                 owner.invalidate()
             } else {
@@ -260,6 +419,14 @@ final class FoundationCurrentArtworkTests: XCTestCase {
                 await owner.updateTask?.value
             }
             await probe.complete(0, with: data)
+            guard
+                await requireArtworkTask(
+                    request, probe: probe, name: "discarded provider",
+                    cleanup: {
+                        owner.invalidate()
+                        player.stop()
+                    })
+            else { return }
             do {
                 try await request.value
                 XCTFail("Discarded provider published artwork")
@@ -273,6 +440,7 @@ final class FoundationCurrentArtworkTests: XCTestCase {
     func testChangedIdentityCancelsAndRejectsLateResultAndStaleCallback() async throws {
         let data = try imageData()
         let probe = ArtworkProbe()
+        addTeardownBlock { await probe.retire() }
         let player = player()
         let owner = FoundationCurrentArtwork(player: player) { await probe.load($0) }
         defer {
@@ -283,17 +451,37 @@ final class FoundationCurrentArtworkTests: XCTestCase {
         let second = track("album", tag: "changed")
         player.setQueue([first, second], selectedIndex: 0)
         await owner.updateTask?.value
-        await probe.waitForCount(1)
+        guard await probe.waitForCount(1) else {
+            XCTFail("Artwork request 1 did not enter within 5 seconds")
+            return
+        }
         let oldTask = owner.loadTask
         player.next()
         await owner.updateTask?.value
         XCTAssertTrue(oldTask?.isCancelled == true)
-        await probe.waitForCount(2)
+        guard await probe.waitForCount(2) else {
+            XCTFail("Artwork request 2 did not enter within 5 seconds")
+            return
+        }
         await probe.complete(1, with: data)
-        await owner.loadTask?.value
+        guard
+            await requireArtworkTask(
+                owner.loadTask, probe: probe, name: "owner.loadTask",
+                cleanup: {
+                    owner.invalidate()
+                    player.stop()
+                })
+        else { return }
         let accepted = try XCTUnwrap(owner.result(for: second))
         await probe.complete(0, with: data)
-        await oldTask?.value
+        guard
+            await requireArtworkTask(
+                oldTask, probe: probe, name: "oldTask",
+                cleanup: {
+                    owner.invalidate()
+                    player.stop()
+                })
+        else { return }
         XCTAssertEqual(owner.result(for: second)?.id, accepted.id)
         XCTAssertNil(owner.result(for: first))
         player.previous()
@@ -305,12 +493,18 @@ final class FoundationCurrentArtworkTests: XCTestCase {
     func testAccountInvalidationRejectsLateWorkAndRetainedSystemResult() async throws {
         let data = try imageData()
         let probe = ArtworkProbe()
+        addTeardownBlock { await probe.retire() }
         let player = player()
         let old = FoundationCurrentArtwork(player: player) { await probe.load($0) }
         let item = track("album", tag: nil)
         player.setQueue([item], selectedIndex: 0)
         await old.updateTask?.value
-        await probe.waitForCount(1)
+        guard await probe.waitForCount(1) else {
+            old.invalidate()
+            player.stop()
+            XCTFail("Artwork request 1 did not enter within 5 seconds")
+            return
+        }
         let oldTask = old.loadTask
         old.invalidate()
         let current = FoundationCurrentArtwork(player: player) { await probe.load($0) }
@@ -318,12 +512,31 @@ final class FoundationCurrentArtworkTests: XCTestCase {
             current.invalidate()
             player.stop()
         }
-        await probe.waitForCount(2)
+        guard await probe.waitForCount(2) else {
+            XCTFail("Artwork request 2 did not enter within 5 seconds")
+            return
+        }
         await probe.complete(0, with: data)
-        await oldTask?.value
+        guard
+            await requireArtworkTask(
+                oldTask, probe: probe, name: "oldTask",
+                cleanup: {
+                    old.invalidate()
+                    current.invalidate()
+                    player.stop()
+                })
+        else { return }
         XCTAssertNil(old.result)
         await probe.complete(1, with: data)
-        await current.loadTask?.value
+        guard
+            await requireArtworkTask(
+                current.loadTask, probe: probe, name: "current.loadTask",
+                cleanup: {
+                    old.invalidate()
+                    current.invalidate()
+                    player.stop()
+                })
+        else { return }
         let result = try XCTUnwrap(current.result(for: item))
         current.invalidate()
         XCTAssertNil(current.data(for: result.id))
@@ -390,6 +603,7 @@ final class FoundationCurrentArtworkTests: XCTestCase {
         XCTAssertLessThanOrEqual(bounded.image.height, 640)
         let player = player()
         let probe = ArtworkProbe()
+        addTeardownBlock { await probe.retire() }
         let owner = FoundationCurrentArtwork(player: player) { await probe.load($0) }
         defer {
             owner.invalidate()
@@ -398,9 +612,19 @@ final class FoundationCurrentArtworkTests: XCTestCase {
         let item = track("album")
         player.setQueue([item, item], selectedIndex: 0)
         await owner.updateTask?.value
-        await probe.waitForCount(1)
+        guard await probe.waitForCount(1) else {
+            XCTFail("Artwork request 1 did not enter within 5 seconds")
+            return
+        }
         await probe.complete(0, with: Data("invalid".utf8))
-        await owner.loadTask?.value
+        guard
+            await requireArtworkTask(
+                owner.loadTask, probe: probe, name: "owner.loadTask",
+                cleanup: {
+                    owner.invalidate()
+                    player.stop()
+                })
+        else { return }
         XCTAssertNil(owner.result)
         XCTAssertTrue(player.wantsPlayback)
         player.next()
@@ -437,7 +661,8 @@ final class FoundationCurrentArtworkTests: XCTestCase {
 private actor ArtworkProbe {
     private(set) var count = 0
     private var pending: [Int: CheckedContinuation<Data?, Never>] = [:]
-    private var waiter: (Int, CheckedContinuation<Void, Never>)?
+    private var retired = false
+    private var waiters: [(Int, XCTestExpectation)] = []
 
     func missingResult(shouldFail: Bool) throws -> Data? {
         count += 1
@@ -446,20 +671,38 @@ private actor ArtworkProbe {
     }
 
     func load(_ item: FoundationItem) async -> Data? {
+        guard !retired else { return nil }
         let request = count
         count += 1
         return await withCheckedContinuation { continuation in
             pending[request] = continuation
-            if let (target, continuation) = waiter, count >= target {
-                waiter = nil
-                continuation.resume()
-            }
+            let ready = waiters.filter { $0.0 <= count }
+            waiters.removeAll { $0.0 <= count }
+            for (_, event) in ready { event.fulfill() }
         }
     }
 
-    func waitForCount(_ target: Int) async {
-        guard count < target else { return }
-        await withCheckedContinuation { waiter = (target, $0) }
+    func waitForCount(_ target: Int) async -> Bool {
+        guard count < target else { return true }
+        let event = XCTestExpectation(description: "artwork request entered")
+        waiters.append((target, event))
+        let result = await XCTWaiter.fulfillment(of: [event], timeout: 5)
+        guard result == .completed && !Task.isCancelled else {
+            retired = true
+            waiters.removeAll { $0.1 === event }
+            let held = Array(pending.values)
+            pending.removeAll()
+            for continuation in held { continuation.resume(returning: nil) }
+            return false
+        }
+        return true
+    }
+
+    func retire() {
+        retired = true
+        let held = Array(pending.values)
+        pending.removeAll()
+        for continuation in held { continuation.resume(returning: nil) }
     }
 
     func complete(_ request: Int, with data: Data?) {

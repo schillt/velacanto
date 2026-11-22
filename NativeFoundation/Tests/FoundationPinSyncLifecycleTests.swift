@@ -7,24 +7,48 @@ final class FoundationPinSyncLifecycleTests: XCTestCase {
     private let scope = String(repeating: "a", count: 64)
 
     private actor Gate {
-        private var continuation: CheckedContinuation<Void, Never>?
-        private var startedWaiter: CheckedContinuation<Void, Never>?
+        private var continuations: [CheckedContinuation<Void, Never>] = []
         private var started = false
+        private var released = false
         private(set) var calls = 0
         func hold() async {
             calls += 1
             started = true
-            startedWaiter?.resume()
-            startedWaiter = nil
-            await withCheckedContinuation { continuation = $0 }
+            guard !released else { return }
+            await withCheckedContinuation { continuations.append($0) }
         }
-        func waitForStart() async {
-            if !started { await withCheckedContinuation { startedWaiter = $0 } }
+        func waitForStart() async -> Bool {
+            let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+            while !started && !Task.isCancelled && ContinuousClock.now < deadline {
+                try? await Task.sleep(for: .milliseconds(10))
+            }
+            return started && !Task.isCancelled
         }
         func release() {
-            continuation?.resume()
-            continuation = nil
+            released = true
+            let held = continuations
+            continuations.removeAll()
+            for continuation in held { continuation.resume() }
         }
+    }
+
+    private func requirePinTask(
+        _ task: Task<Void, Never>?, sync: FoundationPinSync, gate: Gate, name: String
+    ) async -> Bool {
+        let finished = XCTestExpectation(description: name)
+        let observer = Task {
+            await task?.value
+            finished.fulfill()
+        }
+        guard await XCTWaiter.fulfillment(of: [finished], timeout: 5) == .completed else {
+            sync.invalidate()
+            task?.cancel()
+            await gate.release()
+            observer.cancel()
+            XCTFail("\(name) did not finish within 5 seconds")
+            return false
+        }
+        return true
     }
 
     private func defaults() -> UserDefaults {
@@ -136,10 +160,19 @@ final class FoundationPinSyncLifecycleTests: XCTestCase {
                 return false
             })
         let check = Task { await sync.prepareOptInPrompt() }
-        await gate.waitForStart()
-        await sync.prepareOptInPrompt()
+        guard await gate.waitForStart() else {
+            sync.invalidate()
+            await gate.release()
+            XCTFail("Pin sync fixture did not enter its hold within 5 seconds")
+            return
+        }
+        let duplicate = Task { await sync.prepareOptInPrompt() }
+        guard
+            await requirePinTask(duplicate, sync: sync, gate: gate, name: "duplicate prompt check")
+        else { return }
         await gate.release()
-        await check.value
+        guard await requirePinTask(check, sync: sync, gate: gate, name: "held prompt check")
+        else { return }
         await sync.prepareOptInPrompt()
         let calls = await gate.calls
         XCTAssertEqual(calls, 1)
@@ -159,10 +192,22 @@ final class FoundationPinSyncLifecycleTests: XCTestCase {
                     return true
                 })
             let check = Task { await sync.prepareOptInPrompt() }
-            await gate.waitForStart()
-            if retire { sync.invalidate() } else { await sync.accountChanged().value }
+            guard await gate.waitForStart() else {
+                sync.invalidate()
+                await gate.release()
+                XCTFail("Pin sync fixture did not enter its hold within 5 seconds")
+                return
+            }
+            if retire {
+                sync.invalidate()
+            } else {
+                let changed = sync.accountChanged()
+                guard await requirePinTask(changed, sync: sync, gate: gate, name: "account change")
+                else { return }
+            }
             await gate.release()
-            await check.value
+            guard await requirePinTask(check, sync: sync, gate: gate, name: "held prompt check")
+            else { return }
             XCTAssertFalse(sync.offersOptIn)
             XCTAssertFalse(sync.claimOptInPrompt(owner: UUID()))
             sync.respondToOptInPrompt(owner: UUID(), enable: true)
@@ -251,10 +296,16 @@ final class FoundationPinSyncLifecycleTests: XCTestCase {
             XCTAssertNil(sync.task)
             sync.setEnabled(true)
             let pending = sync.task
-            await gate.waitForStart()
+            guard await gate.waitForStart() else {
+                sync.invalidate()
+                await gate.release()
+                XCTFail("Pin sync fixture did not enter its hold within 5 seconds")
+                return
+            }
             if retire { sync.invalidate() } else { sync.setEnabled(false) }
             await gate.release()
-            await pending?.value
+            guard await requirePinTask(pending, sync: sync, gate: gate, name: "held pin operation")
+            else { return }
             XCTAssertFalse(applied)
             let calls = await gate.calls
             XCTAssertEqual(calls, 1)
@@ -297,10 +348,16 @@ final class FoundationPinSyncLifecycleTests: XCTestCase {
             })
         sync.setEnabled(true)
         let pending = sync.task
-        await gate.waitForStart()
+        guard await gate.waitForStart() else {
+            sync.invalidate()
+            await gate.release()
+            XCTFail("Pin sync fixture did not enter its hold within 5 seconds")
+            return
+        }
         sync.setEnabled(false)
         await gate.release()
-        await pending?.value
+        guard await requirePinTask(pending, sync: sync, gate: gate, name: "held pin operation")
+        else { return }
         XCTAssertFalse(committed)
         sync.invalidate()
     }
@@ -353,12 +410,21 @@ final class FoundationPinSyncLifecycleTests: XCTestCase {
             })
         sync.setEnabled(true)
         let first = sync.task
-        await gate.waitForStart()
+        guard await gate.waitForStart() else {
+            sync.invalidate()
+            await gate.release()
+            XCTFail("Pin sync fixture did not enter its hold within 5 seconds")
+            return
+        }
         local = [b, a]
         sync.pinsChanged()
         await gate.release()
-        await first?.value
-        await sync.task?.value
+        guard await requirePinTask(first, sync: sync, gate: gate, name: "held pin exchange")
+        else { return }
+        guard
+            await requirePinTask(
+                sync.task, sync: sync, gate: gate, name: "follow-on pin exchange")
+        else { return }
         let uploads = await log.states
         XCTAssertEqual(uploads.count, 2)
         XCTAssertNil(uploads.first!)

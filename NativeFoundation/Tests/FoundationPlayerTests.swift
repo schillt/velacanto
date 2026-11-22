@@ -10,6 +10,25 @@ final class FoundationPlayerTests: XCTestCase {
     private let track = FoundationItem(
         id: "synthetic", title: "", subtitle: "", kind: .track, duration: nil)
 
+    private func requirePlayerTaskCompletion(
+        _ task: Task<Void, Never>?, name: String, cleanup: @MainActor () async -> Void
+    ) async -> Bool {
+        guard let task else { return true }
+        let finished = XCTestExpectation(description: name)
+        let observer = Task {
+            await task.value
+            finished.fulfill()
+        }
+        guard await XCTWaiter.fulfillment(of: [finished], timeout: 5) == .completed else {
+            task.cancel()
+            await cleanup()
+            observer.cancel()
+            XCTFail("\(name) did not finish within 5 seconds")
+            return false
+        }
+        return true
+    }
+
     func testResolutionErrorsKeepCredentialSentinelsOutOfFailureUIAndJournal() async throws {
         let token = "synthetic-error-credential-25"
         let url = try XCTUnwrap(
@@ -27,6 +46,22 @@ final class FoundationPlayerTests: XCTestCase {
                 ]),
             underlying,
         ]
+        #if DEBUG
+            #if FOUNDATION_ISOLATED_TEST_HOST
+                // Exercise the actual diagnostic writer with disposable storage while
+                // the isolation host's shared journal remains permanently inert.
+                let journalFile = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("player-failure-journal-" + UUID().uuidString)
+                defer { try? FileManager.default.removeItem(at: journalFile) }
+                let journalOwner = FoundationJournal(file: journalFile)
+                let diagnostic: (@Sendable (String) -> Void)? = { journalOwner.record($0) }
+            #else
+                let journalOwner = FoundationJournal.shared
+                let diagnostic: (@Sendable (String) -> Void)? = nil
+            #endif
+        #else
+            let diagnostic: (@Sendable (String) -> Void)? = nil
+        #endif
         for error in errors {
             let player = FoundationPlayer(
                 resolve: { _ in throw error },
@@ -34,7 +69,8 @@ final class FoundationPlayerTests: XCTestCase {
                     XCTFail("Resolution failure must not install a native item")
                     return AVPlayerItem(asset: AVMutableComposition())
                 },
-                activateSession: {}, deactivateSession: {}, startPlayback: { _ in })
+                activateSession: {}, deactivateSession: {}, diagnostic: diagnostic,
+                startPlayback: { _ in })
             defer { player.stop() }
             player.setQueue([track], selectedIndex: 0)
             let occurrence = try XCTUnwrap(player.selectedEntryID)
@@ -52,9 +88,14 @@ final class FoundationPlayerTests: XCTestCase {
                 XCTAssertFalse(message.contains(sentinel))
             }
             #if DEBUG
-                // Read the production projection; never clear or reconfigure the shared journal.
-                XCTAssertTrue(FoundationJournal.shared.isEnabled)
-                let journal = FoundationJournal.shared.snapshot()
+                #if FOUNDATION_ISOLATED_TEST_HOST
+                    XCTAssertFalse(FoundationJournal.shared.isEnabled)
+                    XCTAssertEqual(FoundationJournal.shared.snapshot(), "")
+                #endif
+                // Normal hosts retain the production projection. Neither host clears
+                // or reconfigures the shared journal.
+                XCTAssertTrue(journalOwner.isEnabled)
+                let journal = journalOwner.snapshot()
                 let category = error is URLError ? "timeout" : "other"
                 XCTAssertTrue(journal.contains("player.failure.resolution." + category))
                 for sentinel in [
@@ -82,7 +123,14 @@ final class FoundationPlayerTests: XCTestCase {
         player.pause()
         XCTAssertEqual(observed.last?.0, false)
         await resources.fail(0)
-        await player.selectionTask?.value
+        guard
+            await requirePlayerTaskCompletion(
+                player.selectionTask, name: "player.selectionTask?",
+                cleanup: {
+                    player.stop()
+                    await resources.retireForTest()
+                })
+        else { return }
         XCTAssertEqual(observed.last?.0, false)
         player.stop()
         XCTAssertEqual(observed.last?.0, false)
@@ -100,15 +148,36 @@ final class FoundationPlayerTests: XCTestCase {
         let first = player.selectionTask
         try await resources.waitForCalls(1)
         await resources.succeed(0)
-        await first?.value
-        await player.playTask?.value
+        guard
+            await requirePlayerTaskCompletion(
+                first, name: "first?",
+                cleanup: {
+                    player.stop()
+                    await resources.retireForTest()
+                })
+        else { return }
+        guard
+            await requirePlayerTaskCompletion(
+                player.playTask, name: "player.playTask?",
+                cleanup: {
+                    player.stop()
+                    await resources.retireForTest()
+                })
+        else { return }
         player.didReachEnd(try XCTUnwrap(player.nativePlayer.currentItem))
         let successor = player.selectionTask
         try await resources.waitForCalls(2)
         let occurrence = player.selectedEntryID
         player.enterOfflineMode()
         await resources.succeed(1, url: URL(string: "https://example.invalid/audio")!)
-        await successor?.value
+        guard
+            await requirePlayerTaskCompletion(
+                successor, name: "successor?",
+                cleanup: {
+                    player.stop()
+                    await resources.retireForTest()
+                })
+        else { return }
         try await resources.waitForReleases(2)
         XCTAssertNil(player.nativePlayer.currentItem)
         XCTAssertEqual(player.selectedEntryID, occurrence)
@@ -134,8 +203,22 @@ final class FoundationPlayerTests: XCTestCase {
             } else {
                 await resources.succeed(0, url: URL(string: "https://example.invalid/audio")!)
             }
-            await selection?.value
-            await player.playTask?.value
+            guard
+                await requirePlayerTaskCompletion(
+                    selection, name: "selection?",
+                    cleanup: {
+                        player.stop()
+                        await resources.retireForTest()
+                    })
+            else { return }
+            guard
+                await requirePlayerTaskCompletion(
+                    player.playTask, name: "player.playTask?",
+                    cleanup: {
+                        player.stop()
+                        await resources.retireForTest()
+                    })
+            else { return }
             let item = try XCTUnwrap(player.nativePlayer.currentItem)
             let occurrence = player.selectedEntryID
             player.enterOfflineMode()
@@ -166,8 +249,22 @@ final class FoundationPlayerTests: XCTestCase {
         player.invalidateRemoteItemForPolicyChange()
         XCTAssertFalse(selection?.isCancelled ?? true)
         await resources.succeed(0)
-        await selection?.value
-        await player.playTask?.value
+        guard
+            await requirePlayerTaskCompletion(
+                selection, name: "selection?",
+                cleanup: {
+                    player.stop()
+                    await resources.retireForTest()
+                })
+        else { return }
+        guard
+            await requirePlayerTaskCompletion(
+                player.playTask, name: "player.playTask?",
+                cleanup: {
+                    player.stop()
+                    await resources.retireForTest()
+                })
+        else { return }
         let item = try XCTUnwrap(player.nativePlayer.currentItem)
         player.invalidateRemoteItemForPolicyChange()
         XCTAssertTrue(player.nativePlayer.currentItem === item)
@@ -187,8 +284,22 @@ final class FoundationPlayerTests: XCTestCase {
         let selection = player.selectionTask
         try await resources.waitForCalls(1)
         await resources.succeed(0, url: URL(string: "https://example.invalid/audio")!)
-        await selection?.value
-        await player.playTask?.value
+        guard
+            await requirePlayerTaskCompletion(
+                selection, name: "selection?",
+                cleanup: {
+                    player.stop()
+                    await resources.retireForTest()
+                })
+        else { return }
+        guard
+            await requirePlayerTaskCompletion(
+                player.playTask, name: "player.playTask?",
+                cleanup: {
+                    player.stop()
+                    await resources.retireForTest()
+                })
+        else { return }
         let selected = player.selectedEntryID
         player.invalidateRemoteItemForPolicyChange()
         XCTAssertNil(player.nativePlayer.currentItem)
@@ -200,8 +311,22 @@ final class FoundationPlayerTests: XCTestCase {
         let retry = player.selectionTask
         try await resources.waitForCalls(2)
         await resources.succeed(1)
-        await retry?.value
-        await player.playTask?.value
+        guard
+            await requirePlayerTaskCompletion(
+                retry, name: "retry?",
+                cleanup: {
+                    player.stop()
+                    await resources.retireForTest()
+                })
+        else { return }
+        guard
+            await requirePlayerTaskCompletion(
+                player.playTask, name: "player.playTask?",
+                cleanup: {
+                    player.stop()
+                    await resources.retireForTest()
+                })
+        else { return }
         XCTAssertNotNil(player.nativePlayer.currentItem)
         player.stop()
         try await resources.waitForReleases(2)
@@ -220,8 +345,22 @@ final class FoundationPlayerTests: XCTestCase {
         let first = player.selectionTask
         try await resources.waitForCalls(1)
         await resources.succeed(0)
-        await first?.value
-        await player.playTask?.value
+        guard
+            await requirePlayerTaskCompletion(
+                first, name: "first?",
+                cleanup: {
+                    player.stop()
+                    await resources.retireForTest()
+                })
+        else { return }
+        guard
+            await requirePlayerTaskCompletion(
+                player.playTask, name: "player.playTask?",
+                cleanup: {
+                    player.stop()
+                    await resources.retireForTest()
+                })
+        else { return }
         let oldItem = try XCTUnwrap(player.nativePlayer.currentItem)
         player.didReachEnd(oldItem)
         let successor = player.selectionTask
@@ -230,8 +369,22 @@ final class FoundationPlayerTests: XCTestCase {
         let retained = await resources.releases
         XCTAssertEqual(retained, [])
         await resources.succeed(1)
-        await successor?.value
-        await player.playTask?.value
+        guard
+            await requirePlayerTaskCompletion(
+                successor, name: "successor?",
+                cleanup: {
+                    player.stop()
+                    await resources.retireForTest()
+                })
+        else { return }
+        guard
+            await requirePlayerTaskCompletion(
+                player.playTask, name: "player.playTask?",
+                cleanup: {
+                    player.stop()
+                    await resources.retireForTest()
+                })
+        else { return }
         try await resources.waitForReleases(1)
         XCTAssertFalse(player.nativePlayer.currentItem === oldItem)
         player.stop()
@@ -256,11 +409,32 @@ final class FoundationPlayerTests: XCTestCase {
         let current = player.selectionTask
         try await resources.waitForCalls(2)
         await resources.succeed(1)
-        await current?.value
-        await player.playTask?.value
+        guard
+            await requirePlayerTaskCompletion(
+                current, name: "current?",
+                cleanup: {
+                    player.stop()
+                    await resources.retireForTest()
+                })
+        else { return }
+        guard
+            await requirePlayerTaskCompletion(
+                player.playTask, name: "player.playTask?",
+                cleanup: {
+                    player.stop()
+                    await resources.retireForTest()
+                })
+        else { return }
         let item = player.nativePlayer.currentItem
         await resources.succeed(0)
-        await obsolete?.value
+        guard
+            await requirePlayerTaskCompletion(
+                obsolete, name: "obsolete?",
+                cleanup: {
+                    player.stop()
+                    await resources.retireForTest()
+                })
+        else { return }
         try await resources.waitForReleases(1)
         XCTAssertTrue(player.nativePlayer.currentItem === item)
         let released = await resources.releases
@@ -282,8 +456,22 @@ final class FoundationPlayerTests: XCTestCase {
         let first = player?.selectionTask
         try await resources.waitForCalls(1)
         await resources.succeed(0)
-        await first?.value
-        await player?.playTask?.value
+        guard
+            await requirePlayerTaskCompletion(
+                first, name: "first?",
+                cleanup: {
+                    player?.stop()
+                    await resources.retireForTest()
+                })
+        else { return }
+        guard
+            await requirePlayerTaskCompletion(
+                player?.playTask, name: "player?.playTask?",
+                cleanup: {
+                    player?.stop()
+                    await resources.retireForTest()
+                })
+        else { return }
         player?.didReachEnd(try XCTUnwrap(player?.nativePlayer.currentItem))
         let pending = player?.selectionTask
         try await resources.waitForCalls(2)
@@ -292,7 +480,14 @@ final class FoundationPlayerTests: XCTestCase {
         XCTAssertNil(retired)
         try await resources.waitForReleases(1)
         await resources.succeed(1)
-        await pending?.value
+        guard
+            await requirePlayerTaskCompletion(
+                pending, name: "pending?",
+                cleanup: {
+                    player?.stop()
+                    await resources.retireForTest()
+                })
+        else { return }
         try await resources.waitForReleases(2)
         let released = await resources.releases
         XCTAssertEqual(released.sorted(), [0, 1])
@@ -309,8 +504,22 @@ final class FoundationPlayerTests: XCTestCase {
         let selection = player.selectionTask
         try await resources.waitForCalls(1)
         await resources.succeed(0)
-        await selection?.value
-        await player.playTask?.value
+        guard
+            await requirePlayerTaskCompletion(
+                selection, name: "selection?",
+                cleanup: {
+                    player.stop()
+                    await resources.retireForTest()
+                })
+        else { return }
+        guard
+            await requirePlayerTaskCompletion(
+                player.playTask, name: "player.playTask?",
+                cleanup: {
+                    player.stop()
+                    await resources.retireForTest()
+                })
+        else { return }
         let item = try XCTUnwrap(player.nativePlayer.currentItem)
         NotificationCenter.default.post(
             name: AVPlayerItem.failedToPlayToEndTimeNotification, object: item)
@@ -333,13 +542,34 @@ final class FoundationPlayerTests: XCTestCase {
         let first = player.selectionTask
         try await resources.waitForCalls(1)
         await resources.succeed(0)
-        await first?.value
-        await player.playTask?.value
+        guard
+            await requirePlayerTaskCompletion(
+                first, name: "first?",
+                cleanup: {
+                    player.stop()
+                    await resources.retireForTest()
+                })
+        else { return }
+        guard
+            await requirePlayerTaskCompletion(
+                player.playTask, name: "player.playTask?",
+                cleanup: {
+                    player.stop()
+                    await resources.retireForTest()
+                })
+        else { return }
         player.didReachEnd(try XCTUnwrap(player.nativePlayer.currentItem))
         let successor = player.selectionTask
         try await resources.waitForCalls(2)
         await resources.fail(1)
-        await successor?.value
+        guard
+            await requirePlayerTaskCompletion(
+                successor, name: "successor?",
+                cleanup: {
+                    player.stop()
+                    await resources.retireForTest()
+                })
+        else { return }
         try await resources.waitForReleases(1)
         XCTAssertEqual(player.state, .failed)
         XCTAssertNil(player.nativePlayer.currentItem)
@@ -357,7 +587,11 @@ final class FoundationPlayerTests: XCTestCase {
                 activateSession: { sessionCalls += 1 }, deactivateSession: { sessionCalls += 1 })
             player.setQueue([track, track], selectedIndex: 0)
             let selection = try XCTUnwrap(player.selectionTask)
-            await resolution.waitForCalls(1)
+            guard await resolution.waitForCalls(1) else {
+                player.stop()
+                XCTFail("resolution did not enter call 1 within 5 seconds")
+                return
+            }
             let native = player.nativePlayer
             let occurrence = player.selectedEntryID
             let queue = player.queue
@@ -385,13 +619,31 @@ final class FoundationPlayerTests: XCTestCase {
             let count = await resolution.count
             XCTAssertEqual(count, 1)
             await resolution.fail(0)
-            await selection.value
+            guard
+                await requirePlayerTaskCompletion(
+                    selection, name: "selection",
+                    cleanup: {
+                        player.stop()
+                        await resolution.retireForTest()
+                    })
+            else { return }
             player.setQueue([track], selectedIndex: 0)
             let replacement = try XCTUnwrap(player.selectionTask)
-            await resolution.waitForCalls(2)
+            guard await resolution.waitForCalls(2) else {
+                player.stop()
+                XCTFail("resolution did not enter call 2 within 5 seconds")
+                return
+            }
             XCTAssertEqual(player.playerVolume, 0.4, accuracy: 0.0001)
             await resolution.fail(1)
-            await replacement.value
+            guard
+                await requirePlayerTaskCompletion(
+                    replacement, name: "replacement",
+                    cleanup: {
+                        player.stop()
+                        await resolution.retireForTest()
+                    })
+            else { return }
         }
     #endif
 
@@ -462,19 +714,37 @@ final class FoundationPlayerTests: XCTestCase {
             _ = $1
         }
         player.setQueue([track], selectedIndex: 0)
-        await session.waitForCalls(1)
+        guard await session.waitForCalls(1) else {
+            player.stop()
+            XCTFail("session did not enter call 1 within 5 seconds")
+            return
+        }
         let activation = player.playTask
         XCTAssertTrue(protected)
         player.pause()
         XCTAssertFalse(protected)
         await session.finish(0)
-        await activation?.value
+        guard
+            await requirePlayerTaskCompletion(
+                activation, name: "activation?",
+                cleanup: {
+                    player.stop()
+                    await session.retireForTest()
+                })
+        else { return }
         XCTAssertFalse(protected)
         XCTAssertEqual(starts, 0)
         XCTAssertFalse(player.wantsPlayback)
         XCTAssertEqual(player.state, .paused)
         player.stop()
-        await player.sessionTask?.value
+        guard
+            await requirePlayerTaskCompletion(
+                player.sessionTask, name: "player.sessionTask?",
+                cleanup: {
+                    player.stop()
+                    await session.retireForTest()
+                })
+        else { return }
     }
 
     func testStopThenNewSelectionSerializesActivationDeactivationAndStart() async {
@@ -487,28 +757,58 @@ final class FoundationPlayerTests: XCTestCase {
             deactivateSession: { try await session.run("deactivate") },
             startPlayback: { _ in starts += 1 })
         player.setQueue([track], selectedIndex: 0)
-        await session.waitForCalls(1)
+        guard await session.waitForCalls(1) else {
+            player.stop()
+            XCTFail("session did not enter call 1 within 5 seconds")
+            return
+        }
         player.stop()
         player.setQueue([track], selectedIndex: 0)
         let selected = player.selectedEntryID
         await session.finish(0)
-        await session.waitForCalls(2)
+        guard await session.waitForCalls(2) else {
+            player.stop()
+            XCTFail("session did not enter call 2 within 5 seconds")
+            return
+        }
         let beforeDeactivation = await session.events
         XCTAssertEqual(beforeDeactivation, ["activate", "deactivate"])
         XCTAssertEqual(starts, 0)
         await session.finish(1)
-        await session.waitForCalls(3)
+        guard await session.waitForCalls(3) else {
+            player.stop()
+            XCTFail("session did not enter call 3 within 5 seconds")
+            return
+        }
         let activation = player.playTask
         await session.finish(2)
-        await activation?.value
+        guard
+            await requirePlayerTaskCompletion(
+                activation, name: "activation?",
+                cleanup: {
+                    player.stop()
+                    await session.retireForTest()
+                })
+        else { return }
         let events = await session.events
         XCTAssertEqual(events, ["activate", "deactivate", "activate"])
         XCTAssertEqual(starts, 1)
         XCTAssertEqual(player.selectedEntryID, selected)
         player.stop()
-        await session.waitForCalls(4)
+        guard await session.waitForCalls(4) else {
+            player.stop()
+            XCTFail("session did not enter call 4 within 5 seconds")
+            return
+        }
         await session.finish(3)
-        await player.sessionTask?.value
+        guard
+            await requirePlayerTaskCompletion(
+                player.sessionTask, name: "player.sessionTask?",
+                cleanup: {
+                    player.stop()
+                    await session.retireForTest()
+                })
+        else { return }
     }
 
     func testRetiringPlayerDeactivationPrecedesNewAccountOwnerActivation() async {
@@ -527,23 +827,54 @@ final class FoundationPlayerTests: XCTestCase {
             activateSession: { try await session.run("newActivate") }, deactivateSession: {},
             startPlayback: { _ in newStarts += 1 })
         oldPlayer.setQueue([track], selectedIndex: 0)
-        await session.waitForCalls(1)
+        guard await session.waitForCalls(1) else {
+            oldPlayer.stop()
+            newPlayer.stop()
+            XCTFail("session did not enter call 1 within 5 seconds")
+            return
+        }
         oldPlayer.stop()
         newPlayer.setQueue([track], selectedIndex: 0)
         await session.finish(0)
-        await session.waitForCalls(2)
+        guard await session.waitForCalls(2) else {
+            oldPlayer.stop()
+            newPlayer.stop()
+            XCTFail("session did not enter call 2 within 5 seconds")
+            return
+        }
         XCTAssertEqual(newStarts, 0)
         await session.finish(1)
-        await session.waitForCalls(3)
+        guard await session.waitForCalls(3) else {
+            oldPlayer.stop()
+            newPlayer.stop()
+            XCTFail("session did not enter call 3 within 5 seconds")
+            return
+        }
         let activation = newPlayer.playTask
         await session.finish(2)
-        await activation?.value
+        guard
+            await requirePlayerTaskCompletion(
+                activation, name: "activation?",
+                cleanup: {
+                    oldPlayer.stop()
+                    newPlayer.stop()
+                    await session.retireForTest()
+                })
+        else { return }
         let events = await session.events
         XCTAssertEqual(events, ["oldActivate", "oldDeactivate", "newActivate"])
         XCTAssertEqual(oldStarts, 0)
         XCTAssertEqual(newStarts, 1)
         newPlayer.stop()
-        await newPlayer.sessionTask?.value
+        guard
+            await requirePlayerTaskCompletion(
+                newPlayer.sessionTask, name: "newPlayer.sessionTask?",
+                cleanup: {
+                    oldPlayer.stop()
+                    newPlayer.stop()
+                    await session.retireForTest()
+                })
+        else { return }
     }
 
     func testNativeRateDiagnosticDropsUnrecognizedPayloads() {
@@ -611,15 +942,33 @@ final class FoundationPlayerTests: XCTestCase {
                 activateSession: { try await session.run("activate") }, deactivateSession: {},
                 startPlayback: { _ in starts += 1 })
             player.setQueue([track], selectedIndex: 0)
-            await session.waitForCalls(1)
+            guard await session.waitForCalls(1) else {
+                player.stop()
+                XCTFail("session did not enter call 1 within 5 seconds")
+                return
+            }
             let activation = player.playTask
             player.didDeactivateAudioSession(source: .system)
             await session.finish(0)
-            await activation?.value
+            guard
+                await requirePlayerTaskCompletion(
+                    activation, name: "activation?",
+                    cleanup: {
+                        player.stop()
+                        await session.retireForTest()
+                    })
+            else { return }
             XCTAssertEqual(starts, 0)
             XCTAssertFalse(player.wantsPlayback)
             player.stop()
-            await player.sessionTask?.value
+            guard
+                await requirePlayerTaskCompletion(
+                    player.sessionTask, name: "player.sessionTask?",
+                    cleanup: {
+                        player.stop()
+                        await session.retireForTest()
+                    })
+            else { return }
         }
     #endif
 
@@ -632,9 +981,18 @@ final class FoundationPlayerTests: XCTestCase {
                 startPlayback: { _ in probe.starts += 1 })
         }
 
-        private func finishSessionSelection(_ player: FoundationPlayer) async {
-            await player.selectionTask?.value
-            await player.playTask?.value
+        private func finishSessionSelection(_ player: FoundationPlayer) async -> Bool {
+            guard
+                await requirePlayerTaskCompletion(
+                    player.selectionTask, name: "session selection", cleanup: { player.stop() }
+                )
+            else { return false }
+            guard
+                await requirePlayerTaskCompletion(
+                    player.playTask, name: "session activation", cleanup: { player.stop() }
+                )
+            else { return false }
+            return true
         }
 
         func testTemporarySessionDenialResumesSameItemOnceAndRetainsProtection() async throws {
@@ -643,7 +1001,7 @@ final class FoundationPlayerTests: XCTestCase {
             var protected = false
             player.observePlaybackProtection { value, _ in protected = value }
             player.setQueue([track], selectedIndex: 0)
-            await finishSessionSelection(player)
+            guard await finishSessionSelection(player) else { return }
             let item = try XCTUnwrap(player.nativePlayer.currentItem)
             let occurrence = player.selectedEntryID
             XCTAssertEqual(player.state, .waiting)
@@ -666,12 +1024,12 @@ final class FoundationPlayerTests: XCTestCase {
                 let probe = SessionDenialProbe()
                 let player = sessionDenialPlayer(probe)
                 player.setQueue([track, track], selectedIndex: 0)
-                await finishSessionSelection(player)
+                guard await finishSessionSelection(player) else { return }
                 if action == 0 { player.pause() }
                 if action == 1 { player.stop() }
                 if action == 2 {
                     player.next()
-                    await finishSessionSelection(player)
+                    guard await finishSessionSelection(player) else { return }
                 }
                 let calls = probe.calls
                 let starts = probe.starts
@@ -690,7 +1048,7 @@ final class FoundationPlayerTests: XCTestCase {
             probe.denials = 2
             let player = sessionDenialPlayer(probe)
             player.setQueue([track], selectedIndex: 0)
-            await finishSessionSelection(player)
+            guard await finishSessionSelection(player) else { return }
             player.didReceiveSessionResumption(.shouldResume)
             await player.playTask?.value
             XCTAssertEqual(player.state, .failed)
@@ -699,7 +1057,7 @@ final class FoundationPlayerTests: XCTestCase {
             XCTAssertEqual(probe.calls, 2)
             XCTAssertEqual(probe.starts, 0)
             player.play()
-            await finishSessionSelection(player)
+            guard await finishSessionSelection(player) else { return }
             XCTAssertEqual(probe.calls, 3)
             XCTAssertEqual(probe.starts, 1)
             player.stop()
@@ -718,7 +1076,7 @@ final class FoundationPlayerTests: XCTestCase {
             // A prior recommendation cannot authorize this album's later start.
             player.didReceiveSessionResumption(.shouldResume)
             player.setQueue([track, track, track], selectedIndex: 0)
-            await finishSessionSelection(player)
+            guard await finishSessionSelection(player) else { return }
             let item = try XCTUnwrap(player.nativePlayer.currentItem)
             let occurrence = player.selectedEntryID
             XCTAssertEqual(player.state, .waiting)
@@ -748,12 +1106,12 @@ final class FoundationPlayerTests: XCTestCase {
                 probe.denials = 2
                 let player = sessionDenialPlayer(probe)
                 player.setQueue([track, track], selectedIndex: 0)
-                await finishSessionSelection(player)
+                guard await finishSessionSelection(player) else { return }
                 if action == 0 { player.pause() }
                 if action == 1 { player.stop() }
                 if action == 2 {
                     player.next()
-                    await finishSessionSelection(player)
+                    guard await finishSessionSelection(player) else { return }
                     player.pause()
                 }
                 if action == 3 { player.didReceiveSessionResumption(.shouldNotResume) }
@@ -790,7 +1148,7 @@ final class FoundationPlayerTests: XCTestCase {
                 probe.error = error
                 let player = sessionDenialPlayer(probe)
                 player.setQueue([track], selectedIndex: 0)
-                await finishSessionSelection(player)
+                guard await finishSessionSelection(player) else { return }
                 XCTAssertEqual(player.state, .failed)
                 player.didReceiveSessionResumption(.shouldResume)
                 await player.playTask?.value
@@ -805,7 +1163,7 @@ final class FoundationPlayerTests: XCTestCase {
             let player = sessionDenialPlayer(probe)
             player.didReceiveSessionResumption(.shouldResume)
             player.setQueue([track], selectedIndex: 0)
-            await finishSessionSelection(player)
+            guard await finishSessionSelection(player) else { return }
             XCTAssertEqual(player.state, .waiting)
             XCTAssertEqual(probe.calls, 1)
             player.didReceiveSessionResumption(.shouldNotResume)
@@ -824,7 +1182,7 @@ final class FoundationPlayerTests: XCTestCase {
                 player?.didReceiveSessionResumption(.shouldResume)
             }
             player.setQueue([track], selectedIndex: 0)
-            await finishSessionSelection(player)
+            guard await finishSessionSelection(player) else { return }
             await player.playTask?.value
             XCTAssertEqual(probe.calls, 2)
             XCTAssertEqual(probe.starts, 1)
@@ -850,18 +1208,36 @@ final class FoundationPlayerTests: XCTestCase {
                         }
                     }, deactivateSession: {}, startPlayback: { _ in starts += 1 })
                 player.setQueue([track, track], selectedIndex: 0)
-                await activation.waitForCalls(1)
+                guard await activation.waitForCalls(1) else {
+                    player.stop()
+                    XCTFail("activation did not enter call 1 within 5 seconds")
+                    return
+                }
                 let obsolete = player.playTask
                 if replace { player.next() } else { player.pause() }
                 player.didReceiveSessionResumption(.shouldResume)
                 await activation.finish(0)
-                await obsolete?.value
-                await finishSessionSelection(player)
+                guard
+                    await requirePlayerTaskCompletion(
+                        obsolete, name: "obsolete?",
+                        cleanup: {
+                            player.stop()
+                            await activation.retireForTest()
+                        })
+                else { return }
+                guard await finishSessionSelection(player) else { return }
                 XCTAssertNotEqual(player.state, .failed)
                 XCTAssertEqual(starts, replace ? 1 : 0)
                 XCTAssertEqual(calls, replace ? 2 : 1)
                 player.stop()
-                await player.sessionTask?.value
+                guard
+                    await requirePlayerTaskCompletion(
+                        player.sessionTask, name: "player.sessionTask?",
+                        cleanup: {
+                            player.stop()
+                            await activation.retireForTest()
+                        })
+                else { return }
             }
         }
 
@@ -869,7 +1245,7 @@ final class FoundationPlayerTests: XCTestCase {
             let probe = SessionDenialProbe()
             let player = sessionDenialPlayer(probe)
             player.setQueue([track], selectedIndex: 0)
-            await finishSessionSelection(player)
+            guard await finishSessionSelection(player) else { return }
             let item = try XCTUnwrap(player.nativePlayer.currentItem)
             let failed = expectation(description: "Native item failed")
             let subscription = player.$state.filter { $0 == .failed }.first().sink { _ in
@@ -913,19 +1289,41 @@ final class FoundationPlayerTests: XCTestCase {
             activateSession: { try await session.run("activate") }, deactivateSession: {},
             startPlayback: { _ in starts += 1 })
         player.setQueue([track, track], selectedIndex: 0)
-        await session.waitForCalls(1)
+        guard await session.waitForCalls(1) else {
+            player.stop()
+            XCTFail("session did not enter call 1 within 5 seconds")
+            return
+        }
         player.next()
         await session.finish(0, failing: true)
-        await session.waitForCalls(2)
+        guard await session.waitForCalls(2) else {
+            player.stop()
+            XCTFail("session did not enter call 2 within 5 seconds")
+            return
+        }
         XCTAssertNotEqual(player.state, .failed)
         let activation = player.playTask
         await session.finish(1, failing: true)
-        await activation?.value
+        guard
+            await requirePlayerTaskCompletion(
+                activation, name: "activation?",
+                cleanup: {
+                    player.stop()
+                    await session.retireForTest()
+                })
+        else { return }
         XCTAssertEqual(player.state, .failed)
         XCTAssertFalse(player.wantsPlayback)
         XCTAssertEqual(starts, 0)
         player.stop()
-        await player.sessionTask?.value
+        guard
+            await requirePlayerTaskCompletion(
+                player.sessionTask, name: "player.sessionTask?",
+                cleanup: {
+                    player.stop()
+                    await session.retireForTest()
+                })
+        else { return }
     }
 
     private func player(_ resolver: PlayerResolutionProbe) -> FoundationPlayer {
@@ -1032,12 +1430,29 @@ final class FoundationPlayerTests: XCTestCase {
             defer { player.stop() }
             player.setQueue([track], selectedIndex: 0)
             let selection = player.selectionTask
-            await resolver.waitForCalls(1)
+            guard await resolver.waitForCalls(1) else {
+                XCTFail("resolver did not enter call 1 within 5 seconds")
+                return
+            }
 
             player.didDeactivateAudioSession(source: .system)
             await resolver.succeed(0)
-            await selection?.value
-            await player.playTask?.value
+            guard
+                await requirePlayerTaskCompletion(
+                    selection, name: "selection?",
+                    cleanup: {
+                        player.stop()
+                        await resolver.retireForTest()
+                    })
+            else { return }
+            guard
+                await requirePlayerTaskCompletion(
+                    player.playTask, name: "player.playTask?",
+                    cleanup: {
+                        player.stop()
+                        await resolver.retireForTest()
+                    })
+            else { return }
 
             XCTAssertFalse(player.wantsPlayback)
             XCTAssertEqual(player.state, .paused)
@@ -1051,21 +1466,55 @@ final class FoundationPlayerTests: XCTestCase {
             defer { player.stop() }
             player.setQueue([track], selectedIndex: 0)
             let oldSelection = player.selectionTask
-            await resolver.waitForCalls(1)
+            guard await resolver.waitForCalls(1) else {
+                XCTFail("resolver did not enter call 1 within 5 seconds")
+                return
+            }
             player.stop()
             player.setQueue([track], selectedIndex: 0)
             let newSelection = player.selectionTask
-            await resolver.waitForCalls(2)
+            guard await resolver.waitForCalls(2) else {
+                XCTFail("resolver did not enter call 2 within 5 seconds")
+                return
+            }
 
             player.didDeactivateAudioSession(source: .app)
             XCTAssertTrue(player.wantsPlayback)
             await resolver.succeed(0)
-            await oldSelection?.value
-            await player.playTask?.value
+            guard
+                await requirePlayerTaskCompletion(
+                    oldSelection, name: "oldSelection?",
+                    cleanup: {
+                        player.stop()
+                        await resolver.retireForTest()
+                    })
+            else { return }
+            guard
+                await requirePlayerTaskCompletion(
+                    player.playTask, name: "player.playTask?",
+                    cleanup: {
+                        player.stop()
+                        await resolver.retireForTest()
+                    })
+            else { return }
             XCTAssertNil(player.nativePlayer.currentItem)
             await resolver.succeed(1)
-            await newSelection?.value
-            await player.playTask?.value
+            guard
+                await requirePlayerTaskCompletion(
+                    newSelection, name: "newSelection?",
+                    cleanup: {
+                        player.stop()
+                        await resolver.retireForTest()
+                    })
+            else { return }
+            guard
+                await requirePlayerTaskCompletion(
+                    player.playTask, name: "player.playTask?",
+                    cleanup: {
+                        player.stop()
+                        await resolver.retireForTest()
+                    })
+            else { return }
             let item = try XCTUnwrap(player.nativePlayer.currentItem)
             player.didDeactivateAudioSession(source: .app)
             XCTAssertTrue(player.wantsPlayback)
@@ -1101,10 +1550,27 @@ final class FoundationPlayerTests: XCTestCase {
         defer { player.stop() }
         player.setQueue([track], selectedIndex: 0)
         let selection = player.selectionTask
-        await resolver.waitForCalls(1)
+        guard await resolver.waitForCalls(1) else {
+            XCTFail("resolver did not enter call 1 within 5 seconds")
+            return
+        }
         await resolver.succeed(0)
-        await selection?.value
-        await player.playTask?.value
+        guard
+            await requirePlayerTaskCompletion(
+                selection, name: "selection?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
+        guard
+            await requirePlayerTaskCompletion(
+                player.playTask, name: "player.playTask?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
         let item = try XCTUnwrap(player.nativePlayer.currentItem)
         let occurrence = player.selectedEntryID
         let ready = XCTestExpectation(description: "Real item becomes ready without native start")
@@ -1127,13 +1593,27 @@ final class FoundationPlayerTests: XCTestCase {
         }
         defer { subscription.cancel() }
         player.togglePlayback()
-        await player.playTask?.value
+        guard
+            await requirePlayerTaskCompletion(
+                player.playTask, name: "player.playTask?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
         XCTAssertGreaterThan(player.nativePlayer.rate, 0)
         // Delivered before any queued KVO task runs: a newer waiting/playing request wins.
         Self.postRateFailure(player)
         XCTAssertTrue(player.wantsPlayback)
         player.play()
-        await player.playTask?.value
+        guard
+            await requirePlayerTaskCompletion(
+                player.playTask, name: "player.playTask?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
         XCTAssertEqual(starts, 2)
         XCTAssertEqual(activations, 2)
         let playback = await XCTWaiter.fulfillment(of: [playing], timeout: 10)
@@ -1161,10 +1641,16 @@ final class FoundationPlayerTests: XCTestCase {
         defer { player.stop() }
         player.setQueue([track, track], selectedIndex: 0)
         let oldSelection = player.selectionTask
-        await resolver.waitForCalls(1)
+        guard await resolver.waitForCalls(1) else {
+            XCTFail("resolver did not enter call 1 within 5 seconds")
+            return
+        }
         player.next()
         let replacement = player.selectionTask
-        await resolver.waitForCalls(2)
+        guard await resolver.waitForCalls(2) else {
+            XCTFail("resolver did not enter call 2 within 5 seconds")
+            return
+        }
         Self.postRateFailure(player)
         XCTAssertTrue(player.wantsPlayback)
         XCTAssertEqual(player.state, .loading)
@@ -1173,12 +1659,40 @@ final class FoundationPlayerTests: XCTestCase {
         player.pause()
         Self.postRateFailure(player)
         await resolver.succeed(0)
-        await oldSelection?.value
-        await player.playTask?.value
+        guard
+            await requirePlayerTaskCompletion(
+                oldSelection, name: "oldSelection?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
+        guard
+            await requirePlayerTaskCompletion(
+                player.playTask, name: "player.playTask?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
         XCTAssertNil(player.nativePlayer.currentItem)
         await resolver.succeed(1)
-        await replacement?.value
-        await player.playTask?.value
+        guard
+            await requirePlayerTaskCompletion(
+                replacement, name: "replacement?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
+        guard
+            await requirePlayerTaskCompletion(
+                player.playTask, name: "player.playTask?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
         XCTAssertFalse(player.wantsPlayback)
         XCTAssertEqual(player.state, .paused)
         XCTAssertEqual(starts, 0)
@@ -1203,17 +1717,41 @@ final class FoundationPlayerTests: XCTestCase {
         defer { player.stop() }
         player.setQueue([track], selectedIndex: 0)
         let selection = player.selectionTask
-        await resolver.waitForCalls(1)
+        guard await resolver.waitForCalls(1) else {
+            XCTFail("resolver did not enter call 1 within 5 seconds")
+            return
+        }
         await resolver.succeed(0)
-        await selection?.value
-        await player.playTask?.value
+        guard
+            await requirePlayerTaskCompletion(
+                selection, name: "selection?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
+        guard
+            await requirePlayerTaskCompletion(
+                player.playTask, name: "player.playTask?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
         let item = try XCTUnwrap(player.nativePlayer.currentItem)
         await Task.yield()
         XCTAssertFalse(player.wantsPlayback)
         XCTAssertEqual(player.state, .paused)
         XCTAssertEqual(starts, 1)
         player.play()
-        await player.playTask?.value
+        guard
+            await requirePlayerTaskCompletion(
+                player.playTask, name: "player.playTask?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
         XCTAssertEqual(starts, 2)
         XCTAssertFalse(player.wantsPlayback)
         XCTAssertTrue(player.nativePlayer.currentItem === item)
@@ -1262,17 +1800,53 @@ final class FoundationPlayerTests: XCTestCase {
         let player = player(resolver)
         player.setQueue([track, track], selectedIndex: 0)
         let obsolete = player.selectionTask
-        await resolver.waitForCalls(1)
+        guard await resolver.waitForCalls(1) else {
+            player.stop()
+            XCTFail("resolver did not enter call 1 within 5 seconds")
+            return
+        }
         player.select(player.queue[1].id)
         let current = player.selectionTask
-        await resolver.waitForCalls(2)
+        guard await resolver.waitForCalls(2) else {
+            player.stop()
+            XCTFail("resolver did not enter call 2 within 5 seconds")
+            return
+        }
         await resolver.succeed(1)
-        await current?.value
-        await player.playTask?.value
+        guard
+            await requirePlayerTaskCompletion(
+                current, name: "current?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
+        guard
+            await requirePlayerTaskCompletion(
+                player.playTask, name: "player.playTask?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
         let installed = player.nativePlayer.currentItem
         await resolver.succeed(0)  // Deliberately ignores task cancellation.
-        await obsolete?.value
-        await player.playTask?.value
+        guard
+            await requirePlayerTaskCompletion(
+                obsolete, name: "obsolete?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
+        guard
+            await requirePlayerTaskCompletion(
+                player.playTask, name: "player.playTask?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
         XCTAssertNotNil(installed)
         XCTAssertTrue(player.nativePlayer.currentItem === installed)
         XCTAssertEqual(player.selectedEntryID, player.queue[1].id)
@@ -1286,18 +1860,54 @@ final class FoundationPlayerTests: XCTestCase {
         player.setQueue([track], selectedIndex: 0)
         let obsolete = player.selectionTask
         let oldID = player.selectedEntryID
-        await resolver.waitForCalls(1)
+        guard await resolver.waitForCalls(1) else {
+            player.stop()
+            XCTFail("resolver did not enter call 1 within 5 seconds")
+            return
+        }
         player.setQueue([track], selectedIndex: 0)
         let current = player.selectionTask
-        await resolver.waitForCalls(2)
+        guard await resolver.waitForCalls(2) else {
+            player.stop()
+            XCTFail("resolver did not enter call 2 within 5 seconds")
+            return
+        }
         XCTAssertNotEqual(player.selectedEntryID, oldID)
         await resolver.succeed(0)
-        await obsolete?.value
-        await player.playTask?.value
+        guard
+            await requirePlayerTaskCompletion(
+                obsolete, name: "obsolete?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
+        guard
+            await requirePlayerTaskCompletion(
+                player.playTask, name: "player.playTask?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
         XCTAssertNil(player.nativePlayer.currentItem)
         await resolver.succeed(1)
-        await current?.value
-        await player.playTask?.value
+        guard
+            await requirePlayerTaskCompletion(
+                current, name: "current?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
+        guard
+            await requirePlayerTaskCompletion(
+                player.playTask, name: "player.playTask?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
         XCTAssertNotNil(player.nativePlayer.currentItem)
         player.stop()
     }
@@ -1307,30 +1917,84 @@ final class FoundationPlayerTests: XCTestCase {
         let player = player(resolver)
         player.setQueue([track, track], selectedIndex: 0)
         let first = player.selectionTask
-        await resolver.waitForCalls(1)
+        guard await resolver.waitForCalls(1) else {
+            player.stop()
+            XCTFail("resolver did not enter call 1 within 5 seconds")
+            return
+        }
         XCTAssertNotEqual(player.queue[0].id, player.queue[1].id)
         XCTAssertEqual(player.queue[0].item, player.queue[1].item)
         player.previous()
         await resolver.succeed(0)
-        await first?.value
-        await player.playTask?.value
+        guard
+            await requirePlayerTaskCompletion(
+                first, name: "first?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
+        guard
+            await requirePlayerTaskCompletion(
+                player.playTask, name: "player.playTask?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
         player.next()
         let second = player.selectionTask
-        await resolver.waitForCalls(2)
+        guard await resolver.waitForCalls(2) else {
+            player.stop()
+            XCTFail("resolver did not enter call 2 within 5 seconds")
+            return
+        }
         XCTAssertNil(player.nativePlayer.currentItem)  // Old item gone before resolution.
         player.next()
         await resolver.succeed(1)
-        await second?.value
-        await player.playTask?.value
+        guard
+            await requirePlayerTaskCompletion(
+                second, name: "second?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
+        guard
+            await requirePlayerTaskCompletion(
+                player.playTask, name: "player.playTask?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
         let count = await resolver.count
         XCTAssertEqual(count, 2)
         XCTAssertEqual(player.selectedEntryID, player.queue[1].id)
         player.previous()
         let previous = player.selectionTask
-        await resolver.waitForCalls(3)
+        guard await resolver.waitForCalls(3) else {
+            player.stop()
+            XCTFail("resolver did not enter call 3 within 5 seconds")
+            return
+        }
         await resolver.succeed(2)
-        await previous?.value
-        await player.playTask?.value
+        guard
+            await requirePlayerTaskCompletion(
+                previous, name: "previous?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
+        guard
+            await requirePlayerTaskCompletion(
+                player.playTask, name: "player.playTask?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
         XCTAssertEqual(player.selectedEntryID, player.queue[0].id)
         player.stop()
     }
@@ -1340,11 +2004,29 @@ final class FoundationPlayerTests: XCTestCase {
         let player = player(resolver)
         player.setQueue([track], selectedIndex: 0)
         let obsolete = player.selectionTask
-        await resolver.waitForCalls(1)
+        guard await resolver.waitForCalls(1) else {
+            player.stop()
+            XCTFail("resolver did not enter call 1 within 5 seconds")
+            return
+        }
         player.stop()
         await resolver.succeed(0)
-        await obsolete?.value
-        await player.playTask?.value
+        guard
+            await requirePlayerTaskCompletion(
+                obsolete, name: "obsolete?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
+        guard
+            await requirePlayerTaskCompletion(
+                player.playTask, name: "player.playTask?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
         XCTAssertEqual(player.state, .idle)
         XCTAssertEqual(player.selectedEntryID, player.queue[0].id)
         XCTAssertNil(player.nativePlayer.currentItem)
@@ -1362,23 +2044,59 @@ final class FoundationPlayerTests: XCTestCase {
         player.setQueue([track], selectedIndex: 0)
         let obsolete = player.selectionTask
         let selected = player.selectedEntryID
-        await resolver.waitForCalls(1)
+        guard await resolver.waitForCalls(1) else {
+            player.stop()
+            XCTFail("resolver did not enter call 1 within 5 seconds")
+            return
+        }
         player.stop()
         XCTAssertFalse(player.wantsPlayback)
         XCTAssertEqual(player.selectedEntryID, selected)
         player.togglePlayback()
         await player.playTask?.value
         let restarted = player.selectionTask
-        await resolver.waitForCalls(2)
+        guard await resolver.waitForCalls(2) else {
+            player.stop()
+            XCTFail("resolver did not enter call 2 within 5 seconds")
+            return
+        }
         XCTAssertTrue(player.wantsPlayback)
         XCTAssertEqual(player.state, .loading)
         await resolver.succeed(0)
-        await obsolete?.value
-        await player.playTask?.value
+        guard
+            await requirePlayerTaskCompletion(
+                obsolete, name: "obsolete?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
+        guard
+            await requirePlayerTaskCompletion(
+                player.playTask, name: "player.playTask?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
         XCTAssertNil(player.nativePlayer.currentItem)
         await resolver.succeed(1)
-        await restarted?.value
-        await player.playTask?.value
+        guard
+            await requirePlayerTaskCompletion(
+                restarted, name: "restarted?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
+        guard
+            await requirePlayerTaskCompletion(
+                player.playTask, name: "player.playTask?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
         XCTAssertNotNil(player.nativePlayer.currentItem)
         XCTAssertEqual(player.selectedEntryID, selected)
         let count = await resolver.count
@@ -1391,7 +2109,11 @@ final class FoundationPlayerTests: XCTestCase {
         let player = player(resolver)
         player.setQueue([track], selectedIndex: 0)
         let selection = player.selectionTask
-        await resolver.waitForCalls(1)
+        guard await resolver.waitForCalls(1) else {
+            player.stop()
+            XCTFail("resolver did not enter call 1 within 5 seconds")
+            return
+        }
         XCTAssertTrue(player.wantsPlayback)
         XCTAssertEqual(player.state, .loading)
         player.togglePlayback()
@@ -1399,8 +2121,22 @@ final class FoundationPlayerTests: XCTestCase {
         XCTAssertFalse(player.wantsPlayback)
         XCTAssertEqual(player.state, .paused)
         await resolver.succeed(0)
-        await selection?.value
-        await player.playTask?.value
+        guard
+            await requirePlayerTaskCompletion(
+                selection, name: "selection?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
+        guard
+            await requirePlayerTaskCompletion(
+                player.playTask, name: "player.playTask?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
         XCTAssertFalse(player.wantsPlayback)
         XCTAssertEqual(player.state, .paused)
         player.stop()
@@ -1411,19 +2147,62 @@ final class FoundationPlayerTests: XCTestCase {
         let player = player(resolver)
         player.setQueue([track], selectedIndex: 0)
         let failed = player.selectionTask
-        await resolver.waitForCalls(1)
+        guard await resolver.waitForCalls(1) else {
+            player.stop()
+            XCTFail("resolver did not enter call 1 within 5 seconds")
+            return
+        }
         await resolver.fail(0)
-        await failed?.value
-        await player.playTask?.value
+        guard
+            await requirePlayerTaskCompletion(
+                failed, name: "failed?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
+        guard
+            await requirePlayerTaskCompletion(
+                player.playTask, name: "player.playTask?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
         XCTAssertEqual(player.state, .failed)
         XCTAssertNotNil(player.errorMessage)
         player.togglePlayback()  // Explicit Play re-resolves a failed selection.
-        await player.playTask?.value
+        guard
+            await requirePlayerTaskCompletion(
+                player.playTask, name: "player.playTask?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
         let recovery = player.selectionTask
-        await resolver.waitForCalls(2)
+        guard await resolver.waitForCalls(2) else {
+            player.stop()
+            XCTFail("resolver did not enter call 2 within 5 seconds")
+            return
+        }
         await resolver.succeed(1)
-        await recovery?.value
-        await player.playTask?.value
+        guard
+            await requirePlayerTaskCompletion(
+                recovery, name: "recovery?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
+        guard
+            await requirePlayerTaskCompletion(
+                player.playTask, name: "player.playTask?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
         XCTAssertNil(player.errorMessage)
         XCTAssertNotNil(player.nativePlayer.currentItem)
         XCTAssertNotEqual(player.state, .playing)
@@ -1440,27 +2219,75 @@ final class FoundationPlayerTests: XCTestCase {
         defer { player.stop() }
         player.setQueue([track, track], selectedIndex: 0)
         let first = player.selectionTask
-        await resolver.waitForCalls(1)
+        guard await resolver.waitForCalls(1) else {
+            XCTFail("resolver did not enter call 1 within 5 seconds")
+            return
+        }
         await resolver.succeed(0)
-        await first?.value
-        await player.playTask?.value
+        guard
+            await requirePlayerTaskCompletion(
+                first, name: "first?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
+        guard
+            await requirePlayerTaskCompletion(
+                player.playTask, name: "player.playTask?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
         let oldItem = try XCTUnwrap(player.nativePlayer.currentItem)
         XCTAssertEqual(player.nativePlayer.actionAtItemEnd, .none)
         player.didReachEnd(oldItem)
         let successor = player.selectionTask
-        await resolver.waitForCalls(2)
+        guard await resolver.waitForCalls(2) else {
+            XCTFail("resolver did not enter call 2 within 5 seconds")
+            return
+        }
         XCTAssertTrue(player.nativePlayer.currentItem === oldItem)
         let startCount = starts
         player.play()
-        await player.playTask?.value
+        guard
+            await requirePlayerTaskCompletion(
+                player.playTask, name: "player.playTask?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
         player.play()
-        await player.playTask?.value
+        guard
+            await requirePlayerTaskCompletion(
+                player.playTask, name: "player.playTask?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
         player.didReachEnd(oldItem)
         XCTAssertEqual(starts, startCount)
         player.pause()
         await resolver.succeed(1)
-        await successor?.value
-        await player.playTask?.value
+        guard
+            await requirePlayerTaskCompletion(
+                successor, name: "successor?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
+        guard
+            await requirePlayerTaskCompletion(
+                player.playTask, name: "player.playTask?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
         XCTAssertFalse(player.nativePlayer.currentItem === oldItem)
         XCTAssertFalse(player.wantsPlayback)
         XCTAssertEqual(starts, startCount)
@@ -1475,32 +2302,108 @@ final class FoundationPlayerTests: XCTestCase {
         player.setQueue([track, track], selectedIndex: 0)
         let firstID = player.queue[0].id
         let first = player.selectionTask
-        await resolver.waitForCalls(1)
+        guard await resolver.waitForCalls(1) else {
+            XCTFail("resolver did not enter call 1 within 5 seconds")
+            return
+        }
         await resolver.succeed(0)
-        await first?.value
-        await player.playTask?.value
+        guard
+            await requirePlayerTaskCompletion(
+                first, name: "first?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
+        guard
+            await requirePlayerTaskCompletion(
+                player.playTask, name: "player.playTask?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
         let oldItem = try XCTUnwrap(player.nativePlayer.currentItem)
         player.didReachEnd(oldItem)
         let successor = player.selectionTask
-        await resolver.waitForCalls(2)
+        guard await resolver.waitForCalls(2) else {
+            XCTFail("resolver did not enter call 2 within 5 seconds")
+            return
+        }
+        #if DEBUG
+            let failedEndProcessed = XCTestExpectation(
+                description: "old failed-end event processed")
+            let failedEndToken = UUID()
+            player.failedEndProcessedForTesting = { item, token in
+                if item === oldItem && token == failedEndToken { failedEndProcessed.fulfill() }
+            }
+            defer { player.failedEndProcessedForTesting = nil }
+        #endif
         Self.postRateFailure(player)
-        NotificationCenter.default.post(
-            name: AVPlayerItem.failedToPlayToEndTimeNotification, object: oldItem)
-        await Task.yield()
+        #if DEBUG
+            NotificationCenter.default.post(
+                name: AVPlayerItem.failedToPlayToEndTimeNotification, object: oldItem,
+                userInfo: [FoundationPlayer.failedEndTestTokenKey: failedEndToken])
+        #else
+            NotificationCenter.default.post(
+                name: AVPlayerItem.failedToPlayToEndTimeNotification, object: oldItem)
+        #endif
+        #if DEBUG
+            guard await XCTWaiter.fulfillment(of: [failedEndProcessed], timeout: 5) == .completed
+            else {
+                player.stop()
+                await resolver.retireForTest()
+                XCTFail("Old failed-end event did not finish processing within 5 seconds")
+                return
+            }
+        #else
+            await Task.yield()
+        #endif
         XCTAssertTrue(player.wantsPlayback)
         XCTAssertEqual(player.state, .loading)
         player.previous()
         let replacement = player.selectionTask
-        await resolver.waitForCalls(3)
+        guard await resolver.waitForCalls(3) else {
+            XCTFail("resolver did not enter call 3 within 5 seconds")
+            return
+        }
         XCTAssertEqual(player.selectedEntryID, firstID)
         XCTAssertNil(player.nativePlayer.currentItem)
         await resolver.succeed(1)
-        await successor?.value
-        await player.playTask?.value
+        guard
+            await requirePlayerTaskCompletion(
+                successor, name: "successor?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
+        guard
+            await requirePlayerTaskCompletion(
+                player.playTask, name: "player.playTask?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
         XCTAssertNil(player.nativePlayer.currentItem)
         await resolver.succeed(2)
-        await replacement?.value
-        await player.playTask?.value
+        guard
+            await requirePlayerTaskCompletion(
+                replacement, name: "replacement?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
+        guard
+            await requirePlayerTaskCompletion(
+                player.playTask, name: "player.playTask?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
         XCTAssertNotNil(player.nativePlayer.currentItem)
         XCTAssertEqual(player.selectedEntryID, firstID)
     }
@@ -1510,17 +2413,53 @@ final class FoundationPlayerTests: XCTestCase {
         let player = player(resolver)
         player.setQueue([track, track], selectedIndex: 0)
         let first = player.selectionTask
-        await resolver.waitForCalls(1)
+        guard await resolver.waitForCalls(1) else {
+            player.stop()
+            XCTFail("resolver did not enter call 1 within 5 seconds")
+            return
+        }
         await resolver.succeed(0)
-        await first?.value
-        await player.playTask?.value
+        guard
+            await requirePlayerTaskCompletion(
+                first, name: "first?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
+        guard
+            await requirePlayerTaskCompletion(
+                player.playTask, name: "player.playTask?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
         player.didReachEnd(try XCTUnwrap(player.nativePlayer.currentItem))
         let successor = player.selectionTask
-        await resolver.waitForCalls(2)
+        guard await resolver.waitForCalls(2) else {
+            player.stop()
+            XCTFail("resolver did not enter call 2 within 5 seconds")
+            return
+        }
         player.stop()
         await resolver.succeed(1)
-        await successor?.value
-        await player.playTask?.value
+        guard
+            await requirePlayerTaskCompletion(
+                successor, name: "successor?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
+        guard
+            await requirePlayerTaskCompletion(
+                player.playTask, name: "player.playTask?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
         XCTAssertNil(player.nativePlayer.currentItem)
         XCTAssertEqual(player.state, .idle)
         XCTAssertFalse(player.wantsPlayback)
@@ -1532,16 +2471,50 @@ final class FoundationPlayerTests: XCTestCase {
         defer { player.stop() }
         player.setQueue([track, track], selectedIndex: 0)
         let first = player.selectionTask
-        await resolver.waitForCalls(1)
+        guard await resolver.waitForCalls(1) else {
+            XCTFail("resolver did not enter call 1 within 5 seconds")
+            return
+        }
         await resolver.succeed(0)
-        await first?.value
-        await player.playTask?.value
+        guard
+            await requirePlayerTaskCompletion(
+                first, name: "first?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
+        guard
+            await requirePlayerTaskCompletion(
+                player.playTask, name: "player.playTask?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
         player.didReachEnd(try XCTUnwrap(player.nativePlayer.currentItem))
         let successor = player.selectionTask
-        await resolver.waitForCalls(2)
+        guard await resolver.waitForCalls(2) else {
+            XCTFail("resolver did not enter call 2 within 5 seconds")
+            return
+        }
         await resolver.fail(1)
-        await successor?.value
-        await player.playTask?.value
+        guard
+            await requirePlayerTaskCompletion(
+                successor, name: "successor?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
+        guard
+            await requirePlayerTaskCompletion(
+                player.playTask, name: "player.playTask?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
         XCTAssertNil(player.nativePlayer.currentItem)
         XCTAssertEqual(player.state, .failed)
         XCTAssertFalse(player.wantsPlayback)
@@ -1552,18 +2525,54 @@ final class FoundationPlayerTests: XCTestCase {
         let player = player(resolver)
         player.setQueue([track, track], selectedIndex: 0)
         let first = player.selectionTask
-        await resolver.waitForCalls(1)
+        guard await resolver.waitForCalls(1) else {
+            player.stop()
+            XCTFail("resolver did not enter call 1 within 5 seconds")
+            return
+        }
         await resolver.succeed(0)
-        await first?.value
-        await player.playTask?.value
+        guard
+            await requirePlayerTaskCompletion(
+                first, name: "first?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
+        guard
+            await requirePlayerTaskCompletion(
+                player.playTask, name: "player.playTask?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
         let oldItem = try XCTUnwrap(player.nativePlayer.currentItem)
         player.didReachEnd(oldItem)
         let second = player.selectionTask
-        await resolver.waitForCalls(2)
+        guard await resolver.waitForCalls(2) else {
+            player.stop()
+            XCTFail("resolver did not enter call 2 within 5 seconds")
+            return
+        }
         player.didReachEnd(oldItem)
         await resolver.succeed(1)
-        await second?.value
-        await player.playTask?.value
+        guard
+            await requirePlayerTaskCompletion(
+                second, name: "second?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
+        guard
+            await requirePlayerTaskCompletion(
+                player.playTask, name: "player.playTask?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
         let lastItem = try XCTUnwrap(player.nativePlayer.currentItem)
         player.didReachEnd(lastItem)
         XCTAssertEqual(player.state, .ended)
@@ -1713,7 +2722,11 @@ final class FoundationPlayerTests: XCTestCase {
         let player = player(resolver)
         player.setQueue([track], selectedIndex: 0)
         let pending = player.selectionTask
-        await resolver.waitForCalls(1)
+        guard await resolver.waitForCalls(1) else {
+            player.stop()
+            XCTFail("resolver did not enter call 1 within 5 seconds")
+            return
+        }
         let original = player.persistedQueue
         let selected = player.selectedEntryID
         player.setQueue([track], selectedIndex: 1)
@@ -1731,7 +2744,14 @@ final class FoundationPlayerTests: XCTestCase {
         XCTAssertNil(player.selectedEntryID)
         XCTAssertEqual(player.state, .idle)
         await resolver.succeed(0)
-        await pending?.value
+        guard
+            await requirePlayerTaskCompletion(
+                pending, name: "pending?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
         XCTAssertNil(player.nativePlayer.currentItem)
         player.stop()
     }
@@ -1774,7 +2794,15 @@ final class FoundationPlayerTests: XCTestCase {
         XCTAssertTrue(restored.shuffleEnabled)
         withExtendedLifetime(subscription) {}
         await resolver.fail(0)
-        await selection?.value
+        guard
+            await requirePlayerTaskCompletion(
+                selection, name: "selection?",
+                cleanup: {
+                    player.stop()
+                    restored.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
         player.stop()
         restored.stop()
     }
@@ -1809,7 +2837,14 @@ final class FoundationPlayerTests: XCTestCase {
         XCTAssertEqual(player.queue, edited)
         XCTAssertEqual(Set(player.queue.map(\.id)).count, 5)
         await resolver.fail(0)
-        await selection?.value
+        guard
+            await requirePlayerTaskCompletion(
+                selection, name: "selection?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
     }
 
     func testShuffleKeepsCurrentHistoryAndDisablingKeepsExplicitOrder() async {
@@ -1878,8 +2913,24 @@ final class FoundationPlayerTests: XCTestCase {
         let selection = restored.selectionTask
         try await resolver.waitForCalls(1, timeout: .seconds(5))
         await resolver.succeed(0)
-        await selection?.value
-        await restored.playTask?.value
+        guard
+            await requirePlayerTaskCompletion(
+                selection, name: "selection?",
+                cleanup: {
+                    source.stop()
+                    restored.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
+        guard
+            await requirePlayerTaskCompletion(
+                restored.playTask, name: "restored.playTask?",
+                cleanup: {
+                    source.stop()
+                    restored.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
         XCTAssertEqual(restored.selectedEntryID, snapshot.selectedEntryID)
         XCTAssertEqual(restored.elapsed, 0)
         XCTAssertEqual(activationCalls, 1)
@@ -1946,7 +2997,14 @@ final class FoundationPlayerTests: XCTestCase {
         XCTAssertEqual(player.state, .loading)
         XCTAssertFalse(selection?.isCancelled ?? true)
         await resolver.fail(0)
-        await selection?.value
+        guard
+            await requirePlayerTaskCompletion(
+                selection, name: "selection?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
     }
 
     func testSessionStorageFailuresAreTruthful() async throws {
@@ -1970,23 +3028,65 @@ final class FoundationPlayerTests: XCTestCase {
         let initial = player.selectionTask
         try await resolver.waitForCalls(1, timeout: .seconds(5))
         await resolver.succeed(0)
-        await initial?.value
-        await player.playTask?.value
+        guard
+            await requirePlayerTaskCompletion(
+                initial, name: "initial?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
+        guard
+            await requirePlayerTaskCompletion(
+                player.playTask, name: "player.playTask?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
         player.setRepeat(.one)
         player.didReachEnd(try XCTUnwrap(player.nativePlayer.currentItem))
         let repeated = player.selectionTask
         try await resolver.waitForCalls(2, timeout: .seconds(5))
         XCTAssertEqual(player.selectedEntryID, first)
         await resolver.succeed(1)
-        await repeated?.value
-        await player.playTask?.value
+        guard
+            await requirePlayerTaskCompletion(
+                repeated, name: "repeated?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
+        guard
+            await requirePlayerTaskCompletion(
+                player.playTask, name: "player.playTask?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
         player.next()
         let second = player.selectionTask
         try await resolver.waitForCalls(3, timeout: .seconds(5))
         XCTAssertNotEqual(player.selectedEntryID, first)
         await resolver.succeed(2)
-        await second?.value
-        await player.playTask?.value
+        guard
+            await requirePlayerTaskCompletion(
+                second, name: "second?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
+        guard
+            await requirePlayerTaskCompletion(
+                player.playTask, name: "player.playTask?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
         player.setRepeat(.all)
         XCTAssertTrue(player.canAdvance)
         player.didReachEnd(try XCTUnwrap(player.nativePlayer.currentItem))
@@ -1994,8 +3094,22 @@ final class FoundationPlayerTests: XCTestCase {
         try await resolver.waitForCalls(4, timeout: .seconds(5))
         XCTAssertEqual(player.selectedEntryID, first)
         await resolver.succeed(3)
-        await wrapped?.value
-        await player.playTask?.value
+        guard
+            await requirePlayerTaskCompletion(
+                wrapped, name: "wrapped?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
+        guard
+            await requirePlayerTaskCompletion(
+                player.playTask, name: "player.playTask?",
+                cleanup: {
+                    player.stop()
+                    await resolver.retireForTest()
+                })
+        else { return }
         player.stop()
     }
 
@@ -2003,34 +3117,53 @@ final class FoundationPlayerTests: XCTestCase {
 
 private actor PlayerResolutionProbe {
     private var pending: [Int: CheckedContinuation<URL, Error>] = [:]
-    private var waiters: [(Int, CheckedContinuation<Void, Never>)] = []
+    private var retired = false
     private(set) var count = 0
 
     func resolve() async throws -> URL {
-        try await withCheckedThrowingContinuation { continuation in
+        guard !retired else { throw CancellationError() }
+        return try await withCheckedThrowingContinuation { continuation in
             pending[count] = continuation
             count += 1
-            let ready = waiters.filter { $0.0 <= count }
-            waiters.removeAll { $0.0 <= count }
-            for (_, waiter) in ready { waiter.resume() }
         }
     }
 
-    func waitForCalls(_ target: Int) async {
-        if count >= target { return }
-        await withCheckedContinuation { waiters.append((target, $0)) }
+    func waitForCalls(_ target: Int) async -> Bool {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while count < target && !Task.isCancelled && ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        guard count >= target && !Task.isCancelled else {
+            retireHeld()
+            return false
+        }
+        return true
     }
 
     private struct WaitTimeout: Error {}
 
+    private func retireHeld() {
+        retired = true
+        let held = Array(pending.values)
+        pending.removeAll()
+        for continuation in held { continuation.resume(throwing: CancellationError()) }
+    }
+
     func waitForCalls(_ target: Int, timeout: Duration) async throws {
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: timeout)
-        while count < target {
-            guard clock.now < deadline else { throw WaitTimeout() }
-            try await Task.sleep(for: .milliseconds(10))
+        do {
+            while count < target {
+                guard clock.now < deadline else { throw WaitTimeout() }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+        } catch {
+            retireHeld()
+            throw error
         }
     }
+
+    func retireForTest() { retireHeld() }
 
     func succeed(_ index: Int) {
         // Factory ignores this local URL; tests never load a file or remote asset.
@@ -2044,22 +3177,34 @@ private actor PlayerResolutionProbe {
 
 private actor SessionOperationProbe {
     private var pending: [Int: CheckedContinuation<Void, Error>] = [:]
-    private var waiters: [(Int, CheckedContinuation<Void, Never>)] = []
+    private var retired = false
     private(set) var events: [String] = []
 
     func run(_ event: String) async throws {
+        guard !retired else { throw CancellationError() }
         try await withCheckedThrowingContinuation { continuation in
             pending[events.count] = continuation
             events.append(event)
-            let ready = waiters.filter { $0.0 <= events.count }
-            waiters.removeAll { $0.0 <= events.count }
-            for (_, waiter) in ready { waiter.resume() }
         }
     }
 
-    func waitForCalls(_ count: Int) async {
-        if events.count >= count { return }
-        await withCheckedContinuation { waiters.append((count, $0)) }
+    func waitForCalls(_ count: Int) async -> Bool {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while events.count < count && !Task.isCancelled && ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        guard events.count >= count && !Task.isCancelled else {
+            retireForTest()
+            return false
+        }
+        return true
+    }
+
+    func retireForTest() {
+        retired = true
+        let held = Array(pending.values)
+        pending.removeAll()
+        for continuation in held { continuation.resume(throwing: CancellationError()) }
     }
 
     func finish(_ index: Int, failing: Bool = false) {
@@ -2133,10 +3278,12 @@ enum FoundationTestTones {
 /// A deliberately cancellation-insensitive resolver exercises late lease ownership.
 private actor PlaybackResourceProbe {
     private var calls = 0
+    private var retired = false
     private var pending: [Int: CheckedContinuation<FoundationPlaybackResource, Error>] = [:]
     private(set) var releases: [Int] = []
 
     func resolve() async throws -> FoundationPlaybackResource {
+        guard !retired else { throw CancellationError() }
         let index = calls
         calls += 1
         return try await withCheckedThrowingContinuation { pending[index] = $0 }
@@ -2155,21 +3302,40 @@ private actor PlaybackResourceProbe {
 
     private func recordRelease(_ index: Int) { releases.append(index) }
 
+    private func retireHeld() {
+        retired = true
+        let held = Array(pending.values)
+        pending.removeAll()
+        for continuation in held { continuation.resume(throwing: CancellationError()) }
+    }
+
+    func retireForTest() { retireHeld() }
+
     func waitForCalls(_ count: Int) async throws {
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: .seconds(5))
-        while calls < count {
-            guard clock.now < deadline else { throw URLError(.timedOut) }
-            try await Task.sleep(for: .milliseconds(10))
+        do {
+            while calls < count {
+                guard clock.now < deadline else { throw URLError(.timedOut) }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+        } catch {
+            retireHeld()
+            throw error
         }
     }
 
     func waitForReleases(_ count: Int) async throws {
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: .seconds(5))
-        while releases.count < count {
-            guard clock.now < deadline else { throw URLError(.timedOut) }
-            try await Task.sleep(for: .milliseconds(10))
+        do {
+            while releases.count < count {
+                guard clock.now < deadline else { throw URLError(.timedOut) }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+        } catch {
+            retireHeld()
+            throw error
         }
     }
 }
