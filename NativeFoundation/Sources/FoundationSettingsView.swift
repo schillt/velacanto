@@ -20,8 +20,12 @@ struct FoundationSettingsView: View {
     var library: (any FoundationLibrary)? = nil
     var librarySelection: FoundationMusicLibrarySelection? = nil
     var signInAgain: (() -> Void)? = nil
+    var pinSync: FoundationPinSync? = nil
+    var primaryGenres: FoundationPrimaryGenresModel? = nil
+    var refreshLibrary: (() -> Void)? = nil
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var preferences: FoundationPlaybackPreferences
+    @EnvironmentObject private var connectivity: FoundationConnectivity
     #if DEBUG
         @State private var diagnosticSnapshot: FoundationJournalSnapshot?
     #endif
@@ -51,7 +55,30 @@ struct FoundationSettingsView: View {
                 #if os(macOS)
                     accountSections
                 #endif
+                Section {
+                    Toggle(
+                        isOn: Binding(
+                            get: { preferences.offlineMode },
+                            set: { preferences.setOfflineMode($0) }
+                        )
+                    ) {
+                        Label("Offline Mode", systemImage: "icloud.slash")
+                    }
+                    .accessibilityIdentifier("settings-offline-mode")
+                } header: {
+                    Text("Connection")
+                } footer: {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(
+                            "Browse and play downloaded music without connecting to your music server."
+                        )
+                        FoundationOfflinePlaylistPreparationStatus()
+                    }
+                }
                 librarySection
+                if let pinSync {
+                    FoundationPinSyncSection(sync: pinSync).disabled(connectivity.localOnly)
+                }
                 Section("Storage") {
                     NavigationLink {
                         FoundationDownloadManagementView()
@@ -98,6 +125,18 @@ struct FoundationSettingsView: View {
                 }
                 Section {
                     NavigationLink {
+                        FoundationFeatureIntroductionView(sync: pinSync, replay: true)
+                    } label: {
+                        Label("What’s New", systemImage: "sparkles")
+                    }
+                    .accessibilityIdentifier("settings-feature-introduction")
+                    NavigationLink {
+                        FoundationUserGuideView()
+                    } label: {
+                        Label("User Guide", systemImage: "book.closed")
+                    }
+                    .accessibilityIdentifier("settings-user-guide")
+                    NavigationLink {
                         FoundationLicensesView()
                     } label: {
                         Label("Open-source licenses", systemImage: "doc.text")
@@ -107,6 +146,7 @@ struct FoundationSettingsView: View {
             .formStyle(.grouped)
             .accessibilityIdentifier("foundation-profile-form")
             .navigationTitle("Profile & Settings")
+            .foundationOfflineBrowsingBanner()
             #if os(iOS)
                 .navigationBarTitleDisplayMode(.inline)
             #endif
@@ -176,8 +216,16 @@ struct FoundationSettingsView: View {
 
     private var librarySection: some View {
         Section("Library") {
+            NavigationLink {
+                FoundationLibrarySettingsView(
+                    primaryGenres: primaryGenres, refreshLibrary: refreshLibrary)
+            } label: {
+                Label("Library Settings", systemImage: "books.vertical")
+            }
+            .accessibilityIdentifier("settings-library-options")
             if let librarySelection {
                 FoundationMusicLibrarySettingsRow(selection: librarySelection)
+                    .disabled(connectivity.localOnly)
             } else {
                 Text("All music available to this Jellyfin account")
                 Text("Library selection is unavailable for this connection.")
@@ -199,6 +247,7 @@ struct FoundationSettingsView: View {
         Form { accountSections }
             .formStyle(.grouped)
             .navigationTitle("Server & Account")
+            .foundationOfflineBrowsingBanner()
             #if os(iOS)
                 .navigationBarTitleDisplayMode(.inline)
             #endif
@@ -207,6 +256,83 @@ struct FoundationSettingsView: View {
 }
 
 /// The account owns committed scope; this destination owns only an uncommitted draft.
+private struct FoundationLibrarySettingsView: View {
+    let primaryGenres: FoundationPrimaryGenresModel?
+    let refreshLibrary: (() -> Void)?
+    @EnvironmentObject private var connectivity: FoundationConnectivity
+    @State private var requestedRefresh = false
+
+    var body: some View {
+        Form {
+            Section {
+                Button("Refresh Library", systemImage: "arrow.clockwise") {
+                    refreshLibrary?()
+                    requestedRefresh = true
+                }
+                .disabled(connectivity.localOnly || refreshLibrary == nil)
+                .accessibilityIdentifier("settings-refresh-library")
+                if requestedRefresh {
+                    Text("Your library will refresh as you browse.").foregroundStyle(.secondary)
+                }
+            }
+            if let primaryGenres {
+                FoundationGenreSettingsSection(genres: primaryGenres)
+            } else {
+                Section("Genres") {
+                    Text("Genre preparation is unavailable for this music source.")
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .navigationTitle("Library Settings")
+        .foundationOfflineBrowsingBanner()
+    }
+}
+
+private struct FoundationGenreSettingsSection: View {
+    @ObservedObject var genres: FoundationPrimaryGenresModel
+    @EnvironmentObject private var connectivity: FoundationConnectivity
+
+    var body: some View {
+        Section("Genres") {
+            Button("Rebuild Genres", systemImage: "arrow.clockwise") { genres.start() }
+                .disabled(connectivity.localOnly || !genres.isSupported || genres.isBuilding)
+                .accessibilityIdentifier("settings-rebuild-genres")
+            if genres.isBuilding {
+                ProgressView(
+                    "Preparing genres…", value: Double(genres.processedSongs),
+                    total: Double(max(1, genres.totalSongs ?? 1)))
+                Text("\(genres.processedSongs) songs checked").font(.caption).foregroundStyle(
+                    .secondary)
+                Button("Cancel") { genres.cancel() }
+                    .accessibilityIdentifier("settings-cancel-genres")
+            } else if let record = genres.record {
+                LabeledContent(
+                    "Last Updated",
+                    value:
+                        record.snapshot.completedAt.formatted(date: .abbreviated, time: .shortened))
+            } else {
+                Text(
+                    connectivity.localOnly
+                        ? "Genres will be prepared when you are online."
+                        : "Genres are prepared automatically for your library."
+                )
+                .foregroundStyle(.secondary)
+            }
+            if let error = genres.errorMessage { Text(error).foregroundStyle(.secondary) }
+            #if DEBUG
+                if let report = genres.preparationDiagnostic {
+                    Text("Genre preparation diagnostic (observed): " + report.settingsSummary)
+                        .font(.caption).foregroundStyle(.secondary)
+                        .accessibilityIdentifier("settings-genre-preparation-diagnostic")
+                }
+            #endif
+            if let error = genres.offlineErrorMessage { Text(error).foregroundStyle(.secondary) }
+        }
+    }
+}
+
 private struct FoundationMusicLibrarySettingsRow: View {
     @ObservedObject var selection: FoundationMusicLibrarySelection
 
@@ -310,6 +436,7 @@ private struct FoundationMusicLibrarySelectionView: View {
             if isApplying { ProgressView("Saving library selection…") }
         }
         .navigationTitle("Music Libraries")
+        .foundationOfflineBrowsingBanner()
         #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
         #endif
@@ -444,6 +571,7 @@ private struct FoundationCachedMediaView: View {
         }
         .formStyle(.grouped)
         .navigationTitle("Cached Media")
+        .foundationOfflineBrowsingBanner()
         #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
         #endif
@@ -521,6 +649,7 @@ private struct FoundationLicensesView: View {
                                 .frame(maxWidth: .infinity, alignment: .leading).padding()
                         }
                         .navigationTitle(notice.title)
+                        .foundationOfflineBrowsingBanner()
                         #if os(iOS)
                             .navigationBarTitleDisplayMode(.inline)
                         #endif
@@ -540,6 +669,7 @@ private struct FoundationLicensesView: View {
             }
         }
         .navigationTitle("Open-source licenses")
+        .foundationOfflineBrowsingBanner()
         #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
         #endif
@@ -590,6 +720,7 @@ private struct FoundationLicensesView: View {
             NavigationStack {
                 FoundationJournalTextView(text: text)
                     .navigationTitle("Diagnostic snapshot")
+                    .foundationOfflineBrowsingBanner()
                     #if os(iOS)
                         .navigationBarTitleDisplayMode(.inline)
                     #endif
@@ -730,7 +861,10 @@ private struct FoundationLicensesView: View {
                             model.signOut()
                         },
                         library: library, librarySelection: model.librarySelection,
-                        signInAgain: { model.settingsShowsSignIn = true }
+                        signInAgain: { model.settingsShowsSignIn = true },
+                        pinSync: model.actions?.pinSync,
+                        primaryGenres: model.primaryGenres,
+                        refreshLibrary: { model.actions?.requestLibraryRefresh() }
                     )
                     .environmentObject(model.playbackPreferences)
                     .environmentObject(downloads)

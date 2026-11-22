@@ -9,10 +9,15 @@ struct FoundationLibraryIndexView: View {
     let player: FoundationPlayer
     let isActive: Bool
     var refreshToken = 0
+    var showsContent = true
+    /// Downloads uses the same presentation with a strictly local data source, even online.
+    var downloadedOnly = false
+    @EnvironmentObject private var primaryGenres: FoundationPrimaryGenresModel
     @EnvironmentObject private var downloads: FoundationDownloads
     @EnvironmentObject private var connectivity: FoundationConnectivity
     @EnvironmentObject private var actions: FoundationLibraryActions
     @Environment(\.foundationAddToPlaylist) private var addToPlaylist
+    @Environment(\.foundationManagePlaylist) private var managePlaylist
     @Environment(\.foundationRequestDownloadRemoval) private var requestRemoval
     @Environment(\.foundationReduceMotion) private var reduceMotion
     @Environment(\.foundationReduceTransparency) private var reduceTransparency
@@ -60,28 +65,30 @@ struct FoundationLibraryIndexView: View {
         }
     }
 
+    private var usesLocalCatalog: Bool { downloadedOnly || connectivity.localOnly }
+
     private var localItems: [FoundationItem] {
+        let candidates: [FoundationItem]
         switch kind {
-        case .album: return downloads.downloadedAlbums
-        case .artist: return downloads.downloadedArtists
-        case .track: return downloads.downloadedSongs
-        case .playlist: return downloads.downloadedPlaylists
+        case .album: candidates = downloads.downloadedAlbums
+        case .artist: candidates = downloads.downloadedArtists
+        case .track: candidates = downloads.downloadedSongs
+        case .playlist: candidates = downloads.downloadedPlaylists
         case .genre:
-            let references = (downloads.downloadedSongs + downloads.downloadedAlbums)
-                .flatMap(\.genres)
-            var seen: Set<String> = []
-            return references.filter { seen.insert($0.id).inserted }.map {
-                FoundationItem(
-                    id: $0.id, title: $0.title, subtitle: "", kind: .genre, duration: nil)
-            }.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+            return primaryGenres.items(localOnly: true)
         }
+        return downloads.itemsWithDownloadedMusic(in: candidates)
     }
 
-    var body: some View {
+    @ViewBuilder var body: some View {
+        if showsContent { indexBody }
+    }
+
+    private var indexBody: some View {
         // The task key and its closure must describe the same rendered activation.
         // Reading live @State after onAppear could start work under a superseded key.
         let active = isActive && isVisible
-        let allowsNetwork = !connectivity.localOnly
+        let allowsNetwork = !usesLocalCatalog
         let requestRevision = revision
         return GeometryReader { geometry in
             FoundationCollectionTransitionReader { transition in
@@ -134,6 +141,7 @@ struct FoundationLibraryIndexView: View {
             if item == nil { usesNativeAlphabet = wantsNativeAlphabet }
         }
         .environment(\.foundationCollectionOperationOwner, collectionOperationOwner)
+        .foundationCollectionOutcomePresentation(owner: collectionOperationOwner)
         .onDisappear {
             actions.cancelQueueAdditionOwned(by: collectionOperationOwner)
             isVisible = false
@@ -147,6 +155,10 @@ struct FoundationLibraryIndexView: View {
             selectedLetter = nil
             awaitingLetterAnchor = false
         }
+        .foundationLibraryRefresh(
+            revision: actions.libraryRefreshRevision,
+            active: isActive && isVisible && (!connectivity.localOnly || downloadedOnly)
+        ) { requestVisibleRefresh() }
         .onChange(of: refreshToken) { _, _ in
             selectedLetter = nil
             awaitingLetterAnchor = false
@@ -155,7 +167,7 @@ struct FoundationLibraryIndexView: View {
             revision += 1
         }
         .onChange(of: connectivity.successfulRetryRevision) { _, _ in
-            guard isActive, isVisible else { return }
+            guard isActive, isVisible, !usesLocalCatalog else { return }
             selectedLetter = nil
             awaitingLetterAnchor = false
             displayed.request(.refresh)
@@ -177,7 +189,7 @@ struct FoundationLibraryIndexView: View {
             anchorRevision += 1
         }
         .onReceive(downloads.objectWillChange) {
-            if connectivity.localOnly { revision += 1 }
+            if usesLocalCatalog { revision += 1 }
         }
         .onChange(of: library.catalogScopeID) { _, _ in
             letterModel.clearRetainedData()
@@ -220,46 +232,62 @@ struct FoundationLibraryIndexView: View {
 
     private func indexList(placeholderRows: Int) -> some View {
         let active = isActive && isVisible
-        let allowsNetwork = !connectivity.localOnly
+        let allowsNetwork = !usesLocalCatalog
         let pageModel = displayed
         return ScrollViewReader { proxy in
             List {
-                if connectivity.hasConnectionIssue || displayed.hasConnectionIssue {
+                if !usesLocalCatalog,
+                    connectivity.hasConnectionIssue || displayed.hasConnectionIssue
+                {
                     FoundationOfflineNotice()
                 }
                 if displayed.items.isEmpty, !displayed.loaded, displayed.errorMessage == nil,
-                    !connectivity.localOnly
+                    !usesLocalCatalog
                 {
                     FoundationLoadingPlaceholder(rowCount: placeholderRows, rowSpacing: 24)
                         .listRowSeparator(.hidden)
                 } else {
-                    ForEach(Array(displayed.items.enumerated()), id: \.offset) { index, item in
-                        FoundationLibraryItemRow(
-                            item: item, library: library, isActive: isActive && isVisible,
-                            open: { openedItem = item },
-                            play: kind == .track ? { play(index) } : nil,
-                            player: player, showsTrackArtwork: true,
-                            navigate: { openedItem = $0 }
-                        )
-                        .foundationLibraryListRow()
-                        .id("\(kind):\(item.id)")
+                    if kind == .genre {
+                        ForEach(displayed.items, id: \.genreIdentity) { genre in
+                            FoundationGenrePresentation(
+                                genre: genre, library: library, player: player,
+                                isActive: isActive && isVisible, context: .libraryRow,
+                                open: { openedItem = genre }, navigate: { openedItem = $0 }
+                            )
+                            .foundationLibraryListRow()
+                            .id(genre.genreIdentity)
+                        }
+                    } else {
+                        ForEach(Array(displayed.items.enumerated()), id: \.offset) { index, item in
+                            FoundationLibraryItemRow(
+                                item: item, library: library, isActive: isActive && isVisible,
+                                open: { openedItem = item },
+                                play: kind == .track ? { play(index) } : nil,
+                                player: player, showsTrackArtwork: true,
+                                navigate: { openedItem = $0 }
+                            )
+                            .foundationLibraryListRow()
+                            .id("\(kind):\(item.id)")
+                        }
                     }
                 }
                 if displayed.loaded, displayed.items.isEmpty {
                     Text(term.isEmpty ? "No \(title.lowercased()) found." : "No results found.")
                         .foregroundStyle(.secondary)
                 }
-                if let error = displayed.errorMessage, !displayed.hasConnectionIssue {
+                if let error = displayed.errorMessage, !displayed.hasConnectionIssue,
+                    !usesLocalCatalog
+                {
                     VStack(alignment: .leading, spacing: 8) {
                         Text(error).foregroundStyle(.red)
                         Button("Retry") {
                             awaitingLetterAnchor = selectedLetter != nil
                             displayed.request(displayed.retryRequest)
                             revision += 1
-                        }.disabled(connectivity.localOnly)
+                        }.disabled(usesLocalCatalog)
                     }
                 }
-                if displayed.nextStartIndex != nil, !connectivity.localOnly {
+                if displayed.nextStartIndex != nil, !usesLocalCatalog {
                     VStack(spacing: 0) {
                         if displayed.isLoading {
                             ProgressView("Loading more…")
@@ -277,17 +305,19 @@ struct FoundationLibraryIndexView: View {
                     }
                 }
             }
+            .foundationBottomChromeListClearance()
+            #if DEBUG && os(iOS) && targetEnvironment(simulator)
+                .environment(\.foundationChromeUIContext, "index-\(kind)")
+                .environment(\.foundationChromeUIItemCount, displayed.items.count)
+                .environment(\.foundationChromeUIHasMore, displayed.nextStartIndex != nil)
+            #endif
             .listStyle(.plain)
             #if os(macOS)
                 .padding(.horizontal, FoundationMacLayout.catalogHorizontalInset)
             #endif
             .accessibilityIdentifier("library-index-\(kind)")
             .refreshable {
-                guard isActive, isVisible, !connectivity.localOnly else { return }
-                selectedLetter = nil
-                awaitingLetterAnchor = false
-                displayed.request(.refresh)
-                revision += 1
+                requestVisibleRefresh()
             }
             .onChange(of: anchorRevision) { _, _ in
                 if let anchorRowID { proxy.scrollTo(anchorRowID, anchor: .top) }
@@ -331,15 +361,17 @@ struct FoundationLibraryIndexView: View {
 
     private func collectionGrid(viewport: CGSize) -> some View {
         let active = isActive && isVisible
-        let allowsNetwork = !connectivity.localOnly
+        let allowsNetwork = !usesLocalCatalog
         let pageModel = displayed
         return ScrollView {
             LazyVStack(alignment: .leading, spacing: 20) {
-                if connectivity.hasConnectionIssue || displayed.hasConnectionIssue {
+                if !usesLocalCatalog,
+                    connectivity.hasConnectionIssue || displayed.hasConnectionIssue
+                {
                     FoundationOfflineNotice()
                 }
                 if displayed.items.isEmpty, !displayed.loaded, displayed.errorMessage == nil,
-                    !connectivity.localOnly
+                    !usesLocalCatalog
                 {
                     FoundationLoadingPlaceholder(
                         layout: .albumGrid,
@@ -357,16 +389,18 @@ struct FoundationLibraryIndexView: View {
                     Text(term.isEmpty ? "No \(title.lowercased()) found." : "No results found.")
                         .foregroundStyle(.secondary)
                 }
-                if let error = displayed.errorMessage, !displayed.hasConnectionIssue {
+                if let error = displayed.errorMessage, !displayed.hasConnectionIssue,
+                    !usesLocalCatalog
+                {
                     VStack(alignment: .leading, spacing: 8) {
                         Text(error).foregroundStyle(.red)
                         Button("Retry") {
                             displayed.request(displayed.retryRequest)
                             revision += 1
-                        }.disabled(connectivity.localOnly)
+                        }.disabled(usesLocalCatalog)
                     }
                 }
-                if displayed.nextStartIndex != nil, !connectivity.localOnly {
+                if displayed.nextStartIndex != nil, !usesLocalCatalog {
                     VStack(spacing: 0) {
                         if displayed.isLoading {
                             ProgressView("Loading more…")
@@ -383,12 +417,17 @@ struct FoundationLibraryIndexView: View {
                     }
                 }
             }.padding(.horizontal, catalogHorizontalInset).padding(.vertical, 12)
+                .foundationBottomChromeEndPadding()
         }
+        .foundationBottomChromeScrollClearance()
+        #if DEBUG && os(iOS) && targetEnvironment(simulator)
+            .environment(\.foundationChromeUIContext, "index-\(kind)")
+            .environment(\.foundationChromeUIItemCount, displayed.items.count)
+            .environment(\.foundationChromeUIHasMore, displayed.nextStartIndex != nil)
+        #endif
         .accessibilityIdentifier("library-index-\(kind)")
         .refreshable {
-            guard isActive, isVisible, !connectivity.localOnly else { return }
-            displayed.request(.refresh)
-            revision += 1
+            requestVisibleRefresh()
         }
     }
 
@@ -408,6 +447,12 @@ struct FoundationLibraryIndexView: View {
     }
 
     private func loadPage(_ offset: Int) async throws -> FoundationPage {
+        // A policy change can arrive after an earlier task captured online demand.
+        guard !usesLocalCatalog else { throw CancellationError() }
+        if kind == .genre {
+            return primaryGenres.page(
+                query: term, startIndex: offset, localOnly: usesLocalCatalog)
+        }
         if !term.isEmpty {
             return try await library.search(query: term, kind: kind, startIndex: offset, limit: 50)
         }
@@ -421,8 +466,18 @@ struct FoundationLibraryIndexView: View {
             }
             return try await library.songs(startIndex: offset)
         case .playlist: return try await library.playlists(startIndex: offset)
-        case .genre: return try await library.genres(startIndex: offset)
+        case .genre:
+            return primaryGenres.page(startIndex: offset, localOnly: usesLocalCatalog)
         }
+    }
+
+    private func requestVisibleRefresh() {
+        guard isActive, isVisible else { return }
+        selectedLetter = nil
+        awaitingLetterAnchor = false
+        if !usesLocalCatalog { displayed.request(.refresh) }
+        // Local indexes reinstall only their downloaded snapshot through the existing task.
+        revision += 1
     }
 
     private func offlineSortKey(_ item: FoundationItem) -> String {
@@ -432,7 +487,7 @@ struct FoundationLibraryIndexView: View {
 
     private func chooseLetter(_ letter: String) {
         guard FoundationAlphabetAnchors.titles.contains(letter) else { return }
-        if connectivity.localOnly {
+        if usesLocalCatalog {
             let items = displayed.items
             guard
                 let index = items.firstIndex(where: {
@@ -478,13 +533,13 @@ struct FoundationLibraryIndexView: View {
             }
             return VStack(spacing: 0) {
                 FoundationLibraryAlphabetIndex(
-                    contextID: library.catalogScopeID,
+                    contextID: library.catalogScopeID + (downloadedOnly ? ":downloads" : ""),
                     sections: sections,
                     columnCount: isCoverGrid
                         ? gridColumnCount(width: viewport.width, nativeIndex: true) : 1,
                     isCoverGrid: isCoverGrid,
                     rowHeight: rowHeight,
-                    allowsDemand: isActive && isVisible && !connectivity.localOnly
+                    allowsDemand: isActive && isVisible && !usesLocalCatalog
                         && displayed.errorMessage == nil,
                     isRefreshing: displayed.isLoading,
                     nextPageIdentity: displayed.nextStartIndex.map { "\($0):\(revision)" },
@@ -492,11 +547,7 @@ struct FoundationLibraryIndexView: View {
                     anchorRevision: anchorRevision,
                     onDemandNextPage: { demandRevision += 1 },
                     onRefresh: {
-                        guard isActive, isVisible, !connectivity.localOnly else { return }
-                        selectedLetter = nil
-                        awaitingLetterAnchor = false
-                        displayed.request(.refresh)
-                        revision += 1
+                        requestVisibleRefresh()
                     }
                 ) { entry in
                     Group {
@@ -530,6 +581,7 @@ struct FoundationLibraryIndexView: View {
                         library.catalogScopeID + ":" + entry.id
                     )
                     .environment(\.foundationAddToPlaylist, addToPlaylist)
+                    .environment(\.foundationManagePlaylist, managePlaylist)
                     .environment(\.foundationRequestDownloadRemoval, requestRemoval)
                     .environment(\.foundationShowsDownloadBadges, showsBadges)
                     .environment(\.foundationReduceMotion, reduceMotion)
@@ -542,7 +594,7 @@ struct FoundationLibraryIndexView: View {
                 }
                 .overlay(alignment: .topLeading) {
                     if displayed.items.isEmpty, !displayed.loaded, displayed.errorMessage == nil,
-                        !connectivity.localOnly
+                        !usesLocalCatalog
                     {
                         FoundationLoadingPlaceholder(
                             layout: isCoverGrid ? .albumGrid : .rows,
@@ -557,14 +609,14 @@ struct FoundationLibraryIndexView: View {
                 }
                 .task(
                     id:
-                        "\(demandRevision)-\(isActive)-\(isVisible)-\(connectivity.localOnly)-\(library.catalogScopeID)"
+                        "\(demandRevision)-\(isActive)-\(isVisible)-\(usesLocalCatalog)-\(library.catalogScopeID)"
                 ) {
                     let demand = demandRevision
                     guard demand > consumedDemandRevision else { return }
                     await loadDemandedPage(
                         displayed, active: isActive && isVisible,
-                        allowsNetwork: !connectivity.localOnly)
-                    if !Task.isCancelled, isActive, isVisible, !connectivity.localOnly {
+                        allowsNetwork: !usesLocalCatalog)
+                    if !Task.isCancelled, isActive, isVisible, !usesLocalCatalog {
                         consumedDemandRevision = max(consumedDemandRevision, demand)
                     }
                 }
@@ -574,36 +626,35 @@ struct FoundationLibraryIndexView: View {
                     FoundationAlphabetRail(onChooseLetter: chooseLetter)
                         .frame(width: 36)
                 }
-                if connectivity.hasConnectionIssue || displayed.hasConnectionIssue {
+                if !usesLocalCatalog,
+                    connectivity.hasConnectionIssue || displayed.hasConnectionIssue
+                {
                     FoundationOfflineNotice()
                 }
                 if displayed.loaded, displayed.items.isEmpty {
                     Text("No \(title.lowercased()) found.").foregroundStyle(
                         .secondary)
                 }
-                if let error = displayed.errorMessage, !displayed.hasConnectionIssue {
+                if let error = displayed.errorMessage, !displayed.hasConnectionIssue,
+                    !usesLocalCatalog
+                {
                     Text(error).foregroundStyle(.red)
                     Button("Retry") {
                         awaitingLetterAnchor = selectedLetter != nil
                         displayed.request(displayed.retryRequest)
                         revision += 1
-                    }.disabled(connectivity.localOnly)
+                    }.disabled(usesLocalCatalog)
                 }
             }
         }
     #endif
 
     private func play(_ index: Int) {
-        guard let selection = displayed.trackQueue(selecting: index) else { return }
-        if connectivity.localOnly {
-            guard downloads.isReady(selection.items[selection.index]) else { return }
-            let ready = selection.items.filter { downloads.isReady($0) }
-            let selected = selection.items.prefix(selection.index).filter { downloads.isReady($0) }
-                .count
-            player.setQueue(ready, selectedIndex: selected)
-        } else {
-            player.setQueue(selection.items, selectedIndex: selection.index)
-        }
+        guard
+            let selection = displayed.trackQueue(
+                selecting: index, isAvailable: { !connectivity.localOnly || downloads.isReady($0) })
+        else { return }
+        player.setQueue(selection.items, selectedIndex: selection.index)
     }
 }
 

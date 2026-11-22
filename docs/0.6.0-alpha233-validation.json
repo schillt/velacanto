@@ -1,0 +1,87 @@
+{
+  "build": "0.6.0 (233)",
+  "source": "Enclosing Git commit; exact runtime in 0.6.0-alpha233-runtime-sha256.json",
+  "parentAlpha": "bf1af681b37cb2a9a7b98202b16c84411f14e274",
+  "predecessor232": {
+    "macRegression": {
+      "passed": 869,
+      "failed": 0,
+      "skipped": 0
+    },
+    "iosFocused": {
+      "passed": 118,
+      "failed": 0,
+      "skipped": 0
+    },
+    "macFocused": {
+      "passed": 111,
+      "failed": 0,
+      "skipped": 0
+    }
+  },
+  "currentNativeMarginExtent": {
+    "passed": 3,
+    "failed": 0,
+    "skipped": 0,
+    "points": [
+      0,
+      12,
+      64
+    ],
+    "naturalRowHeightsUnchanged": true,
+    "dynamicTransitionsAccepted": false
+  },
+  "currentRepresentativeUI": {
+    "passed": 1,
+    "failed": 2,
+    "skipped": 1,
+    "passedCase": "Native Home icon",
+    "failures": [
+      "Handoff Help after guide suppression not found",
+      "List cycle numeric snapshot absent"
+    ],
+    "skippedCase": "Home native header unavailable for underlap observation"
+  },
+  "canonicalLint": {
+    "exit": 0,
+    "findings": 0
+  },
+  "signedMac": {
+    "build": "233",
+    "strictSignature": true,
+    "entitlementsEqual227": true,
+    "privacyEqual227": true,
+    "releaseVerifierPass": true,
+    "handoffDeclared": true,
+    "nonExemptEncryption": false,
+    "ownedSourceWarnings": 0,
+    "executableSHA256": "b03e5e003593f744dade513840a87bf946dff033a5f7ef8656562234c486c819"
+  },
+  "signedIOS": {
+    "build": "233",
+    "strictSignature": true,
+    "entitlementsEqual227": true,
+    "privacyEqual227": true,
+    "releaseVerifierPass": true,
+    "handoffDeclared": true,
+    "nonExemptEncryption": false,
+    "ownedSourceWarnings": 0,
+    "executableSHA256": "f1044a4f3fad67c742d9cb43ec1547cbf409518e65e4127c5ffd73a4f9f264d5",
+    "hostAndExtensionProfilesEqual227": true,
+    "personalPhoneCoveredBoth": true,
+    "profilesUnexpired": true
+  },
+  "installation": {
+    "macVersion": "0.6.0 (233)",
+    "iphoneVersion": "0.6.0 (233)",
+    "iphoneNormalLaunch": true,
+    "macWorkingProfileReopenPending": true,
+    "canonicalMacUnchanged": true,
+    "appDataPreserved": true,
+    "signed228RollbackSaved": true
+  },
+  "browserContinuationIncluded": false,
+  "systemSettingsStorageReplacementIncluded": false,
+  "testFlightOrAppStoreDistribution": false,
+  "milestoneAcceptanceComplete": false
+}

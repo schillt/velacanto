@@ -64,6 +64,11 @@
                 content
             }
             .task {
+                await fixture.primaryGenres.restoreBoundCache()
+                if ProcessInfo.processInfo.arguments.contains("-fixtureAutomaticGenres") {
+                    await fixture.primaryGenres.prepareAutomaticallyIfNeeded(
+                        allowsNetwork: fixture.connectivity.isConnected)
+                }
                 await fixture.prepareCanonicalCollections()
                 await fixture.prepareMembershipCollections()
                 if !fixture.connectivity.localOnly {
@@ -71,11 +76,47 @@
                 }
             }
             .foundationDownloadRemovalPresentation()
+            .environmentObject(fixture.primaryGenres)
+            .onReceive(fixture.preferences.$offlineMode) { enabled in
+                fixture.connectivity.setOfflineMode(enabled)
+                if enabled { fixture.player.enterOfflineMode() }
+                fixture.downloads.updateConnectivity(
+                    isConnected: fixture.connectivity.isConnected,
+                    usesWiFi: fixture.connectivity.usesWiFiOrWired)
+            }
+            .onReceive(fixture.connectivity.$localOnly) { _ in
+                Task { @MainActor in
+                    let automatic = ProcessInfo.processInfo.arguments.contains(
+                        "-fixtureAutomaticGenres")
+                    if fixture.connectivity.localOnly {
+                        if automatic {
+                            fixture.primaryGenres.suspendForOffline()
+                        } else {
+                            fixture.primaryGenres.cancel()
+                        }
+                    }
+                    if automatic {
+                        await fixture.primaryGenres.prepareAutomaticallyIfNeeded(
+                            allowsNetwork: fixture.connectivity.isConnected)
+                    }
+                }
+            }
+            .onChange(of: fixture.catalogLibrary.catalogScopeID) { _, _ in
+                guard ProcessInfo.processInfo.arguments.contains("-fixtureAutomaticGenres") else {
+                    return
+                }
+                Task {
+                    await fixture.primaryGenres.prepareAutomaticallyIfNeeded(
+                        allowsNetwork: fixture.connectivity.isConnected)
+                }
+            }
             .environmentObject(fixture.downloads)
             .environmentObject(fixture.preferences)
             .environmentObject(fixture.connectivity)
             .environmentObject(fixture.actions)
             .environmentObject(fixture.artwork)
+            .environmentObject(fixture.continueListeningDismissals)
+            .modifier(FoundationRemoteListeningUITestStorage())
             .environmentObject(playlistChanges)
             .environment(
                 \.dynamicTypeSize,
@@ -88,7 +129,8 @@
             if productionShell {
                 FoundationLibraryView(
                     library: fixture.catalogLibrary, accountLibrary: fixture.library,
-                    player: fixture.player, signOut: {}, librarySelection: fixture.librarySelection)
+                    player: fixture.player, primaryGenres: fixture.primaryGenres,
+                    signOut: {}, librarySelection: fixture.librarySelection)
             } else {
                 fixtureNavigation
             }
@@ -127,16 +169,35 @@
 
         private var fixtureControlBand: some View {
             HStack {
+                if ProcessInfo.processInfo.arguments.contains("-fixtureProgressivePlaylistSearch") {
+                    Button("Next batch") {
+                        Task { await fixture.library.releasePlaylistSearchBatch() }
+                    }.accessibilityLabel("Release playlist search batch")
+                }
                 Button("Fixture controls") { showingFixtureControls = true }
                     .frame(minWidth: 44, minHeight: 44)
                     .modifier(
                         FoundationFixtureConnectivityValue(connectivity: fixture.connectivity))
+                if ProcessInfo.processInfo.arguments.contains("-fixtureRemoteFavoriteRefresh") {
+                    Button("Remote Fav") {
+                        Task {
+                            await fixture.catalogLibrary.simulateRemoteFavorite()
+                            remoteFavoriteFixtureChanged = true
+                        }
+                    }
+                    .accessibilityIdentifier("fixture-change-remote-favorite")
+                    .accessibilityValue(remoteFavoriteFixtureChanged ? "changed" : "unchanged")
+                }
                 Button("Read catalog counts") {
                     Task { catalogCounts = await fixture.library.catalogCounts() }
                 }
                 .frame(minWidth: 44, minHeight: 44)
                 .accessibilityValue(catalogCounts)
                 VStack(spacing: 0) {
+                    if ProcessInfo.processInfo.arguments.contains("-fixturePlaylistReorder") {
+                        FoundationDownloadUIQueueSnapshot(player: fixture.player)
+                            .font(.system(size: 1)).frame(height: 1).clipped()
+                    }
                     if ProcessInfo.processInfo.arguments.contains("-fixtureLongPlayback") {
                         FoundationDownloadUIPlaybackIdentity(player: fixture.player)
                             .lineLimit(1)
@@ -169,8 +230,49 @@
 
         @State private var artworkCounts = ""
         @State private var catalogCounts = ""
+        @State private var remoteFavoriteFixtureChanged = false
+        @State private var primaryGenreCounts = ""
+        @State private var remoteFixtureRevision = 0
+        @State private var remoteFixtureState = "playing"
         private var fixtureControls: some View {
             VStack {
+                if ProcessInfo.processInfo.arguments.contains("-fixtureRemoteListening") {
+                    Button("Next remote fixture track") {
+                        Task {
+                            remoteFixtureRevision = await fixture.catalogLibrary
+                                .advanceRemoteTrack()
+                            remoteFixtureState = "playing"
+                        }
+                    }
+                    Text("Remote generation \(remoteFixtureRevision)")
+                        .accessibilityIdentifier("fixture-remote-generation")
+                    Text(remoteFixtureState).accessibilityIdentifier("fixture-remote-state")
+                    Button("End remote fixture playback") {
+                        Task {
+                            await fixture.catalogLibrary.endRemotePlayback()
+                            remoteFixtureState = "ended"
+                        }
+                    }
+                }
+                if ProcessInfo.processInfo.arguments.contains("-fixtureHoldHomeGenres") {
+                    Button("Release Home genres") {
+                        Task { await fixture.library.releaseHomeGenres() }
+                    }
+                }
+                if ProcessInfo.processInfo.arguments.contains("-fixturePrimaryGenres")
+                    || ProcessInfo.processInfo.arguments.contains("-fixtureArtworkCache")
+                    || ProcessInfo.processInfo.arguments.contains("-fixtureHomeScrollBoundary")
+                {
+                    Button("Build primary genres") { fixture.primaryGenres.start() }
+                        .accessibilityIdentifier("fixture-build-primary-genres")
+                    Button("Release primary genre metadata") {
+                        Task { await fixture.library.releasePrimaryGenreMetadata() }
+                    }
+                    Button("Read primary genre counts") {
+                        Task { primaryGenreCounts = await fixture.library.primaryGenreCounts() }
+                    }
+                    Text(primaryGenreCounts).accessibilityIdentifier("fixture-primary-genre-counts")
+                }
                 if ProcessInfo.processInfo.arguments.contains("-fixtureHoldArtistAlbums") {
                     Button("Release artist albums") {
                         Task { await fixture.library.releaseArtistAlbums() }
@@ -448,7 +550,18 @@
     /// Synthetic continuity evidence: route navigation must retain the exact queue occurrence.
     struct FoundationDownloadUIPlaybackIdentity: View {
         @ObservedObject var player: FoundationPlayer
+        @EnvironmentObject private var actions: FoundationLibraryActions
         var identifier = "fixture-playback-identity"
+
+        private var collectionOutcomeStatus: String {
+            guard ProcessInfo.processInfo.arguments.contains("-fixtureCollectionOutcome") else {
+                return ""
+            }
+            return "loading \(actions.isQueueLoading); loaded \(actions.queueLoadedCount); "
+                + "error \(actions.queueErrorMessage ?? "none"); "
+                + "notice \(actions.queueNotice ?? "none"); retry \(actions.canRetryQueueAddition)"
+        }
+
         var body: some View {
             Text(
                 verbatim:
@@ -456,6 +569,23 @@
             )
             .font(.caption).lineLimit(1).dynamicTypeSize(.medium)
             .accessibilityIdentifier(identifier)
+            .accessibilityValue(collectionOutcomeStatus)
+        }
+    }
+
+    struct FoundationDetailUIContextEvidence: View {
+        let item: FoundationItem
+        @Environment(\.colorScheme) private var colorScheme
+        @Environment(\.foundationRelatedItemSheet) private var relatedItemSheet
+
+        var body: some View {
+            Text(
+                "Detail context: \(relatedItemSheet ? "related" : "browsing"); "
+                    + "appearance \(colorScheme == .dark ? "dark" : "light")"
+            )
+            .font(.system(size: 1)).frame(width: 1, height: 1).clipped().opacity(0.05)
+            .allowsHitTesting(false)
+            .accessibilityIdentifier("fixture-detail-context-\(item.kind)-\(item.id)")
         }
     }
 
@@ -483,11 +613,13 @@
         let downloads: FoundationDownloads
         let player: FoundationPlayer
         let library: FoundationDownloadUILibrary
+        let primaryGenres: FoundationPrimaryGenresModel
         @Published private(set) var catalogLibrary: FoundationDownloadUILibrary
         private(set) var librarySelection: FoundationMusicLibrarySelection?
         let actions: FoundationLibraryActions
         let artwork: FoundationCurrentArtwork
         let preferences: FoundationPlaybackPreferences
+        let continueListeningDismissals = FoundationContinueListeningDismissals()
         let connectivity = FoundationConnectivity(
             monitorConnectivity: false, settleDuration: .zero, retry: {})
         let playlist = FoundationItem(
@@ -509,6 +641,7 @@
             let library = FoundationDownloadUILibrary()
             self.library = library
             self.catalogLibrary = library
+            self.primaryGenres = FoundationPrimaryGenresModel(library: library)
             let transfer = FoundationDownloadUITransfer(
                 failOnce: ProcessInfo.processInfo.arguments.contains("-fixtureFailOnce"))
             let downloads = FoundationDownloads(
@@ -526,10 +659,17 @@
             )
             self.player.configureTrackProjection(
                 project: { actions.visibleTracks($0) }, observe: { actions.observeTrackCopies($0) })
+            let queueArtworkTransition = ProcessInfo.processInfo.arguments.contains(
+                "-fixtureQueueArtworkTransition")
             self.artwork = FoundationCurrentArtwork(player: player) { item in
-                await downloads.retainedArtwork(for: item)
+                if let retained = await downloads.retainedArtwork(for: item) { return retained }
+                // Only this opt-in scenario mirrors production's current-artwork fallback.
+                // Other fixtures retain their original cache/read-count behavior.
+                guard queueArtworkTransition else { return nil }
+                return try await library.artwork(for: item)
             }
             let connectivity = self.connectivity
+            connectivity.setOfflineMode(preferences.offlineMode)
             actions.configureTrackAvailability { [weak connectivity, weak downloads] item in
                 connectivity?.localOnly != true || downloads?.isReady(item) == true
             }
@@ -549,6 +689,7 @@
                     root: root.appendingPathComponent("library-selections", isDirectory: true))
                 let selected = try? store.load()
                 catalogLibrary = FoundationDownloadUILibrary(selectionID: selected?.id)
+                primaryGenres.bind(catalogLibrary)
                 librarySelection = FoundationMusicLibrarySelection(
                     selected: selected,
                     load: {
@@ -571,10 +712,19 @@
                         ]
                     }, save: { try store.save($0) },
                     apply: { [weak self] id, available in
-                        self?.catalogLibrary = FoundationDownloadUILibrary(
+                        guard let self else { return }
+                        let scoped = FoundationDownloadUILibrary(
                             selectionID: id, selectionAvailable: available)
+                        self.primaryGenres.bind(scoped)
+                        self.primaryGenres.bindDownloads(self.downloads)
+                        self.catalogLibrary = scoped
+                        self.continueListeningDismissals.configure(
+                            scope: scoped.listeningActivityScope)
+                        Task { await self.primaryGenres.restoreBoundCache() }
                     })
             }
+            primaryGenres.bindDownloads(downloads)
+            continueListeningDismissals.configure(scope: catalogLibrary.listeningActivityScope)
         }
 
         func prepareCanonicalCollections() async {
@@ -676,11 +826,84 @@
     }
 
     private actor FoundationDownloadUILibrary: FoundationLibrary {
+        nonisolated var listeningActivityScope: String {
+            guard ProcessInfo.processInfo.arguments.contains("-fixtureRemoteListening") else {
+                return ""
+            }
+            return "synthetic-remote-"
+                + (ProcessInfo.processInfo.environment["FOUNDATION_UI_RUN_ID"] ?? "missing")
+        }
+        private var remoteTrackGeneration = 0
+        private var remotePlaybackEnded = false
+        func advanceRemoteTrack() -> Int {
+            remoteTrackGeneration += 1
+            remotePlaybackEnded = false
+            return remoteTrackGeneration
+        }
+        func endRemotePlayback() { remotePlaybackEnded = true }
+        func remoteListeningActivity() async throws -> [FoundationRemoteListeningActivity] {
+            guard !listeningActivityScope.isEmpty else { return [] }
+            catalogRequests["remote-listening", default: 0] += 1
+            guard !remotePlaybackEnded else { return [] }
+            let item = FoundationItem(
+                id: "remote-fixture-track-\(remoteTrackGeneration)",
+                title: "Remote Fixture Track \(remoteTrackGeneration)",
+                subtitle: "Remote Fixture Artist", kind: .track, duration: 180,
+                primaryImageTag: "synthetic",
+                album: .init(
+                    id: "remote-fixture-album", title: "Remote Fixture Album",
+                    primaryImageTag: "synthetic"))
+            let older = FoundationItem(
+                id: "remote-older-track", title: "Older Remote Fixture",
+                subtitle: item.subtitle, kind: .track, duration: 180,
+                primaryImageTag: "synthetic", album: item.album)
+            return [
+                .init(
+                    id: "remote-session-track-\(remoteTrackGeneration)",
+                    deviceKey: "remote-fixture-Mac", deviceLabel: "Mac", checkedInAt: Date(),
+                    item: item, albumTitle: "Remote Fixture Album", elapsed: 90),
+                .init(
+                    id: "remote-older-session", deviceKey: "remote-fixture-iPad",
+                    deviceLabel: "iPad",
+                    checkedInAt: Date().addingTimeInterval(-5), item: older,
+                    albumTitle: "Remote Fixture Album", elapsed: 30),
+            ]
+        }
+
+        func lyrics(for item: FoundationItem) async throws -> FoundationLyrics? {
+            guard ProcessInfo.processInfo.arguments.contains("-fixtureLyricsPresentation") else {
+                return nil
+            }
+            if ProcessInfo.processInfo.arguments.contains("-fixtureMissingLyrics") { return nil }
+            return .init(lines: [
+                .init(id: 0, text: "Fixture lyric " + item.id, start: 0),
+                .init(id: 1, text: "Fixture next line " + item.id, start: 5),
+            ])
+        }
+
         private var alphabetCapabilityReleased = false
         func releaseAlphabetCapability() { alphabetCapabilityReleased = true }
         private let alphabetCatalog = ProcessInfo.processInfo.arguments.contains(
             "-fixtureAlphabetCatalog")
         private var alphabetFailures: Set<String> = []
+        private var failedPlaybackCollections: Set<String> = []
+
+        /// Affect only explicit Play/Shuffle expansion, never browsing or download preparation.
+        private func playbackCollectionOutcome(key: String) throws -> FoundationPage? {
+            guard FoundationRequestIntent.isPlayback else { return nil }
+            let arguments = ProcessInfo.processInfo.arguments
+            guard let index = arguments.firstIndex(of: "-fixtureCollectionOutcome"),
+                arguments.indices.contains(index + 1)
+            else { return nil }
+            catalogRequests["collection-playback-" + key, default: 0] += 1
+            switch arguments[index + 1] {
+            case "fail-once":
+                if failedPlaybackCollections.insert(key).inserted { throw URLError(.timedOut) }
+            case "empty": return .init(items: [], nextStartIndex: nil)
+            default: break
+            }
+            return nil
+        }
 
         func alphabetCapability() async -> FoundationAlphabetCapability {
             guard alphabetCatalog else { return .unavailable }
@@ -701,7 +924,10 @@
             let firstWindow = kind == .track ? 100 : 50
             let extendedSongs = ProcessInfo.processInfo.arguments.contains(
                 "-fixtureExtendedSongsCatalog")
-            let count = kind == .track ? (extendedSongs ? 280 : 180) : 120
+            let count =
+                ProcessInfo.processInfo.arguments.contains("-fixtureSharedChromeEvidence")
+                ? (kind == .track ? 24 : 12)
+                : (kind == .track ? (extendedSongs ? 280 : 180) : 120)
             return (0..<count).map { index in
                 let letter =
                     index < firstWindow
@@ -800,11 +1026,20 @@
         private let selectionID: String?
         private let selectionAvailable: Bool
         nonisolated let catalogScopeID: String
+        nonisolated let primaryGenreIndexScope: FoundationPrimaryGenreIndex.Scope?
         private nonisolated let selectionCacheScope: String?
 
         init(selectionID: String? = nil, selectionAvailable: Bool = true) {
             self.selectionID = selectionID
             self.selectionAvailable = selectionAvailable
+            if selectionAvailable,
+                let source = try? FoundationCatalogSource.jellyfin(
+                    scope: String(repeating: "a", count: 64))
+            {
+                self.primaryGenreIndexScope = .init(source: source, libraryID: selectionID)
+            } else {
+                self.primaryGenreIndexScope = nil
+            }
             self.selectionCacheScope = selectionID.map { FoundationMusicLibraryStore.digest($0) }
             self.catalogScopeID =
                 (selectionID.map { FoundationMusicLibraryStore.digest($0) } ?? "all")
@@ -842,9 +1077,13 @@
                 ],
                 nextStartIndex: nil)
         }
-        // Opt-in picker presentation acceptance only; tests never invoke server mutations.
+        // Synthetic opt-in presentation/reorder only; no real server is contacted.
         nonisolated var supportsPlaylistManagement: Bool {
             ProcessInfo.processInfo.arguments.contains("-fixturePlaylistPresentation")
+                || ProcessInfo.processInfo.arguments.contains("-fixturePlaylistReorder")
+        }
+        nonisolated var supportsPlaylistReordering: Bool {
+            ProcessInfo.processInfo.arguments.contains("-fixturePlaylistReorder")
         }
         private let usesCache = ProcessInfo.processInfo.arguments.contains("-fixtureArtworkCache")
         private let cache = FoundationArtworkCache(
@@ -933,6 +1172,11 @@
         func artworkCounts() -> String {
             "Album \(fetches["album", default: 0]), Artist \(fetches["artist", default: 0]), Playlist \(fetches["playlist", default: 0]), Genre \(fetches["genre", default: 0])"
         }
+        nonisolated func immediateArtworkResult(for item: FoundationItem, size: Int)
+            -> FoundationCurrentArtwork.Result?
+        {
+            usesCache ? cache.immediateResult(for: item, pixels: size) : nil
+        }
         func artworkResult(for item: FoundationItem, size: Int, allowsNetwork: Bool) async throws
             -> FoundationCurrentArtwork.Result?
         {
@@ -962,6 +1206,145 @@
                             duration: nil, primaryImageTag: "synthetic")
                     ] : [], nextStartIndex: nil)
         }
+        private var primaryMetadataReads = 0
+        private var primaryMetadataReturned = 0
+        private var heldPrimaryMetadata: [UUID: CheckedContinuation<Void, Never>] = [:]
+
+        func releasePrimaryGenreMetadata() {
+            let pending = heldPrimaryMetadata.values
+            heldPrimaryMetadata.removeAll()
+            for continuation in pending { continuation.resume() }
+        }
+
+        func primaryGenreCounts() -> String {
+            "metadata \(primaryMetadataReads) returned \(primaryMetadataReturned)"
+        }
+
+        func primaryGenreSongs(ids: [String]) async throws -> [FoundationItem] {
+            guard ids.count <= 50 else { throw FoundationLibraryError.invalidResponse }
+            return ids.map(primaryGenreSong)
+        }
+
+        private func primaryGenreSong(_ id: String) -> FoundationItem {
+            if id == track.id { return track }
+            if id == "home-boundary-song" || id.hasPrefix("home-late-song-") {
+                return FoundationItem(
+                    id: id, title: "Final Home Album", subtitle: "Final Home Subtitle",
+                    kind: .track,
+                    duration: 30,
+                    album: .init(
+                        id: "home-boundary-album", title: "Final Home Album",
+                        primaryImageTag: "synthetic"))
+            }
+            return FoundationItem(
+                id: id, title: "Primary Song " + String(id.suffix(1)),
+                subtitle: "Synthetic song-only genre", kind: .track, duration: 30)
+        }
+
+        func primaryGenreCollections(ids: [String], kind: FoundationItem.Kind) async throws
+            -> [FoundationItem]
+        {
+            guard ids.count <= 50 else { throw FoundationLibraryError.invalidResponse }
+            return try ids.map { id in
+                if kind == .album, id == album.id { return album }
+                if kind == .artist, id == "artist" {
+                    return FoundationItem(
+                        id: id, title: "Fixture Artist", subtitle: "", kind: .artist,
+                        duration: nil, primaryImageTag: "synthetic")
+                }
+                if kind == .album, id == "home-boundary-album" {
+                    return FoundationItem(
+                        id: id, title: "Final Home Album", subtitle: "", kind: .album,
+                        duration: nil, primaryImageTag: "synthetic")
+                }
+                throw FoundationLibraryError.unavailable
+            }
+        }
+
+        private func genreContent(_ id: String) -> FoundationPrimaryGenreContentMetadata {
+            let item = primaryGenreSong(id)
+            return .init(
+                title: item.title, album: item.album, artist: item.artist, duration: item.duration)
+        }
+
+        func primaryGenreMetadataPage(startIndex: Int) async throws
+            -> FoundationPrimaryGenreMetadataPage
+        {
+            guard startIndex == 0 else { throw FoundationLibraryError.invalidResponse }
+            primaryMetadataReads += 1
+            if ProcessInfo.processInfo.arguments.contains("-fixtureHomeScrollBoundary") {
+                let songs: [FoundationPrimaryGenreMetadataPage.Song]
+                if ProcessInfo.processInfo.arguments.contains("-fixtureHoldHomeGenres") {
+                    try await waitForHomeGenres()
+                    songs = (1...3).map { index in
+                        .init(
+                            id: "home-late-song-\(index)",
+                            genres: [
+                                .init(
+                                    id: "home-late-genre-\(index)",
+                                    title: "Late Home Genre \(index)")
+                            ])
+                    }
+                } else {
+                    let genre = FoundationItemReference(id: "genre", title: "Fixture Genre")
+                    songs = [
+                        .init(id: track.id, genres: [genre]),
+                        .init(id: "home-boundary-song", genres: [genre]),
+                    ]
+                }
+                primaryMetadataReturned += 1
+                return .init(
+                    startIndex: 0, total: songs.count,
+                    songs: songs.map {
+                        var song = $0
+                        song.content = genreContent(song.id)
+                        return song
+                    }, nextStartIndex: nil)
+            }
+            let held =
+                ProcessInfo.processInfo.arguments.contains("-fixtureHoldPrimaryGenreMetadata")
+                && primaryMetadataReads == 1
+            if held {
+                let key = UUID()
+                // Synthetic late-response proof only. Always release this bounded hold after 60s.
+                Task {
+                    try? await Task.sleep(for: .seconds(60))
+                    heldPrimaryMetadata.removeValue(forKey: key)?.resume()
+                }
+                await withCheckedContinuation { heldPrimaryMetadata[key] = $0 }
+            }
+            let genre = FoundationItemReference(id: "genre", title: "Fixture Genre")
+            let other = FoundationItemReference(id: "other-genre", title: "Fixture Other Genre")
+            let rare = FoundationItemReference(id: "rare-genre", title: "Fixture Rare Genre")
+            var sets: [[FoundationItemReference]]
+            if held {
+                sets = [[rare]]
+            } else if ProcessInfo.processInfo.arguments.contains("-fixturePrimaryGenres") {
+                sets = [[genre, other, rare], [genre, other], [genre], []]
+            } else {
+                sets = [[genre]]
+            }
+            if ProcessInfo.processInfo.arguments.contains("-fixturePrimaryGenreScopedQuery"), !held
+            {
+                sets += (1...6).map { number in
+                    [
+                        FoundationItemReference(
+                            id: "extra-genre-\(number)", title: "Fixture Genre Extra \(number)")
+                    ]
+                }
+            }
+            primaryMetadataReturned += 1
+            return .init(
+                startIndex: 0, total: sets.count,
+                songs: sets.enumerated().map {
+                    .init(
+                        id: $0.offset == 0 ? track.id : "primary-song-\($0.offset)",
+                        genres: $0.element,
+                        content: genreContent(
+                            $0.offset == 0 ? track.id : "primary-song-\($0.offset)"))
+                }, nextStartIndex: nil)
+        }
+
         func genres(startIndex: Int) async throws -> FoundationPage {
             if alphabetCatalog {
                 return try await alphabetBrowse(kind: .genre, startIndex: startIndex)
@@ -994,7 +1377,11 @@
         private var orderedTracks: [FoundationItem] {
             if canonical && ProcessInfo.processInfo.arguments.contains("-fixtureQueuePresentation")
             {
-                return [track, missing, track, missing, track]
+                let entries = [track, missing, track, missing, track]
+                if ProcessInfo.processInfo.arguments.contains("-fixtureQueueArtworkTransition") {
+                    return Array(repeating: entries, count: 3).flatMap { $0 }
+                }
+                return entries
             }
             return canonical ? [track, missing, track] : [track, track]
         }
@@ -1008,6 +1395,16 @@
         func search(query: String, kind: FoundationItem.Kind, startIndex: Int, limit: Int)
             async throws -> FoundationPage
         {
+            if ProcessInfo.processInfo.arguments.contains("-fixtureProgressivePlaylistSearch") {
+                let items =
+                    query.localizedStandardContains("Opalite")
+                    ? (1...5).map { index in
+                        FoundationItem(
+                            id: "opalite-\(kind)-\(index)", title: "Opalite \(kind) \(index)",
+                            subtitle: "Synthetic search", kind: kind, duration: nil)
+                    } : []
+                return .init(items: items, nextStartIndex: nil)
+            }
             if alphabetCatalog {
                 catalogRequests["\(kind)-search-\(startIndex)", default: 0] += 1
                 let items = alphabetItems(kind: kind).filter {
@@ -1044,6 +1441,72 @@
                 items: items.filter { $0.title.localizedStandardContains(query) },
                 nextStartIndex: nil)
         }
+        private var playlistSearchBatch: (id: UUID, continuation: CheckedContinuation<Void, Error>)?
+
+        func releasePlaylistSearchBatch() {
+            let pending = playlistSearchBatch
+            playlistSearchBatch = nil
+            pending?.continuation.resume()
+        }
+
+        private func cancelPlaylistSearchBatch(_ id: UUID) {
+            guard playlistSearchBatch?.id == id else { return }
+            catalogRequests["playlist-search-cancelled", default: 0] += 1
+            let pending = playlistSearchBatch
+            playlistSearchBatch = nil
+            pending?.continuation.resume(throwing: CancellationError())
+        }
+
+        func playlistsContainingMusic(context: FoundationMusicSearchContext, startIndex: Int)
+            async throws -> FoundationPlaylistContentPage
+        {
+            guard ProcessInfo.processInfo.arguments.contains("-fixtureProgressivePlaylistSearch")
+            else { throw FoundationLibraryError.unavailable }
+            return .init(
+                items: [], nextStartIndex: 6, hasIncompleteCoverage: true, partialFailureCount: 0)
+        }
+
+        func playlistsContainingMusic(
+            context: FoundationMusicSearchContext, cursor: FoundationPlaylistContentCursor
+        ) async throws -> FoundationPlaylistContentPage {
+            guard ProcessInfo.processInfo.arguments.contains("-fixtureProgressivePlaylistSearch")
+            else { throw FoundationLibraryError.unavailable }
+            catalogRequests["playlist-search", default: 0] += 1
+            let id = UUID()
+            try await withTaskCancellationHandler {
+                try Task.checkCancellation()
+                try await withCheckedThrowingContinuation {
+                    (continuation: CheckedContinuation<Void, Error>) in
+                    if Task.isCancelled {
+                        continuation.resume(throwing: CancellationError())
+                    } else if playlistSearchBatch != nil {
+                        continuation.resume(throwing: FoundationLibraryError.invalidResponse)
+                    } else {
+                        playlistSearchBatch = (id, continuation)
+                    }
+                }
+            } onCancel: {
+                Task { await self.cancelPlaylistSearchBatch(id) }
+            }
+            try Task.checkCancellation()
+            let first = cursor.candidateOffset == 6
+            let items =
+                first
+                ? (1...6).map { index in
+                    FoundationItem(
+                        id: "search-playlist-\(index)", title: "Search Drive \(index)",
+                        subtitle: "Synthetic playlist", kind: .playlist, duration: nil)
+                }
+                : [
+                    FoundationItem(
+                        id: "day-drive", title: "Day Drive", subtitle: "Synthetic playlist",
+                        kind: .playlist, duration: nil)
+                ]
+            return .init(
+                items: items, nextStartIndex: first ? 12 : nil, hasIncompleteCoverage: first,
+                partialFailureCount: 0)
+        }
+
         func playlists(startIndex: Int) async throws -> FoundationPage {
             if alphabetCatalog {
                 return try await alphabetBrowse(kind: .playlist, startIndex: startIndex)
@@ -1063,6 +1526,7 @@
         }
         private var heldInitialPlaylistRead = false
         func playlistTracks(playlistID: String, startIndex: Int) async throws -> FoundationPage {
+            if let outcome = try playbackCollectionOutcome(key: "playlist") { return outcome }
             catalogRequests["playlist-tracks", default: 0] += 1
             if ProcessInfo.processInfo.arguments.contains("-fixtureHoldFirstPlaylistTracks"),
                 !heldInitialPlaylistRead
@@ -1072,6 +1536,9 @@
                 try await Task.sleep(for: .seconds(30))
             }
             try Task.checkCancellation()
+            if supportsPlaylistReordering {
+                return .init(items: reorderEntries().map(\.item), nextStartIndex: nil)
+            }
             return .init(items: orderedTracks, nextStartIndex: nil)
         }
 
@@ -1115,7 +1582,31 @@
             }
             return .init(items: [album], nextStartIndex: nil)
         }
+
+        func similarItems(for item: FoundationItem) async throws -> FoundationPage {
+            guard ProcessInfo.processInfo.arguments.contains("-fixtureRelatedRecommendations")
+            else { throw FoundationLibraryError.unavailable }
+            catalogRequests["recommendations-\(item.kind)", default: 0] += 1
+            let artist = item.kind == .artist
+            return .init(
+                items: [
+                    .init(
+                        id: artist ? "recommended-artist" : "recommended-album",
+                        title: artist ? "Recommended Fixture Artist" : "Recommended Fixture Album",
+                        subtitle: "Synthetic recommendation", kind: artist ? .artist : .album,
+                        duration: nil, primaryImageTag: "synthetic")
+                ], nextStartIndex: nil)
+        }
+
+        func appearances(artistID: String, startIndex: Int) async throws -> FoundationPage {
+            guard ProcessInfo.processInfo.arguments.contains("-fixtureRelatedRecommendations")
+            else { throw FoundationLibraryError.unavailable }
+            catalogRequests["artist-appearances", default: 0] += 1
+            return .init(items: [album], nextStartIndex: nil)
+        }
+
         func tracks(artistID: String, startIndex: Int) async throws -> FoundationPage {
+            if let outcome = try playbackCollectionOutcome(key: "artist") { return outcome }
             if ProcessInfo.processInfo.arguments.contains("-fixtureHoldArtistTracks") {
                 // User cancellation must unwind the real collection action, not a test release.
                 while true { try await Task.sleep(for: .seconds(60)) }
@@ -1138,6 +1629,9 @@
         func recentlyPlayed(startIndex: Int) async throws -> FoundationPage {
             .init(items: [track], nextStartIndex: nil)
         }
+        private var remoteFavoriteVisible = false
+        func simulateRemoteFavorite() { remoteFavoriteVisible = true }
+
         func favorites(kind: FoundationItem.Kind, startIndex: Int) async throws -> FoundationPage {
             guard ProcessInfo.processInfo.arguments.contains("-fixtureFavoritesCatalog"),
                 [.album, .artist, .track, .playlist].contains(kind)
@@ -1155,7 +1649,7 @@
                     id: "artist", title: "Fixture Artist", subtitle: "", kind: .artist,
                     duration: nil, primaryImageTag: "synthetic")
             }
-            let items = (0..<8).map { index in
+            var items = (0..<8).map { index in
                 var item =
                     index == 0
                     ? base
@@ -1166,6 +1660,15 @@
                         primaryImageTag: base.primaryImageTag)
                 item.isFavorite = true
                 return item
+            }
+            if ProcessInfo.processInfo.arguments.contains("-fixtureRemoteFavoriteRefresh"),
+                kind == .track, remoteFavoriteVisible
+            {
+                items.insert(
+                    FoundationItem(
+                        id: "remote-added-favorite", title: "Fixture Remote Favorite",
+                        subtitle: "Synthetic remote change",
+                        kind: .track, duration: nil, isFavorite: true), at: 0)
             }
             guard startIndex < items.count else { return .init(items: [], nextStartIndex: nil) }
             let end = min(startIndex + 6, items.count)
@@ -1206,10 +1709,68 @@
         func favoriteAlbums(startIndex: Int) async throws -> FoundationPage {
             .init(items: [], nextStartIndex: nil)
         }
+        private var homeGenresReleased = false
+        private var pendingHomeGenres: (id: UUID, continuation: CheckedContinuation<Void, Error>)?
+
+        func releaseHomeGenres() {
+            homeGenresReleased = true
+            let pending = pendingHomeGenres
+            pendingHomeGenres = nil
+            pending?.continuation.resume()
+        }
+
+        private func cancelHomeGenres(_ id: UUID) {
+            guard pendingHomeGenres?.id == id else { return }
+            let pending = pendingHomeGenres
+            pendingHomeGenres = nil
+            pending?.continuation.resume(throwing: CancellationError())
+        }
+
+        private func waitForHomeGenres() async throws {
+            let id = UUID()
+            try await withTaskCancellationHandler {
+                try Task.checkCancellation()
+                try await withCheckedThrowingContinuation {
+                    (continuation: CheckedContinuation<Void, Error>) in
+                    if Task.isCancelled {
+                        continuation.resume(throwing: CancellationError())
+                    } else if homeGenresReleased {
+                        continuation.resume()
+                    } else if pendingHomeGenres != nil {
+                        continuation.resume(throwing: FoundationLibraryError.unavailable)
+                    } else {
+                        pendingHomeGenres = (id, continuation)
+                    }
+                }
+            } onCancel: {
+                Task { await self.cancelHomeGenres(id) }
+            }
+            try Task.checkCancellation()
+        }
+
         func homeGenres() async throws -> FoundationPage {
+            if ProcessInfo.processInfo.arguments.contains("-fixtureHoldHomeGenres") {
+                try await waitForHomeGenres()
+                return .init(
+                    items: (1...3).map { index in
+                        FoundationItem(
+                            id: "home-late-genre-\(index)", title: "Late Home Genre \(index)",
+                            subtitle: "", kind: .genre, duration: nil, primaryImageTag: "synthetic")
+                    }, nextStartIndex: nil)
+            }
             // The paged fixture targets explicit Library indexes, not unrelated Home shelves.
             if pagedCatalog { return .init(items: [], nextStartIndex: nil) }
             return try await genres(startIndex: 0)
+        }
+        func albums(genreID: String, startIndex: Int) async throws -> FoundationPage {
+            guard ProcessInfo.processInfo.arguments.contains("-fixtureHomeScrollBoundary") else {
+                throw FoundationLibraryError.unavailable
+            }
+            let final = FoundationItem(
+                id: "home-boundary-album", title: "Final Home Album",
+                subtitle: "Final Home Subtitle", kind: .album, duration: nil,
+                primaryImageTag: "synthetic")
+            return .init(items: startIndex == 0 ? [final] : [], nextStartIndex: nil)
         }
         func searchGenres() async throws -> FoundationPage {
             try await genres(startIndex: 0)
@@ -1231,6 +1792,7 @@
             }
         }
         func tracks(albumID: String, startIndex: Int) async throws -> FoundationPage {
+            if let outcome = try playbackCollectionOutcome(key: "album") { return outcome }
             if ProcessInfo.processInfo.arguments.contains("-fixtureDuplicateAlbumTracks") {
                 var first = track
                 first.trackNumber = 1
@@ -1253,15 +1815,48 @@
             return .init(items: canonical ? orderedTracks : [track], nextStartIndex: nil)
         }
         func playlistPermissions(id: String) async throws -> FoundationPlaylistPermissions {
-            .init(name: "Fixture Playlist", canEdit: false, canDelete: false)
+            .init(name: "Fixture Playlist", canEdit: supportsPlaylistReordering, canDelete: false)
         }
         func playlistEntries(id: String, startIndex: Int) async throws -> FoundationPlaylistPage {
-            .init(
+            if supportsPlaylistReordering {
+                return .init(entries: startIndex == 0 ? reorderEntries() : [], nextStartIndex: nil)
+            }
+            return .init(
                 entries: orderedTracks.enumerated().map {
                     .init(
                         id: "occurrence-\($0.offset)", mutationID: "occurrence-\($0.offset)",
                         item: $0.element)
                 }, nextStartIndex: nil)
+        }
+        private var reorderedMemberships: [FoundationPlaylistEntry]?
+        private var failedReorder = false
+
+        private func reorderEntries() -> [FoundationPlaylistEntry] {
+            if let reorderedMemberships { return reorderedMemberships }
+            let entries = orderedTracks.enumerated().map { index, track in
+                var item = track
+                let id = "occurrence-\(index)"
+                item.playlistEntryID = id
+                return FoundationPlaylistEntry(id: id, mutationID: id, item: item)
+            }
+            reorderedMemberships = entries
+            return entries
+        }
+
+        func moveEntry(in playlistID: String, entryID: String, to index: Int) async throws {
+            guard supportsPlaylistReordering else { throw FoundationLibraryError.unavailable }
+            var members = reorderEntries()
+            guard let current = members.firstIndex(where: { $0.mutationID == entryID }),
+                members.indices.contains(index)
+            else { throw FoundationLibraryError.invalidResponse }
+            members.insert(members.remove(at: current), at: index)
+            reorderedMemberships = members
+            if ProcessInfo.processInfo.arguments.contains("-fixturePlaylistReorderFailOnce"),
+                !failedReorder
+            {
+                failedReorder = true
+                throw URLError(.networkConnectionLost)
+            }
         }
         func playbackURL(for item: FoundationItem) async throws -> URL {
             throw FoundationLibraryError.unavailable
@@ -1341,6 +1936,376 @@
                     values["FOUNDATION_UI_COLOR_SCHEME"] == "light"
                         ? .light
                         : values["FOUNDATION_UI_COLOR_SCHEME"] == "dark" ? .dark : nil)
+        }
+    }
+
+    /// Only the explicitly opted-in remote fixture changes AppStorage's suite.
+    private struct FoundationRemoteListeningUITestStorage: ViewModifier {
+        @ViewBuilder func body(content: Content) -> some View {
+            if FoundationDownloadsTestHarness.enabled,
+                ProcessInfo.processInfo.arguments.contains("-fixtureRemoteListening"),
+                let run = ProcessInfo.processInfo.environment["FOUNDATION_UI_RUN_ID"],
+                let defaults = UserDefaults(suiteName: "FoundationRemoteListeningUI." + run)
+            {
+                content.defaultAppStorage(defaults)
+            } else {
+                content
+            }
+        }
+    }
+
+    private struct FoundationChromeUIContextKey: EnvironmentKey {
+        static let defaultValue = ""
+    }
+    private struct FoundationChromeUIItemCountKey: EnvironmentKey { static let defaultValue = -1 }
+    private struct FoundationChromeUIHasMoreKey: EnvironmentKey { static let defaultValue = false }
+    extension EnvironmentValues {
+        var foundationChromeUIItemCount: Int {
+            get { self[FoundationChromeUIItemCountKey.self] }
+            set { self[FoundationChromeUIItemCountKey.self] = newValue }
+        }
+        var foundationChromeUIHasMore: Bool {
+            get { self[FoundationChromeUIHasMoreKey.self] }
+            set { self[FoundationChromeUIHasMoreKey.self] = newValue }
+        }
+        var foundationChromeUIContext: String {
+            get { self[FoundationChromeUIContextKey.self] }
+            set { self[FoundationChromeUIContextKey.self] = newValue }
+        }
+    }
+    private struct FoundationChromeUIFooterFrames: PreferenceKey {
+        static let defaultValue: [String: CGRect] = [:]
+        static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) {
+            value.merge(nextValue(), uniquingKeysWith: { _, newer in newer })
+        }
+    }
+    struct FoundationChromeUIFooterProbe: ViewModifier {
+        @Environment(\.foundationChromeUIContext) private var context
+        func body(content: Content) -> some View {
+            if FoundationChromeUIScrollProbe.enabled, !context.isEmpty {
+                content.background {
+                    GeometryReader { proxy in
+                        Color.clear.preference(
+                            key: FoundationChromeUIFooterFrames.self,
+                            value: [context: proxy.frame(in: .global)])
+                    }
+                }
+            } else {
+                content
+            }
+        }
+    }
+
+    /// Synthetic metrics only. No inset, offset, margin, delegate or player mutation.
+    struct FoundationChromeUIScrollProbe: ViewModifier {
+        static var enabled: Bool {
+            FoundationDownloadsTestHarness.enabled
+                && ProcessInfo.processInfo.arguments.contains("-fixtureSharedChromeEvidence")
+        }
+        let clearance: CGFloat
+        let nativeBottomInset: CGFloat?
+        @Environment(\.displayScale) private var displayScale
+        @Environment(\.foundationChromeUIItemCount) private var naturalRows
+        @Environment(\.foundationChromeUIHasMore) private var hasMore
+        @Environment(\.foundationChromeUIContext) private var context
+        @Environment(\.foundationBottomChromeGeometry) private var chrome
+        @State private var swiftFacts: [String: Double] = [:]
+        @State private var nativeFacts: [String: Double] = [:]
+        @State private var footerFrames: [String: CGRect] = [:]
+        @State private var phase = 0.0
+        @State private var expansionCount = 0.0
+        @State private var observedMinimized = false
+        @State private var minimizedFrame: CGRect?
+        @State private var expandedFrame: CGRect?
+        @State private var awaitingExpansion = false
+
+        @ViewBuilder func body(content: Content) -> some View {
+            if Self.enabled, !context.isEmpty {
+                content
+                    .onScrollGeometryChange(for: [String: Double].self) { geometry in
+                        [
+                            "swiftOffset": Double(geometry.contentOffset.y),
+                            "swiftContentHeight": Double(geometry.contentSize.height),
+                            "swiftContainerHeight": Double(geometry.containerSize.height),
+                            "swiftInsetBottom": Double(geometry.contentInsets.bottom),
+                        ]
+                    } action: { _, value in
+                        swiftFacts = value
+                    }
+                    .onScrollPhaseChange { _, value in
+                        switch value {
+                        case .idle: phase = 0
+                        case .tracking: phase = 1
+                        case .interacting: phase = 2
+                        case .decelerating: phase = 3
+                        case .animating: phase = 4
+                        @unknown default: phase = -1
+                        }
+                    }
+                    .onChange(of: chrome?.accessory, initial: true) { _, after in
+                        guard let after else { return }
+                        if after.placement == .minimized {
+                            observedMinimized = true
+                            minimizedFrame = after.frame
+                            awaitingExpansion = true
+                        } else if after.placement == .normal, awaitingExpansion,
+                            let minimizedFrame, after.frame != minimizedFrame
+                        {
+                            expansionCount += 1
+                            expandedFrame = after.frame
+                            awaitingExpansion = false
+                        }
+                    }
+                    .onPreferenceChange(FoundationChromeUIFooterFrames.self) { footerFrames = $0 }
+                    .background {
+                        FoundationChromeUINativeLocator(
+                            refresh: swiftFacts, naturalRows: naturalRows,
+                            receive: { nativeFacts = $0 }
+                        )
+                        .allowsHitTesting(false).accessibilityHidden(true)
+                    }
+                    .overlay(alignment: .topLeading) {
+                        Text("Synthetic shared chrome evidence")
+                            .font(.system(size: 1)).foregroundStyle(.clear)
+                            .frame(width: 1, height: 1).allowsHitTesting(false)
+                            .accessibilityIdentifier("fixture-chrome-" + context)
+                            .accessibilityValue(evidence)
+                    }
+            } else {
+                content
+            }
+        }
+
+        private var evidence: String {
+            var facts = nativeFacts.merging(swiftFacts, uniquingKeysWith: { _, newer in newer })
+            facts["clearance"] = Double(clearance)
+            facts["displayScale"] = Double(displayScale)
+            if let nativeBottomInset { facts["scopeNativeInset"] = Double(nativeBottomInset) }
+            if let host = chrome?.host { facts["hostBottom"] = Double(host.maxY) }
+            facts["naturalRows"] = Double(naturalRows)
+            facts["hasMore"] = hasMore ? 1 : 0
+            facts["phase"] = phase
+            facts["expansions"] = expansionCount
+            facts["observedMinimized"] = observedMinimized ? 1 : 0
+            if let minimizedFrame {
+                facts["lastMinFrameTop"] = Double(minimizedFrame.minY)
+                facts["lastMinFrameHeight"] = Double(minimizedFrame.height)
+            }
+            if let expandedFrame {
+                facts["lastExpansionFrameTop"] = Double(expandedFrame.minY)
+                facts["lastExpansionFrameHeight"] = Double(expandedFrame.height)
+            }
+            facts["hasAccessory"] = chrome?.hasAccessory == true ? 1 : 0
+            facts["placement"] =
+                chrome?.accessory?.placement == .normal
+                ? 1
+                : chrome?.accessory?.placement == .minimized ? 2 : 0
+            if let frame = chrome?.accessory?.frame {
+                facts["accessoryTop"] = Double(frame.minY)
+                facts["accessoryBottom"] = Double(frame.maxY)
+            }
+            if let frame = footerFrames[context] {
+                facts["footerPresent"] = 1
+                facts["footerHeight"] = Double(frame.height)
+                facts["footerY"] = Double(frame.minY)
+            } else {
+                facts["footerPresent"] = 0
+                facts["footerHeight"] = 0
+            }
+            let data = try? JSONSerialization.data(
+                withJSONObject: facts.filter { $0.value.isFinite }, options: [.sortedKeys])
+            return data.flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+        }
+    }
+
+    private struct FoundationChromeUINativeLocator: UIViewRepresentable {
+        let refresh: [String: Double]
+        let naturalRows: Int
+        let receive: @MainActor @Sendable ([String: Double]) -> Void
+        func makeUIView(context: Context) -> ProbeView {
+            let view = ProbeView()
+            view.backgroundColor = .clear
+            view.isUserInteractionEnabled = false
+            view.isAccessibilityElement = false
+            return view
+        }
+        func updateUIView(_ view: ProbeView, context: Context) {
+            view.receive = receive
+            view.naturalRows = naturalRows
+            view.sample()
+        }
+        final class ProbeView: UIView {
+            var receive: (@MainActor @Sendable ([String: Double]) -> Void)?
+            var naturalRows = -1
+            private weak var previousScroll: UIScrollView?
+            private var last: [String: Double] = [:]
+            override func didMoveToSuperview() {
+                super.didMoveToSuperview()
+                sample()
+            }
+            override func didMoveToWindow() {
+                super.didMoveToWindow()
+                sample()
+            }
+            override func layoutSubviews() {
+                super.layoutSubviews()
+                sample()
+            }
+
+            func sample() {
+                guard let window, let receive else { return }
+                var parent = superview
+                var selected: UIScrollView?
+                var ambiguous = false
+                while let root = parent {
+                    if let scroll = root as? UIScrollView {
+                        selected = scroll
+                        break
+                    }
+                    var queue: [UIView] = [root]
+                    var candidates: [UIScrollView] = []
+                    var visited = 0
+                    while !queue.isEmpty, visited < 4096 {
+                        let view = queue.removeLast()
+                        visited += 1
+                        guard !view.isHidden, view.alpha > 0.01 else { continue }
+                        if let scroll = view as? UIScrollView,
+                            scroll.window === window, !scroll.isHidden,
+                            scroll.bounds.height >= 200, scroll.bounds.width >= 200
+                        {
+                            candidates.append(scroll)
+                        }
+                        queue.append(contentsOf: view.subviews)
+                    }
+                    if let largest = candidates.max(by: { $0.bounds.height < $1.bounds.height }) {
+                        let ties = candidates.filter {
+                            abs($0.bounds.height - largest.bounds.height) < 1
+                        }
+                        ambiguous = ties.count != 1
+                        selected = largest
+                        break
+                    }
+                    parent = root.superview
+                }
+                var facts = FoundationHomeNativeScrollSnapshot.facts(
+                    selected,
+                    identityConsistent: previousScroll == nil || previousScroll === selected)
+                facts["ambiguousNativeScroll"] = ambiguous ? 1 : 0
+                previousScroll = selected
+                if let scroll = selected {
+                    let end = max(
+                        -scroll.adjustedContentInset.top,
+                        scroll.contentSize.height - scroll.bounds.height
+                            + scroll.adjustedContentInset.bottom)
+                    let pixel = 1 / max(1, traitCollection.displayScale)
+                    facts["nativeDisplayScale"] = Double(traitCollection.displayScale)
+                    facts["nativeAtEnd"] = abs(scroll.contentOffset.y - end) <= pixel ? 1 : 0
+                    if let list = scroll as? UICollectionView {
+                        var count = 0
+                        var extraHeight: CGFloat = 0
+                        var missingAttributes = 0
+                        for section in 0..<list.numberOfSections {
+                            for item in 0..<list.numberOfItems(inSection: section) {
+                                if let frame = list.layoutAttributesForItem(
+                                    at: IndexPath(item: item, section: section))?.frame
+                                {
+                                    if count >= naturalRows, naturalRows >= 0 {
+                                        extraHeight += frame.height
+                                    }
+                                    facts["lastCellHeight"] = Double(frame.height)
+                                } else {
+                                    missingAttributes += 1
+                                }
+                                count += 1
+                            }
+                        }
+                        facts["nativeListItems"] = Double(count)
+                        facts["missingListLayoutAttributes"] = Double(missingAttributes)
+                        if naturalRows >= 0 { facts["extraRowsHeight"] = Double(extraHeight) }
+                        facts["nativeListKind"] = 1
+                        if naturalRows >= 0, count == naturalRows + 1,
+                            let section = (0..<list.numberOfSections).last(where: {
+                                list.numberOfItems(inSection: $0) > 0
+                            }),
+                            let cell = list.cellForItem(
+                                at: IndexPath(
+                                    item: list.numberOfItems(inSection: section) - 1,
+                                    section: section)),
+                            cell.window === window
+                        {
+                            facts["nativeFooterHeight"] = Double(cell.bounds.height)
+                            facts["nativeFooterY"] = Double(
+                                cell.convert(cell.bounds, to: window).minY)
+                        }
+                    } else if let list = scroll as? UITableView {
+                        var count = 0
+                        var extraHeight: CGFloat = 0
+                        for section in 0..<list.numberOfSections {
+                            for row in 0..<list.numberOfRows(inSection: section) {
+                                let frame = list.rectForRow(
+                                    at: IndexPath(row: row, section: section))
+                                if count >= naturalRows, naturalRows >= 0 {
+                                    extraHeight += frame.height
+                                }
+                                facts["lastCellHeight"] = Double(frame.height)
+                                count += 1
+                            }
+                        }
+                        facts["nativeListItems"] = Double(count)
+                        if naturalRows >= 0 { facts["extraRowsHeight"] = Double(extraHeight) }
+                        facts["nativeListKind"] = 2
+                        facts["missingListLayoutAttributes"] = 0
+                        if naturalRows >= 0, count == naturalRows + 1,
+                            let section = (0..<list.numberOfSections).last(where: {
+                                list.numberOfRows(inSection: $0) > 0
+                            }),
+                            let cell = list.cellForRow(
+                                at: IndexPath(
+                                    row: list.numberOfRows(inSection: section) - 1, section: section
+                                )),
+                            cell.window === window
+                        {
+                            facts["nativeFooterHeight"] = Double(cell.bounds.height)
+                            facts["nativeFooterY"] = Double(
+                                cell.convert(cell.bounds, to: window).minY)
+                        }
+                    }
+                }
+                var queue: [UIView] = [window]
+                var visited = 0
+                while !queue.isEmpty, visited < 4096 {
+                    let view = queue.removeLast()
+                    visited += 1
+                    if let bar = view as? UITabBar,
+                        let home = bar.items?.first(where: { $0.title == "Home" })
+                    {
+                        facts["homeIconWidth"] = Double(home.image?.size.width ?? 0)
+                        facts["homeIconHeight"] = Double(home.image?.size.height ?? 0)
+                        break
+                    }
+                    queue.append(contentsOf: view.subviews)
+                }
+                guard facts != last else { return }
+                last = facts
+                let captured = facts
+                DispatchQueue.main.async { [weak self, weak window] in
+                    guard let self, let window, self.window === window else { return }
+                    receive(captured)
+                }
+            }
+        }
+    }
+
+    struct FoundationRemoteListeningShelfUIProbe: ViewModifier {
+        let isFavorites: Bool
+        @ViewBuilder func body(content: Content) -> some View {
+            if FoundationDownloadsTestHarness.enabled, isFavorites,
+                ProcessInfo.processInfo.arguments.contains("-fixtureRemoteListening")
+            {
+                content.accessibilityIdentifier("fixture-favorites-carousel")
+            } else {
+                content
+            }
         }
     }
 #endif

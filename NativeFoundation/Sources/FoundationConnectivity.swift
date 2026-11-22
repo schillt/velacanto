@@ -8,13 +8,14 @@ final class FoundationConnectivity: ObservableObject {
     enum Status: Equatable { case checking, available, connecting, unavailable, restricted }
     @Published private(set) var status: Status = .checking
     @Published private(set) var localOnly = false
+    @Published private(set) var offlineMode = false
     @Published private(set) var statusMessage: String?
     @Published private(set) var isRetrying = false
     @Published private(set) var successfulRetryRevision = 0
-    var hasConnectionIssue: Bool { localOnly || (status == .available && statusMessage != nil) }
+    var hasConnectionIssue: Bool { !localOnly && status == .available && statusMessage != nil }
     @Published private(set) var usesWiFiOrWired = false
     @Published private(set) var usesCellular = false
-    var isConnected: Bool { status == .available }
+    var isConnected: Bool { !offlineMode && status == .available }
     var streamingPath: FoundationStreamingPath {
         guard isLive else { return FoundationStreamingPath() }
         return FoundationStreamingPath(
@@ -40,9 +41,12 @@ final class FoundationConnectivity: ObservableObject {
     }
 
     init(
-        monitorConnectivity: Bool = true, settleDuration: Duration = .milliseconds(500),
+        offlineMode: Bool = false, monitorConnectivity: Bool = true,
+        settleDuration: Duration = .milliseconds(500),
         retry: @escaping @Sendable () async throws -> Void
     ) {
+        self.offlineMode = offlineMode
+        self.localOnly = offlineMode
         self.retry = retry
         self.settleDuration = settleDuration
         if monitorConnectivity {
@@ -110,7 +114,7 @@ final class FoundationConnectivity: ObservableObject {
 
     private func publish(_ next: Status) {
         status = next
-        localOnly = next == .unavailable || next == .restricted
+        localOnly = offlineMode || next == .unavailable || next == .restricted
         switch next {
         case .checking: statusMessage = "Checking connection…"
         case .connecting: statusMessage = "Connecting. Downloaded music remains available."
@@ -124,8 +128,17 @@ final class FoundationConnectivity: ObservableObject {
         }
     }
 
+    func setOfflineMode(_ enabled: Bool) {
+        guard isLive, offlineMode != enabled else { return }
+        generation &+= 1
+        settleTask?.cancel()
+        offlineMode = enabled
+        // Reapply the actual observed path; manual mode never fabricates a radio failure.
+        publish(observation?.status ?? status)
+    }
+
     func retryOnline() async {
-        guard isLive, !isRetrying else { return }
+        guard isLive, !offlineMode, !isRetrying else { return }
         isRetrying = true
         defer { isRetrying = false }
         let epoch = generation

@@ -21,3 +21,20 @@ current app preferences; it does not erase copies already captured in older
 backups or in separately exported device data. The app does not use iCloud
 key-value synchronization for pins. Avoid putting personal pin values or raw
 preference files in issue, test, or support evidence.
+
+## Optional iCloud development candidate — #198
+
+The source candidate adds an account-scoped local sync journal under
+`Velacanto.Foundation.PinSync.v1.*`, containing only pin identities/order,
+removal contexts, opaque scope/account digests, random device identity and consent.
+It uses ordinary UserDefaults with the same backup/encryption limits above.
+Successful local cleanup removes these journal keys as well as pin snapshots;
+failed credential deletion preserves the active owner and local records.
+
+The optional CloudKit path is default OFF and unavailable without reviewed native
+container/profile configuration. It never uses iCloud key-value synchronization.
+Disabling sync or signing out leaves cloud records retained; explicit cloud-pin
+deletion has its own cross-device confirmation and reset epoch. Local cleanup
+does not erase historical device or Apple backups. See [candidate contract and
+unapplied capability gate](icloud-pin-sync-198.md); native/signed cross-device
+acceptance remains pending and #198 remains open.

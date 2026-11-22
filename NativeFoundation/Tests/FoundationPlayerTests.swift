@@ -10,6 +10,62 @@ final class FoundationPlayerTests: XCTestCase {
     private let track = FoundationItem(
         id: "synthetic", title: "", subtitle: "", kind: .track, duration: nil)
 
+    func testResolutionErrorsKeepCredentialSentinelsOutOfFailureUIAndJournal() async throws {
+        let token = "synthetic-error-credential-25"
+        let url = try XCTUnwrap(
+            URL(string: "https://playback-error.invalid/audio/master.m3u8?ApiKey=\(token)"))
+        let underlying = NSError(
+            domain: "synthetic-private-domain-25", code: 1,
+            userInfo: [NSLocalizedDescriptionKey: url.absoluteString])
+        let errors: [Error] = [
+            URLError(
+                .timedOut,
+                userInfo: [
+                    NSURLErrorFailingURLErrorKey: url,
+                    NSLocalizedDescriptionKey: token,
+                    NSUnderlyingErrorKey: underlying,
+                ]),
+            underlying,
+        ]
+        for error in errors {
+            let player = FoundationPlayer(
+                resolve: { _ in throw error },
+                makeItem: { _ in
+                    XCTFail("Resolution failure must not install a native item")
+                    return AVPlayerItem(asset: AVMutableComposition())
+                },
+                activateSession: {}, deactivateSession: {}, startPlayback: { _ in })
+            defer { player.stop() }
+            player.setQueue([track], selectedIndex: 0)
+            let occurrence = try XCTUnwrap(player.selectedEntryID)
+            await player.selectionTask?.value
+            XCTAssertEqual(player.state, .failed)
+            XCTAssertFalse(player.wantsPlayback)
+            XCTAssertNil(player.nativePlayer.currentItem)
+            XCTAssertEqual(player.selectedEntryID, occurrence)
+            XCTAssertEqual(player.queue.map(\.item), [track])
+            let message = try XCTUnwrap(player.errorMessage)
+            XCTAssertEqual(message, "Playback failed. Select a track to try again.")
+            for sentinel in [
+                token, url.absoluteString, "playback-error.invalid", underlying.domain,
+            ] {
+                XCTAssertFalse(message.contains(sentinel))
+            }
+            #if DEBUG
+                // Read the production projection; never clear or reconfigure the shared journal.
+                XCTAssertTrue(FoundationJournal.shared.isEnabled)
+                let journal = FoundationJournal.shared.snapshot()
+                let category = error is URLError ? "timeout" : "other"
+                XCTAssertTrue(journal.contains("player.failure.resolution." + category))
+                for sentinel in [
+                    token, url.absoluteString, "playback-error.invalid", underlying.domain,
+                ] {
+                    XCTAssertFalse(journal.contains(sentinel))
+                }
+            #endif
+        }
+    }
+
     func testPlaybackProtectionFollowsLoadingPauseFailureAndStop() async throws {
         let resources = PlaybackResourceProbe()
         let player = FoundationPlayer(
@@ -31,6 +87,70 @@ final class FoundationPlayerTests: XCTestCase {
         player.stop()
         XCTAssertEqual(observed.last?.0, false)
         XCTAssertEqual(observed.map(\.1), observed.map(\.1).sorted())
+    }
+
+    func testOfflineModeRetiresPendingNaturalSuccessorEvenWhenLocalItemIsRetained() async throws {
+        let resources = PlaybackResourceProbe()
+        let player = FoundationPlayer(
+            resolve: { _ in throw URLError(.unknown) },
+            resolveResource: { _ in try await resources.resolve() },
+            makeItem: { _ in AVPlayerItem(asset: AVMutableComposition()) },
+            activateSession: {}, deactivateSession: {}, startPlayback: { _ in })
+        player.setQueue([track, track], selectedIndex: 0)
+        let first = player.selectionTask
+        try await resources.waitForCalls(1)
+        await resources.succeed(0)
+        await first?.value
+        await player.playTask?.value
+        player.didReachEnd(try XCTUnwrap(player.nativePlayer.currentItem))
+        let successor = player.selectionTask
+        try await resources.waitForCalls(2)
+        let occurrence = player.selectedEntryID
+        player.enterOfflineMode()
+        await resources.succeed(1, url: URL(string: "https://example.invalid/audio")!)
+        await successor?.value
+        try await resources.waitForReleases(2)
+        XCTAssertNil(player.nativePlayer.currentItem)
+        XCTAssertEqual(player.selectedEntryID, occurrence)
+        XCTAssertNil(player.errorMessage)
+        XCTAssertEqual(player.state, .idle)
+        player.stop()
+    }
+
+    func testOfflineModePreservesInstalledLocalPlaybackAndReleasesRemoteWithoutError() async throws
+    {
+        for local in [true, false] {
+            let resources = PlaybackResourceProbe()
+            let player = FoundationPlayer(
+                resolve: { _ in throw URLError(.unknown) },
+                resolveResource: { _ in try await resources.resolve() },
+                makeItem: { _ in AVPlayerItem(asset: AVMutableComposition()) },
+                activateSession: {}, deactivateSession: {}, startPlayback: { _ in })
+            player.setQueue([track], selectedIndex: 0)
+            let selection = player.selectionTask
+            try await resources.waitForCalls(1)
+            if local {
+                await resources.succeed(0)
+            } else {
+                await resources.succeed(0, url: URL(string: "https://example.invalid/audio")!)
+            }
+            await selection?.value
+            await player.playTask?.value
+            let item = try XCTUnwrap(player.nativePlayer.currentItem)
+            let occurrence = player.selectedEntryID
+            player.enterOfflineMode()
+            if local {
+                XCTAssertTrue(player.nativePlayer.currentItem === item)
+            } else {
+                XCTAssertNil(player.nativePlayer.currentItem)
+                XCTAssertEqual(player.state, .idle)
+                try await resources.waitForReleases(1)
+            }
+            XCTAssertNil(player.errorMessage)
+            XCTAssertEqual(player.selectedEntryID, occurrence)
+            XCTAssertEqual(player.queue.count, 1)
+            player.stop()
+        }
     }
 
     func testStreamingPolicyChangePreservesPendingAndInstalledLocalResource() async throws {
@@ -1614,6 +1734,57 @@ final class FoundationPlayerTests: XCTestCase {
         await pending?.value
         XCTAssertNil(player.nativePlayer.currentItem)
         player.stop()
+    }
+
+    func testClearHistoryPreservesCurrentResolutionUpcomingModesAndRestoration() async throws {
+        let resolver = PlayerResolutionProbe()
+        let player = FoundationPlayer(resolve: { _ in try await resolver.resolve() })
+        player.enqueue(Array(repeating: track, count: 6), position: .last)
+        player.select(player.queue[2].id)
+        let selection = player.selectionTask
+        try await resolver.waitForCalls(1, timeout: .seconds(5))
+        player.setShuffle(true)
+        player.setRepeat(.all)
+        let current = player.selectedEntryID
+        let upcoming = player.upcoming
+        let intent = player.wantsPlayback
+        let state = player.state
+        var changes = 0
+        let subscription = player.sessionChanged.sink { changes += 1 }
+        player.clearHistory()
+        XCTAssertTrue(player.history.isEmpty)
+        XCTAssertEqual(player.queue.map(\.id), [try XCTUnwrap(current)] + upcoming.map(\.id))
+        XCTAssertEqual(player.selectedEntryID, current)
+        XCTAssertEqual(player.upcoming, upcoming)
+        XCTAssertEqual(player.wantsPlayback, intent)
+        XCTAssertEqual(player.state, state)
+        XCTAssertTrue(player.shuffleEnabled)
+        XCTAssertEqual(player.repeatMode, .all)
+        XCTAssertFalse(selection?.isCancelled ?? true)
+        XCTAssertEqual(changes, 1)
+        player.clearHistory()
+        XCTAssertEqual(changes, 1)
+        let restored = FoundationPlayer(resolve: { _ in throw CancellationError() })
+        restored.restoreSession(FoundationPlaybackSnapshot(player: player))
+        XCTAssertEqual(restored.queue, player.queue)
+        XCTAssertTrue(restored.history.isEmpty)
+        XCTAssertEqual(restored.selectedEntryID, current)
+        XCTAssertEqual(restored.upcoming, upcoming)
+        XCTAssertEqual(restored.repeatMode, .all)
+        XCTAssertTrue(restored.shuffleEnabled)
+        withExtendedLifetime(subscription) {}
+        await resolver.fail(0)
+        await selection?.value
+        player.stop()
+        restored.stop()
+    }
+
+    func testClearHistoryWithoutCurrentDoesNotDiscardQueue() {
+        let player = FoundationPlayer(resolve: { _ in throw CancellationError() })
+        player.clearHistory()
+        XCTAssertTrue(player.queue.isEmpty)
+        XCTAssertNil(player.selectedEntryID)
+        XCTAssertEqual(player.state, .idle)
     }
 
     func testUpcomingEditsPreserveCurrentHistoryDuplicatesAndRejectStaleDrag() async throws {

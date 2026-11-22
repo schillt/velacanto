@@ -10,6 +10,15 @@ nonisolated struct FoundationConvertedDownloadRendition: Codable, Equatable, Sen
     let duration: Double
 }
 
+/// Native HLS verification records requested intent and declared codec metadata.
+/// It never claims file-reader sample rate/channels or a measured encoded bitrate.
+nonisolated struct FoundationNativeDownloadRendition: Codable, Equatable, Sendable {
+    let requestedQuality: FoundationDownloadQuality
+    let declaredAudioCodec: String
+    let container: String
+    let duration: Double
+}
+
 nonisolated struct FoundationVerifiedConvertedDownload: Sendable {
     let bytes: Int64
     let digest: String
@@ -228,41 +237,212 @@ nonisolated enum FoundationConvertedDownload {
             else {
                 throw FoundationDownloadError.incomplete
             }
-            let asset = AVURLAsset(url: url)
+            return try await inspectCompressedAsset(AVURLAsset(url: url), plan: plan)
+        } catch {
+            if Task.isCancelled || error is CancellationError { throw CancellationError() }
+            throw FoundationDownloadError.incomplete
+        }
+    }
+
+    struct NativeVariant: Sendable {
+        let declaredAudioFormats: [UInt32]
+        let declaresVideo: Bool
+    }
+    struct NativePackageSnapshot: Sendable {
+        let completeOffline: Bool
+        let duration: Double
+        let variants: [NativeVariant]
+    }
+    typealias NativePackageLoad = @Sendable (AVURLAsset) async throws -> NativePackageSnapshot
+
+    /// A completed native task plus the caller's finite-VOD/owned/protected allocation
+    /// is validated through HLS APIs, not the unrelated file-only packet reader.
+    static func inspectNativePackage(
+        _ url: URL, plan: FoundationDownloadConversionPlan,
+        load: NativePackageLoad = { asset in
+            let complete = asset.assetCache?.isPlayableOffline == true
+            let duration = try await asset.load(.duration).seconds
+            let variants = try await asset.load(.variants)
+            return NativePackageSnapshot(
+                completeOffline: complete, duration: duration,
+                variants: variants.prefix(2).map { variant in
+                    NativeVariant(
+                        declaredAudioFormats: variant.audioAttributes?.formatIDs ?? [],
+                        declaresVideo: variant.videoAttributes != nil)
+                })
+        }
+    ) async throws -> FoundationNativeDownloadRendition {
+        let asset = AVURLAsset(
+            url: url,
+            options: [
+                AVURLAssetReferenceRestrictionsKey:
+                    NSNumber(
+                        value: AVAssetReferenceRestrictions.forbidLocalReferenceToRemote.rawValue),
+                AVURLAssetAllowsCellularAccessKey: false,
+                AVURLAssetAllowsExpensiveNetworkAccessKey: false,
+                AVURLAssetAllowsConstrainedNetworkAccessKey: false,
+            ])
+        #if DEBUG
+            enum Stage: String { case snapshot, intent, cache, duration, variant, codec }
+            var stage = Stage.snapshot
+            var variantCount = -1
+            var complete = false
+        #endif
+        do {
+            try Task.checkCancellation()
+            let snapshot = try await load(asset)
+            #if DEBUG
+                stage = .intent
+                variantCount = min(2, snapshot.variants.count)
+                complete = snapshot.completeOffline
+            #endif
+            guard plan.quality.aacBitrate != nil else { throw FoundationDownloadError.incomplete }
+            #if DEBUG
+                stage = .cache
+            #endif
+            guard snapshot.completeOffline else { throw FoundationDownloadError.incomplete }
+            #if DEBUG
+                stage = .duration
+            #endif
+            let tolerance = min(1, max(0.1, plan.duration * 0.001))
+            guard snapshot.duration.isFinite, abs(snapshot.duration - plan.duration) <= tolerance
+            else { throw FoundationDownloadError.incomplete }
+            #if DEBUG
+                stage = .variant
+            #endif
+            guard snapshot.variants.count == 1, let variant = snapshot.variants.first,
+                !variant.declaresVideo
+            else { throw FoundationDownloadError.incomplete }
+            #if DEBUG
+                stage = .codec
+            #endif
+            guard variant.declaredAudioFormats == [kAudioFormatMPEG4AAC] else {
+                throw FoundationDownloadError.incomplete
+            }
+            try Task.checkCancellation()
+            return .init(
+                requestedQuality: plan.quality, declaredAudioCodec: "aac", container: "hls",
+                duration: snapshot.duration)
+        } catch {
+            #if DEBUG
+                if ProcessInfo.processInfo.arguments.contains("-diagnosticNativeDownload") {
+                    FoundationJournal.shared.record(
+                        "download.native stage=rendition.native substage=\(stage.rawValue) outcome=failed completeOffline=\(complete ? 1 : 0) variants=\(variantCount) "
+                            + FoundationNativeDownloadErrorFields.scalars(error))
+                }
+            #endif
+            if Task.isCancelled || error is CancellationError { throw CancellationError() }
+            throw FoundationDownloadError.incomplete
+        }
+    }
+
+    private static func inspectCompressedAsset(
+        _ asset: AVURLAsset, plan: FoundationDownloadConversionPlan
+    )
+        async throws -> FoundationConvertedDownloadRendition
+    {
+        #if DEBUG
+            var diagnostic = RenditionDiagnostic()
+            let diagnose = ProcessInfo.processInfo.arguments.contains("-diagnosticNativeDownload")
+            if diagnose { diagnostic.readable = try? await asset.load(.isReadable) }
+        #endif
+        do {
             let tracks = try await asset.loadTracks(withMediaType: .audio)
-            guard tracks.count == 1, let track = tracks.first,
-                try await asset.loadTracks(withMediaType: .video).isEmpty
-            else { throw FoundationDownloadError.incomplete }
+            #if DEBUG
+                diagnostic.audioTracks = tracks.count
+            #endif
+            guard tracks.count == 1, let track = tracks.first else {
+                throw FoundationDownloadError.incomplete
+            }
+            #if DEBUG
+                diagnostic.stage = .videoTracks
+            #endif
+            let videoTracks = try await asset.loadTracks(withMediaType: .video)
+            #if DEBUG
+                diagnostic.videoTracks = videoTracks.count
+            #endif
+            guard videoTracks.isEmpty else { throw FoundationDownloadError.incomplete }
+            #if DEBUG
+                diagnostic.stage = .formats
+            #endif
             let formats = try await track.load(.formatDescriptions)
-            guard formats.count == 1, let format = formats.first,
-                let description = CMAudioFormatDescriptionGetStreamBasicDescription(format)?
-                    .pointee,
-                description.mFormatID == kAudioFormatMPEG4AAC,
-                description.mSampleRate == 48_000, description.mChannelsPerFrame == 2
+            #if DEBUG
+                diagnostic.formats = formats.count
+            #endif
+            guard formats.count == 1, let format = formats.first else {
+                throw FoundationDownloadError.incomplete
+            }
+            #if DEBUG
+                diagnostic.stage = .audioDescription
+            #endif
+            guard
+                let description = CMAudioFormatDescriptionGetStreamBasicDescription(format)?.pointee
             else { throw FoundationDownloadError.incomplete }
+            #if DEBUG
+                diagnostic.stage = .codec
+            #endif
+            guard description.mFormatID == kAudioFormatMPEG4AAC else {
+                throw FoundationDownloadError.incomplete
+            }
+            #if DEBUG
+                diagnostic.stage = .sampleRate
+            #endif
+            guard description.mSampleRate == 48_000 else {
+                throw FoundationDownloadError.incomplete
+            }
+            #if DEBUG
+                diagnostic.stage = .channels
+            #endif
+            guard description.mChannelsPerFrame == 2 else {
+                throw FoundationDownloadError.incomplete
+            }
+            #if DEBUG
+                diagnostic.stage = .duration
+            #endif
             let assetDuration = try await asset.load(.duration).seconds
+            #if DEBUG
+                diagnostic.stage = .readerInit
+            #endif
             let reader = try AVAssetReader(asset: asset)
             let output = AVAssetReaderTrackOutput(track: track, outputSettings: nil)
+            #if DEBUG
+                diagnostic.stage = .readerOutput
+            #endif
             guard reader.canAdd(output) else { throw FoundationDownloadError.incomplete }
             let provider = reader.outputProvider(for: output)
+            #if DEBUG
+                diagnostic.stage = .readerStart
+            #endif
             try reader.start()
             defer { reader.cancelReading() }
             var first: Double?
             var end: Double = 0
             var lastStart = -Double.infinity
             var readBytes: Int64 = 0
+            #if DEBUG
+                diagnostic.stage = .readerNext
+            #endif
             while let sample = try await provider.next() {
                 try Task.checkCancellation()
                 // With compressed outputSettings=nil, AVAssetReader also emits
                 // marker-only buffers (zero samples). They carry edit/end metadata,
                 // not audio packets. Continue through them to actual reader EOF;
                 // nonempty packets and the complete expected duration remain mandatory.
+                #if DEBUG
+                    diagnostic.stage = .marker
+                #endif
                 if sample.sampleCount == 0 {
                     guard sample.totalSampleSize == 0 else {
                         throw FoundationDownloadError.incomplete
                     }
+                    #if DEBUG
+                        diagnostic.stage = .readerNext
+                    #endif
                     continue
                 }
+                #if DEBUG
+                    diagnostic.stage = .packet
+                #endif
                 guard sample.sampleCount > 0 else {
                     throw FoundationDownloadError.incomplete
                 }
@@ -277,8 +457,15 @@ nonisolated enum FoundationConvertedDownload {
                 lastStart = start
                 end = start + duration
                 readBytes += Int64(size)
+                #if DEBUG
+                    diagnostic.sawPacket = true
+                    diagnostic.stage = .readerNext
+                #endif
             }
             try Task.checkCancellation()
+            #if DEBUG
+                diagnostic.stage = .eof
+            #endif
             guard let first, reader.status == .completed,
                 plan.acceptsOutput(
                     codec: "aac", container: "m4a", sampleRate: description.mSampleRate,
@@ -289,8 +476,37 @@ nonisolated enum FoundationConvertedDownload {
                 container: "m4a", codec: "aac", sampleRate: description.mSampleRate,
                 channels: Int(description.mChannelsPerFrame), duration: assetDuration)
         } catch {
+            #if DEBUG
+                if diagnose { FoundationJournal.shared.record(diagnostic.failure(error)) }
+            #endif
             if Task.isCancelled || error is CancellationError { throw CancellationError() }
             throw FoundationDownloadError.incomplete
         }
     }
+
+    #if DEBUG
+        /// Fixed shape and recognized numeric errors only; never media identifiers or URLs.
+        struct RenditionDiagnostic {
+            enum Stage: String {
+                case audioTracks, videoTracks, formats, audioDescription, codec, sampleRate,
+                    channels
+                case duration, readerInit, readerOutput, readerStart, readerNext, marker, packet,
+                    eof
+            }
+            var stage = Stage.audioTracks
+            var readable: Bool?
+            var audioTracks = -1
+            var videoTracks = -1
+            var formats = -1
+            var sawPacket = false
+            func failure(_ error: Error) -> String {
+                func count(_ value: Int) -> Int { max(-1, min(2, value)) }
+                let support = readable.map { $0 ? "yes" : "no" } ?? "unknown"
+                return
+                    "download.native stage=rendition.inspect substage=\(stage.rawValue) outcome=failed readable=\(support) audioTracks=\(count(audioTracks)) videoTracks=\(count(videoTracks)) formats=\(count(formats)) sawPacket=\(sawPacket ? 1 : 0) "
+                    + FoundationNativeDownloadErrorFields.scalars(error)
+            }
+        }
+    #endif
+
 }

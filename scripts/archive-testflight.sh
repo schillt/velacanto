@@ -23,4 +23,17 @@ if [ -n "${VELACANTO_BUILD_NUMBER:-}" ]; then
   case "$VELACANTO_BUILD_NUMBER" in *[!0-9]*|'') printf 'Build number must be numeric.\n' >&2; exit 2 ;; esac
   set -- "$@" "CURRENT_PROJECT_VERSION=$VELACANTO_BUILD_NUMBER"
 fi
+# Explicit distribution-only opt-in; ordinary/development archive defaults stay intact.
+case ${VELACANTO_DISTRIBUTION_PIN_SYNC:-} in
+  '') ;;
+  production)
+    set -- "$@" \
+      "VELACANTO_APP_BUNDLE_IDENTIFIER=com.chameleonenterprise.velacanto" \
+      "VELACANTO_APP_DISPLAY_NAME=VelaCanto" \
+      "VELACANTO_PIN_SYNC_CONTAINER_IDENTIFIER=iCloud.com.chameleonenterprise.velacanto" \
+      "VELACANTO_IOS_ENTITLEMENTS_FILE=Resources/Velacanto-iOS-PinSyncProduction.entitlements" \
+      "VELACANTO_MACOS_ENTITLEMENTS_FILE=Resources/Velacanto-macOS-PinSyncProduction.entitlements"
+    ;;
+  *) printf 'Unsupported distribution pin-sync configuration.\n' >&2; exit 2 ;;
+esac
 "$DEVELOPER_DIR/usr/bin/xcodebuild" "$@" archive

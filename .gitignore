@@ -31,3 +31,10 @@ Secrets.xcconfig
 /Velacanto/Resources/CanvasPreview.xcconfig
 /Velacanto/Resources/Info-Debug.plist
 /Velacanto.xcodeproj/xcshareddata/xcodecloud/
+
+# Local-only generated registration and private acceptance evidence
+/NativeFoundation/VelacantoFoundation.xcodeproj/xcshareddata/xcodecloud/manifest.json
+/docs/proposals/198-local-signing-inventory.json
+/milestone-validation/
+/.local-evidence/
+*.profraw

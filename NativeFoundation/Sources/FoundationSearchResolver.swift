@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 
 /// Resolves a bounded query snapshot. Callers own cancellation and source/query identity.
@@ -121,9 +122,15 @@ struct FoundationSearchResolver: Sendable {
     private let localOnly: Bool
     private static let kinds: [FoundationItem.Kind] = [.track, .album, .artist, .playlist, .genre]
 
-    init(library: any FoundationLibrary) {
+    init(library: any FoundationLibrary, genreSearch: Search? = nil) {
         self.init(
-            search: { try await library.search(query: $0, kind: $1, startIndex: 0, limit: $2) },
+            search: { query, kind, limit in
+                if kind == .genre, let genreSearch {
+                    return try await genreSearch(query, kind, limit)
+                }
+                return try await library.search(
+                    query: query, kind: kind, startIndex: 0, limit: limit)
+            },
             artistAlbums: { try await library.albums(artistID: $0, startIndex: 0) },
             artistTracks: { try await library.tracks(artistID: $0, startIndex: 0) },
             artistMostPlayed: { try await library.mostPlayed(artistID: $0) },
@@ -576,5 +583,185 @@ struct FoundationSearchResolver: Sendable {
     private static func unique(_ items: [FoundationItem]) -> [FoundationItem] {
         var seen: Set<String> = []
         return items.filter { seen.insert(key($0)).inserted }
+    }
+}
+
+/// Visible query-owned lookup: empty matching pages may still advance the inspected cursor.
+@MainActor final class FoundationPlaylistLookupModel: ObservableObject {
+    @Published private(set) var items: [FoundationItem]
+    @Published private(set) var cursor: FoundationPlaylistContentCursor?
+    @Published private(set) var incomplete: Bool
+    @Published private(set) var error: FoundationLibraryError?
+    @Published private(set) var loading = false
+    @Published private(set) var searching = false
+    @Published private(set) var hasStartedSearch = false
+    var showsSearchProgress: Bool {
+        searching || (!hasStartedSearch && cursor != nil && error == nil)
+    }
+    var canRetryContinuation: Bool {
+        !searching && !loading && cursor != nil && budget.canRequestPage
+            && (error == .network || error == .unavailable)
+    }
+    private var searchOwner = UUID()
+    private var visibleClients: Set<UUID> = []
+    private var visibleTask: Task<Void, Never>?
+    private var visibleJob = UUID()
+    private var visibilityRevision = 0
+    private var owner = UUID()
+    private var budget = FoundationCatalogBudget()
+    private let scope: String
+
+    init(
+        scope: String, seed: FoundationPlaylistContentPage,
+        limits: FoundationCatalogBudget = .init()
+    ) {
+        self.scope = scope
+        budget = limits
+        items = seed.items
+        cursor =
+            seed.continuation
+            ?? seed.nextStartIndex.map {
+                .init(candidateOffset: $0, pending: [])
+            }
+        incomplete = seed.hasIncompleteCoverage
+        let page = FoundationPage(items: seed.items, nextStartIndex: nil)
+        guard seed.items.count <= FoundationPlaylistContentSearch.candidateLimit,
+            seed.items.allSatisfy({ $0.kind == .playlist }),
+            let cost = budget.cost(of: page), budget.canRetain(cost)
+        else {
+            items = []
+            cursor = nil
+            incomplete = true
+            error = .invalidResponse
+            return
+        }
+        budget.requestedPages += 1
+        budget.retainedItems += cost.items
+        budget.retainedBytes += cost.bytes
+        if seed.partialFailureCount > 0 { error = .network }
+    }
+
+    /// Inline and full results register independently while sharing one producer.
+    @discardableResult
+    func registerVisible(
+        _ client: UUID, context: FoundationMusicSearchContext,
+        library: any FoundationLibrary
+    ) -> Task<Void, Never>? {
+        guard library.metadataScopeID == scope else { return nil }
+        visibleClients.insert(client)
+        visibilityRevision += 1
+        guard visibleTask == nil, error == nil, cursor != nil else { return visibleTask }
+        let job = UUID()
+        visibleJob = job
+        visibleTask = Task { [weak self] in
+            guard let self else { return }
+            defer { if visibleJob == job { visibleTask = nil } }
+            guard visibleJob == job, !visibleClients.isEmpty, !Task.isCancelled else { return }
+            await searchWhileVisible(context: context, library: library)
+        }
+        return visibleTask
+    }
+
+    func releaseVisible(_ client: UUID) {
+        guard visibleClients.remove(client) != nil else { return }
+        visibilityRevision += 1
+        guard visibleClients.isEmpty else { return }
+        let revision = visibilityRevision
+        // Defer cleanup to the next actor turn so synchronous SwiftUI view
+        // handover can register its successor without cancelling a shared read.
+        Task { [weak self] in
+            guard let self, visibilityRevision == revision, visibleClients.isEmpty else { return }
+            cancel()
+        }
+    }
+
+    /// Only an explicit action from a current visible client can resume a failed
+    /// cursor. Preserve results and the existing budget; redraws never retry.
+    @discardableResult
+    func retryVisible(
+        _ client: UUID, context: FoundationMusicSearchContext,
+        library: any FoundationLibrary
+    ) -> Task<Void, Never>? {
+        guard visibleClients.contains(client), library.metadataScopeID == scope,
+            canRetryContinuation
+        else { return nil }
+        error = nil
+        return registerVisible(client, context: context, library: library)
+    }
+
+    /// The caller owns visibility/query lifetime. Each step uses the unchanged
+    /// bounded provider batch and ordinary admission; errors never auto-retry.
+    func searchWhileVisible(context: FoundationMusicSearchContext, library: any FoundationLibrary)
+        async
+    {
+        guard !searching, !loading, error == nil, library.metadataScopeID == scope else { return }
+        let identity = UUID()
+        searchOwner = identity
+        hasStartedSearch = true
+        searching = true
+        defer { if searchOwner == identity { searching = false } }
+        while let previous = cursor, searchOwner == identity, !Task.isCancelled, error == nil {
+            guard await load(context: context, library: library) else { return }
+            guard searchOwner == identity, !Task.isCancelled, error == nil else { return }
+            if cursor == previous {
+                error = .invalidResponse
+                return
+            }
+        }
+    }
+
+    func cancel() {
+        visibleClients.removeAll()
+        visibilityRevision += 1
+        visibleJob = UUID()
+        visibleTask?.cancel()
+        visibleTask = nil
+        owner = UUID()
+        searchOwner = UUID()
+        loading = false
+        searching = false
+    }
+
+    @discardableResult
+    func load(context: FoundationMusicSearchContext, library: any FoundationLibrary) async -> Bool {
+        guard !loading, library.metadataScopeID == scope, let cursor else { return false }
+        guard budget.canRequestPage else {
+            error = .invalidResponse
+            return false
+        }
+        let identity = UUID()
+        owner = identity
+        budget.requestedPages += 1
+        loading = true
+        error = nil
+        defer { if owner == identity { loading = false } }
+        do {
+            let page = try await library.playlistsContainingMusic(context: context, cursor: cursor)
+            try Task.checkCancellation()
+            guard owner == identity, library.metadataScopeID == scope else { return false }
+            let raw = FoundationPage(items: page.items, nextStartIndex: nil)
+            guard let cost = budget.cost(of: raw), budget.canRetain(cost) else {
+                throw FoundationLibraryError.invalidResponse
+            }
+            budget.retainedItems += cost.items
+            budget.retainedBytes += cost.bytes
+            var seen = Set(items.map(\.id))
+            items += page.items.filter { seen.insert($0.id).inserted }
+            self.cursor =
+                page.continuation
+                ?? page.nextStartIndex.map {
+                    .init(candidateOffset: $0, pending: [])
+                }
+            incomplete = page.hasIncompleteCoverage
+            if page.partialFailureCount > 0 { error = .network }
+            return true
+        } catch {
+            guard owner == identity, library.metadataScopeID == scope, !Task.isCancelled else {
+                return false
+            }
+            let category = FoundationLibraryError.category(error)
+            if category != .cancelled { self.error = category }
+            return false
+        }
     }
 }

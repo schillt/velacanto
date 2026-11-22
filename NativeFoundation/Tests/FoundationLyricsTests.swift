@@ -3,6 +3,11 @@ import XCTest
 
 @testable import VelacantoFoundation
 
+#if os(macOS)
+    import AppKit
+    import SwiftUI
+#endif
+
 @MainActor
 final class FoundationLyricsTests: XCTestCase {
     private let item = FoundationItem(
@@ -11,6 +16,140 @@ final class FoundationLyricsTests: XCTestCase {
     private let session = FoundationSession(
         serverURL: URL(string: "https://example.invalid/proxy/")!, accessToken: "synthetic",
         userID: "00000000000000000000000000000002", deviceID: "synthetic")
+
+    func testOfflineSuspensionRejectsLateLyricsAndRetainsAlreadyLoadedWords() async {
+        let probe = Probe()
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            await probe.wait()
+            return (
+                Data(#"{"Lyrics":[{"Text":"Available"}]}"#.utf8),
+                Self.response(request, status: 200)
+            )
+        }
+        let model = FoundationLyricsModel()
+        let task = Task { await model.load(item: item, library: library) { true } }
+        while !(await probe.waiting) { await Task.yield() }
+        model.suspendForOffline()
+        await probe.finish()
+        await task.value
+        XCTAssertEqual(model.state, .idle)
+        XCTAssertTrue(model.isActive)
+        let reload = Task { await model.load(item: item, library: library) { true } }
+        while !(await probe.waiting) { await Task.yield() }
+        await probe.finish()
+        await reload.value
+        XCTAssertEqual(model.state, .loaded(.init(text: "Available")))
+        model.suspendForOffline()
+        XCTAssertEqual(model.state, .loaded(.init(text: "Available")))
+    }
+
+    func testProviderCancellationHasExplicitRetryAndNeverStaysIdleLoading() async {
+        let probe = Probe()
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            if await probe.increment() == 1 { throw CancellationError() }
+            return (
+                Data(#"{"Lyrics":[{"Text":"Recovered"}]}"#.utf8),
+                Self.response(request, status: 200)
+            )
+        }
+        let model = FoundationLyricsModel()
+        await model.load(item: item, library: library) { true }
+        XCTAssertEqual(model.state, .failed(.cancelled))
+        await model.load(item: item, library: library) { true }
+        let initialCount = await probe.count
+        XCTAssertEqual(initialCount, 1, "No automatic retry")
+        model.prepareRetry()
+        await model.load(item: item, library: library) { true }
+        XCTAssertEqual(model.state, .loaded(.init(text: "Recovered")))
+    }
+
+    func testKnownMissingMetadataSkipsRequestWhileUnknownStillLoads() async {
+        let probe = Probe()
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            _ = await probe.increment()
+            return (Data(#"{"Lyrics":[]}"#.utf8), Self.response(request, status: 200))
+        }
+        var knownMissing = item
+        knownMissing.hasLyrics = false
+        let missing = FoundationLyricsModel()
+        await missing.load(item: knownMissing, library: library) { true }
+        XCTAssertEqual(missing.state, .missing)
+        let before = await probe.count
+        XCTAssertEqual(before, 0)
+        let unknown = FoundationLyricsModel()
+        await unknown.load(item: item, library: library) { true }
+        XCTAssertEqual(unknown.state, .missing)
+        let after = await probe.count
+        XCTAssertEqual(after, 1)
+    }
+
+    func testCatalogPreservesTrueFalseAndUnknownLyricsMetadata() async throws {
+        for flag in [true, false, nil] as [Bool?] {
+            let library = FoundationJellyfinLibrary(session: session) { request in
+                var track: [String: Any] = [
+                    "Id": "00000000000000000000000000000001", "Name": "Synthetic", "Type": "Audio",
+                ]
+                if let flag { track["HasLyrics"] = flag }
+                let data = try JSONSerialization.data(withJSONObject: [
+                    "Items": [track], "TotalRecordCount": 1, "StartIndex": 0,
+                ])
+                return (data, Self.response(request, status: 200))
+            }
+            let page = try await library.songs(startIndex: 0)
+            XCTAssertEqual(page.items.first?.hasLyrics, flag)
+        }
+    }
+
+    #if os(macOS)
+        func testMountedMacLyricsLoadsNewTrackWithoutClosingInspector() async {
+            let first = FoundationQueueEntry(item: item)
+            let other = FoundationItem(
+                id: "00000000000000000000000000000003", title: "Second", subtitle: "", kind: .track,
+                duration: 30)
+            let second = FoundationQueueEntry(item: other)
+            let initial = expectation(description: "First lyrics loaded")
+            let changed = expectation(description: "Second lyrics loaded in mounted inspector")
+            let library = FoundationJellyfinLibrary(session: session) { request in
+                if request.url!.path.contains(other.id) {
+                    changed.fulfill()
+                } else {
+                    initial.fulfill()
+                }
+                return (
+                    Data(#"{"Lyrics":[{"Text":"Synthetic line"}]}"#.utf8),
+                    Self.response(request, status: 200)
+                )
+            }
+            let player = FoundationPlayer(
+                resolve: { _ in throw FoundationLibraryError.unavailable }, activateSession: {},
+                deactivateSession: {})
+            func select(_ id: UUID) {
+                player.restoreSession(
+                    .init(
+                        entries: [first, second], selectedEntryID: id, shuffleEnabled: false,
+                        repeatMode: .off))
+            }
+            select(first.id)
+            let connectivity = FoundationConnectivity(monitorConnectivity: false, retry: {})
+            let panel = FoundationMacPlaybackPanel(
+                player: player, library: library, mode: .lyrics, queuePresentation: 0,
+                isPresented: true
+            ).environmentObject(connectivity)
+            let window = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 340, height: 600), styleMask: [.titled],
+                backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            window.contentView = NSHostingView(rootView: panel)
+            window.orderFront(nil)
+            defer {
+                window.close()
+                player.stop()
+            }
+            await fulfillment(of: [initial], timeout: 5)
+            select(second.id)
+            await fulfillment(of: [changed], timeout: 5)
+        }
+    #endif
 
     func testGeneratedRequestAndTimedUntimedBlankMapping() async throws {
         for body in [
@@ -34,6 +173,28 @@ final class FoundationLyricsTests: XCTestCase {
             let lyrics = try await library.lyrics(for: item)
             XCTAssertNil(lyrics)
         }
+    }
+
+    func testExplicitTimedBlanksRemainInstrumentalBoundariesWithoutChangingUntimedSpacing()
+        async throws
+    {
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            let body =
+                #"{"Lyrics":[{"Text":"First","Start":0},{"Text":" \n ","Start":20000000},{"Text":"Second","Start":40000000},{"Text":""},{"Text":"…","Start":60000000}]}"#
+            return (Data(body.utf8), Self.response(request, status: 200))
+        }
+        let result = try await library.lyrics(for: item)
+        let lyrics = try XCTUnwrap(result)
+        XCTAssertEqual(lyrics.lines.map(\.id), [0, 1, 2, 3, 4])
+        XCTAssertEqual(lyrics.lines.map(\.start), [0, 2, 4, nil, 6])
+        XCTAssertEqual(lyrics.lines.map(\.text), ["First", "", "Second", "", "…"])
+        XCTAssertEqual(lyrics.lines.map(\.isInstrumental), [false, true, false, false, false])
+        XCTAssertEqual(lyrics.activeLine(at: 2, duration: 10), 1)
+        XCTAssertEqual(lyrics.activeLine(at: 4, duration: 10), 2)
+        // Untimed paragraphs retain their original spacing, including internal blank lines.
+        let untimed = FoundationLyrics(text: "First\n\nSecond")
+        XCTAssertEqual(untimed.text, "First\n\nSecond")
+        XCTAssertFalse(untimed.lines[0].isInstrumental)
     }
 
     func testMissingResourceDoesNotSwallowAuthenticationSecurityOrMalformedResponses() async throws
@@ -141,6 +302,93 @@ final class FoundationLyricsTests: XCTestCase {
             _ = try await oversized.lyrics(for: item)
             XCTFail("Oversized lyrics must not publish")
         } catch { XCTAssertEqual(error as? FoundationLibraryError, .invalidResponse) }
+    }
+
+    func testActiveLineUsesTimestampThenIDIndependentOfSourceOrder() {
+        let lyrics = FoundationLyrics(lines: [
+            .init(id: 90, text: "Earlier", start: 2),
+            .init(id: 2, text: "Later", start: 8),
+            .init(id: 8, text: "Same earlier time", start: 2),
+            .init(id: 12, text: "Same later time", start: 8),
+            .init(id: -3, text: "", start: 12),
+        ])
+        XCTAssertEqual(lyrics.activeLine(at: 2, duration: 20), 90)
+        XCTAssertEqual(lyrics.activeLine(at: 8, duration: 20), 12)
+        XCTAssertEqual(lyrics.activeLine(at: 8, duration: 8), 90)
+        XCTAssertEqual(lyrics.activeLine(at: 12, duration: 20), -3)
+        XCTAssertEqual(lyrics.activeLine(at: 3, duration: 20), 90)
+    }
+
+    func testActiveLinePreservesUnknownAndNonfiniteDurationEligibility() {
+        let lyrics = FoundationLyrics(lines: [
+            .init(id: 0, text: "First", start: 0),
+            .init(id: 1, text: "Second", start: 2),
+            .init(id: 2, text: "Third", start: 5),
+        ])
+        for duration in [0, -1, -Double.infinity, Double.infinity] {
+            XCTAssertEqual(lyrics.activeLine(at: 5, duration: duration), 2)
+        }
+        XCTAssertNil(lyrics.activeLine(at: 5, duration: .nan))
+        XCTAssertEqual(lyrics.activeLine(at: 5, duration: 5), 1)
+        XCTAssertEqual(lyrics.activeLine(at: 5, duration: Double(5).nextUp), 2)
+        for elapsed in [-0.1, Double.nan, Double.infinity, -Double.infinity] {
+            XCTAssertNil(lyrics.activeLine(at: elapsed, duration: 20))
+        }
+    }
+
+    func testActiveLineInvalidStartsCannotHideEligibleBoundaryOrExtremeIDs() {
+        let lyrics = FoundationLyrics(lines: [
+            .init(id: Int.min, text: "First boundary", start: 0),
+            .init(id: 1, text: "Untimed", start: nil),
+            .init(id: 2, text: "Negative", start: -1),
+            .init(id: 3, text: "Not finite", start: Double.nan),
+            .init(id: 4, text: "Not finite", start: Double.infinity),
+            .init(id: 5, text: "Not finite", start: -Double.infinity),
+            .init(id: Int.max, text: "Same boundary", start: -0.0),
+            .init(id: 6, text: "Next boundary", start: 0.5),
+        ])
+        XCTAssertEqual(lyrics.activeLine(at: 0, duration: 1), Int.max)
+        XCTAssertEqual(lyrics.activeLine(at: 0.5, duration: 0.5), Int.max)
+        XCTAssertEqual(lyrics.activeLine(at: 0.5, duration: Double(0.5).nextUp), 6)
+        XCTAssertNil(FoundationLyrics(lines: []).activeLine(at: 0, duration: 1))
+    }
+
+    func testActiveLineMatchesPreviousSelectionContractAcrossLargeMixedTimeline() {
+        let lines: [FoundationLyrics.Line] = (0..<1_024).map { index in
+            let start: Double?
+            switch index % 13 {
+            case 0: start = nil
+            case 1: start = Double.nan
+            case 2: start = -Double.infinity
+            case 3: start = Double.infinity
+            case 4: start = -1
+            default: start = Double((index * 11) % 128) / 4
+            }
+            return .init(
+                id: (index * 37) % 1_024, text: index % 11 == 0 ? "" : "Synthetic line",
+                start: start)
+        }
+        let lyrics = FoundationLyrics(lines: lines)
+        // Two-pass reference preserves the pre-change selection contract. The explicit
+        // cases above independently name its timestamp, ID and eligibility boundaries.
+        func reference(elapsed: Double, duration: Double) -> Int? {
+            guard elapsed.isFinite, elapsed >= 0 else { return nil }
+            return lines.filter {
+                guard let start = $0.start, start.isFinite, start >= 0 else { return false }
+                return start <= elapsed && (duration <= 0 || start < duration)
+            }.max {
+                if $0.start == $1.start { return $0.id < $1.id }
+                return ($0.start ?? 0) < ($1.start ?? 0)
+            }?.id
+        }
+        for elapsed in [-1, -0.0, 0.01, 1.75, 3.5, 31.75, 32, 100, .nan, .infinity] {
+            for duration in [0, -2, 3.5, 12, 32, .nan, .infinity, -.infinity] {
+                XCTAssertEqual(
+                    lyrics.activeLine(at: elapsed, duration: duration),
+                    reference(elapsed: elapsed, duration: duration),
+                    "elapsed=\(elapsed), duration=\(duration)")
+            }
+        }
     }
 
     func testTimingBoundariesDuplicatesBlankMarkersAndBackwardsPosition() {

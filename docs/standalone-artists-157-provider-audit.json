@@ -1,0 +1,80 @@
+{
+  "issue": "https://github.com/schillt/velacanto/issues/157",
+  "status": "OPEN; source audit and regression fixture only; no standalone implementation or acceptance claim",
+  "base": "5477affc6d60e8301c4fb71ff7182322b427aa1a",
+  "contract_source": "Coordinator fetched live issue and all comments (zero); connector unavailable to worker. No issue writes.",
+  "scope": "Shared iOS/macOS Library and Search artist inclusion. No production changes.",
+  "finding": "Library, artist Search and alphabet pages consistently use AlbumArtists. A track-only artist lacking an AlbumArtist relation is not discoverable through this index. An artist with AlbumArtist relations on audio may already appear even without a MusicAlbum item; missing/zero album counts do not establish track-only status.",
+  "local_evidence": [
+    "NativeFoundation/Sources/FoundationLibrary.swift:1057 alphabet artist page;1102 artist search;1348 artists;1353 albumArtists single page <=50;2467 mappedPage provider-relative cursor;2482 mappedItems preserves provider IDs without count eligibility",
+    "NativeFoundation/Sources/FoundationLibraryIndexView.swift:411 loadPage routes Artists and filtered Search through same library protocol",
+    "NativeFoundation/Sources/FoundationSearchResolver.swift:123 shared resolver uses library.search; no separate artist inclusion policy",
+    "NativeFoundation/Sources/FoundationBrowseModel.swift:98 uniqueCatalogItems deduplicates kind+provider ID rather than display name; existing snapshot/page owners remain unchanged",
+    "NativeFoundation/Tests/FoundationLibraryTests.swift:testArtistPagesAndSelectedArtistAlbumsUseExplicitSinglePageRequests;testInvalidArtistScopeAndNegativeArtistPageStartNoTransport;testArtistPageFailureDoesNotRetryAndLaterAlbumReadSucceeds;testAlphabetWindowsAreBoundedScopedRelativeAndShareOneCapabilityRequest",
+    "NativeFoundation/Sources/FoundationCatalogPageCache.swift:4 account-owned disposable cache; limits32pages,200items/page,256KiBentry,2MiBtotal unchanged. No new artist index/cache namespace or scan introduced."
+  ],
+  "provider_evidence": [
+    {
+      "source": "https://github.com/jellyfin/jellyfin/blob/v10.11.6/Jellyfin.Api/Controllers/ArtistsController.cs",
+      "observed": "GetArtists lacks a standalone/primary-credit predicate. Type filters constrain related items, not performer role. Counts are conditionally copied into artist DTOs."
+    },
+    {
+      "source": "https://github.com/jellyfin/jellyfin/blob/v10.11.6/Jellyfin.Server.Implementations/Item/BaseItemRepository.cs",
+      "observed": "GetArtists and GetAlbumArtists select Artist and AlbumArtist relations respectively. ContributingArtistIds tests Artist membership absent AlbumArtist membership on an item; it needs known IDs and includes featured-only credits."
+    },
+    {
+      "source": "https://github.com/jellyfin/jellyfin/blob/v10.11.6/Jellyfin.Api/Controllers/ItemsController.cs",
+      "observed": "artistIds, albumArtistIds and contributingArtistIds filter known identities; they do not discover standalone primary artists as a bounded classification query."
+    }
+  ],
+  "minimum_runtime_change": "None until a trustworthy bounded provider distinction or owner-approved narrower policy exists. Do not swap to Artists, infer eligibility from nil/zero counts, parse display names, scan the entire catalog, or fan out per artist.",
+  "standalone_definition_gap": "A provider identity appearing only in Artist relations can denote either a meaningful standalone primary artist or a featured-only performer/combination. Reviewed server contracts do not distinguish those roles. AlbumCount==0 is insufficient, and nil remains unknown.",
+  "fixture_matrix": [
+    {
+      "case": "album artist with albums",
+      "expected": "Retain provider identity"
+    },
+    {
+      "case": "album artist with missing counts",
+      "expected": "Retain; absence is not zero"
+    },
+    {
+      "case": "album artist with explicit zero album count and audio relations",
+      "expected": "Retain; no count heuristic"
+    },
+    {
+      "case": "same display name, distinct provider IDs",
+      "expected": "Keep both identities"
+    },
+    {
+      "case": "same provider ID encountered across pages",
+      "expected": "Existing consumer dedup preserves provider cursor"
+    },
+    {
+      "case": "track-only primary vs featured-only vs combination credit",
+      "expected": "Unresolved provider distinction; no invented admission rule"
+    }
+  ],
+  "new_test": "testLibraryAndSearchPreserveAlbumArtistIdentityWithoutInferringFromCounts",
+  "new_test_scope": "Synthetic adapter fixture checks missing/zero/positive counts, equal names with distinct IDs, consistent Library/Search identity, four repeated calls yielding four single bounded requests and no per-artist reads. Not a standalone discovery implementation or measured performance benchmark.",
+  "verification": {
+    "diff_check": "pass",
+    "json_parse": "pass",
+    "xcode_tests": "NOT RUN: installer224 has exclusive build/sign lane",
+    "runtime_or_real_server": "NOT RUN; no private catalog or server queried",
+    "alpha_fetch": "Failed DNS; explicit coordinator local base used; no reset or remote writes",
+    "synthetic_fixture_json": "Parsed successfully; three distinct provider IDs, two equal display names, counts absent/zero/positive"
+  },
+  "remaining_acceptance": [
+    "Owner resolves precise standalone eligibility and supported provider scope.",
+    "If a bounded trustworthy query is established, implement once in shared artist page path including Search/alphabet, preserve provider IDs and page cursor, then add eligible/featured/duplicate/missing-count fixtures.",
+    "Run focused Mac/iOS tests in serialized lane after integration; cold/warm request counts, latency and metadata footprint remain unmeasured.",
+    "Sanitized real-library check on both platforms and exact-candidate stream/browse/Now Playing/track-change/seek checks remain pending for any shared catalog runtime change."
+  ],
+  "owner_disposition_proposal": {
+    "current": "Keep #157 open in v0.6.0. Evaluation does not clear release disposition gate.",
+    "if_owner_accepts_provider_limitation": "Explicitly replan implementation and live acceptance to v0.7.0 with recorded provider dependency, remove from v0.6.0 and update active Project tracking consistently. Proposal only; no milestone or tracking changes made.",
+    "if_required_for_v0_6": "Keep release blocked on #157 until a bounded eligible classification can be implemented and accepted. Do not broaden the feature silently."
+  },
+  "provider_scope_limit": "Official server v10.11.6 source inspected. No real server version queried; this is not an exhaustive proof across every supported server release or plugin. A future documented role-aware endpoint requires separate validation before adoption."
+}

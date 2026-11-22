@@ -4,6 +4,59 @@ import XCTest
 @testable import VelacantoFoundation
 
 final class FoundationGenreTests: XCTestCase {
+    func testCanonicalGenreIdentitySeparatesSourcesAndCensusGenerations() throws {
+        let source = try FoundationCatalogSource.jellyfin(scope: String(repeating: "a", count: 64))
+        let other = try FoundationCatalogSource.jellyfin(scope: String(repeating: "b", count: 64))
+        let census = UUID()
+        let genre = FoundationItem(
+            id: "genre", title: "Rock", subtitle: "", kind: .genre, duration: nil,
+            primaryGenreCensusID: census, catalogSource: source)
+        var anotherSource = genre
+        anotherSource.catalogSource = other
+        var anotherCensus = genre
+        anotherCensus.primaryGenreCensusID = UUID()
+        var legacy = genre
+        legacy.primaryGenreCensusID = nil
+        XCTAssertEqual(
+            Set([
+                genre.genreIdentity, anotherSource.genreIdentity, anotherCensus.genreIdentity,
+                legacy.genreIdentity,
+            ]).count, 4)
+    }
+
+    func testGenreIdentityPreservesRowsWhenMutableTitleAndArtworkChange() throws {
+        let genre = FoundationItem(
+            id: "genre", title: "Rock", subtitle: "", kind: .genre, duration: nil,
+            primaryGenreCensusID: UUID(),
+            catalogSource: try .jellyfin(scope: String(repeating: "a", count: 64)))
+        var changed = genre
+        changed.title = "Updated Rock"
+        changed.primaryImageTag = "new-artwork-revision"
+        XCTAssertNotEqual(genre, changed)
+        XCTAssertEqual(genre.genreIdentity, changed.genreIdentity)
+        XCTAssertEqual(Set([genre.genreIdentity, changed.genreIdentity]).count, 1)
+    }
+
+    func testSearchAndLibraryCanonicalRecordUseTheSameGenreIdentity() async throws {
+        let source = try FoundationCatalogSource.jellyfin(scope: String(repeating: "a", count: 64))
+        let index = FoundationPrimaryGenreIndex()
+        let generation = try await index.begin(scope: .init(source: source, libraryID: nil))
+        try await index.append(
+            .init(
+                startIndex: 0, total: 1, songs: [.init(id: "song", genreIDs: ["rock"])],
+                nextStartIndex: nil), generation: generation)
+        let snapshot = try await index.finish(generation: generation)
+        let genre = FoundationItem(
+            id: "rock", title: "Rock", subtitle: "", kind: .genre, duration: nil,
+            primaryGenreCensusID: snapshot.censusID, catalogSource: source)
+        let record = FoundationPrimaryGenreRecord(snapshot: snapshot, descriptors: [genre])
+        let search = try XCTUnwrap(record.page(query: "Rock").items.first)
+        let library = try XCTUnwrap(record.matchingItems().first)
+        XCTAssertEqual(search.genreIdentity, library.genreIdentity)
+        XCTAssertEqual(search.genreIdentity.censusID, snapshot.censusID)
+        XCTAssertEqual(search.genreIdentity.source, source)
+    }
+
     private let genreID = "00000000000000000000000000000001"
     private var session: FoundationSession {
         FoundationSession(
@@ -54,6 +107,69 @@ final class FoundationGenreTests: XCTestCase {
             XCTAssertEqual(values("enableImageTypes"), ["Primary"])
             XCTAssertEqual(values("imageTypeLimit"), ["1"])
         }
+    }
+
+    func testSearchAndLibraryUseTheSameScopedPaginatedGenreCatalog() async throws {
+        let recorder = GenreRequests()
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            await recorder.append(request)
+            let body = """
+                {"Items":[{"Id":"00000000000000000000000000000001","Name":"Rock","Type":"MusicGenre"}],"StartIndex":0,"TotalRecordCount":1200}
+                """
+            return (
+                Data(body.utf8),
+                HTTPURLResponse(
+                    url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            )
+        }.scoped(to: "00000000000000000000000000000003")
+        let libraryPage = try await library.genres(startIndex: 0)
+        let searchPage = try await library.searchGenres()
+        XCTAssertEqual(searchPage.items, libraryPage.items)
+        XCTAssertEqual(searchPage.nextStartIndex, libraryPage.nextStartIndex)
+        XCTAssertEqual(searchPage.nextStartIndex, 1)
+        let requests = await recorder.values
+        XCTAssertEqual(requests.count, 2)
+        XCTAssertEqual(requests[0].url, requests[1].url)
+        let query = try XCTUnwrap(
+            URLComponents(url: requests[0].url!, resolvingAgainstBaseURL: false)?.queryItems)
+        XCTAssertEqual(
+            query.first { $0.name == "parentId" }?.value,
+            "00000000000000000000000000000003")
+        XCTAssertEqual(
+            query.filter { $0.name == "includeItemTypes" }.compactMap(\.value),
+            ["MusicAlbum", "Audio"])
+        XCTAssertEqual(query.first { $0.name == "limit" }?.value, "50")
+    }
+
+    func testTypedGenreSearchKeepsTheCatalogPolicyAndProviderIdentity() async throws {
+        let recorder = GenreRequests()
+        let library = FoundationJellyfinLibrary(session: session) { request in
+            await recorder.append(request)
+            let body = """
+                {"Items":[{"Id":"00000000000000000000000000000001","Name":"Rock","Type":"MusicGenre"}],"StartIndex":50,"TotalRecordCount":51}
+                """
+            return (
+                Data(body.utf8),
+                HTTPURLResponse(
+                    url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            )
+        }.scoped(to: "00000000000000000000000000000003")
+        let page = try await library.search(
+            query: " Rock ", kind: .genre, startIndex: 50, limit: 50)
+        XCTAssertEqual(page.items.first?.id, genreID)
+        XCTAssertEqual(page.items.first?.title, "Rock")
+        XCTAssertNil(page.nextStartIndex)
+        let requests = await recorder.values
+        let query = try XCTUnwrap(
+            URLComponents(url: requests[0].url!, resolvingAgainstBaseURL: false)?.queryItems)
+        XCTAssertEqual(query.first { $0.name == "searchTerm" }?.value, "Rock")
+        XCTAssertEqual(
+            query.first { $0.name == "parentId" }?.value,
+            "00000000000000000000000000000003")
+        XCTAssertEqual(
+            query.filter { $0.name == "includeItemTypes" }.compactMap(\.value),
+            ["MusicAlbum", "Audio"])
+        XCTAssertEqual(query.first { $0.name == "startIndex" }?.value, "50")
     }
 
     func testInvalidGenreAndPageDoNotSendAndGenreFailureDoesNotRetry() async {

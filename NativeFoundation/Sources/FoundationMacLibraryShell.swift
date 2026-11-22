@@ -35,8 +35,31 @@ import SwiftUI
         }
     }
 
-    struct FoundationMacNavigationItem: Hashable {
+    /// Keep the native playlist glyph until the shared artwork loader supplies an image.
+    struct FoundationMacSidebarPlaylistArtwork: View {
         let item: FoundationItem
+        let library: any FoundationLibrary
+        let isActive: Bool
+        @State private var loadedImage: Image?
+
+        var body: some View {
+            ZStack {
+                FoundationCatalogArtwork(
+                    item: item, library: library, isActive: isActive, size: 20,
+                    cornerRadius: 4, loadedImage: $loadedImage
+                )
+                .opacity(loadedImage == nil ? 0 : 1)
+                if loadedImage == nil {
+                    Image(systemName: "music.note.list").font(.system(size: 18))
+                }
+            }
+            .frame(width: 20, height: 20)
+            .accessibilityHidden(true)
+        }
+    }
+
+    struct FoundationMacNavigationItem: Hashable {
+        var item: FoundationItem
         let headerOwnerID = UUID().uuidString
 
         static func == (lhs: Self, rhs: Self) -> Bool { lhs.headerOwnerID == rhs.headerOwnerID }
@@ -51,6 +74,17 @@ import SwiftUI
 
         func open(_ item: FoundationItem) { path.append(.init(item: item)) }
         func returnToRoot() { path.removeAll() }
+
+        /// Incoming Handoff is a destination, not a local collection-binding change.
+        /// Replace the live stack directly even when its root has no such binding.
+        func continueBrowsing(_ item: FoundationItem) { path = [.init(item: item)] }
+
+        func updatePlaylistTitle(id: String, name: String) {
+            for index in path.indices
+            where path[index].item.kind == .playlist && path[index].item.id == id {
+                path[index].item.title = name
+            }
+        }
     }
 
     private struct FoundationMacNavigationKey: EnvironmentKey {
@@ -123,6 +157,7 @@ import SwiftUI
             let owner = navigation.path.last?.headerOwnerID ?? rootHeaderOwnerID
             return headerScrollByItem[owner] ?? false
         }
+        @Environment(\.foundationHandoff) private var handoff
         @Binding var playbackInset: CGFloat
         let showsMiniPlayer: Bool
         private let homeIconSize: CGFloat = 18
@@ -131,6 +166,8 @@ import SwiftUI
         private let librarySidebar: () -> LibrarySidebar
         private let profile: () -> Profile
         private let activateSearch: () -> Void
+        private let catalogPageCache: FoundationCatalogPageCache?
+        @EnvironmentObject private var connectivity: FoundationConnectivity
         private let destination: (FoundationItem) -> Destination
 
         init(
@@ -138,7 +175,7 @@ import SwiftUI
             searchQuery: Binding<String>, searchActivation: Int, libraryNavigationID: String,
             navigationRevision: Int, navigation: FoundationMacNavigation,
             playbackInset: Binding<CGFloat>,
-            showsMiniPlayer: Bool,
+            showsMiniPlayer: Bool, catalogPageCache: FoundationCatalogPageCache? = nil,
             @ViewBuilder content: @escaping (FoundationDestination) -> Content,
             @ViewBuilder miniPlayer: @escaping () -> MiniPlayer,
             @ViewBuilder librarySidebar: @escaping () -> LibrarySidebar,
@@ -154,6 +191,7 @@ import SwiftUI
             self.navigation = navigation
             _playbackInset = playbackInset
             self.showsMiniPlayer = showsMiniPlayer
+            self.catalogPageCache = catalogPageCache
             self.content = content
             self.miniPlayer = miniPlayer
             self.librarySidebar = librarySidebar
@@ -237,7 +275,16 @@ import SwiftUI
                     sidebarWidth = $0
                 }
             } detail: {
-                NavigationStack(path: $navigation.path) {
+                NavigationStack(
+                    path: Binding(
+                        get: { navigation.path },
+                        set: { path in
+                            if path != navigation.path {
+                                handoff?.navigationChangedByUser()
+                                navigation.path = path
+                            }
+                        })
+                ) {
                     content(selection)
                         .modifier(FoundationMacScrollChrome())
                         .environment(\.foundationMacHeaderOwnerID, rootHeaderOwnerID)
@@ -246,6 +293,9 @@ import SwiftUI
                                 .modifier(FoundationMacScrollChrome())
                                 .environment(\.foundationMacHeaderOwnerID, route.headerOwnerID)
                         }
+                }
+                .safeAreaInset(edge: .top, spacing: 0) {
+                    if connectivity.localOnly { FoundationOfflineStatus(cache: catalogPageCache) }
                 }
                 .scrollClipDisabled()
                 .scrollEdgeEffectStyle(.soft, for: .top)
@@ -425,7 +475,7 @@ import SwiftUI
                     .disabled(actions?.canAdvance != true)
                 Divider()
                 Button("Show / Hide Queue") { actions?.queue() }
-                    .keyboardShortcut("q", modifiers: [.command, .shift])
+                    .keyboardShortcut("u", modifiers: [.command, .option])
                     .disabled(actions == nil)
                 Button("Show / Hide Lyrics") { actions?.lyrics() }
                     .keyboardShortcut("l", modifiers: [.command, .shift])
@@ -441,11 +491,13 @@ import SwiftUI
         let item: FoundationItem?
         let state: FoundationPlayer.State
         let lyricsEnabled: Bool
+        let lyricsUnavailable: Bool
         let lyricsSelected: Bool
         let queueSelected: Bool
         let toggleLyrics: () -> Void
         let toggleQueue: () -> Void
         let navigate: (FoundationItem) -> Void
+        let showCredits: (FoundationItem) -> Void
         @ViewBuilder let artwork: () -> Artwork
 
         var body: some View {
@@ -485,7 +537,7 @@ import SwiftUI
                     if let item {
                         FoundationMacPlaybackTimeline(
                             player: player, item: item, state: state, navigate: navigate,
-                            artwork: artwork
+                            showCredits: showCredits, artwork: artwork
                         )
                     } else {
                         Image(nsImage: NSApplication.shared.applicationIconImage)
@@ -496,6 +548,7 @@ import SwiftUI
                 .frame(maxWidth: .infinity, minHeight: FoundationMacLayout.transportContentHeight)
                 FoundationMacTransportTools(
                     player: player, lyricsEnabled: lyricsEnabled,
+                    lyricsUnavailable: lyricsUnavailable,
                     lyricsSelected: lyricsSelected, queueSelected: queueSelected,
                     toggleLyrics: toggleLyrics, toggleQueue: toggleQueue
                 ).frame(width: 184)
@@ -509,10 +562,15 @@ import SwiftUI
     @MainActor private final class FoundationMacTrackMenu: NSObject {
         let item: FoundationItem
         let navigate: (FoundationItem) -> Void
+        let showCredits: (FoundationItem) -> Void
 
-        init(item: FoundationItem, navigate: @escaping (FoundationItem) -> Void) {
+        init(
+            item: FoundationItem, navigate: @escaping (FoundationItem) -> Void,
+            showCredits: @escaping (FoundationItem) -> Void
+        ) {
             self.item = item
             self.navigate = navigate
+            self.showCredits = showCredits
         }
 
         func show() {
@@ -537,10 +595,21 @@ import SwiftUI
                 entry.image = NSImage(systemSymbolName: "music.mic", accessibilityDescription: nil)
                 menu.addItem(entry)
             }
+            if item.kind == .track {
+                if !menu.items.isEmpty { menu.addItem(.separator()) }
+                let credits = NSMenuItem(
+                    title: "Song Credits", action: #selector(openCredits), keyEquivalent: "")
+                credits.target = self
+                credits.image = NSImage(
+                    systemSymbolName: "person.text.rectangle", accessibilityDescription: nil)
+                menu.addItem(credits)
+            }
             menu.popUp(
                 positioning: nil,
                 at: view.convert(window.mouseLocationOutsideOfEventStream, from: nil), in: view)
         }
+
+        @objc private func openCredits() { showCredits(item) }
 
         @objc private func openAlbum() {
             if let album = item.relatedAlbum { navigate(album) }
@@ -554,6 +623,7 @@ import SwiftUI
     private struct FoundationMacTransportTools: View {
         @ObservedObject var player: FoundationPlayer
         let lyricsEnabled: Bool
+        let lyricsUnavailable: Bool
         let lyricsSelected: Bool
         let queueSelected: Bool
         let toggleLyrics: () -> Void
@@ -565,12 +635,15 @@ import SwiftUI
         var body: some View {
             HStack(spacing: 8) {
                 Button(action: toggleLyrics) {
-                    Image(systemName: "quote.bubble").frame(width: 40, height: 44)
-                        .contentShape(Rectangle())
+                    FoundationLyricsIcon(unavailable: lyricsUnavailable).frame(
+                        width: 40, height: 44
+                    )
+                    .contentShape(Rectangle())
                 }
                 .disabled(!lyricsEnabled)
                 .foregroundStyle(lyricsSelected ? Color.accentColor : Color.primary)
-                .help("Lyrics (⇧⌘L)").accessibilityLabel("Show lyrics")
+                .help("Lyrics (⇧⌘L)")
+                .accessibilityLabel(lyricsUnavailable ? "Lyrics unavailable" : "Show lyrics")
                 .accessibilityAddTraits(lyricsSelected ? .isSelected : [])
                 Button(action: toggleQueue) {
                     Image(systemName: "list.bullet").frame(width: 40, height: 44)
@@ -578,7 +651,7 @@ import SwiftUI
                 }
                 .disabled(player.queue.isEmpty)
                 .foregroundStyle(queueSelected ? Color.accentColor : Color.primary)
-                .help("Queue (⇧⌘Q)").accessibilityLabel("Show queue")
+                .help("Queue (⌥⌘U)").accessibilityLabel("Show queue")
                 .accessibilityAddTraits(queueSelected ? .isSelected : [])
                 FoundationAirPlayPicker(player: player).frame(width: 40, height: 44)
                 volumeButton
@@ -657,6 +730,7 @@ import SwiftUI
         let item: FoundationItem
         let state: FoundationPlayer.State
         let navigate: (FoundationItem) -> Void
+        let showCredits: (FoundationItem) -> Void
         @ViewBuilder let artwork: () -> Artwork
         @Environment(\.foundationReduceMotion) private var reduceMotion
         @State private var scrubbing = false
@@ -667,7 +741,7 @@ import SwiftUI
         @State private var entryID: UUID?
 
         private var showsDetails: Bool { hovering || scrubbing || keyboardFocused }
-        private var currentPosition: Double { scrubbing ? position : player.elapsed }
+        private var currentPosition: Double { scrubbing ? position : player.presentationElapsed }
 
         var body: some View {
             HStack(spacing: 10) {
@@ -686,8 +760,9 @@ import SwiftUI
                         height: FoundationMacLayout.transportContentHeight, alignment: .top
                     )
                     .contentShape(Rectangle())
-                    .disabled(!canNavigate)
-                    .accessibilityLabel("View album or artist")
+                    .disabled(!canShowTrackMenu)
+                    .accessibilityLabel("Track options")
+                    .help("View album, artist or song credits")
                     .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: showsDetails)
                     Text(time(currentPosition))
                         .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
@@ -704,8 +779,9 @@ import SwiftUI
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .contentShape(Rectangle())
                     }
-                    .buttonStyle(.plain).disabled(!canNavigate)
-                    .accessibilityLabel("View album or artist")
+                    .buttonStyle(.plain).disabled(!canShowTrackMenu)
+                    .accessibilityLabel("Track options")
+                    .help("View album, artist or song credits")
                     timeline
                 }
             }
@@ -727,7 +803,7 @@ import SwiftUI
                     in: 0...max(1, player.duration),
                     onEditingChanged: { editing in
                         if editing {
-                            position = player.elapsed
+                            position = player.presentationElapsed
                             entryID = player.selectedEntryID
                             scrubbing = true
                         } else {
@@ -744,7 +820,8 @@ import SwiftUI
                 .sliderThumbVisibility(showsDetails ? .visible : .hidden)
                 .focused($focused)
                 .accessibilityLabel("Playback position")
-                .accessibilityValue("\(time(player.elapsed)) of \(time(player.duration))")
+                .accessibilityValue(
+                    "\(time(player.presentationElapsed)) of \(time(player.duration))")
                 Text(time(player.duration)).frame(width: 44, alignment: .trailing)
                     .opacity(showsDetails ? 1 : 0).accessibilityHidden(true)
             }
@@ -757,10 +834,13 @@ import SwiftUI
             .onChange(of: focused) { _, focused in keyboardFocused = focused && !hovering }
         }
 
-        private var canNavigate: Bool { item.relatedAlbum != nil || item.relatedArtist != nil }
+        private var canShowTrackMenu: Bool {
+            item.kind == .track || item.relatedAlbum != nil || item.relatedArtist != nil
+        }
 
         private func showTrackMenu() {
-            let menu = FoundationMacTrackMenu(item: item, navigate: navigate)
+            let menu = FoundationMacTrackMenu(
+                item: item, navigate: navigate, showCredits: showCredits)
             withExtendedLifetime(menu) { menu.show() }
         }
 

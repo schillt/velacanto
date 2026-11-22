@@ -17,6 +17,7 @@ actor FoundationArtworkCache {
         let result: FoundationCurrentArtwork.Result
         let expiry: Date
         var access: UInt
+        let compactFallback: Bool
         var cost: Int { result.data.count + result.image.bytesPerRow * result.image.height }
     }
     private struct Job {
@@ -33,7 +34,7 @@ actor FoundationArtworkCache {
     private let disk: FoundationArtworkDisk
     private let networkAdmission: FoundationNetworkAdmission?
     private var protectedWorkers: Set<UUID> = []
-    private var entries: [Key: Entry] = [:]
+    private nonisolated let memory: DecodedMemory
     private var failures: [Key: Date] = [:]
     private var activeTasks: [UUID: Task<Void, Never>] = [:]
     private var jobs: [Key: Job] = [:]
@@ -50,7 +51,6 @@ actor FoundationArtworkCache {
         private func waitBeforePersistence() async { await persistenceBarrier?() }
     #endif
     private var queue: [Key] = []
-    private var revisions: [String: Revision] = [:]
     private struct Revision {
         let identity: String
         let tag: String
@@ -61,8 +61,11 @@ actor FoundationArtworkCache {
         let task: Task<Void, Never>
         var waiters: [UUID: CheckedContinuation<FoundationCurrentArtwork.Result?, Error>]
     }
-    private var previews: [Key: PreviewJob] = [:]
-    private var clock: UInt = 0
+    private struct PreviewKey: Hashable, Sendable {
+        let artwork: Key
+        let allowsSmaller: Bool
+    }
+    private var previews: [PreviewKey: PreviewJob] = [:]
     private var live = true
     private var active = 0
 
@@ -75,6 +78,7 @@ actor FoundationArtworkCache {
         self.networkAdmission = networkAdmission
         self.scope = Self.digest(scope)
         self.limits = limits
+        self.memory = DecodedMemory(limits: limits)
         let root =
             root
             ?? FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
@@ -116,24 +120,21 @@ actor FoundationArtworkCache {
     {
         let key = Self.key(item, pixels: pixels)
         let base = Self.digest(item.artworkCacheBase)
-        revisions = revisions.filter { $0.value.expiry > now() }
         if let tag = item.primaryImageTag, !tag.isEmpty {
-            if let revision = revisions[base], revision.identity == key.identity {
+            if let revision = memory.revision(for: base, now: now()),
+                revision.identity == key.identity
+            {
                 return (key, item)
             }
             if tag.utf8.count > 256 { return (key, item) }
             let expiry = now().addingTimeInterval(30 * 86_400)
-            revisions[base] = Revision(identity: key.identity, tag: tag, expiry: expiry)
-            if revisions.count > max(1, limits.pendingKeys),
-                let oldest = revisions.min(by: { $0.value.expiry < $1.value.expiry })?.key
-            {
-                revisions.removeValue(forKey: oldest)
-            }
+            memory.rememberRevision(
+                Revision(identity: key.identity, tag: tag, expiry: expiry), for: base, now: now())
             await disk.rememberRevision(
                 base: base, identity: key.identity, tag: tag, expiry: expiry)
             return (key, item)
         }
-        if let revision = revisions[base] {
+        if let revision = memory.revision(for: base, now: now()) {
             var canonical = item
             canonical.primaryImageTag = revision.tag
             return (Key(identity: revision.identity, pixels: key.pixels), canonical)
@@ -144,13 +145,17 @@ actor FoundationArtworkCache {
             guard Self.key(canonical, pixels: pixels).identity == revision.identity else {
                 return (key, item)
             }
+            memory.rememberRevision(
+                Revision(identity: revision.identity, tag: revision.tag, expiry: revision.expiry),
+                for: base, now: now())
             return (Key(identity: revision.identity, pixels: key.pixels), canonical)
         }
         return (key, item)
     }
 
     /// Local preview may use a smaller rendition while the caller owns a bounded upgrade.
-    func cachedResult(for item: FoundationItem, pixels: Int) async throws
+    func cachedResult(for item: FoundationItem, pixels: Int, allowsSmaller: Bool = true)
+        async throws
         -> FoundationCurrentArtwork.Result?
     {
         try Task.checkCancellation()
@@ -158,33 +163,31 @@ actor FoundationArtworkCache {
         let key = await resolvedArtwork(item.catalogArtworkItem, pixels: pixels).key
         try Task.checkCancellation()
         guard live else { throw CancellationError() }
-        for candidate in Self.renditionCandidates(key, allowsSmaller: true) {
-            if var entry = entries[candidate], entry.expiry > now() {
-                clock &+= 1
-                entry.access = clock
-                entries[candidate] = entry
-                return entry.result
-            }
+        if let result = memory.result(for: key, allowsSmaller: allowsSmaller, now: now()) {
+            return result
         }
-        for candidate in Self.renditionCandidates(key, allowsSmaller: true) {
+        for candidate in Self.renditionCandidates(key, allowsSmaller: allowsSmaller) {
             if let pending = pendingImages[candidate], pending.expiry > now() {
                 return pending.image
             }
         }
-        guard previews[key] != nil || previews.count < max(1, limits.pendingKeys) else {
+        let previewKey = PreviewKey(artwork: key, allowsSmaller: allowsSmaller)
+        guard previews[previewKey] != nil || previews.count < max(1, limits.pendingKeys) else {
             return nil
         }
         let waiter = UUID()
         let result = try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
-                if var job = previews[key] {
+                if var job = previews[previewKey] {
                     job.waiters[waiter] = continuation
-                    previews[key] = job
+                    previews[previewKey] = job
                 } else {
                     let id = UUID()
                     let disk = disk
+                    let needsCompact = needsCompactPreview(for: key)
+                    let maximumMemoryBytes = limits.memoryBytes
                     let task = Task.detached(priority: .utility) { [weak self] in
-                        let record = await disk.read(key, allowsSmaller: true)
+                        let record = await disk.read(key, allowsSmaller: allowsSmaller)
                         let decoded =
                             Task.isCancelled
                             ? nil
@@ -192,27 +195,33 @@ actor FoundationArtworkCache {
                                 FoundationCurrentArtwork.decode(
                                     $0.data, maximumPixels: $0.key.pixels)
                             }
-                        await self?.finishPreview(key: key, id: id, record: record, result: decoded)
+                        let compact =
+                            needsCompact
+                            ? Self.compactPreview(decoded, maximumMemoryBytes: maximumMemoryBytes)
+                            : nil
+                        await self?.finishPreview(
+                            key: previewKey, id: id, record: record, result: decoded,
+                            compact: compact)
                     }
-                    previews[key] = PreviewJob(
+                    previews[previewKey] = PreviewJob(
                         id: id, task: task, waiters: [waiter: continuation])
                 }
             }
         } onCancel: {
-            Task { await self.cancelPreview(key: key, waiter: waiter) }
+            Task { await self.cancelPreview(key: previewKey, waiter: waiter) }
         }
         try Task.checkCancellation()
         return result
     }
 
     private func finishPreview(
-        key: Key, id: UUID, record: FoundationArtworkDisk.CachedRecord?,
-        result: FoundationCurrentArtwork.Result?
+        key: PreviewKey, id: UUID, record: FoundationArtworkDisk.CachedRecord?,
+        result: FoundationCurrentArtwork.Result?, compact: FoundationCurrentArtwork.Result?
     ) {
         guard let job = previews[key], job.id == id else { return }
         previews.removeValue(forKey: key)
         if live, let record, let result {
-            remember(result, key: record.key, expiry: record.record.expiry)
+            remember(compact, full: result, key: record.key, expiry: record.record.expiry)
         }
         for waiter in job.waiters.values {
             if live {
@@ -223,7 +232,7 @@ actor FoundationArtworkCache {
         }
     }
 
-    private func cancelPreview(key: Key, waiter: UUID) {
+    private func cancelPreview(key: PreviewKey, waiter: UUID) {
         guard var job = previews[key], let continuation = job.waiters.removeValue(forKey: waiter)
         else { return }
         continuation.resume(throwing: CancellationError())
@@ -253,13 +262,8 @@ actor FoundationArtworkCache {
         try Task.checkCancellation()
         guard live else { throw CancellationError() }
         let now = now()
-        for candidate in Self.renditionCandidates(key, allowsSmaller: false) {
-            if var entry = entries[candidate], entry.expiry > now {
-                clock &+= 1
-                entry.access = clock
-                entries[candidate] = entry
-                return entry.result
-            }
+        if let result = memory.result(for: key, allowsSmaller: false, now: now) {
+            return result
         }
         for candidate in Self.renditionCandidates(key, allowsSmaller: false) {
             if let pending = pendingImages[candidate], pending.expiry > now { return pending.image }
@@ -267,6 +271,9 @@ actor FoundationArtworkCache {
         let id = UUID()
         // Offline readers never join a pending remote fetch. A disk read remains local.
         if !allowsNetwork {
+            if let full = try await cachedResult(for: item, pixels: pixels, allowsSmaller: false) {
+                return full
+            }
             return try await cachedResult(for: item, pixels: pixels)
         }
         failures = failures.filter { $0.value > now }
@@ -334,6 +341,8 @@ actor FoundationArtworkCache {
             if playback { protectedWorkers.insert(jobID) }
             let disk = disk
             let now = now
+            let needsCompact = !playback && needsCompactPreview(for: key)
+            let maximumMemoryBytes = limits.memoryBytes
             active += 1
             #if DEBUG
                 let timing = FoundationLoadTiming(.artwork)
@@ -393,9 +402,16 @@ actor FoundationArtworkCache {
                 } catch {
                     outcome = .failure(error)
                 }
+                let compact: FoundationCurrentArtwork.Result?
+                if needsCompact, !Task.isCancelled, case .success(let value) = outcome {
+                    compact = Self.compactPreview(value?.0, maximumMemoryBytes: maximumMemoryBytes)
+                } else {
+                    compact = nil
+                }
                 let didPublish =
                     await self?.publish(
-                        key: key, jobID: jobID, outcome: outcome, persists: write != nil) ?? false
+                        key: key, jobID: jobID, outcome: outcome, compact: compact,
+                        persists: write != nil) ?? false
                 #if DEBUG
                     if didPublish { timing.record(.published) }
                 #endif
@@ -422,12 +438,12 @@ actor FoundationArtworkCache {
 
     private func publish(
         key: Key, jobID: UUID, outcome: Result<(FoundationCurrentArtwork.Result, Date)?, Error>,
-        persists: Bool
+        compact: FoundationCurrentArtwork.Result?, persists: Bool
     ) -> Bool {
         guard let job = jobs[key], job.id == jobID else { return false }
         jobs.removeValue(forKey: key)
         if live, case .success(let value) = outcome, let (result, expiry) = value {
-            remember(result, key: key, expiry: expiry)
+            remember(compact, full: result, key: key, expiry: expiry)
         }
         if live {
             switch outcome {
@@ -491,17 +507,45 @@ actor FoundationArtworkCache {
         }
     }
 
-    private func remember(_ result: FoundationCurrentArtwork.Result, key: Key, expiry: Date) {
-        clock &+= 1
-        let entry = Entry(result: result, expiry: expiry, access: clock)
-        // A view may use an oversized hero without flushing every reusable thumbnail.
-        guard entry.cost <= max(0, limits.memoryBytes) else { return }
-        entries[key] = entry
-        while entries.values.reduce(0, { $0 + $1.cost }) > max(0, limits.memoryBytes),
-            let oldest = entries.min(by: { $0.value.access < $1.value.access })?.key
+    private func needsCompactPreview(for key: Key) -> Bool {
+        key.pixels > 160
+            && !memory.containsExact(Key(identity: key.identity, pixels: 160), now: now())
+    }
+
+    /// Called only by existing detached decode workers, never by synchronous presentation.
+    private nonisolated static func compactPreview(
+        _ result: FoundationCurrentArtwork.Result?, maximumMemoryBytes: Int
+    ) -> FoundationCurrentArtwork.Result? {
+        guard let result,
+            result.data.count + result.image.bytesPerRow * result.image.height <= maximumMemoryBytes
+        else { return nil }
+        if max(result.image.width, result.image.height) <= 160 { return result }
+        return FoundationCurrentArtwork.compactRepresentation(of: result)
+    }
+
+    private func remember(
+        _ compact: FoundationCurrentArtwork.Result?, full result: FoundationCurrentArtwork.Result,
+        key: Key, expiry: Date
+    ) {
+        let previewKey = Key(identity: key.identity, pixels: 160)
+        let instant = now()
+        if key.pixels > 160, let compact,
+            !memory.containsExact(previewKey, now: instant)
         {
-            entries.removeValue(forKey: oldest)
+            memory.remember(
+                compact, key: previewKey, expiry: expiry, now: instant, compactFallback: true)
         }
+        // Admit the requested full cover last. A visible full result must not be immediately
+        // evicted by its own preview, even when compact entries fill the entire budget.
+        memory.remember(result, key: key, expiry: expiry, now: instant)
+    }
+
+    /// Pure memory-only presentation lookup. It neither changes LRU order nor starts work.
+    /// Async consumers continue owning expiry checks, disk reads and normal revalidation.
+    nonisolated func immediateResult(for item: FoundationItem, pixels: Int)
+        -> FoundationCurrentArtwork.Result?
+    {
+        memory.peek(for: item.catalogArtworkItem, pixels: pixels, now: now())
     }
 
     func invalidate(removeDisk: Bool) async -> Bool {
@@ -511,10 +555,9 @@ actor FoundationArtworkCache {
             for waiter in job.waiters.values { waiter.resume(throwing: CancellationError()) }
         }
         previews.removeAll()
-        entries.removeAll()
+        memory.invalidate()
         pendingImages.removeAll()
         failures.removeAll()
-        revisions.removeAll()
         queue.removeAll()
         let draining = removeDisk ? [] : persisting.compactMap { activeTasks[$0] }
         let tasks = Array(activeTasks.values)
@@ -533,6 +576,158 @@ actor FoundationArtworkCache {
         let cleared = await disk.invalidate(removeFiles: removeDisk)
         for task in tasks { await task.value }
         return cleared
+    }
+
+    /// The actor and first-frame readers share this one bounded store. All mutable fields
+    /// are protected by the lock; the actor still exclusively owns fetching and persistence.
+    private final class DecodedMemory: @unchecked Sendable {
+        private let lock = NSLock()
+        private let limits: Limits
+        private var live = true
+        private var entries: [Key: Entry] = [:]
+        private var revisions: [String: Revision] = [:]
+        private var clock: UInt = 0
+
+        init(limits: Limits) { self.limits = limits }
+
+        private func withLock<Value>(_ body: () -> Value) -> Value {
+            lock.lock()
+            defer { lock.unlock() }
+            return body()
+        }
+
+        func peek(for item: FoundationItem, pixels: Int, now: Date)
+            -> FoundationCurrentArtwork.Result?
+        {
+            withLock {
+                guard live else { return nil }
+                var key = FoundationArtworkCache.key(item, pixels: pixels)
+                if item.primaryImageTag?.isEmpty != false,
+                    let revision = revisions[FoundationArtworkCache.digest(item.artworkCacheBase)],
+                    revision.expiry > now
+                {
+                    key = Key(identity: revision.identity, pixels: key.pixels)
+                }
+                for fallback in [false, true] {
+                    for candidate in FoundationArtworkCache.renditionCandidates(
+                        key, allowsSmaller: true)
+                    {
+                        if let entry = entries[candidate], entry.expiry > now,
+                            entry.compactFallback == fallback
+                        {
+                            return entry.result
+                        }
+                    }
+                }
+                return nil
+            }
+        }
+
+        func containsExact(_ key: Key, now: Date) -> Bool {
+            withLock { live && entries[key].map { $0.expiry > now } == true }
+        }
+
+        func result(for key: Key, allowsSmaller: Bool, now: Date)
+            -> FoundationCurrentArtwork.Result?
+        {
+            withLock {
+                guard live else { return nil }
+                // Generated compact entries are a presentation fallback, never a reason
+                // to replace an existing requested/full rendition with a different decode.
+                for fallback in [false, true] {
+                    for candidate in FoundationArtworkCache.renditionCandidates(
+                        key, allowsSmaller: allowsSmaller)
+                    {
+                        if var entry = entries[candidate], entry.expiry > now,
+                            entry.compactFallback == fallback
+                        {
+                            clock &+= 1
+                            entry.access = clock
+                            entries[candidate] = entry
+                            return entry.result
+                        }
+                    }
+                }
+                return nil
+            }
+        }
+
+        func revision(for base: String, now: Date) -> Revision? {
+            withLock {
+                guard live else { return nil }
+                revisions = revisions.filter { $0.value.expiry > now }
+                return revisions[base]
+            }
+        }
+
+        func rememberRevision(_ revision: Revision, for base: String, now: Date) {
+            withLock {
+                guard live else { return }
+                revisions = revisions.filter { $0.value.expiry > now }
+                revisions[base] = revision
+                if revisions.count > max(1, limits.pendingKeys),
+                    let oldest = revisions.min(by: { $0.value.expiry < $1.value.expiry })?.key
+                {
+                    revisions.removeValue(forKey: oldest)
+                }
+            }
+        }
+
+        func remember(
+            _ result: FoundationCurrentArtwork.Result, key: Key, expiry: Date, now: Date,
+            compactFallback: Bool = false
+        ) {
+            let state: (entries: [Key: Entry], access: UInt)? = withLock {
+                guard live else { return nil }
+                clock &+= 1
+                return (entries, clock)
+            }
+            guard let state else { return }
+            let entry = Entry(
+                result: result, expiry: expiry, access: state.access,
+                compactFallback: compactFallback)
+            guard entry.cost <= max(0, limits.memoryBytes) else { return }
+            // Only the owning actor mutates this store, and this method never suspends.
+            // Plan eviction off-lock so a first-frame peek never waits for a large LRU scan.
+            // The temporary dictionary shares decoded objects; it is not another image cache.
+            var next = state.entries.filter { $0.value.expiry > now }
+            next[key] = entry
+            var total = next.values.reduce(0) { $0 + $1.cost }
+            if total > max(0, limits.memoryBytes) {
+                // One store and one budget: older upgrades go before compact covers, LRU
+                // within each class. Protect this admission so full requests cannot starve.
+                let candidates = next.filter { $0.key != key }.sorted {
+                    let leftUpgrade = $0.key.pixels > 160
+                    let rightUpgrade = $1.key.pixels > 160
+                    if leftUpgrade != rightUpgrade { return leftUpgrade }
+                    return $0.value.access < $1.value.access
+                }
+                for (candidate, value) in candidates {
+                    guard total > max(0, limits.memoryBytes) else { break }
+                    next.removeValue(forKey: candidate)
+                    total -= value.cost
+                }
+            }
+            withExtendedLifetime(state.entries) {
+                withLock {
+                    guard live else { return }
+                    entries = next
+                }
+            }
+        }
+
+        var bytes: Int {
+            let snapshot = withLock { entries }
+            return snapshot.values.reduce(0) { $0 + $1.cost }
+        }
+
+        func invalidate() {
+            withLock {
+                live = false
+                entries.removeAll()
+                revisions.removeAll()
+            }
+        }
     }
 
     /// Aggregate scheduling seam for deterministic cancellation tests; contains no identities.
@@ -554,12 +749,12 @@ actor FoundationArtworkCache {
         guard live else { return (0, nil) }
         let bytes = await disk.storageBytes()
         guard live else { return (0, nil) }
-        return (Int64(entries.values.reduce(0, { $0 + $1.cost })), bytes)
+        return (Int64(memory.bytes), bytes)
     }
 
     func usage() async -> (memory: Int, disk: Int, active: Int, pending: Int) {
         await flushPersistence()
-        return (entries.values.reduce(0, { $0 + $1.cost }), await disk.bytes(), active, jobs.count)
+        return (memory.bytes, await disk.bytes(), active, jobs.count)
     }
 }
 

@@ -2,8 +2,304 @@ import XCTest
 
 @testable import VelacantoFoundation
 
+#if os(iOS)
+    import SwiftUI
+    import UIKit
+#else
+    import AppKit
+    import SwiftUI
+#endif
+
 @MainActor
 final class FoundationPresentationTests: XCTestCase {
+    #if os(iOS)
+        func testQueueNativeSwipesProtectHistoryAndRejectRetiredOccurrenceActions() throws {
+            let item = FoundationItem(
+                id: "same-track", title: "Song", subtitle: "Artist", kind: .track, duration: 60)
+            let history = FoundationQueueEntry(item: item)
+            let current = FoundationQueueEntry(item: item)
+            let upcoming = [FoundationQueueEntry(item: item), FoundationQueueEntry(item: item)]
+            var played: [UUID] = []
+            var positions: [String] = []
+            var removed: [UUID] = []
+            func list(_ entries: [FoundationQueueEntry]) -> FoundationQueueReorderList<
+                Text, Text, Text
+            > {
+                .init(
+                    history: [history], current: current, upcoming: entries,
+                    dynamicTypeSize: .large, shuffleEnabled: false, repeatMode: .off,
+                    play: { id, position in
+                        played.append(id)
+                        positions.append(position == .next ? "next" : "last")
+                    }, remove: { removed.append($0) }, geometryReady: {}, move: { _, _ in },
+                    header: { Text("Current") }, historyHeader: { Text("History") },
+                    row: { _, _ in Text("Song") })
+            }
+            let coordinator = FoundationQueueReorderList<Text, Text, Text>.Coordinator(
+                parent: list(upcoming))
+            XCTAssertNil(
+                coordinator.swipeActions(at: IndexPath(item: 0, section: 0), leading: true))
+            XCTAssertNil(
+                coordinator.swipeActions(at: IndexPath(item: 0, section: 1), leading: false))
+            XCTAssertNil(
+                coordinator.swipeActions(at: IndexPath(item: 3, section: 2), leading: true))
+            let leading = try XCTUnwrap(
+                coordinator.swipeActions(at: IndexPath(item: 0, section: 2), leading: true))
+            XCTAssertEqual(leading.actions.map(\.accessibilityLabel), ["Play Next", "Play Last"])
+            XCTAssertTrue(leading.actions.allSatisfy { $0.title == nil && $0.image != nil })
+            XCTAssertTrue(leading.performsFirstActionWithFullSwipe)
+            var completed: [Bool] = []
+            for action in leading.actions {
+                action.handler(action, UIView()) { completed.append($0) }
+            }
+            XCTAssertEqual(played, [upcoming[0].id, upcoming[0].id])
+            XCTAssertEqual(positions, ["next", "last"])
+            XCTAssertEqual(completed, [true, true])
+            let trailing = try XCTUnwrap(
+                coordinator.swipeActions(at: IndexPath(item: 1, section: 2), leading: false))
+            XCTAssertTrue(trailing.performsFirstActionWithFullSwipe)
+            let remove = try XCTUnwrap(trailing.actions.first)
+            XCTAssertEqual(remove.style, .destructive)
+            XCTAssertNotNil(remove.image)
+            remove.handler(remove, UIView()) { completed.append($0) }
+            XCTAssertEqual(removed, [upcoming[1].id])
+            // A captured action must not mutate an occurrence that is no longer upcoming.
+            coordinator.parent = list([])
+            let oldPlay = leading.actions[0]
+            oldPlay.handler(oldPlay, UIView()) { completed.append($0) }
+            remove.handler(remove, UIView()) { completed.append($0) }
+            XCTAssertEqual(played.count, 2)
+            XCTAssertEqual(removed.count, 1)
+            XCTAssertEqual(Array(completed.suffix(2)), [false, false])
+        }
+    #endif
+
+    #if os(macOS)
+        func testOverviewSheetResetsImmersiveForegroundAndNativeBarAppearance() async throws {
+            for scheme in [ColorScheme.light, .dark] {
+                let window = NSWindow(
+                    contentRect: NSRect(x: 0, y: 0, width: 800, height: 700),
+                    styleMask: [.titled], backing: .buffered, defer: false)
+                window.isReleasedWhenClosed = false
+                // Match the actual immersive host's native and preferred dark appearance while
+                // requesting each semantic browsing scheme for the reading sheet.
+                let parentAppearance: NSAppearance.Name = .darkAqua
+                window.appearance = NSAppearance(named: parentAppearance)
+                let beganSheet = expectation(
+                    for: NSPredicate { _, _ in
+                        MainActor.assumeIsolated {
+                            guard let sheet = window.attachedSheet, let content = sheet.contentView
+                            else { return false }
+                            return sheet.isVisible && content.bounds.width > 0
+                                && content.bounds.height > 0
+                        }
+                    }, evaluatedWith: window)
+                window.contentView = NSHostingView(
+                    rootView: FoundationOverviewAppearanceHost(scheme: scheme))
+                window.orderFront(nil)
+                defer { window.close() }
+                await fulfillment(of: [beganSheet], timeout: 5)
+                let sheet = try XCTUnwrap(window.attachedSheet)
+                let content = try XCTUnwrap(sheet.contentView)
+                content.layoutSubtreeIfNeeded()
+                content.displayIfNeeded()
+                XCTAssertEqual(
+                    window.appearance?.name, parentAppearance, "The presenter is unchanged")
+                let bitmap = try XCTUnwrap(
+                    content.bitmapImageRepForCachingDisplay(in: content.bounds))
+                content.cacheDisplay(in: content.bounds, to: bitmap)
+                let image = NSImage(size: content.bounds.size)
+                image.addRepresentation(bitmap)
+                let attachment = XCTAttachment(image: image)
+                attachment.name =
+                    "Native Mac overview \(scheme) from preferred dark native window appearance"
+                attachment.lifetime = .keepAlways
+                add(attachment)
+                // Include the native frame as well: the reading view alone can omit the sheet's
+                // title and confirmation chrome. Review this capture in both appearances.
+                let frameView = content.superview ?? content
+                frameView.layoutSubtreeIfNeeded()
+                frameView.displayIfNeeded()
+                let frameBitmap = try XCTUnwrap(
+                    frameView.bitmapImageRepForCachingDisplay(in: frameView.bounds))
+                frameView.cacheDisplay(in: frameView.bounds, to: frameBitmap)
+                let frameImage = NSImage(size: frameView.bounds.size)
+                frameImage.addRepresentation(frameBitmap)
+                let chrome = XCTAttachment(image: frameImage)
+                chrome.name =
+                    "Native Mac overview \(scheme) full sheet frame and confirmation chrome"
+                chrome.lifetime = .keepAlways
+                add(chrome)
+                let footerColor = try XCTUnwrap(
+                    frameBitmap.colorAt(
+                        x: frameBitmap.pixelsWide / 8,
+                        y: frameBitmap.pixelsHigh - frameBitmap.pixelsHigh / 25
+                    )?.usingColorSpace(.sRGB))
+                let footerLuma =
+                    0.2126 * footerColor.redComponent
+                    + 0.7152 * footerColor.greenComponent + 0.0722 * footerColor.blueComponent
+                if scheme == .light {
+                    XCTAssertGreaterThan(footerLuma, 0.7, "Reading footer must follow Light")
+                } else {
+                    XCTAssertLessThan(footerLuma, 0.3, "Reading footer must follow Dark")
+                }
+
+                // Sample only the reading interior, excluding native chrome, edges and scrollbar.
+                // White-on-white inherited text cannot satisfy this contrast check.
+                var foregroundPixels = 0
+                var backgroundPixels = 0
+                for y in stride(from: bitmap.pixelsHigh / 4, to: bitmap.pixelsHigh * 3 / 4, by: 2) {
+                    for x in stride(
+                        from: bitmap.pixelsWide / 8, to: bitmap.pixelsWide * 7 / 8, by: 2)
+                    {
+                        let color = try XCTUnwrap(
+                            bitmap.colorAt(x: x, y: y)?.usingColorSpace(.sRGB))
+                        let luma =
+                            0.2126 * color.redComponent + 0.7152 * color.greenComponent
+                            + 0.0722 * color.blueComponent
+                        if scheme == .light ? luma < 0.35 : luma > 0.65 {
+                            foregroundPixels += 1
+                        }
+                        if scheme == .light ? luma > 0.8 : luma < 0.2 {
+                            backgroundPixels += 1
+                        }
+                    }
+                }
+                XCTAssertGreaterThan(
+                    foregroundPixels, 100, "Overview words must contrast with the sheet")
+                XCTAssertGreaterThan(
+                    backgroundPixels, 1000, "The reading surface must follow \(scheme)")
+                let dismissed = expectation(
+                    for: NSPredicate { _, _ in
+                        MainActor.assumeIsolated { window.attachedSheet == nil }
+                    }, evaluatedWith: window)
+                let returnKey = try XCTUnwrap(
+                    NSEvent.keyEvent(
+                        with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+                        windowNumber: sheet.windowNumber, context: nil, characters: "\r",
+                        charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36))
+                XCTAssertTrue(
+                    sheet.performKeyEquivalent(with: returnKey),
+                    "Return must invoke the reading footer's default Done action")
+                await fulfillment(of: [dismissed], timeout: 5)
+            }
+        }
+
+        func testHandoffBrowseRoutesWithoutAMountedRootCollectionBinding() async throws {
+            let audio = FoundationMacHandoffAudioProbe()
+            let player = FoundationPlayer(
+                resolve: { item in try await audio.resolve(item) },
+                activateSession: {}, deactivateSession: {})
+            let original = FoundationQueueEntry(
+                item: .init(
+                    id: "current", title: "Current", subtitle: "", kind: .track, duration: 30))
+            player.restoreSession(
+                .init(
+                    entries: [original], selectedEntryID: original.id,
+                    shuffleEnabled: false, repeatMode: .off))
+            let controller = FoundationHandoffController(publish: { _ in })
+            controller.configure(
+                scope: String(repeating: "a", count: 64), player: player,
+                resolve: { $0 }, navigate: { _ in })
+            defer {
+                controller.invalidate()
+                player.stop()
+            }
+            let navigation = FoundationMacNavigation()
+            // No SwiftUI collection-binding observer is mounted in this seam.
+            // Native continuation has already resolved the item for this account.
+            for kind in [FoundationItem.Kind.album, .artist, .playlist] {
+                let item = FoundationItem(
+                    id: "incoming", title: "Incoming", subtitle: "", kind: kind, duration: nil)
+                controller.requestBrowse(item)
+                navigation.continueBrowsing(try XCTUnwrap(controller.takeBrowseRequest()))
+                XCTAssertEqual(navigation.path.map(\.item), [item])
+                XCTAssertNil(controller.takeBrowseRequest(), "A browse delivery is consumed once")
+                XCTAssertEqual(player.persistedQueue, [original])
+                XCTAssertEqual(player.selectedEntryID, original.id)
+                XCTAssertFalse(player.wantsPlayback)
+                XCTAssertEqual(player.state, .paused)
+            }
+            let resolutions = await audio.count
+            XCTAssertEqual(resolutions, 0, "Browsing must not request an audio resource")
+        }
+
+        func testHandoffBrowseReplacesExistingMacDetailPath() {
+            let navigation = FoundationMacNavigation()
+            let album = FoundationItem(
+                id: "album", title: "Album", subtitle: "", kind: .album, duration: nil)
+            let artist = FoundationItem(
+                id: "artist", title: "Artist", subtitle: "", kind: .artist, duration: nil)
+            let playlist = FoundationItem(
+                id: "playlist", title: "Playlist", subtitle: "", kind: .playlist, duration: nil)
+            navigation.open(album)
+            navigation.open(artist)
+            let previousOwners = Set(navigation.path.map(\.headerOwnerID))
+
+            navigation.continueBrowsing(playlist)
+
+            XCTAssertEqual(navigation.path.map(\.item), [playlist])
+            XCTAssertFalse(previousOwners.contains(navigation.path[0].headerOwnerID))
+        }
+
+        func testPlaylistTitleChangePreservesSidebarDestinationIdentity() {
+            let before = FoundationItem(
+                id: "playlist", title: "Before", subtitle: "", kind: .playlist, duration: nil)
+            var after = before
+            after.title = "After"
+            let oldRoute = FoundationMacLibraryRoute.playlist(before)
+            let renamedRoute = FoundationMacLibraryRoute.playlist(after)
+            XCTAssertNotEqual(oldRoute, renamedRoute)
+            XCTAssertEqual(oldRoute.identity, renamedRoute.identity)
+            XCTAssertNotEqual(oldRoute.identity, FoundationMacLibraryRoute.playlists.identity)
+        }
+
+        func testConfirmedPlaylistRenameUpdatesAllOpenCopiesWithoutChangingNavigationIdentity() {
+            let navigation = FoundationMacNavigation()
+            let playlist = FoundationItem(
+                id: "playlist", title: "Before", subtitle: "", kind: .playlist, duration: nil)
+            navigation.open(playlist)
+            navigation.open(playlist)
+            let owners = navigation.path.map(\.headerOwnerID)
+            let before = Set(navigation.path)
+            XCTAssertEqual(before.count, 2, "Repeated destinations retain distinct header owners")
+
+            navigation.updatePlaylistTitle(id: playlist.id, name: "After")
+
+            XCTAssertEqual(navigation.path.map(\.item.title), ["After", "After"])
+            XCTAssertEqual(navigation.path.map(\.headerOwnerID), owners)
+            XCTAssertEqual(
+                Set(navigation.path), before, "Changing a title must not replace a route")
+            XCTAssertTrue(
+                navigation.path.allSatisfy {
+                    $0.item.id == playlist.id && $0.item.kind == .playlist
+                })
+        }
+
+        func testPlaylistRenameLeavesUnrelatedAndSameIDOtherKindDestinationsUntouched() {
+            let navigation = FoundationMacNavigation()
+            let playlist = FoundationItem(
+                id: "same", title: "Playlist", subtitle: "", kind: .playlist, duration: nil)
+            let album = FoundationItem(
+                id: "same", title: "Album", subtitle: "Artist", kind: .album, duration: nil)
+            let other = FoundationItem(
+                id: "other", title: "Other Playlist", subtitle: "", kind: .playlist, duration: nil)
+            for item in [playlist, album, other] { navigation.open(item) }
+            let owners = navigation.path.map(\.headerOwnerID)
+
+            navigation.updatePlaylistTitle(id: playlist.id, name: "Renamed")
+
+            XCTAssertEqual(
+                navigation.path.map(\.item.title), ["Renamed", "Album", "Other Playlist"])
+            XCTAssertEqual(navigation.path[1].item, album)
+            XCTAssertEqual(navigation.path[2].item, other)
+            XCTAssertEqual(navigation.path.map(\.headerOwnerID), owners)
+            navigation.updatePlaylistTitle(id: "missing", name: "Must Not Appear")
+            XCTAssertEqual(
+                navigation.path.map(\.item.title), ["Renamed", "Album", "Other Playlist"])
+        }
+    #endif
+
     func testSongAlphabetSeeksUnloadedFarLetterWithoutWalkingCatalogPages() async throws {
         let source = SongAlphabetFixture(total: 1_000_000, split: 750_000)
         let offset = try await FoundationSongAlphabetSeek.lowerBound(letter: "Z") {
@@ -521,3 +817,37 @@ private actor SongAlphabetFixture {
             ])
     }
 }
+
+#if os(macOS)
+    private struct FoundationOverviewAppearanceHost: View {
+        let scheme: ColorScheme
+        @State private var presented = false
+
+        var body: some View {
+            Color.black
+                .sheet(isPresented: $presented) {
+                    FoundationOverviewSheet(
+                        item: .init(
+                            id: "synthetic-overview", title: "Synthetic Album", subtitle: "",
+                            kind: .album, duration: nil),
+                        overview: (1...12).map {
+                            "Overview paragraph \($0). Native reading text remains legible when an immersive artwork page uses white controls."
+                        }.joined(separator: "\n\n")
+                    ) { presented = false }
+                }
+                .foregroundStyle(Color.white)
+                .preferredColorScheme(.dark)
+                .environment(\.colorScheme, .dark)
+                .environment(\.foundationBrowsingColorScheme, scheme)
+                .onAppear { presented = true }
+        }
+    }
+
+    private actor FoundationMacHandoffAudioProbe {
+        private(set) var count = 0
+        func resolve(_ item: FoundationItem) throws -> URL {
+            count += 1
+            throw FoundationLibraryError.unavailable
+        }
+    }
+#endif

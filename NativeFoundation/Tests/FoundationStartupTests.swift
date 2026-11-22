@@ -1,3 +1,4 @@
+import CryptoKit
 import Security
 import XCTest
 
@@ -10,6 +11,329 @@ import XCTest
 
 @MainActor
 final class FoundationStartupTests: XCTestCase {
+    private func backgroundFixture() throws -> (
+        root: URL, directory: URL, identifier: String, data: Data,
+        store: FoundationNativeAllocationStore
+    ) {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let session = FoundationSession(
+            serverURL: URL(string: "https://background-fixture.invalid")!,
+            accessToken: "fixture-token",
+            userID: "00000000000000000000000000000001",
+            deviceID: "00000000-0000-0000-0000-000000000002")
+        let identity = "jellyfin\0" + session.serverURL.absoluteString + "\0" + session.userID
+        let scope = SHA256.hash(data: Data(identity.utf8)).map { String(format: "%02x", $0) }
+            .joined()
+        let directory = FoundationDownloadStorage.directory(scope: scope, root: root)
+        try FoundationDownloadStorage.prepare(directory)
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        let identifier =
+            "dev.novoluxor.velacanto.offline." + directory.lastPathComponent + "."
+            + UUID().uuidString
+        let store = FoundationNativeAllocationStore(
+            directory: directory, sessionIdentifier: identifier)
+        try store.reserve()
+        var manifest = FoundationDownloadManifest()
+        manifest.nativePendingSessions = [identifier]
+        try FoundationDownloadStorage.save(manifest, directory: directory)
+        return (root, directory, identifier, try JSONEncoder().encode(session), store)
+    }
+
+    private func backgroundPreferences() throws -> FoundationPlaybackPreferences {
+        let suite = "BackgroundSessionTests." + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        addTeardownBlock { defaults.removePersistentDomain(forName: suite) }
+        return FoundationPlaybackPreferences(defaults: defaults)
+    }
+
+    private func backgroundCredentials(_ data: Data, status: OSStatus = errSecSuccess)
+        -> FoundationCredentials.Operations
+    {
+        .init(
+            update: { _, _ in
+                XCTFail("Background events must not save credentials")
+                return errSecParam
+            },
+            add: { _ in
+                XCTFail("Background events must not add credentials")
+                return errSecParam
+            },
+            copy: { _ in (status, status == errSecSuccess ? data as CFData : nil) },
+            delete: { _ in
+                XCTFail("Background events must not clear credentials")
+                return errSecParam
+            })
+    }
+
+    private func waitForBackgroundOutcome(_ outcome: @MainActor () -> Bool) async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(3))
+        while !outcome() {
+            guard clock.now < deadline else {
+                XCTFail("Background handoff did not settle")
+                return
+            }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+    }
+
+    func testBackgroundEventDrainWaitsForDurableAccountRecoveryAndSerializesStartup() async throws {
+        let fixture = try backgroundFixture()
+        let gate = PreparationGate()
+        var preparations = 0
+        var restorations = 0
+        var completions = 0
+        let model = FoundationAppModel(
+            prepareCaches: {
+                preparations += 1
+                return true
+            },
+            restoreAccount: { _ in restorations += 1 },
+            credentialOperations: backgroundCredentials(fixture.data),
+            playbackPreferences: try backgroundPreferences(),
+            backgroundDownloadRoot: fixture.root,
+            backgroundNativeRetirement: { identifiers, directory in
+                _ = await gate.prepare()
+                for identifier in identifiers {
+                    try? FoundationNativeAllocationStore(
+                        directory: directory, sessionIdentifier: identifier
+                    ).retire()
+                }
+                return identifiers
+            })
+        let completion: @MainActor () -> Void = {
+            XCTAssertTrue(Thread.isMainThread)
+            completions += 1
+        }
+        model.receiveBackgroundDownloadEvents(fixture.identifier, completionHandler: completion)
+        model.receiveBackgroundDownloadEvents(fixture.identifier, completionHandler: completion)
+        try await gate.waitUntilStarted()
+        // Drain arrives before durable publication.
+        model.finishBackgroundDownloadEvents(fixture.identifier)
+        XCTAssertEqual(completions, 0)
+        model.restore()
+        await Task.yield()
+        let startup = Task { await model.ensureReady() }
+        XCTAssertEqual(preparations, 0)
+        XCTAssertEqual(restorations, 0)
+        gate.complete(true)
+        let readiness = await startup.value
+        XCTAssertEqual(readiness, .signedOut)
+        XCTAssertEqual(completions, 2)
+        XCTAssertEqual(preparations, 1)
+        XCTAssertEqual(restorations, 1)
+        XCTAssertTrue(
+            try FoundationDownloadStorage.load(directory: fixture.directory).nativePendingSessions?
+                .isEmpty == true)
+        XCTAssertEqual(try fixture.store.load().retired, true)
+        model.finishBackgroundDownloadEvents(fixture.identifier)
+        XCTAssertEqual(completions, 2)
+    }
+
+    func testBackgroundDurableRecoveryWaitsForNativeDrainWithoutBootstrappingAccount() async throws
+    {
+        let fixture = try backgroundFixture()
+        var completions = 0
+        let model = FoundationAppModel(
+            prepareCaches: {
+                XCTFail("Headless callback bootstrapped caches")
+                return false
+            },
+            restoreAccount: { _ in XCTFail("Headless callback restored catalog/player") },
+            credentialOperations: backgroundCredentials(fixture.data),
+            playbackPreferences: try backgroundPreferences(),
+            backgroundDownloadRoot: fixture.root,
+            backgroundNativeRetirement: { identifiers, directory in
+                for identifier in identifiers {
+                    try? FoundationNativeAllocationStore(
+                        directory: directory, sessionIdentifier: identifier
+                    ).retire()
+                }
+                return identifiers
+            })
+        model.receiveBackgroundDownloadEvents(fixture.identifier) { completions += 1 }
+        try await waitForBackgroundOutcome {
+            (try? FoundationDownloadStorage.load(directory: fixture.directory)
+                .nativePendingSessions?.isEmpty) == true
+        }
+        XCTAssertEqual(completions, 0)
+        XCTAssertNil(model.library)
+        XCTAssertFalse(model.cachesReady)
+        model.finishBackgroundDownloadEvents(fixture.identifier)
+        XCTAssertEqual(completions, 1)
+        model.finishBackgroundDownloadEvents(fixture.identifier)
+        XCTAssertEqual(completions, 1)
+    }
+
+    func testUnknownAndLockedBackgroundEventsPreserveProtectedAccountRecords() async throws {
+        for locked in [false, true] {
+            let fixture = try backgroundFixture()
+            let manifestURL = fixture.directory.appendingPathComponent("manifest.json")
+            let manifestBefore = try Data(contentsOf: manifestURL)
+            let receiptBefore = try Data(contentsOf: fixture.store.receiptURL)
+            var completions = 0
+            let model = FoundationAppModel(
+                prepareCaches: {
+                    XCTFail("Unexpected bootstrap")
+                    return false
+                },
+                restoreAccount: { _ in XCTFail("Unexpected account restore") },
+                credentialOperations: backgroundCredentials(
+                    fixture.data, status: locked ? errSecInteractionNotAllowed : errSecSuccess),
+                playbackPreferences: try backgroundPreferences(),
+                backgroundDownloadRoot: fixture.root,
+                backgroundNativeRetirement: { _, _ in
+                    XCTFail("Unadmitted native session opened")
+                    return []
+                })
+            model.receiveBackgroundDownloadEvents(
+                locked ? fixture.identifier : fixture.identifier + ".unknown"
+            ) { completions += 1 }
+            try await waitForBackgroundOutcome { completions == 1 }
+            model.finishBackgroundDownloadEvents(fixture.identifier)
+            XCTAssertEqual(completions, 1)
+            XCTAssertEqual(try Data(contentsOf: manifestURL), manifestBefore)
+            XCTAssertEqual(try Data(contentsOf: fixture.store.receiptURL), receiptBefore)
+            XCTAssertNil(model.library)
+        }
+    }
+
+    func testRetiredAccountCannotPublishLateBackgroundRecovery() async throws {
+        let fixture = try backgroundFixture()
+        let gate = PreparationGate()
+        var completions = 0
+        let model = FoundationAppModel(
+            prepareCaches: {
+                XCTFail("Unexpected bootstrap")
+                return false
+            },
+            restoreAccount: { _ in XCTFail("Unexpected account restore") },
+            credentialOperations: backgroundCredentials(fixture.data),
+            playbackPreferences: try backgroundPreferences(),
+            backgroundDownloadRoot: fixture.root,
+            backgroundNativeRetirement: { identifiers, directory in
+                _ = await gate.prepare()
+                for identifier in identifiers {
+                    try? FoundationNativeAllocationStore(
+                        directory: directory, sessionIdentifier: identifier
+                    ).retire()
+                }
+                return identifiers
+            })
+        model.receiveBackgroundDownloadEvents(fixture.identifier) { completions += 1 }
+        try await gate.waitUntilStarted()
+        model.invalidateAccountReadiness()
+        model.finishBackgroundDownloadEvents(fixture.identifier)
+        gate.complete(true)
+        try await waitForBackgroundOutcome { completions == 1 }
+        XCTAssertTrue(
+            try FoundationDownloadStorage.load(directory: fixture.directory).nativePendingSessions?
+                .contains(fixture.identifier) == true)
+        // Retain cleanup authority for the matching account.
+        XCTAssertEqual(try fixture.store.load().retired, true)
+        XCTAssertNil(model.library)
+    }
+
+    func testInactiveSceneDoesNotRestoreAccountButExplicitReadinessStillWorks() async throws {
+        var preparations = 0
+        var restorations = 0
+        let model = FoundationAppModel(
+            prepareCaches: {
+                preparations += 1
+                return true
+            },
+            restoreAccount: { _ in restorations += 1 },
+            playbackPreferences: try backgroundPreferences())
+        await model.prepareForScene(isActive: false)
+        XCTAssertEqual(preparations, 0)
+        XCTAssertEqual(restorations, 0)
+        XCTAssertTrue(model.isPreparingCaches)
+        // Siri/Handoff explicitly call readiness without relying on scene activity.
+        let explicit = await model.ensureReady()
+        XCTAssertEqual(explicit, .signedOut)
+        XCTAssertEqual(preparations, 1)
+        XCTAssertEqual(restorations, 1)
+        await model.prepareForScene(isActive: true)
+        XCTAssertEqual(preparations, 1)
+        XCTAssertEqual(restorations, 1)
+        let freshForegroundModel = FoundationAppModel(
+            prepareCaches: {
+                preparations += 1
+                return true
+            },
+            restoreAccount: { _ in restorations += 1 },
+            playbackPreferences: try backgroundPreferences())
+        await freshForegroundModel.prepareForScene(isActive: false)
+        XCTAssertEqual(preparations, 1)
+        await freshForegroundModel.prepareForScene(isActive: true)
+        XCTAssertEqual(preparations, 2)
+        XCTAssertEqual(restorations, 2)
+        XCTAssertTrue(freshForegroundModel.cachesReady)
+    }
+
+    func testAppModelRetainsInjectedPlaybackPreferencesDuringReadiness() async throws {
+        let suite = "StartupPlaybackPreferences-" + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(
+            FoundationStreamingQuality.aac128.rawValue,
+            forKey: FoundationPlaybackPreferences.streamingCellularQualityKey)
+        let preferences = FoundationPlaybackPreferences(defaults: defaults)
+        var preparations = 0
+        var restorations = 0
+        let model = FoundationAppModel(
+            prepareCaches: {
+                preparations += 1
+                return true
+            },
+            restoreAccount: { _ in restorations += 1 }, credentialDefaults: defaults,
+            playbackPreferences: preferences)
+        let readiness = await model.ensureReady()
+        XCTAssertEqual(readiness, .signedOut)
+        XCTAssertTrue(model.playbackPreferences === preferences)
+        XCTAssertEqual(preparations, 1)
+        XCTAssertEqual(restorations, 1)
+        XCTAssertEqual(model.playbackPreferences.streamingCellularQuality, .aac128)
+        model.playbackPreferences.setStreamingCellularQuality(.aac192)
+        XCTAssertEqual(
+            defaults.string(
+                forKey:
+                    FoundationPlaybackPreferences.streamingCellularQualityKey), "aac192")
+    }
+
+    #if DEBUG
+        func testTestingRuntimeUsesDisposablePreferencesAndDoesNotRestoreAnAccount() async throws {
+            guard ProcessInfo.processInfo.arguments.contains("-foundationTesting") else {
+                XCTFail("This isolated bootstrap check requires the existing test-host argument")
+                return
+            }
+            let suite = "StartupTestingRuntime-" + UUID().uuidString
+            let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+            defer { defaults.removePersistentDomain(forName: suite) }
+            defaults.set("aac192", forKey: FoundationPlaybackPreferences.streamingQualityKey)
+            defaults.set("data-protection-ready", forKey: FoundationAppModel.credentialBackendKey)
+            let model = FoundationAppRuntime.makeTestingModel(defaults: defaults)
+            XCTAssertEqual(model.playbackPreferences.streamingWiFiQuality, .aac192)
+            XCTAssertEqual(model.playbackPreferences.streamingCellularQuality, .aac192)
+            XCTAssertEqual(
+                defaults.string(
+                    forKey:
+                        FoundationPlaybackPreferences.streamingWiFiQualityKey), "aac192")
+            #if os(macOS)
+                XCTAssertFalse(model.awaitsCredentialUpgrade)
+                defaults.removeObject(forKey: FoundationAppModel.credentialBackendKey)
+                XCTAssertTrue(model.awaitsCredentialUpgrade)
+            #endif
+            let readiness = await model.ensureReady()
+            XCTAssertEqual(readiness, .unavailable)
+            XCTAssertTrue(model.isPreparingCaches)
+            XCTAssertFalse(model.cachesReady)
+            XCTAssertNil(model.library)
+            XCTAssertNil(model.player)
+            XCTAssertNil(model.downloads)
+            XCTAssertNil(model.librarySelection)
+        }
+    #endif
     #if os(iOS)
         func testPhoneRoutingDoesNotRecycleExistingDelegateConfiguration() {
             let existing = UISceneConfiguration(name: nil, sessionRole: .windowApplication)
@@ -32,46 +356,133 @@ final class FoundationStartupTests: XCTestCase {
             XCTAssertTrue(routed.delegateClass == FoundationCarPlaySceneDelegate.self)
         }
 
-        func testCarPlaySearchOffersNativeSiriAndTypingOnlyWhenVehicleAllowsIt() throws {
+        func testCarPlayAudioSearchUsesOnlyNativeAssistantAndBrowseAction() throws {
             let template = CPListTemplate(title: "Search", sections: [])
-            var typed = 0
+            var browsed = 0
             FoundationCarPlaySceneDelegate.configureSearchOptions(
-                template, keyboardLimited: false, siriAuthorized: true,
-                typeSearch: { typed += 1 }, close: {})
-            XCTAssertNotNil(template.assistantCellConfiguration)
+                template, siriAuthorized: true, isRootTab: false, isActive: { true },
+                browse: { browsed += 1 }, close: {})
+            let assistant = try XCTUnwrap(template.assistantCellConfiguration)
+            XCTAssertEqual(assistant.assistantAction, .playMedia)
             XCTAssertTrue(template.leadingNavigationBarButtons.isEmpty)
             XCTAssertEqual(template.backButton?.accessibilityLabel, "Back")
             let row = try XCTUnwrap(template.sections.first?.items.first as? CPListItem)
-            XCTAssertEqual(row.text, "Type to Search")
+            XCTAssertEqual(row.text, "Browse Library")
+            XCTAssertEqual(template.sections.first?.items.count, 1)
+            XCTAssertEqual(browsed, 0, "Configuring the hub must not invoke browsing or Siri.")
             var completions = 0
             row.handler?(row, { completions += 1 })
-            XCTAssertEqual(typed, 1)
+            XCTAssertEqual(browsed, 1)
             XCTAssertEqual(completions, 1)
+        }
+
+        func testCarPlaySearchWithoutSiriKeepsBrowsingAndExplainsAuthorization() throws {
+            let template = CPListTemplate(title: "Search", sections: [])
             FoundationCarPlaySceneDelegate.configureSearchOptions(
-                template, keyboardLimited: true, siriAuthorized: true,
-                typeSearch: { typed += 1 }, close: {})
-            XCTAssertTrue(template.sections.isEmpty)
+                template, siriAuthorized: false, isRootTab: false, isActive: { true },
+                browse: {}, close: {})
+            XCTAssertNil(template.assistantCellConfiguration)
+            let rows = try XCTUnwrap(template.sections.first?.items as? [CPListItem])
+            XCTAssertEqual(rows.count, 2)
+            XCTAssertEqual(rows.first?.text, "Browse Library")
+            XCTAssertEqual(rows.last?.text, "Enable Siri on iPhone")
+            XCTAssertEqual(rows.last?.isEnabled, false)
+            FoundationCarPlaySceneDelegate.configureSearchOptions(
+                template, siriAuthorized: true, isRootTab: false, isActive: { true },
+                browse: {}, close: {})
             XCTAssertNotNil(template.assistantCellConfiguration)
-            XCTAssertTrue(template.leadingNavigationBarButtons.isEmpty)
-            XCTAssertEqual(template.backButton?.accessibilityLabel, "Back")
-            XCTAssertEqual(typed, 1, "Changing restrictions must not invoke typing or Siri.")
-            FoundationCarPlaySceneDelegate.configureSearchOptions(
-                template, keyboardLimited: false, siriAuthorized: true,
-                typeSearch: { typed += 1 }, close: {})
             XCTAssertEqual(template.sections.first?.items.count, 1)
         }
 
-        func testCarPlaySearchExplainsSiriAuthorizationWithoutAnInactiveAssistantCell() throws {
+        func testCarPlayRootSearchHasExplicitCloseWithoutDuplicatingPushedBack() {
             let template = CPListTemplate(title: "Search", sections: [])
             FoundationCarPlaySceneDelegate.configureSearchOptions(
-                template, keyboardLimited: true, siriAuthorized: false,
-                typeSearch: { XCTFail("Typing is restricted") }, close: {})
-            XCTAssertNil(template.assistantCellConfiguration)
+                template, siriAuthorized: true, isRootTab: true, isActive: { true },
+                browse: {}, close: {})
+            XCTAssertEqual(template.leadingNavigationBarButtons.count, 1)
+            XCTAssertEqual(template.leadingNavigationBarButtons.first?.title, "Close")
+            XCTAssertEqual(
+                template.leadingNavigationBarButtons.first?.accessibilityLabel, "Close Search")
+            XCTAssertNil(template.backButton)
+            FoundationCarPlaySceneDelegate.configureSearchOptions(
+                template, siriAuthorized: true, isRootTab: false, isActive: { true },
+                browse: {}, close: {})
             XCTAssertTrue(template.leadingNavigationBarButtons.isEmpty)
             XCTAssertEqual(template.backButton?.accessibilityLabel, "Back")
-            let guidance = try XCTUnwrap(template.sections.first?.items.first as? CPListItem)
-            XCTAssertEqual(guidance.text, "Enable Siri on iPhone")
-            XCTAssertFalse(guidance.isEnabled)
+        }
+
+        func testCarPlaySearchCompletesInactiveNativeRowWithoutNavigating() throws {
+            let template = CPListTemplate(title: "Search", sections: [])
+            var active = true
+            var navigations = 0
+            FoundationCarPlaySceneDelegate.configureSearchOptions(
+                template, siriAuthorized: true, isRootTab: false, isActive: { active },
+                browse: { navigations += 1 }, close: { navigations += 1 })
+            let row = try XCTUnwrap(template.sections.first?.items.first as? CPListItem)
+            active = false
+            var completions = 0
+            row.handler?(row, { completions += 1 })
+            XCTAssertEqual(completions, 1)
+            XCTAssertEqual(navigations, 0)
+        }
+
+        func testCarPlaySearchEntryKeepsNowPlayingAboveAnAlreadySelectedSearchTab() {
+            let home = CPListTemplate(title: "Home", sections: [])
+            let search = CPListTemplate(title: "Search", sections: [])
+            let root = CPTabBarTemplate(templates: [home, search])
+            root.select(search)
+            let nowPlaying = CPNowPlayingTemplate.shared
+            XCTAssertTrue(
+                FoundationCarPlaySceneDelegate.searchEntryOrigin(
+                    root: root, top: nowPlaying) === nowPlaying)
+            let album = CPListTemplate(title: "Album", sections: [])
+            XCTAssertTrue(
+                FoundationCarPlaySceneDelegate.searchEntryOrigin(
+                    root: root, top: album) === album)
+        }
+
+        func testCarPlayInitialNowPlayingIsConsumedOnceForReadyRoot() {
+            let delegate = FoundationCarPlaySceneDelegate()
+            let library = CPListTemplate(title: "Library", sections: [])
+            let root = CPTabBarTemplate(templates: [library])
+            XCTAssertTrue(
+                delegate.consumeInitialNowPlaying(
+                    root: root, currentRoot: root, top: root, contextIsCurrent: true))
+            XCTAssertFalse(
+                delegate.consumeInitialNowPlaying(
+                    root: root, currentRoot: root, top: root, contextIsCurrent: true))
+            XCTAssertTrue(
+                FoundationCarPlaySceneDelegate().consumeInitialNowPlaying(
+                    root: root, currentRoot: root, top: library, contextIsCurrent: true))
+        }
+
+        func testCarPlayInitialNowPlayingRejectsStaleContextAndReplacedRootWithoutConsuming() {
+            let delegate = FoundationCarPlaySceneDelegate()
+            let root = CPTabBarTemplate(templates: [CPListTemplate(title: "Library", sections: [])])
+            let replacement = CPTabBarTemplate(templates: [
+                CPListTemplate(title: "Home", sections: [])
+            ])
+            XCTAssertFalse(
+                delegate.consumeInitialNowPlaying(
+                    root: root, currentRoot: root, top: root, contextIsCurrent: false))
+            XCTAssertFalse(
+                delegate.consumeInitialNowPlaying(
+                    root: root, currentRoot: replacement, top: replacement, contextIsCurrent: true))
+            XCTAssertTrue(
+                delegate.consumeInitialNowPlaying(
+                    root: root, currentRoot: root, top: root, contextIsCurrent: true))
+        }
+
+        func testCarPlayInitialNowPlayingDoesNotOverrideOrLaterFollowUserNavigation() {
+            let delegate = FoundationCarPlaySceneDelegate()
+            let root = CPTabBarTemplate(templates: [CPListTemplate(title: "Library", sections: [])])
+            let album = CPListTemplate(title: "Album", sections: [])
+            XCTAssertFalse(
+                delegate.consumeInitialNowPlaying(
+                    root: root, currentRoot: root, top: album, contextIsCurrent: true))
+            XCTAssertFalse(
+                delegate.consumeInitialNowPlaying(
+                    root: root, currentRoot: root, top: root, contextIsCurrent: true))
         }
 
         func testCarPlaySearchReturnsToExactNestedOriginAndSelectedContentTab() {
@@ -80,6 +491,11 @@ final class FoundationStartupTests: XCTestCase {
             let album = CPListTemplate(title: "Album", sections: [])
             let hub = CPListTemplate(title: "Search", sections: [])
             let root = CPTabBarTemplate(templates: [home, library])
+            let nowPlaying = CPNowPlayingTemplate.shared
+            XCTAssertTrue(
+                FoundationCarPlaySceneDelegate.searchReturnTarget(
+                    origin: nowPlaying, lastContentTab: library,
+                    stack: [root, nowPlaying, hub], tabs: [home, library]) === nowPlaying)
             XCTAssertTrue(
                 FoundationCarPlaySceneDelegate.searchReturnTarget(
                     origin: album, lastContentTab: library,
@@ -99,31 +515,27 @@ final class FoundationStartupTests: XCTestCase {
             let home = CPListTemplate(title: "Home", sections: [])
             let search = CPListTemplate(title: "Search", sections: [])
             let album = CPListTemplate(title: "Album", sections: [])
-            let keyboard = CPSearchTemplate()
+            let destination = CPListTemplate(title: "Destination", sections: [])
             let root = CPTabBarTemplate(templates: [home, search])
             let step = FoundationCarPlaySceneDelegate.searchReturnStep
             XCTAssertEqual(
-                step(home, root, keyboard, [root, search, keyboard], [home, search]), .popToRoot)
+                step(home, root, destination, [root, search, destination], [home, search]),
+                .popToRoot)
             XCTAssertEqual(step(home, root, root, [root], [home, search]), .selectTab)
             XCTAssertEqual(step(home, root, search, [root, search], [home, search]), .selectTab)
             XCTAssertEqual(
-                step(album, root, keyboard, [root, album, search, keyboard], [home, search]),
+                step(
+                    album, root, destination, [root, album, search, destination], [home, search]),
                 .popOne)
             XCTAssertEqual(step(album, root, album, [root, album], [home, search]), .done)
+            let nowPlaying = CPNowPlayingTemplate.shared
             XCTAssertEqual(
-                step(album, root, keyboard, [root, keyboard], [home, search]),
+                step(nowPlaying, root, search, [root, nowPlaying, search], [home, search]), .popOne)
+            XCTAssertEqual(
+                step(nowPlaying, root, nowPlaying, [root, nowPlaying], [home, search]), .done)
+            XCTAssertEqual(
+                step(album, root, destination, [root, destination], [home, search]),
                 .unavailable)
-        }
-
-        func testCarPlayKeyboardSearchUsesNativeCancelWithoutAnExtraResultRow() {
-            let result = CPListItem(text: "Result", detailText: nil)
-            XCTAssertTrue(FoundationCarPlaySceneDelegate.searchRows([], budget: 4).isEmpty)
-            let limited = FoundationCarPlaySceneDelegate.searchRows([result, result], budget: 2)
-            XCTAssertEqual(limited.count, 2)
-            XCTAssertTrue(limited.first === result)
-            XCTAssertTrue(limited.last === result)
-            XCTAssertEqual(FoundationCarPlaySceneDelegate.searchRows([result], budget: 1).count, 1)
-            XCTAssertTrue(FoundationCarPlaySceneDelegate.searchRows([result], budget: 0).isEmpty)
         }
 
         func testCarPlayCategoryArtworkPreservesAspectAndInsetsAtDisplayScale() throws {
@@ -176,16 +588,6 @@ final class FoundationStartupTests: XCTestCase {
             XCTAssertEqual(category.scale, 3)
         }
 
-        func testCarPlayCancelledSearchResponseCompletesOnlyOnce() {
-            var completions = 0
-            let response = FoundationCarPlaySceneDelegate.SearchResponse { rows in
-                completions += 1
-                XCTAssertTrue(rows.isEmpty)
-            }
-            response.finish([])
-            response.finish([CPListItem(text: "Late result", detailText: nil)])
-            XCTAssertEqual(completions, 1)
-        }
     #endif
 
     @MainActor

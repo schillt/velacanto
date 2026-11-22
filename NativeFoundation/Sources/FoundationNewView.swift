@@ -4,6 +4,7 @@ import SwiftUI
 struct FoundationNewView<Profile: View>: View {
     @EnvironmentObject private var downloads: FoundationDownloads
     @EnvironmentObject private var connectivity: FoundationConnectivity
+    @EnvironmentObject private var primaryGenres: FoundationPrimaryGenresModel
     let profile: Profile
     let library: any FoundationLibrary
     @ObservedObject var player: FoundationPlayer
@@ -27,13 +28,24 @@ struct FoundationNewView<Profile: View>: View {
                 trackSection
                 albumSection
                 genreSection
-                if let error = actions.pinErrorMessage {
+                if let error = actions.pinErrorMessage, !connectivity.localOnly {
                     Text(error).foregroundStyle(.red)
                 }
             }.padding()
+                .foundationBottomChromeEndPadding()
         }
+        .foundationBottomChromeScrollClearance()
         .refreshable {
             guard isActive, !connectivity.localOnly else { return }
+            tracks.request(.refresh)
+            albums.request(.refresh)
+            trackRevision += 1
+            albumRevision += 1
+        }
+        .foundationLibraryRefresh(
+            revision: actions.libraryRefreshRevision,
+            active: isActive && isVisible && !connectivity.localOnly
+        ) {
             tracks.request(.refresh)
             albums.request(.refresh)
             trackRevision += 1
@@ -63,40 +75,42 @@ struct FoundationNewView<Profile: View>: View {
             item: $openedItem, library: library, player: player, isActive: isActive)
     }
 
+    private var displayedTracks: [FoundationItem] {
+        connectivity.localOnly ? downloads.itemsWithDownloadedMusic(in: tracks.items) : tracks.items
+    }
+
+    private var displayedAlbums: [FoundationItem] {
+        connectivity.localOnly ? downloads.itemsWithDownloadedMusic(in: albums.items) : albums.items
+    }
+
     private var trackSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            sectionHeader("New Tracks", model: tracks) {
-                try await library.recentTracks(startIndex: $0)
-            }
-            ForEach(
-                Array(tracks.items.prefix(6).enumerated()).filter {
-                    !connectivity.localOnly || downloads.isReady($0.element)
-                }, id: \.offset
-            ) { index, item in
-                FoundationLibraryItemRow(
-                    item: item, library: library, isActive: isActive && isVisible,
-                    open: {},
-                    play: {
-                        guard let selection = tracks.trackQueue(selecting: index) else { return }
-                        if connectivity.localOnly {
-                            guard downloads.isReady(selection.items[selection.index]) else {
-                                return
-                            }
-                            let ready = selection.items.filter { downloads.isReady($0) }
-                            let index = selection.items.prefix(selection.index).filter {
-                                downloads.isReady($0)
-                            }.count
-                            player.setQueue(ready, selectedIndex: index)
-                        } else {
+            if !connectivity.localOnly || !displayedTracks.isEmpty {
+                sectionHeader("New Tracks", model: tracks) {
+                    try await library.recentTracks(startIndex: $0)
+                }
+                ForEach(
+                    Array(displayedTracks.prefix(6).enumerated()), id: \.offset
+                ) { index, item in
+                    FoundationLibraryItemRow(
+                        item: item, library: library, isActive: isActive && isVisible,
+                        open: {},
+                        play: {
+                            guard
+                                let selection = FoundationTrackQueueSelection(
+                                    in: displayedTracks, selecting: index,
+                                    isAvailable: {
+                                        !connectivity.localOnly || downloads.isReady($0)
+                                    })
+                            else { return }
                             player.setQueue(selection.items, selectedIndex: selection.index)
-                        }
-
-                    }, player: player, showsTrackArtwork: true)
-                if index < min(5, tracks.items.count - 1) { Divider() }
-            }
-            sectionState(tracks) {
-                tracks.request(tracks.retryRequest)
-                trackRevision += 1
+                        }, player: player, showsTrackArtwork: true)
+                    if index < min(5, displayedTracks.count - 1) { Divider() }
+                }
+                sectionState(tracks) {
+                    tracks.request(tracks.retryRequest)
+                    trackRevision += 1
+                }
             }
         }
         .task(
@@ -121,28 +135,30 @@ struct FoundationNewView<Profile: View>: View {
 
     private var albumSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            sectionHeader("Recently Added", model: albums) {
-                try await library.recentAlbums(startIndex: $0)
-            }
-            if !albums.items.isEmpty {
-                ScrollView(.horizontal) {
-                    LazyHStack(alignment: .top, spacing: 16) {
-                        ForEach(Array(albums.items.prefix(5).enumerated()), id: \.offset) {
-                            _, item in
-                            FoundationAlbumShelfCard(
-                                item: item, library: library, player: player,
-                                isActive: isActive && isVisible, open: { openedItem = item },
-                                navigate: { openedItem = $0 })
-                        }
-                    }.scrollTargetLayout()
+            if !connectivity.localOnly || !displayedAlbums.isEmpty {
+                sectionHeader("Recently Added", model: albums) {
+                    try await library.recentAlbums(startIndex: $0)
                 }
-                .scrollTargetBehavior(.viewAligned)
-                .scrollIndicators(.hidden)
-                .foundationMacShelfUnderlap()
-            }
-            sectionState(albums) {
-                albums.request(albums.retryRequest)
-                albumRevision += 1
+                if !displayedAlbums.isEmpty {
+                    ScrollView(.horizontal) {
+                        LazyHStack(alignment: .top, spacing: 16) {
+                            ForEach(Array(displayedAlbums.prefix(5).enumerated()), id: \.offset) {
+                                _, item in
+                                FoundationAlbumShelfCard(
+                                    item: item, library: library, player: player,
+                                    isActive: isActive && isVisible, open: { openedItem = item },
+                                    navigate: { openedItem = $0 })
+                            }
+                        }.scrollTargetLayout()
+                    }
+                    .scrollTargetBehavior(.viewAligned)
+                    .scrollIndicators(.hidden)
+                    .foundationMacShelfUnderlap()
+                }
+                sectionState(albums) {
+                    albums.request(albums.retryRequest)
+                    albumRevision += 1
+                }
             }
         }
         .task(
@@ -165,34 +181,21 @@ struct FoundationNewView<Profile: View>: View {
         }
     }
 
-    /// Most recent occurrence wins; only the existing first 24 albums contribute.
-    private var recentGenres: [(genre: FoundationItem, artwork: FoundationItem)] {
-        var seen = Set<String>()
-        var result: [(genre: FoundationItem, artwork: FoundationItem)] = []
-        for album in albums.items.prefix(24) {
-            for reference in album.genres where seen.insert(reference.id).inserted {
-                result.append(
-                    (
-                        FoundationItem(
-                            id: reference.id, title: reference.title, subtitle: "",
-                            kind: .genre, duration: nil), album
-                    ))
-                if result.count == 6 { return result }
-            }
-        }
-        return result
+    private var recentGenres: [FoundationPrimaryGenreRecord.RecentGenre] {
+        primaryGenres.completedRecord(libraryScope: library.primaryGenreIndexScope)?.recentGenres(
+            songs: tracks.items,
+            readySongIDs: connectivity.localOnly ? primaryGenres.readySongIDs : nil
+        ) ?? []
     }
 
     @ViewBuilder private var genreSection: some View {
-        let entries = recentGenres.filter {
-            !connectivity.localOnly || !downloads.browseTracks(for: $0.genre).isEmpty
-        }
+        let entries = recentGenres
         if !entries.isEmpty {
             VStack(alignment: .leading, spacing: 12) {
                 Text("Genres with New Music").font(.title2.bold())
                 ScrollView(.horizontal) {
                     LazyHStack(spacing: 16) {
-                        ForEach(entries, id: \.genre.id) { entry in
+                        ForEach(entries, id: \.genre.genreIdentity) { entry in
                             FoundationGenreCard(
                                 genre: entry.genre, library: library,
                                 isActive: isActive && isVisible,
@@ -205,6 +208,14 @@ struct FoundationNewView<Profile: View>: View {
                 .scrollIndicators(.hidden)
                 .foundationMacShelfUnderlap()
             }
+        } else if !connectivity.localOnly,
+            primaryGenres.completedRecord(libraryScope: library.primaryGenreIndexScope) == nil
+        {
+            Text(
+                primaryGenres.isBuilding
+                    ? "Preparing genres…" : "Genres are prepared automatically for your library."
+            )
+            .font(.subheadline).foregroundStyle(.secondary)
         }
     }
 
@@ -213,7 +224,9 @@ struct FoundationNewView<Profile: View>: View {
         loader: @escaping (Int) async throws -> FoundationPage
     ) -> some View {
         HStack(spacing: 6) {
-            if model.items.count > (model === tracks ? 6 : 5) || model.nextStartIndex != nil {
+            if !connectivity.localOnly,
+                model.items.count > (model === tracks ? 6 : 5) || model.nextStartIndex != nil
+            {
                 NavigationLink {
                     FoundationCatalogView(
                         title: title, model: model, library: library, player: player,
@@ -243,7 +256,7 @@ struct FoundationNewView<Profile: View>: View {
         if model.isLoading, model.items.isEmpty, !connectivity.localOnly {
             FoundationLoadingPlaceholder(layout: model === albums ? .albumShelf : .rows)
         }
-        if let error = model.errorMessage, !model.hasConnectionIssue {
+        if let error = model.errorMessage, !model.hasConnectionIssue, !connectivity.localOnly {
             Text(error).foregroundStyle(.red)
             Button("Retry") {
                 guard !connectivity.localOnly else { return }
@@ -260,47 +273,60 @@ struct FoundationNewView<Profile: View>: View {
 
 /// A retained, bounded album ranking independent of New and Home.
 struct FoundationLibraryMostPlayedAlbums: View {
+    @EnvironmentObject private var downloads: FoundationDownloads
     @EnvironmentObject private var connectivity: FoundationConnectivity
     @ObservedObject var model: FoundationBrowseModel
     let library: any FoundationLibrary
     @ObservedObject var player: FoundationPlayer
     let isActive: Bool
+    var refreshRevision = 0
+    @State private var consumedRefreshRevision = 0
     @State private var isVisible = false
     @State private var revision = 0
     @State private var openedItem: FoundationItem?
 
+    private var displayedItems: [FoundationItem] {
+        connectivity.localOnly ? downloads.itemsWithDownloadedMusic(in: model.items) : model.items
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Most Played Albums").font(.title2.bold())
-            Text("From your 100 most-played tracks").font(.subheadline).foregroundStyle(.secondary)
-            LazyVGrid(
-                columns: [GridItem(.adaptive(minimum: 144, maximum: 180), spacing: 16)],
-                alignment: .leading, spacing: 20
-            ) {
-                ForEach(Array(model.items.prefix(12).enumerated()), id: \.offset) { _, item in
-                    FoundationAlbumShelfCard(
-                        item: item, library: library, player: player,
-                        isActive: isActive && isVisible, open: { openedItem = item },
-                        navigate: { openedItem = $0 })
+            if !connectivity.localOnly || !displayedItems.isEmpty {
+                Text("Most Played Albums").font(.title2.bold())
+                Text("From your 100 most-played tracks").font(.subheadline).foregroundStyle(
+                    .secondary)
+                LazyVGrid(
+                    columns: [GridItem(.adaptive(minimum: 144, maximum: 180), spacing: 16)],
+                    alignment: .leading, spacing: 20
+                ) {
+                    ForEach(Array(displayedItems.prefix(12).enumerated()), id: \.offset) {
+                        _, item in
+                        FoundationAlbumShelfCard(
+                            item: item, library: library, player: player,
+                            isActive: isActive && isVisible, open: { openedItem = item },
+                            navigate: { openedItem = $0 })
+                    }
                 }
-            }
-            if connectivity.hasConnectionIssue || model.hasConnectionIssue {
-                FoundationOfflineNotice()
-            }
-            if model.isLoading, model.items.isEmpty, !connectivity.localOnly {
-                FoundationLoadingPlaceholder(layout: .albumGrid)
-            }
-            if let error = model.errorMessage, !model.hasConnectionIssue {
-                Text(error).foregroundStyle(.red)
-                Button("Retry") {
-                    guard !connectivity.localOnly else { return }
-                    model.request(model.retryRequest)
-                    revision += 1
-                }.disabled(connectivity.localOnly)
-            } else if !connectivity.localOnly, !model.hasConnectionIssue, model.loaded,
-                model.items.isEmpty
-            {
-                Text("No album listening history yet.").foregroundStyle(.secondary)
+                if connectivity.hasConnectionIssue || model.hasConnectionIssue {
+                    FoundationOfflineNotice()
+                }
+                if model.isLoading, model.items.isEmpty, !connectivity.localOnly {
+                    FoundationLoadingPlaceholder(layout: .albumGrid)
+                }
+                if let error = model.errorMessage, !model.hasConnectionIssue,
+                    !connectivity.localOnly
+                {
+                    Text(error).foregroundStyle(.red)
+                    Button("Retry") {
+                        guard !connectivity.localOnly else { return }
+                        model.request(model.retryRequest)
+                        revision += 1
+                    }.disabled(connectivity.localOnly)
+                } else if !connectivity.localOnly, !model.hasConnectionIssue, model.loaded,
+                    model.items.isEmpty
+                {
+                    Text("No album listening history yet.").foregroundStyle(.secondary)
+                }
             }
         }
         .onAppear { isVisible = true }
@@ -312,8 +338,15 @@ struct FoundationLibraryMostPlayedAlbums: View {
         .foundationCollectionDestination(
             item: $openedItem, library: library, player: player, isActive: isActive
         )
-        .task(id: isActive && isVisible && !connectivity.localOnly ? revision : nil) {
+        .task(
+            id: isActive && isVisible && !connectivity.localOnly
+                ? "\(revision)-\(refreshRevision)" : nil
+        ) {
             guard isActive, isVisible, !Task.isCancelled else { return }
+            if refreshRevision != consumedRefreshRevision {
+                consumedRefreshRevision = refreshRevision
+                model.request(.refresh)
+            }
             #if DEBUG
                 await FoundationTrace.withPage(origin: .library, page: .shelf) {
                     await model.loadPending(

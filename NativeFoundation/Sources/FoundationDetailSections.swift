@@ -4,9 +4,20 @@ import SwiftUI
     import UIKit
 #endif
 
+/// Capture the window's semantic appearance before immersive artwork changes detail colors.
+private struct FoundationBrowsingColorSchemeKey: EnvironmentKey {
+    static let defaultValue: ColorScheme? = nil
+}
+
+extension EnvironmentValues {
+    var foundationBrowsingColorScheme: ColorScheme? {
+        get { self[FoundationBrowsingColorSchemeKey.self] }
+        set { self[FoundationBrowsingColorSchemeKey.self] = newValue }
+    }
+}
+
 /// Optional item text owns one visible-page read; presenting it adds no work.
 struct FoundationOverviewSection: View {
-    @Environment(\.colorScheme) private var colorScheme
     @Environment(\.foundationReduceMotion) private var reduceMotion
     @EnvironmentObject private var connectivity: FoundationConnectivity
     let item: FoundationItem
@@ -78,39 +89,9 @@ struct FoundationOverviewSection: View {
                 .accessibilityHint("Opens the complete overview")
                 .transition(.opacity)
                 .sheet(isPresented: $showingOverview) {
-                    NavigationStack {
-                        ScrollView {
-                            Text(overview)
-                                .lineSpacing(item.kind == .artist ? 4 : 0)
-                                #if os(macOS)
-                                    .font(overviewFont)
-                                #endif
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .textSelection(.enabled).padding()
-                        }
-                        .navigationTitle("About " + item.title)
-                        #if os(iOS)
-                            .navigationBarTitleDisplayMode(.inline)
-                            .toolbarBackground(.hidden, for: .navigationBar)
-                        #else
-                            .toolbar {
-                                ToolbarItem(placement: .confirmationAction) {
-                                    Button("Done") { showingOverview = false }
-                                }
-                            }
-                        #endif
+                    FoundationOverviewSheet(item: item, overview: overview) {
+                        showingOverview = false
                     }
-                    // Match native sheet chrome to the semantic colors inherited from its detail.
-                    .preferredColorScheme(colorScheme)
-                    #if os(iOS)
-                        .presentationDetents([.medium, .large])
-                        .presentationDragIndicator(.hidden)
-                        .foundationIdleGrabber(showsOverlay: true)
-                        .accessibilityAction(.escape) { showingOverview = false }
-                    #else
-                        .frame(minWidth: 360, idealWidth: 480, minHeight: 320, idealHeight: 520)
-                        .background(.regularMaterial)
-                    #endif
                 }
             }
             if failed, !connectivity.localOnly {
@@ -153,9 +134,88 @@ struct FoundationOverviewSection: View {
     }
 }
 
+/// A text reading surface follows the window, rather than the presenting artwork's tint.
+struct FoundationOverviewSheet: View {
+    let item: FoundationItem
+    let overview: String
+    let dismiss: () -> Void
+    @Environment(\.foundationBrowsingColorScheme) private var browsingColorScheme
+    @Environment(\.colorScheme) private var inheritedColorScheme
+    #if os(iOS)
+        @State private var detent = PresentationDetent.medium
+    #endif
+    #if os(macOS)
+        @ScaledMetric(relativeTo: .body) private var textSize = 15.0
+    #endif
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                Text(overview)
+                    #if os(macOS)
+                        .font(.system(size: textSize))
+                    #else
+                        .font(.body)
+                    #endif
+                    .lineSpacing(5)
+                    .foregroundStyle(.primary)
+                    .frame(maxWidth: 600, alignment: .leading)
+                    .textSelection(.enabled)
+                    .padding(.horizontal, 24).padding(.vertical, 24)
+                    .frame(maxWidth: .infinity, alignment: .center)
+            }
+            #if os(iOS)
+                .scrollDisabled(detent != .large)
+            #else
+                .background(.background)
+            #endif
+            .navigationTitle("About " + item.title)
+            .foundationOfflineBrowsingBanner()
+            #if os(iOS)
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbarBackground(.hidden, for: .navigationBar)
+            #endif
+            #if os(macOS)
+                .safeAreaInset(edge: .bottom, spacing: 0) {
+                    HStack {
+                        Spacer()
+                        Button("Done", action: dismiss)
+                        .buttonStyle(.glassProminent)
+                        .keyboardShortcut(.defaultAction)
+                        .accessibilityIdentifier("overview-done")
+                    }
+                    .padding(.horizontal, 24).padding(.vertical, 16)
+                    .background(.background)
+                    .accessibilityElement(children: .contain)
+                    .accessibilityIdentifier("overview-reading-footer")
+                }
+            #endif
+        }
+        #if os(macOS)
+            // Reset the immersive presenter's style before resolving hierarchical text and actions.
+            .foregroundStyle(Color.primary)
+            .onExitCommand(perform: dismiss)
+        #endif
+        // Immersive detail controls may use a white tint; native sheet actions use the app accent.
+        .tint(.accentColor)
+        .preferredColorScheme(browsingColorScheme ?? inheritedColorScheme)
+        .environment(\.colorScheme, browsingColorScheme ?? inheritedColorScheme)
+        .accessibilityAction(.escape, dismiss)
+        #if os(iOS)
+            .presentationDetents([.medium, .large], selection: $detent)
+            .presentationDragIndicator(.visible)
+            .presentationContentInteraction(.resizes)
+        #else
+            .presentationBackground(.background)
+            .frame(minWidth: 400, idealWidth: 600, minHeight: 360, idealHeight: 600)
+        #endif
+    }
+}
+
 /// Reuses catalog ownership and cards; each optional shelf fails independently.
 struct FoundationRelatedSection<Card: View>: View {
     @Environment(\.foundationReduceMotion) private var reduceMotion
+    @EnvironmentObject private var downloads: FoundationDownloads
     @EnvironmentObject private var actions: FoundationLibraryActions
     @EnvironmentObject private var connectivity: FoundationConnectivity
     let title: String
@@ -167,22 +227,29 @@ struct FoundationRelatedSection<Card: View>: View {
     @StateObject private var model = FoundationBrowseModel()
     @State private var revision = 0
 
+    private var displayedItems: [FoundationItem] {
+        connectivity.localOnly ? downloads.itemsWithDownloadedMusic(in: model.items) : model.items
+    }
+
+    private var showsError: Bool { !connectivity.localOnly && model.errorMessage != nil }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            if showsInitialPlaceholder || !model.items.isEmpty || model.errorMessage != nil {
+            if showsInitialPlaceholder || !displayedItems.isEmpty || showsError {
                 Text(title).font(.title2.bold()).padding(.horizontal)
             }
-            if !model.items.isEmpty {
+            if !displayedItems.isEmpty {
                 ScrollView(.horizontal) {
                     LazyHStack(alignment: .top, spacing: 16) {
                         let rows = twoRows ? 2 : 1
-                        ForEach(0..<((model.items.count + rows - 1) / rows), id: \.self) { column in
+                        ForEach(0..<((displayedItems.count + rows - 1) / rows), id: \.self) {
+                            column in
                             VStack(alignment: .leading, spacing: 20) {
                                 ForEach(
-                                    column * rows..<min(column * rows + rows, model.items.count),
+                                    column * rows..<min(column * rows + rows, displayedItems.count),
                                     id: \.self
                                 ) { index in
-                                    card(model.items[index]).frame(width: 150)
+                                    card(displayedItems[index]).frame(width: 150)
                                 }
                             }
                         }
@@ -194,21 +261,17 @@ struct FoundationRelatedSection<Card: View>: View {
             if model.hasConnectionIssue {
                 FoundationOfflineNotice().padding(.horizontal)
             }
-            if let error = model.errorMessage, !model.hasConnectionIssue {
-                if connectivity.localOnly {
-                    if model.items.isEmpty { FoundationOfflineNotice().padding(.horizontal) }
-                } else {
-                    Text(error).font(.caption).foregroundStyle(.secondary).padding(.horizontal)
-                    Button("Retry") { request(model.retryRequest) }.padding(.horizontal)
-                }
+            if let error = model.errorMessage, !model.hasConnectionIssue, !connectivity.localOnly {
+                Text(error).font(.caption).foregroundStyle(.secondary).padding(.horizontal)
+                Button("Retry") { request(model.retryRequest) }.padding(.horizontal)
             }
-            if model.items.isEmpty, showsInitialPlaceholder {
+            if displayedItems.isEmpty, showsInitialPlaceholder {
                 VStack(spacing: 20) {
                     FoundationLoadingPlaceholder(layout: .albumShelf)
                     if twoRows { FoundationLoadingPlaceholder(layout: .albumShelf) }
                 }.padding(.horizontal)
             }
-            if model.nextStartIndex != nil {
+            if model.nextStartIndex != nil, !connectivity.localOnly {
                 Button("Load more") { request(.more) }.disabled(
                     model.isLoading || connectivity.localOnly
                 ).padding(
@@ -217,9 +280,9 @@ struct FoundationRelatedSection<Card: View>: View {
         }
         .padding(
             .vertical,
-            showsInitialPlaceholder || !model.items.isEmpty || model.errorMessage != nil ? 12 : 0
+            showsInitialPlaceholder || !displayedItems.isEmpty || showsError ? 12 : 0
         )
-        .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: model.items.isEmpty)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: displayedItems.isEmpty)
         .onChange(of: connectivity.successfulRetryRevision) { _, _ in
             model.request(.refresh)
             revision += 1
@@ -258,26 +321,33 @@ struct FoundationArtistSuggestedSongs: View {
         refreshInterval: 30 * 60, usesCachedFreshness: true)
     @State private var revision = 0
 
+    private var displayedItems: [FoundationItem] {
+        connectivity.localOnly ? downloads.itemsWithDownloadedMusic(in: model.items) : model.items
+    }
+
+    private var showsError: Bool { !connectivity.localOnly && model.errorMessage != nil }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            if showsInitialPlaceholder || !model.items.isEmpty || model.errorMessage != nil {
+            if showsInitialPlaceholder || !displayedItems.isEmpty || showsError {
                 Text("Suggested Songs").font(.title2.bold()).padding(.horizontal)
             }
-            if !model.items.isEmpty {
+            if !displayedItems.isEmpty {
                 ScrollView(.horizontal) {
                     LazyHStack(alignment: .top, spacing: 20) {
-                        ForEach(0..<((model.items.count + 1) / 2), id: \.self) { column in
+                        ForEach(0..<((displayedItems.count + 1) / 2), id: \.self) { column in
                             VStack(alignment: .leading, spacing: 16) {
                                 ForEach(
-                                    column * 2..<min(column * 2 + 2, model.items.count), id: \.self
+                                    column * 2..<min(column * 2 + 2, displayedItems.count),
+                                    id: \.self
                                 ) { index in
                                     FoundationLibraryItemRow(
-                                        item: model.items[index], library: library,
+                                        item: displayedItems[index], library: library,
                                         isActive: isActive,
                                         open: {}, play: { play(index) }, player: player,
                                         showsTrackArtwork: true, navigate: navigate,
                                         currentPageKind: .artist,
-                                        subtitleOverride: model.items[index].album?.title ?? "")
+                                        subtitleOverride: displayedItems[index].album?.title ?? "")
                                 }
                             }.frame(width: 300)
                         }
@@ -289,7 +359,7 @@ struct FoundationArtistSuggestedSongs: View {
             if model.hasConnectionIssue {
                 FoundationOfflineNotice().padding(.horizontal)
             }
-            if let error = model.errorMessage, !model.hasConnectionIssue {
+            if let error = model.errorMessage, !model.hasConnectionIssue, !connectivity.localOnly {
                 Text(error).font(.caption).foregroundStyle(.secondary).padding(.horizontal)
                 Button("Retry") {
                     guard !connectivity.localOnly else { return }
@@ -297,15 +367,15 @@ struct FoundationArtistSuggestedSongs: View {
                     revision += 1
                 }.disabled(connectivity.localOnly).padding(.horizontal)
             }
-            if model.items.isEmpty, showsInitialPlaceholder {
+            if displayedItems.isEmpty, showsInitialPlaceholder {
                 FoundationLoadingPlaceholder(rowCount: 2, rowArtworkSize: 52).padding(.horizontal)
             }
         }
         .padding(
             .vertical,
-            showsInitialPlaceholder || !model.items.isEmpty || model.errorMessage != nil ? 12 : 0
+            showsInitialPlaceholder || !displayedItems.isEmpty || showsError ? 12 : 0
         )
-        .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: model.items.isEmpty)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: displayedItems.isEmpty)
         .onChange(of: connectivity.successfulRetryRevision) { _, _ in
             model.request(.refresh)
             revision += 1
@@ -331,17 +401,12 @@ struct FoundationArtistSuggestedSongs: View {
     }
 
     private func play(_ index: Int) {
-        guard let selection = model.trackQueue(selecting: index) else { return }
-        if connectivity.localOnly {
-            guard downloads.isReady(selection.items[selection.index]) else { return }
-            let ready = selection.items.filter { downloads.isReady($0) }
-            let index = selection.items.prefix(selection.index).filter { downloads.isReady($0) }
-                .count
-            player.setQueue(ready, selectedIndex: index)
-        } else {
-            player.setQueue(selection.items, selectedIndex: selection.index)
-        }
-
+        guard
+            let selection = FoundationTrackQueueSelection(
+                in: displayedItems, selecting: index,
+                isAvailable: { !connectivity.localOnly || downloads.isReady($0) })
+        else { return }
+        player.setQueue(selection.items, selectedIndex: selection.index)
     }
 }
 

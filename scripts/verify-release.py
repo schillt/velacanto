@@ -10,14 +10,21 @@ info_path = app / "Info.plist"
 if not info_path.exists():
     info_path = app / "Contents/Info.plist"
 info = plistlib.loads(info_path.read_bytes())
-assert info["CFBundleIdentifier"] == "com.chameleonenterprise.velacanto"
+canonical_bundle_id = "com.chameleonenterprise.velacanto"
+expected_bundle_id = os.environ.get("VELACANTO_APP_BUNDLE_IDENTIFIER", canonical_bundle_id)
+is_mac = (app / "Contents").exists()
+assert expected_bundle_id == canonical_bundle_id or (
+    is_mac and expected_bundle_id == canonical_bundle_id + ".siri-validation"
+), "Unexpected application identity"
+assert info["CFBundleIdentifier"] == expected_bundle_id
 expected_display_name = os.environ.get("VELACANTO_APP_DISPLAY_NAME", "VelaCanto")
 assert expected_display_name in ("VelaCanto Alpha", "VelaCanto")
 assert info["CFBundleDisplayName"] == expected_display_name
 assert info["CFBundleName"] == expected_display_name
-assert info["CFBundleShortVersionString"] == "0.5.0"
-assert info["CFBundleVersion"] == os.environ.get("VELACANTO_BUILD_NUMBER", "217")
+assert info["CFBundleShortVersionString"] == "0.6.0"
+assert info["CFBundleVersion"] == os.environ.get("VELACANTO_BUILD_NUMBER", "249")
 assert info["ITSAppUsesNonExemptEncryption"] is False
+assert "com.chameleonenterprise.velacanto.continuation.v1" in info.get("NSUserActivityTypes", []), "Missing Handoff activity registration"
 privacy_path = app / "PrivacyInfo.xcprivacy"
 if not privacy_path.exists():
     privacy_path = app / "Contents/Resources/PrivacyInfo.xcprivacy"
@@ -51,7 +58,7 @@ else:
     assert attributes["SupportedMediaCategories"] == ["INMediaCategoryMusic"]
     extension_binaries.append(extension / extension_info["CFBundleExecutable"])
 markers = (
-    b"player.siri", b"audioSession.activation.denied",
+    b"player.siri", b"audioSession.activation.denied", b"queueMorph", b"queueCompleted", b"queuePhase", b"metadataCompleted",
     b"player.hls.copy", b"player.hls.playlist", b"player.hls.negotiation",
     b"player.hls.source", b"player.hls.selection", b"player.comparison.access",
     b"foundationDeliveryComparison", b"player.hls.cleanup", b"MP3 HLS",
@@ -61,6 +68,11 @@ markers = (
     b"seek.complete direction=", b"FoundationSystemMediaControlsTests",
     b"-foundationDownloadsUITesting", b"DownloadUITestFixtures", b"FoundationDownloadUIFixture",
     b"FoundationAccountUITestHarness", b"synthetic-not-a-password",
+    b"-diagnosticCarPlaySearch", b"-diagnosticCarPlayNativeSearch",
+    b"-diagnosticNativeDownload", b"download.native stage=", b"FoundationNativeDownloadErrorFields",
+    b"FoundationCarPlayInputDiagnostic", b"CarPlaySearchDiagnostics",
+    b"-diagnosticHomeRebound", b"HomeReboundDiagnostics", b"FoundationHomeReboundDiagnostic",
+    b"-fixtureQueueArtworkTransition", b"-fixtureSharedChromeEvidence", b"-fixtureRemoteListening", b"FoundationChromeUIScrollProbe",
 )
 for binary in [executable, *extension_binaries, *app.rglob("*.dylib")]:
     content = binary.read_bytes()

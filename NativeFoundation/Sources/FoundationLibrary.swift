@@ -3,7 +3,7 @@ import Get
 import JellyfinAPI
 
 struct FoundationItem: Identifiable, Equatable, Codable, Sendable {
-    enum Kind: String, Codable, Sendable { case album, artist, track, playlist, genre }
+    enum Kind: String, Codable, Hashable, Sendable { case album, artist, track, playlist, genre }
     let id: String
     var title: String
     let subtitle: String
@@ -19,12 +19,20 @@ struct FoundationItem: Identifiable, Equatable, Codable, Sendable {
     var album: FoundationItemReference? = nil
     var artist: FoundationItemReference? = nil
     var genres: [FoundationItemReference] = []
+    /// Nil preserves legacy snapshots whose missing/empty tag coverage is unknown.
+    var genreMetadataIsComplete: Bool? = nil
+    /// Canonical primary-genre route origin; provider identity and raw tags stay intact.
+    var primaryGenreCensusID: UUID? = nil
     var playCount: Int = 0
     var sortName: String? = nil
     /// Membership identity for editing this occurrence, separate from the song identity.
     var playlistEntryID: String? = nil
+    /// Provider-reported availability; nil means unknown, never absent.
+    var hasLyrics: Bool? = nil
     var trackNumber: Int? = nil
     var discNumber: Int? = nil
+    /// Nil preserves legacy account-owned Jellyfin snapshots. New local items are explicit.
+    var catalogSource: FoundationCatalogSource? = nil
 }
 
 extension FoundationItem {
@@ -50,19 +58,27 @@ extension FoundationItem {
 
     /// Related routes use the same catalog identity and metadata in every entry point.
     var relatedAlbum: FoundationItem? {
-        guard let album, !album.id.isEmpty else { return nil }
+        guard let album, !album.id.isEmpty,
+            catalogSource == nil || album.catalogSource == nil
+                || album.catalogSource == catalogSource
+        else { return nil }
         return FoundationItem(
             id: album.id, title: album.title.isEmpty ? "Album" : album.title,
             subtitle: artist.flatMap { $0.title.isEmpty ? nil : $0.title } ?? subtitle,
             kind: .album, duration: nil,
-            primaryImageTag: album.primaryImageTag, artist: artist)
+            primaryImageTag: album.primaryImageTag, artist: artist,
+            catalogSource: album.catalogSource ?? catalogSource)
     }
 
     var relatedArtist: FoundationItem? {
-        guard let artist, !artist.id.isEmpty else { return nil }
+        guard let artist, !artist.id.isEmpty,
+            catalogSource == nil || artist.catalogSource == nil
+                || artist.catalogSource == catalogSource
+        else { return nil }
         return FoundationItem(
             id: artist.id, title: artist.title.isEmpty ? "Artist" : artist.title,
-            subtitle: "", kind: .artist, duration: nil, primaryImageTag: artist.primaryImageTag)
+            subtitle: "", kind: .artist, duration: nil, primaryImageTag: artist.primaryImageTag,
+            catalogSource: artist.catalogSource ?? catalogSource)
     }
 }
 
@@ -70,6 +86,7 @@ struct FoundationItemReference: Equatable, Codable, Sendable {
     let id: String
     let title: String
     var primaryImageTag: String? = nil
+    var catalogSource: FoundationCatalogSource? = nil
 }
 
 struct FoundationPage: Codable, Sendable {
@@ -135,11 +152,21 @@ struct FoundationMusicSearchContext: Sendable {
 }
 
 /// The cursor advances through inspected playlist candidates, not through matching results.
+struct FoundationPlaylistContentCursor: Sendable, Equatable {
+    struct Pending: Sendable, Equatable {
+        let playlist: FoundationItem
+        let trackOffset: Int
+    }
+    let candidateOffset: Int?
+    let pending: [Pending]
+}
+
 struct FoundationPlaylistContentPage: Sendable {
     let items: [FoundationItem]
     let nextStartIndex: Int?
     let hasIncompleteCoverage: Bool
     let partialFailureCount: Int
+    var continuation: FoundationPlaylistContentCursor? = nil
 }
 
 /// One bounded batch: six playlist candidates and at most their first 100 tracks each.
@@ -147,65 +174,93 @@ enum FoundationPlaylistContentSearch {
     static let candidateLimit = 6
     static let trackLimit = 100
 
-    static func resolve(
-        context: FoundationMusicSearchContext, startIndex: Int,
+    /// Each explicit continuation checks at most six track pages. Pending long
+    /// playlists finish before the next candidate batch; a match ends that playlist.
+    static func continueSearch(
+        context: FoundationMusicSearchContext, cursor: FoundationPlaylistContentCursor,
         playlists: @Sendable (Int, Int) async throws -> FoundationPage,
-        tracks: @Sendable (String) async throws -> FoundationPage
+        tracks: @Sendable (String, Int) async throws -> FoundationPage
     ) async throws -> FoundationPlaylistContentPage {
         try Task.checkCancellation()
         try context.validate()
-        guard startIndex >= 0 else { throw FoundationLibraryError.invalidResponse }
+        guard cursor.pending.count <= candidateLimit,
+            cursor.candidateOffset.map({ $0 >= 0 }) ?? true,
+            cursor.pending.allSatisfy({ $0.playlist.kind == .playlist && $0.trackOffset >= 0 })
+        else { throw FoundationLibraryError.invalidResponse }
         guard !context.isEmpty else {
             return .init(
-                items: [], nextStartIndex: nil, hasIncompleteCoverage: false,
-                partialFailureCount: 0)
+                items: [], nextStartIndex: nil, hasIncompleteCoverage: false, partialFailureCount: 0
+            )
         }
-        let candidates: FoundationPage
-        do {
-            candidates = try await playlists(startIndex, candidateLimit)
-            try Task.checkCancellation()
-        } catch {
-            try Task.checkCancellation()
-            let category = FoundationLibraryError.category(error)
-            if category == .cancelled { throw CancellationError() }
-            throw category
+        var pending = cursor.pending
+        var candidateOffset = cursor.candidateOffset
+        if pending.isEmpty, let offset = candidateOffset {
+            let page: FoundationPage
+            do {
+                page = try await playlists(offset, candidateLimit)
+                try Task.checkCancellation()
+            } catch {
+                try Task.checkCancellation()
+                let category = FoundationLibraryError.category(error)
+                if category == .cancelled { throw CancellationError() }
+                throw category
+            }
+            guard page.items.count <= candidateLimit,
+                page.items.allSatisfy({ $0.kind == .playlist && !$0.id.isEmpty }),
+                page.nextStartIndex.map({ $0 > offset && !page.items.isEmpty }) ?? true
+            else { throw FoundationLibraryError.invalidResponse }
+            var seen = Set<String>()
+            pending = page.items.filter { seen.insert($0.id).inserted }.map {
+                .init(playlist: $0, trackOffset: 0)
+            }
+            candidateOffset = page.nextStartIndex
         }
-        guard candidates.items.count <= candidateLimit,
-            candidates.items.allSatisfy({ $0.kind == .playlist && !$0.id.isEmpty }),
-            candidates.nextStartIndex.map({ $0 > startIndex && !candidates.items.isEmpty }) ?? true
-        else { throw FoundationLibraryError.invalidResponse }
+        var remaining: [FoundationPlaylistContentCursor.Pending] = []
         var matches: [FoundationItem] = []
-        var inspected: Set<String> = []
-        var incomplete = candidates.nextStartIndex != nil
-        var failureCount = 0
-        for playlist in candidates.items where inspected.insert(playlist.id).inserted {
+        var failures = 0
+        for entry in pending {
             try Task.checkCancellation()
             do {
-                let contents = try await tracks(playlist.id)
+                let page = try await tracks(entry.playlist.id, entry.trackOffset)
                 try Task.checkCancellation()
-                guard contents.items.count <= trackLimit,
-                    contents.items.allSatisfy({ $0.kind == .track }),
-                    contents.nextStartIndex.map({ $0 > 0 && !contents.items.isEmpty }) ?? true
+                guard page.items.count <= trackLimit, page.items.allSatisfy({ $0.kind == .track }),
+                    page.nextStartIndex.map({ $0 > entry.trackOffset && !page.items.isEmpty })
+                        ?? true
                 else { throw FoundationLibraryError.invalidResponse }
-                incomplete = incomplete || contents.nextStartIndex != nil
-                if contents.items.contains(where: context.matches(track:)) {
-                    matches.append(playlist)
+                if page.items.contains(where: context.matches(track:)) {
+                    matches.append(entry.playlist)
+                } else if let next = page.nextStartIndex {
+                    remaining.append(.init(playlist: entry.playlist, trackOffset: next))
                 }
             } catch {
                 try Task.checkCancellation()
                 let category = FoundationLibraryError.category(error)
                 if category == .cancelled { throw CancellationError() }
-                // A missing optional playlist or transport failure is partial; authentication stays actionable.
                 guard category == .network || category == .unavailable else { throw category }
-                failureCount += 1
-                incomplete = true
+                failures += 1
+                remaining.append(entry)
             }
         }
         try Task.checkCancellation()
+        let next: FoundationPlaylistContentCursor? =
+            remaining.isEmpty && candidateOffset == nil
+            ? nil : .init(candidateOffset: candidateOffset, pending: remaining)
         return .init(
-            items: matches, nextStartIndex: candidates.nextStartIndex,
-            hasIncompleteCoverage: incomplete, partialFailureCount: failureCount)
+            items: matches, nextStartIndex: candidateOffset,
+            hasIncompleteCoverage: next != nil, partialFailureCount: failures, continuation: next)
     }
+
+    static func resolve(
+        context: FoundationMusicSearchContext, startIndex: Int,
+        playlists: @Sendable (Int, Int) async throws -> FoundationPage,
+        tracks: @Sendable (String) async throws -> FoundationPage
+    ) async throws -> FoundationPlaylistContentPage {
+        try await continueSearch(
+            context: context,
+            cursor: .init(candidateOffset: startIndex, pending: []),
+            playlists: playlists, tracks: { id, _ in try await tracks(id) })
+    }
+
 }
 
 struct FoundationSession: Codable, Sendable {
@@ -420,6 +475,24 @@ actor FoundationArtistDetailMemo {
 }
 
 protocol FoundationLibrary: Sendable {
+    var listeningActivityScope: String { get }
+    func remoteListeningActivity() async throws -> [FoundationRemoteListeningActivity]
+    func observeRemoteListeningActivity(
+        receive: @escaping @Sendable ([FoundationRemoteListeningActivity]) async -> Void
+    ) async throws
+    func prepareRemoteContinuation(_ activity: FoundationRemoteListeningActivity) async throws
+        -> FoundationRemoteContinuationOffer
+    func prepareRemotePlayback(_ activity: FoundationRemoteListeningActivity) async throws
+        -> FoundationRemoteContinuationOffer
+    func prepareRemoteCurrentSong(_ activity: FoundationRemoteListeningActivity) async throws
+        -> FoundationRemoteContinuationOffer
+    func authorizeRemoteContinuation(_ expected: FoundationRemoteContinuationOffer) async throws
+        -> FoundationRemoteContinuationOffer
+    func refreshRemoteContinuation(_ expected: FoundationRemoteContinuationOffer) async throws
+        -> FoundationRemoteContinuationOffer
+    func stopRemoteContinuation(_ expected: FoundationRemoteContinuationOffer) async throws
+    func confirmRemoteContinuationStopped(_ expected: FoundationRemoteContinuationOffer)
+        async throws -> Bool
     func reportPlayback(_ event: FoundationPlaybackReport) async throws
     func retireAlphabetCapability() async
     func alphabetCapability() async -> FoundationAlphabetCapability
@@ -430,23 +503,41 @@ protocol FoundationLibrary: Sendable {
     var catalogScopeID: String { get }
     func catalogCacheKey(_ key: String) -> String
     func retryArtwork(for item: FoundationItem) async
+    /// First-frame reuse only: no I/O, decoding, request admission or asynchronous fallback.
+    func immediateArtworkResult(for item: FoundationItem, size: Int)
+        -> FoundationCurrentArtwork.Result?
     func cachedArtworkResult(for item: FoundationItem, size: Int) async throws
         -> FoundationCurrentArtwork.Result?
     func downloadSource(for item: FoundationItem) async throws -> FoundationDownloadSource
     func downloadPreparation(for item: FoundationItem, quality: FoundationDownloadQuality)
         async throws -> FoundationDownloadPreparation
+    func nativeDownloadProposal(
+        for item: FoundationItem, quality: FoundationDownloadQuality, allowsCellular: Bool
+    )
+        async throws -> FoundationNativeDownloadProposal
+    var supportsOfflinePlaylistPreparation: Bool { get }
     var supportsPlaylistManagement: Bool { get }
     var supportsRepeatedPlaylistTracks: Bool { get }
+    var supportsPlaylistReordering: Bool { get }
     func playlistPermissions(id: String) async throws -> FoundationPlaylistPermissions
+    func playlistDetails(id: String) async throws -> FoundationPlaylistDetails
+    func updatePlaylistDetails(id: String, name: String?, overview: String?, isPublic: Bool?)
+        async throws -> FoundationPlaylistDetails
+    func setPlaylistCover(id: String, data: Data, contentType: String) async throws
+        -> FoundationItem
     func playlistEntries(id: String, startIndex: Int) async throws -> FoundationPlaylistPage
     func createPlaylist(name: String) async throws -> FoundationItem
     func renamePlaylist(id: String, name: String) async throws
     func deletePlaylist(id: String) async throws
     func addTracks(to playlistID: String, tracks: [FoundationItem]) async throws
     func removeEntry(from playlistID: String, entryID: String) async throws
+    func moveEntry(in playlistID: String, entryID: String, to index: Int) async throws
 
     func lyrics(for item: FoundationItem) async throws -> FoundationLyrics?
     func cachedArtistDetails(for item: FoundationItem) async -> FoundationArtistDetails?
+    var supportsItemMetadata: Bool { get }
+    var metadataScopeID: String { get }
+    func itemMetadata(for item: FoundationItem) async throws -> FoundationItemMetadata?
     func overview(for item: FoundationItem) async throws -> String?
     func itemDetails(for item: FoundationItem) async throws -> FoundationItem?
     func invalidateItemDetails(for item: FoundationItem) async
@@ -478,9 +569,20 @@ protocol FoundationLibrary: Sendable {
     func playlistTracks(playlistID: String, startIndex: Int) async throws -> FoundationPage
     func playlistsContainingMusic(context: FoundationMusicSearchContext, startIndex: Int)
         async throws -> FoundationPlaylistContentPage
+    func playlistsContainingMusic(
+        context: FoundationMusicSearchContext, cursor: FoundationPlaylistContentCursor
+    ) async throws -> FoundationPlaylistContentPage
     func favorites(startIndex: Int) async throws -> FoundationPage
     func favorites(kind: FoundationItem.Kind, startIndex: Int) async throws -> FoundationPage
     func genres(startIndex: Int) async throws -> FoundationPage
+    var primaryGenreIndexScope: FoundationPrimaryGenreIndex.Scope? { get }
+    func primaryGenreMetadataPage(startIndex: Int) async throws
+        -> FoundationPrimaryGenreMetadataPage
+    func primaryGenreSongs(ids: [String]) async throws -> [FoundationItem]
+    func primaryGenreCollections(ids: [String], kind: FoundationItem.Kind) async throws
+        -> [FoundationItem]
+    func primaryGenreCanonicalNames(ids: [String], kind: FoundationItem.Kind) async throws
+        -> [FoundationItemReference]
     func albums(genreID: String, startIndex: Int) async throws -> FoundationPage
     func setFavorite(for item: FoundationItem, isFavorite: Bool) async throws
     func playbackURL(for item: FoundationItem) async throws -> URL
@@ -494,6 +596,33 @@ protocol FoundationLibrary: Sendable {
 }
 
 extension FoundationLibrary {
+    var supportsOfflinePlaylistPreparation: Bool { false }
+    var listeningActivityScope: String { "" }
+    func remoteListeningActivity() async throws -> [FoundationRemoteListeningActivity] { [] }
+    func observeRemoteListeningActivity(
+        receive: @escaping @Sendable ([FoundationRemoteListeningActivity]) async -> Void
+    ) async throws {}
+    func prepareRemoteContinuation(_ activity: FoundationRemoteListeningActivity) async throws
+        -> FoundationRemoteContinuationOffer
+    { throw FoundationHandoffError.unavailable }
+    func prepareRemotePlayback(_ activity: FoundationRemoteListeningActivity) async throws
+        -> FoundationRemoteContinuationOffer
+    { try await prepareRemoteContinuation(activity) }
+    func prepareRemoteCurrentSong(_ activity: FoundationRemoteListeningActivity) async throws
+        -> FoundationRemoteContinuationOffer
+    { throw FoundationHandoffError.unavailable }
+    func authorizeRemoteContinuation(_ expected: FoundationRemoteContinuationOffer) async throws
+        -> FoundationRemoteContinuationOffer
+    { throw FoundationHandoffError.unavailable }
+    func refreshRemoteContinuation(_ expected: FoundationRemoteContinuationOffer) async throws
+        -> FoundationRemoteContinuationOffer
+    { throw FoundationHandoffError.unavailable }
+    func stopRemoteContinuation(_ expected: FoundationRemoteContinuationOffer) async throws {
+        throw FoundationHandoffError.unavailable
+    }
+    func confirmRemoteContinuationStopped(_ expected: FoundationRemoteContinuationOffer)
+        async throws -> Bool
+    { false }
     func playbackResource(for item: FoundationItem) async throws -> FoundationPlaybackResource {
         FoundationPlaybackResource(url: try await playbackURL(for: item))
     }
@@ -509,6 +638,9 @@ extension FoundationLibrary {
     var catalogPageCache: FoundationCatalogPageCache? { nil }
     var catalogScopeID: String { "all" }
     func catalogCacheKey(_ key: String) -> String { key }
+    func immediateArtworkResult(for item: FoundationItem, size: Int)
+        -> FoundationCurrentArtwork.Result?
+    { nil }
     func cachedArtworkResult(for item: FoundationItem, size: Int) async throws
         -> FoundationCurrentArtwork.Result?
     { nil }
@@ -532,9 +664,31 @@ extension FoundationLibrary {
         guard quality == .original else { throw FoundationDownloadError.unsupported }
         return .original(try await downloadSource(for: item))
     }
+    func nativeDownloadProposal(
+        for item: FoundationItem, quality: FoundationDownloadQuality, allowsCellular: Bool
+    )
+        async throws -> FoundationNativeDownloadProposal
+    { throw FoundationDownloadError.systemManagementUnavailable }
+
     var supportsPlaylistManagement: Bool { false }
     var supportsRepeatedPlaylistTracks: Bool { false }
+    var supportsPlaylistReordering: Bool { false }
     func playlistPermissions(id: String) async throws -> FoundationPlaylistPermissions {
+        throw FoundationLibraryError.unavailable
+    }
+    func playlistDetails(id: String) async throws -> FoundationPlaylistDetails {
+        let permissions = try await playlistPermissions(id: id)
+        return .init(
+            item: .init(
+                id: id, title: permissions.name, subtitle: "", kind: .playlist, duration: nil),
+            overview: "", isPublic: nil, permissions: permissions)
+    }
+    func updatePlaylistDetails(id: String, name: String?, overview: String?, isPublic: Bool?)
+        async throws -> FoundationPlaylistDetails
+    { throw FoundationLibraryError.unavailable }
+    func setPlaylistCover(id: String, data: Data, contentType: String) async throws
+        -> FoundationItem
+    {
         throw FoundationLibraryError.unavailable
     }
     func playlistEntries(id: String, startIndex: Int) async throws -> FoundationPlaylistPage {
@@ -551,6 +705,9 @@ extension FoundationLibrary {
         throw FoundationLibraryError.unavailable
     }
     func removeEntry(from playlistID: String, entryID: String) async throws {
+        throw FoundationLibraryError.unavailable
+    }
+    func moveEntry(in playlistID: String, entryID: String, to index: Int) async throws {
         throw FoundationLibraryError.unavailable
     }
 
@@ -573,6 +730,9 @@ extension FoundationLibrary {
         throw FoundationLibraryError.unavailable
     }
     func cachedArtistDetails(for item: FoundationItem) async -> FoundationArtistDetails? { nil }
+    var supportsItemMetadata: Bool { false }
+    var metadataScopeID: String { catalogScopeID }
+    func itemMetadata(for item: FoundationItem) async throws -> FoundationItemMetadata? { nil }
     func overview(for item: FoundationItem) async throws -> String? { nil }
     func itemDetails(for item: FoundationItem) async throws -> FoundationItem? { nil }
     func tracks(artistID: String, startIndex: Int) async throws -> FoundationPage {
@@ -616,6 +776,26 @@ extension FoundationLibrary {
         throw FoundationLibraryError.unavailable
     }
 
+    func primaryGenreSongs(ids: [String]) async throws -> [FoundationItem] {
+        throw FoundationLibraryError.unavailable
+    }
+    func primaryGenreCollections(ids: [String], kind: FoundationItem.Kind) async throws
+        -> [FoundationItem]
+    {
+        throw FoundationLibraryError.unavailable
+    }
+    func primaryGenreCanonicalNames(ids: [String], kind: FoundationItem.Kind) async throws
+        -> [FoundationItemReference]
+    {
+        throw FoundationLibraryError.unavailable
+    }
+    var primaryGenreIndexScope: FoundationPrimaryGenreIndex.Scope? { nil }
+    func primaryGenreMetadataPage(startIndex: Int) async throws
+        -> FoundationPrimaryGenreMetadataPage
+    {
+        throw FoundationLibraryError.unavailable
+    }
+
     func genres(startIndex: Int) async throws -> FoundationPage {
         throw FoundationLibraryError.unavailable
     }
@@ -638,6 +818,14 @@ extension FoundationLibrary {
     func playlistsContainingMusic(context: FoundationMusicSearchContext, startIndex: Int)
         async throws -> FoundationPlaylistContentPage
     { throw FoundationLibraryError.unavailable }
+    func playlistsContainingMusic(
+        context: FoundationMusicSearchContext, cursor: FoundationPlaylistContentCursor
+    ) async throws -> FoundationPlaylistContentPage {
+        guard cursor.pending.isEmpty, let offset = cursor.candidateOffset else {
+            throw FoundationLibraryError.unavailable
+        }
+        return try await playlistsContainingMusic(context: context, startIndex: offset)
+    }
     func favorites(kind: FoundationItem.Kind, startIndex: Int) async throws -> FoundationPage {
         throw FoundationLibraryError.unavailable
     }
@@ -705,6 +893,7 @@ enum FoundationLibraryError: String, Error, LocalizedError, Sendable {
 struct FoundationJellyfinLibrary: FoundationLibrary {
     typealias Load = @Sendable (URLRequest) async throws -> (Data, URLResponse)
     let session: FoundationSession
+    let deviceName: FoundationClientDeviceName
     private let load: Load
     private let streamingQuality: @Sendable () async -> FoundationStreamingQuality
     private let hlsCleanup = FoundationHLSCleanup()
@@ -720,6 +909,24 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
     let catalogPageCache: FoundationCatalogPageCache?
     private(set) var musicLibraryID: String?
     private(set) var catalogAvailable = true
+
+    /// Account identity matches FoundationApp's existing persisted source scope.
+    /// Music-library selection is a separate catalog filter, never account identity.
+    var catalogAccountIdentity: String {
+        FoundationMusicLibraryStore.digest(
+            "jellyfin\0" + session.serverURL.absoluteString + "\0" + session.userID)
+    }
+
+    private func acceptsCatalogItem(_ item: FoundationItem) -> Bool {
+        let expected = catalogAccountIdentity
+        func accepts(_ source: FoundationCatalogSource?) -> Bool {
+            source == nil || (source?.kind == .jellyfin && source?.identity == expected)
+        }
+        return accepts(item.catalogSource)
+            && ([item.album, item.artist].compactMap { $0 } + item.genres).allSatisfy {
+                accepts($0.catalogSource)
+            }
+    }
 
     var catalogScopeID: String {
         (musicLibraryID.map { FoundationMusicLibraryStore.digest($0) } ?? "all")
@@ -760,19 +967,20 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
     }
 
     init(
-        session: FoundationSession, load: @escaping Load = nativeLoad,
+        session: FoundationSession, deviceName: FoundationClientDeviceName = .apple,
+        load: @escaping Load = nativeLoad,
         artworkCache: FoundationArtworkCache? = nil,
         catalogPageCache: FoundationCatalogPageCache? = nil,
         networkAdmission: FoundationNetworkAdmission = FoundationNetworkAdmission()
     ) {
         self.init(
-            session: session, streamingQuality: { .original }, load: load,
+            session: session, deviceName: deviceName, streamingQuality: { .original }, load: load,
             artworkCache: artworkCache, catalogPageCache: catalogPageCache,
             networkAdmission: networkAdmission)
     }
 
     init(
-        session: FoundationSession,
+        session: FoundationSession, deviceName: FoundationClientDeviceName = .apple,
         streamingQuality: @escaping @Sendable () async -> FoundationStreamingQuality,
         load: @escaping Load = nativeLoad,
         artworkCache: FoundationArtworkCache? = nil,
@@ -780,6 +988,7 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
         networkAdmission: FoundationNetworkAdmission = FoundationNetworkAdmission()
     ) {
         self.session = session
+        self.deviceName = deviceName
         self.load = load
         self.streamingQuality = streamingQuality
         self.artworkCache = artworkCache
@@ -788,7 +997,446 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
         self.musicLibraryID = nil
     }
 
+    var listeningActivityScope: String {
+        FoundationMusicLibraryStore.digest(catalogAccountIdentity + "\0" + session.deviceID)
+    }
+
+    func remoteListeningActivity() async throws -> [FoundationRemoteListeningActivity] {
+        try await FoundationRequestIntent.$isPlayback.withValue(false) {
+            try await FoundationRemoteListeningDeadline.run {
+                let data = try await responseData(
+                    Paths.getSessions(parameters: .init(activeWithinSeconds: 90)),
+                    requestTimeout: 8)
+                try Task.checkCancellation()
+                return try FoundationRemoteListeningActivity.decode(
+                    data, userID: session.userID, ownDeviceID: session.deviceID, now: Date(),
+                    catalogSource: try FoundationCatalogSource.jellyfin(
+                        scope: catalogAccountIdentity))
+            }
+        }
+    }
+
+    /// A foreground Home subscription only. It uses the existing account identity
+    /// and redirect policy, without advertising capabilities or accepting controls.
+    func observeRemoteListeningActivity(
+        receive: @escaping @Sendable ([FoundationRemoteListeningActivity]) async -> Void
+    ) async throws {
+        try Task.checkCancellation()
+        let request = try Self.remoteListeningSocketRequest(
+            session: session, deviceName: deviceName)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.waitsForConnectivity = false
+        configuration.timeoutIntervalForRequest = 60
+        configuration.httpCookieStorage = nil
+        configuration.urlCredentialStorage = nil
+        let transport = URLSession(
+            configuration: configuration, delegate: RejectRedirects(), delegateQueue: nil)
+        let socket = transport.webSocketTask(with: request)
+        socket.maximumMessageSize = 1_048_576
+        defer {
+            socket.cancel(with: .goingAway, reason: nil)
+            transport.invalidateAndCancel()
+        }
+        let source = try FoundationCatalogSource.jellyfin(scope: catalogAccountIdentity)
+        let accountSession = session
+        let encoder = JSONEncoder()
+        let start = try encoder.encode(
+            InboundWebSocketMessage.sessionsStartMessage(
+                .init(data: "0,15000", messageType: .sessionsStart)))
+        let keepAlive = try encoder.encode(
+            InboundWebSocketMessage.inboundKeepAliveMessage(.init(messageType: .keepAlive)))
+        do {
+            try await withTaskCancellationHandler {
+                socket.resume()
+                try Task.checkCancellation()
+                try await socket.send(.data(start))
+                try await withThrowingTaskGroup(of: Void.self) { group in
+                    defer {
+                        socket.cancel(with: .goingAway, reason: nil)
+                        group.cancelAll()
+                    }
+                    group.addTask {
+                        while !Task.isCancelled {
+                            let frame = try await socket.receive()
+                            try Task.checkCancellation()
+                            let data: Data
+                            switch frame {
+                            case .data(let value): data = value
+                            case .string(let value):
+                                guard value.utf8.count <= 1_048_576 else {
+                                    throw FoundationLibraryError.invalidResponse
+                                }
+                                data = Data(value.utf8)
+                            @unknown default: throw FoundationLibraryError.invalidResponse
+                            }
+                            let update = try Self.remoteListeningSocketUpdate(
+                                data, session: accountSession, catalogSource: source, now: Date())
+                            switch update {
+                            case .sessions(let activities): await receive(activities)
+                            case .keepAlive: try await socket.send(.data(keepAlive))
+                            case .ignored: break
+                            }
+                        }
+                    }
+                    group.addTask {
+                        while !Task.isCancelled {
+                            try await Task.sleep(for: .seconds(20))
+                            try Task.checkCancellation()
+                            try await socket.send(.data(keepAlive))
+                        }
+                    }
+                    try await group.next()
+                }
+            } onCancel: {
+                // URLSessionWebSocketTask.receive does not honor Swift cancellation alone.
+                socket.cancel(with: .goingAway, reason: nil)
+                transport.invalidateAndCancel()
+            }
+        } catch {
+            if Task.isCancelled { throw CancellationError() }
+            if let response = socket.response as? HTTPURLResponse,
+                response.statusCode == 401 || response.statusCode == 403
+            {
+                throw FoundationLibraryError.authentication
+            }
+            throw error
+        }
+    }
+
+    static func remoteListeningSocketRequest(
+        session: FoundationSession, deviceName: FoundationClientDeviceName
+    ) throws -> URLRequest {
+        let safe = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+        guard !session.accessToken.isEmpty, !session.deviceID.isEmpty,
+            session.accessToken.unicodeScalars.allSatisfy({ safe.contains($0) }),
+            session.deviceID.unicodeScalars.allSatisfy({ safe.contains($0) }),
+            var components = URLComponents(
+                url: session.serverURL.appendingPathComponent("socket"),
+                resolvingAgainstBaseURL: false),
+            components.scheme == "https" || components.scheme == "http",
+            components.user == nil, components.password == nil
+        else { throw FoundationLibraryError.authentication }
+        components.scheme = components.scheme == "https" ? "wss" : "ws"
+        components.queryItems = [URLQueryItem(name: "deviceId", value: session.deviceID)]
+        components.fragment = nil
+        guard let url = components.url else { throw FoundationLibraryError.invalidResponse }
+        var request = URLRequest(url: url, timeoutInterval: 60)
+        request.setValue(
+            "MediaBrowser Client=\"Velacanto Native\", Device=\"\(deviceName.rawValue)\", DeviceId=\"\(session.deviceID)\", Version=\"1\", Token=\"\(session.accessToken)\"",
+            forHTTPHeaderField: "Authorization")
+        return request
+    }
+
+    enum RemoteListeningSocketUpdate: Equatable {
+        case sessions([FoundationRemoteListeningActivity])
+        case keepAlive, ignored
+    }
+
+    static func remoteListeningSocketUpdate(
+        _ data: Data, session: FoundationSession, catalogSource: FoundationCatalogSource,
+        now: Date
+    ) throws -> RemoteListeningSocketUpdate {
+        guard data.count <= 1_048_576,
+            let envelope = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let type = envelope["MessageType"] as? String
+        else { throw FoundationLibraryError.invalidResponse }
+        if type == "ForceKeepAlive" { return .keepAlive }
+        guard type == "Sessions" else { return .ignored }
+        guard let rows = envelope["Data"] as? [[String: Any]], rows.count <= 512 else {
+            throw FoundationLibraryError.invalidResponse
+        }
+        let raw = try JSONSerialization.data(withJSONObject: rows)
+        return .sessions(
+            try FoundationRemoteListeningActivity.decode(
+                raw, userID: session.userID, ownDeviceID: session.deviceID, now: now,
+                catalogSource: catalogSource))
+    }
+
+    var supportsOfflinePlaylistPreparation: Bool { true }
+    /// Explicit card action only; Home discovery never prepares media or sends controls.
+    func prepareRemoteContinuation(_ activity: FoundationRemoteListeningActivity) async throws
+        -> FoundationRemoteContinuationOffer
+    {
+        try await prepareRemoteContinuation(activity, selection: .fullQueue)
+    }
+
+    func prepareRemotePlayback(_ activity: FoundationRemoteListeningActivity) async throws
+        -> FoundationRemoteContinuationOffer
+    {
+        try await prepareRemoteContinuation(activity, selection: .automatic)
+    }
+
+    func prepareRemoteCurrentSong(_ activity: FoundationRemoteListeningActivity) async throws
+        -> FoundationRemoteContinuationOffer
+    {
+        try await prepareRemoteContinuation(activity, selection: .currentSong)
+    }
+
+    private func prepareRemoteContinuation(
+        _ activity: FoundationRemoteListeningActivity,
+        selection: FoundationRemoteContinuationSelection
+    ) async throws -> FoundationRemoteContinuationOffer {
+        guard activity.receiverScope == listeningActivityScope,
+            !activity.usesNativeHandoff, !activity.sessionID.isEmpty,
+            FoundationRemoteListeningActivity.remoteDeviceID(activity.remoteDeviceID) != nil
+        else {
+            #if DEBUG
+                FoundationRemotePreparationDiagnostic.receiverScopeRejected.record()
+            #endif
+            throw FoundationHandoffError.unavailable
+        }
+        return try await FoundationRequestIntent.$isPlayback.withValue(false) {
+            try await FoundationRemoteListeningDeadline.run {
+                #if DEBUG
+                    var diagnosticStage = FoundationRemotePreparationDiagnostic.readingSessions
+                    var diagnosticQueueCount = -1
+                    var diagnosticMetadataCount = -1
+                    defer {
+                        diagnosticStage.record(
+                            queueCount: diagnosticQueueCount,
+                            metadataCount: diagnosticMetadataCount,
+                            completed: diagnosticStage == .providerPrepared)
+                    }
+                #endif
+                let data = try await remoteContinuationData()
+                #if DEBUG
+                    diagnosticStage = .decodingOffer
+                #endif
+                let source = try FoundationCatalogSource.jellyfin(scope: catalogAccountIdentity)
+                var offer = try FoundationRemoteContinuationOffer.decode(
+                    data, sessionID: activity.sessionID,
+                    userID: session.userID, ownDeviceID: session.deviceID,
+                    scope: listeningActivityScope,
+                    catalogSource: source, now: Date(), selection: selection)
+                #if DEBUG
+                    diagnosticStage = .matchingActivity
+                    diagnosticQueueCount = offer.queue.count
+                    diagnosticMetadataCount = offer.items.count
+                #endif
+                guard offer.activityID == activity.id, offer.client == activity.client,
+                    offer.deviceID == activity.remoteDeviceID,
+                    offer.queue.first(where: { $0.sourceID == offer.sourceOccurrence })?.itemID
+                        == activity.item.id
+                else {
+                    throw FoundationHandoffError.changed
+                }
+                // FullItems is display metadata, not a user-authorization bypass.
+                #if DEBUG
+                    diagnosticStage = .authorizingQueue
+                #endif
+                let verified = try await authorizedRemoteQueueItems(
+                    offer,
+                    remainingBytes: FoundationHandoffPayload.maximumBytes - data.count)
+                #if DEBUG
+                    diagnosticStage = .resolvingMetadata
+                    diagnosticMetadataCount = verified.items.count
+                #endif
+                offer = try offer.resolving(verified.items, authoritative: true)
+                guard offer.missingItemIDs.isEmpty else { throw FoundationHandoffError.unavailable }
+                #if DEBUG
+                    diagnosticStage = .providerPrepared
+                #endif
+                return offer
+            }
+        }
+    }
+
+    /// Recheck every queued permission, then obtain the latest matching source
+    /// snapshot immediately before the controller changes its receiving queue.
+    func authorizeRemoteContinuation(_ expected: FoundationRemoteContinuationOffer) async throws
+        -> FoundationRemoteContinuationOffer
+    {
+        guard expected.scope == listeningActivityScope else {
+            throw FoundationHandoffError.differentAccount
+        }
+        return try await FoundationRequestIntent.$isPlayback.withValue(false) {
+            try await FoundationRemoteListeningDeadline.run {
+                let verified = try await authorizedRemoteQueueItems(
+                    expected,
+                    remainingBytes: FoundationHandoffPayload.maximumBytes)
+                let data = try await remoteContinuationData()
+                guard data.count <= FoundationHandoffPayload.maximumBytes - verified.bytes else {
+                    throw FoundationHandoffError.tooLarge
+                }
+                let fresh = try FoundationRemoteContinuationOffer.decode(
+                    data,
+                    sessionID: expected.sessionID, userID: session.userID,
+                    ownDeviceID: session.deviceID,
+                    scope: listeningActivityScope,
+                    catalogSource: try .jellyfin(scope: catalogAccountIdentity), now: Date(),
+                    selection: expected.selection)
+                return try fresh.matching(expected).resolving(verified.items, authoritative: true)
+            }
+        }
+    }
+
+    /// Finite sequential ID batches, never one request per track or background loading.
+    /// This is a post-buffer cumulative decode budget, not a transport allocation cap.
+    private func authorizedRemoteQueueItems(
+        _ offer: FoundationRemoteContinuationOffer,
+        remainingBytes: Int
+    ) async throws -> (items: [FoundationItem], bytes: Int) {
+        let ids = Array(Set(offer.queue.map(\.itemID))).sorted()
+        guard !ids.isEmpty, ids.count <= FoundationHandoffPayload.maximumEntries,
+            ids.allSatisfy(Self.validID), remainingBytes >= 0
+        else { throw FoundationHandoffError.tooLarge }
+        var resultItems: [FoundationItem] = []
+        var consumedBytes = 0
+        let source = try FoundationCatalogSource.jellyfin(scope: catalogAccountIdentity)
+        for start in stride(from: 0, to: ids.count, by: 200) {
+            try Task.checkCancellation()
+            let requested = Array(ids[start..<min(start + 200, ids.count)])
+            var parameters = Paths.GetItemsParameters()
+            parameters.userID = session.userID
+            // Account-owned audio, never the unrelated browsing ParentId filter.
+            parameters.ids = requested
+            parameters.includeItemTypes = [.audio]
+            parameters.isRecursive = true
+            parameters.startIndex = 0
+            parameters.limit = requested.count
+            parameters.fields = []
+            parameters.enableUserData = false
+            parameters.enableImages = true
+            parameters.imageTypeLimit = 1
+            parameters.enableImageTypes = [.primary]
+            parameters.enableTotalRecordCount = true
+            let data = try await responseData(
+                Paths.getItems(parameters: parameters), requestTimeout: 8)
+            try Task.checkCancellation()
+            guard data.count <= remainingBytes - consumedBytes else {
+                throw FoundationHandoffError.tooLarge
+            }
+            consumedBytes += data.count
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .custom { decoder in
+                let text = try decoder.singleValueContainer().decode(String.self)
+                guard text.utf8.count <= 64 else { throw FoundationLibraryError.invalidResponse }
+                let formatter = ISO8601DateFormatter()
+                formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+                if let value = formatter.date(from: text) { return value }
+                formatter.formatOptions = [.withInternetDateTime]
+                guard let value = formatter.date(from: text) else {
+                    throw FoundationLibraryError.invalidResponse
+                }
+                return value
+            }
+            let result = try decoder.decode(BaseItemDtoQueryResult.self, from: data)
+            guard let rows = result.items, result.startIndex == 0,
+                result.totalRecordCount == requested.count, rows.count == requested.count
+            else {
+                #if DEBUG
+                    FoundationRemotePreparationDiagnostic.recordAuthorizationShape(
+                        requestedCount: requested.count, startIndex: result.startIndex,
+                        totalCount: result.totalRecordCount, rowsCount: result.items?.count)
+                #endif
+                throw FoundationHandoffError.unavailable
+            }
+            let canonicalRows = try rows.map { row in
+                guard let id = FoundationRemoteListeningActivity.catalogID(row.id) else {
+                    #if DEBUG
+                        FoundationRemotePreparationDiagnostic.invalidAuthorizationItemID.record(
+                            queueCount: requested.count, metadataCount: rows.count)
+                    #endif
+                    throw FoundationHandoffError.unavailable
+                }
+                var row = row
+                row.id = id
+                return row
+            }
+            let mapped = try mappedItems(canonicalRows, kinds: [.track]).map { item in
+                var item = item
+                item.catalogSource = source
+                return item
+            }
+            guard Set(mapped.map(\.id)) == Set(requested),
+                Set(mapped.map(\.id)).count == mapped.count
+            else {
+                #if DEBUG
+                    let unique = Set(mapped.map(\.id))
+                    FoundationRemotePreparationDiagnostic.recordAuthorizationIDs(
+                        requestedCount: requested.count, mappedCount: mapped.count,
+                        uniqueCount: unique.count,
+                        matchedCount: unique.intersection(Set(requested)).count)
+                #endif
+                throw FoundationHandoffError.unavailable
+            }
+            resultItems += mapped
+        }
+        return (resultItems, consumedBytes)
+    }
+
+    func refreshRemoteContinuation(_ expected: FoundationRemoteContinuationOffer) async throws
+        -> FoundationRemoteContinuationOffer
+    {
+        guard expected.scope == listeningActivityScope else {
+            throw FoundationHandoffError.differentAccount
+        }
+        return try await FoundationRequestIntent.$isPlayback.withValue(false) {
+            try await FoundationRemoteListeningDeadline.run {
+                let fresh = try FoundationRemoteContinuationOffer.decode(
+                    try await remoteContinuationData(),
+                    sessionID: expected.sessionID, userID: session.userID,
+                    ownDeviceID: session.deviceID,
+                    scope: listeningActivityScope,
+                    catalogSource: try .jellyfin(scope: catalogAccountIdentity), now: Date(),
+                    selection: expected.selection)
+                return try fresh.matching(expected).resolving(
+                    expected.entries.map(\.item), authoritative: true)
+            }
+        }
+    }
+
+    func stopRemoteContinuation(_ expected: FoundationRemoteContinuationOffer) async throws {
+        guard expected.scope == listeningActivityScope, expected.supportsRemoteControl,
+            expected.selection == .fullQueue || expected.canPauseCurrentSong,
+            Self.validID(expected.sessionID),
+            FoundationRemoteListeningActivity.remoteDeviceID(expected.deviceID) != nil
+        else { throw FoundationHandoffError.unavailable }
+        try await FoundationRequestIntent.$isPlayback.withValue(false) {
+            try await FoundationRemoteListeningDeadline.run {
+                // Exactly one best-effort command. No toggle, retries or source credentials.
+                _ = try await responseData(
+                    Paths.sendPlaystateCommand(
+                        sessionID: expected.sessionID,
+                        command: expected.selection == .currentSong ? "Pause" : "Stop"),
+                    requestTimeout: 8)
+            }
+        }
+    }
+
+    func confirmRemoteContinuationStopped(_ expected: FoundationRemoteContinuationOffer)
+        async throws -> Bool
+    {
+        guard expected.scope == listeningActivityScope else {
+            throw FoundationHandoffError.differentAccount
+        }
+        return try await FoundationRequestIntent.$isPlayback.withValue(false) {
+            try await FoundationRemoteListeningDeadline.run {
+                let data = try await remoteContinuationData()
+                if expected.selection == .currentSong {
+                    return try FoundationRemoteContinuationOffer.paused(
+                        data, expected: expected, userID: session.userID,
+                        ownDeviceID: session.deviceID,
+                        catalogSource: try .jellyfin(scope: catalogAccountIdentity), now: Date())
+                }
+                return try FoundationRemoteContinuationOffer.stopped(
+                    data, expected: expected, userID: session.userID)
+            }
+        }
+    }
+
+    private func remoteContinuationData() async throws -> Data {
+        let data = try await responseData(
+            Paths.getSessions(parameters: .init(activeWithinSeconds: 90)), requestTimeout: 8)
+        try Task.checkCancellation()
+        guard data.count <= FoundationHandoffPayload.maximumBytes else {
+            throw FoundationHandoffError.tooLarge
+        }
+        return data
+    }
+
     var supportsPlaylistManagement: Bool { true }
+    var supportsPlaylistReordering: Bool { true }
 
     func playlistPermissions(id: String) async throws -> FoundationPlaylistPermissions {
         guard Self.validID(id) else { throw FoundationLibraryError.invalidResponse }
@@ -801,6 +1449,103 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
         return FoundationPlaylistPermissions(
             name: item.name ?? "Untitled", canEdit: permission.canEdit == true,
             canDelete: item.canDelete == true)
+    }
+
+    func playlistDetails(id: String) async throws -> FoundationPlaylistDetails {
+        guard Self.validID(id) else { throw FoundationLibraryError.invalidResponse }
+        let permission = try await send(
+            Paths.getPlaylistUser(playlistID: id, userID: session.userID))
+        let dto = try await send(
+            Paths.getItem(itemID: id, userID: session.userID),
+            maximumBytes: FoundationPlaylistMetadata.maximumItemBytes)
+        guard dto.id == id, dto.type == .playlist, permission.userID == session.userID,
+            var item = try mappedItems([dto], kinds: [.playlist]).first
+        else { throw FoundationLibraryError.invalidResponse }
+        item.catalogSource = try .jellyfin(scope: catalogAccountIdentity)
+        let permissions = FoundationPlaylistPermissions(
+            name: dto.name ?? "Untitled", canEdit: permission.canEdit == true,
+            canDelete: dto.canDelete == true)
+        let sharing = try await responseData(
+            Paths.getPlaylist(playlistID: id), notFoundIsEmpty: true)
+        let isPublic = try FoundationPlaylistMetadata.publicSetting(sharing)
+        let user = try await send(Paths.getCurrentUser)
+        guard user.id == session.userID else { throw FoundationLibraryError.invalidResponse }
+        try Task.checkCancellation()
+        let elevated = permissions.canEdit && user.policy?.isAdministrator == true
+        return .init(
+            item: item, overview: dto.overview ?? "", isPublic: isPublic, permissions: permissions,
+            canEditOverview: elevated && dto.lockData != nil, canEditCover: elevated)
+    }
+
+    func updatePlaylistDetails(id: String, name: String?, overview: String?, isPublic: Bool?)
+        async throws -> FoundationPlaylistDetails
+    {
+        let name = try name.map(FoundationPlaylistName.validated)
+        if let overview { try FoundationPlaylistMetadata.validateOverview(overview) }
+        let before = try await playlistDetails(id: id)
+        guard before.permissions.canEdit else { throw FoundationPlaylistError.readOnly }
+        if overview != nil && !before.canEditOverview {
+            throw FoundationPlaylistMetadataError.overviewReadOnly
+        }
+        if isPublic != nil && before.isPublic == nil {
+            throw FoundationPlaylistMetadataError.sharingUnavailable
+        }
+        if name == nil && overview == nil && isPublic == nil { return before }
+        var attemptedWrite = false
+        do {
+            if overview != nil {
+                // Refetch immediately before the full metadata POST. Nil inputs preserve
+                // freshly returned fields, including concurrent name/description edits.
+                let fresh = try await responseData(
+                    Paths.getItem(itemID: id, userID: session.userID))
+                let body = try FoundationPlaylistMetadata.updatedItem(
+                    fresh, id: id, name: name, overview: overview)
+                try Task.checkCancellation()
+                attemptedWrite = true
+                _ = try await responseData(
+                    Paths.updateItem(itemID: id, BaseItemDto()), rawBody: body,
+                    contentType: "application/json")
+            }
+            if (overview == nil && name != nil) || isPublic != nil {
+                try Task.checkCancellation()
+                attemptedWrite = true
+                _ = try await responseData(
+                    Paths.updatePlaylist(
+                        playlistID: id,
+                        UpdatePlaylistDto(isPublic: isPublic, name: overview == nil ? name : nil)))
+            }
+            let after = try await playlistDetails(id: id)
+            guard name == nil || after.item.title == name,
+                overview == nil || after.overview == overview,
+                isPublic == nil || after.isPublic == isPublic
+            else { throw FoundationPlaylistMetadataError.partialUpdate }
+            return after
+        } catch {
+            if attemptedWrite { throw FoundationPlaylistMetadataError.partialUpdate }
+            throw error
+        }
+    }
+
+    func setPlaylistCover(id: String, data: Data, contentType: String) async throws
+        -> FoundationItem
+    {
+        try FoundationPlaylistMetadata.validateCover(data, contentType: contentType)
+        let before = try await playlistDetails(id: id)
+        guard before.permissions.canEdit, before.canEditCover else {
+            throw FoundationPlaylistError.readOnly
+        }
+        try Task.checkCancellation()
+        do {
+            // Jellyfin ImageController decodes raw base64, not a JSON string or raw PNG.
+            _ = try await responseData(
+                Paths.setItemImage(itemID: id, imageType: "Primary"),
+                rawBody: data.base64EncodedData(), contentType: contentType)
+            let after = try await playlistDetails(id: id)
+            guard let tag = after.item.primaryImageTag, !tag.isEmpty,
+                tag != before.item.primaryImageTag
+            else { throw FoundationPlaylistMetadataError.partialCover }
+            return after.item
+        } catch { throw FoundationPlaylistMetadataError.partialCover }
     }
 
     func playlistEntries(id: String, startIndex: Int) async throws -> FoundationPlaylistPage {
@@ -851,7 +1596,13 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
     }
 
     func addTracks(to playlistID: String, tracks: [FoundationItem]) async throws {
-        guard Self.validID(playlistID), !tracks.isEmpty, tracks.count <= 100,
+        guard !tracks.isEmpty, tracks.count <= 100 else {
+            throw FoundationLibraryError.invalidResponse
+        }
+        guard tracks.allSatisfy(acceptsCatalogItem) else {
+            throw FoundationLibraryError.unavailable
+        }
+        guard Self.validID(playlistID),
             tracks.allSatisfy({ $0.kind == .track && Self.validID($0.id) })
         else {
             throw FoundationLibraryError.invalidResponse
@@ -872,15 +1623,27 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
             Paths.removeItemFromPlaylist(playlistID: playlistID, entryIDs: [entryID]))
     }
 
+    func moveEntry(in playlistID: String, entryID: String, to index: Int) async throws {
+        guard Self.validID(playlistID), index >= 0, index < 10_000,
+            !entryID.isEmpty, entryID.utf8.count <= 128,
+            entryID.unicodeScalars.allSatisfy({
+                CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_")).contains($0)
+            })
+        else { throw FoundationLibraryError.invalidResponse }
+        _ = try await responseData(
+            Paths.moveItem(playlistID: playlistID, itemID: entryID, newIndex: index))
+    }
+
     static func signIn(
         serverURL: URL, username: String, password: String,
+        deviceName: FoundationClientDeviceName = .apple,
         load: @escaping Load = nativeLoad
     ) async throws -> FoundationSession {
         let base = try validatedServerURL(serverURL)
         let deviceID = UUID().uuidString
         let unsigned = FoundationSession(
             serverURL: base, accessToken: "", userID: "", deviceID: deviceID)
-        let adapter = Self(session: unsigned, load: load)
+        let adapter = Self(session: unsigned, deviceName: deviceName, load: load)
         let result: AuthenticationResult = try await adapter.send(
             Paths.authenticateUserByName(AuthenticateUserByName(pw: password, username: username)))
         guard let token = result.accessToken, !token.isEmpty,
@@ -978,7 +1741,7 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
             let offset =
                 startIndex == 0
                 ? try await FoundationSongAlphabetSeek.lowerBound(
-                    letter: letter, read: songAlphabetProbe)
+                    letter: letter, read: { try await songAlphabetProbe($0) })
                 : startIndex
             let result = try await page(
                 kinds: [.track], parent: nil, startIndex: offset, limit: 50, sortBy: [.name])
@@ -1159,6 +1922,7 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
     }
 
     func similarItems(for item: FoundationItem) async throws -> FoundationPage {
+        guard acceptsCatalogItem(item) else { throw FoundationLibraryError.unavailable }
         guard Self.validID(item.id) else { throw FoundationLibraryError.invalidResponse }
         // Similar endpoints cannot honestly constrain results to a music folder.
         guard musicLibraryID == nil, catalogAvailable else {
@@ -1187,12 +1951,39 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
     }
 
     func cachedArtistDetails(for item: FoundationItem) async -> FoundationArtistDetails? {
+        guard acceptsCatalogItem(item) else { return nil }
         guard item.kind == .artist, Self.validID(item.id), !Task.isCancelled else { return nil }
         return await artistDetailMemo.cachedValue(
             key: item.id, revision: item.artistBrandingRevision)
     }
 
+    var supportsItemMetadata: Bool { true }
+
+    // Scope identity is internal only: no credential, provider ID or server address reaches the UI.
+    var metadataScopeID: String {
+        FoundationMusicLibraryStore.digest(session.serverURL.absoluteString + "|" + session.userID)
+            + "." + catalogScopeID
+    }
+
+    func itemMetadata(for item: FoundationItem) async throws -> FoundationItemMetadata? {
+        guard acceptsCatalogItem(item) else { throw FoundationLibraryError.unavailable }
+        guard item.kind == .track, Self.validID(item.id) else {
+            throw FoundationLibraryError.invalidResponse
+        }
+        guard catalogAvailable else { throw FoundationLibraryError.unavailable }
+        try Task.checkCancellation()
+        let detail: BaseItemDto = try await FoundationRequestIntent.$isPlayback.withValue(false) {
+            try await send(Paths.getItem(itemID: item.id, userID: session.userID))
+        }
+        try Task.checkCancellation()
+        guard detail.id == item.id, detail.type == .audio else {
+            throw FoundationLibraryError.invalidResponse
+        }
+        return FoundationItemMetadata.jellyfin(detail)
+    }
+
     func overview(for item: FoundationItem) async throws -> String? {
+        guard acceptsCatalogItem(item) else { throw FoundationLibraryError.unavailable }
         guard Self.validID(item.id), item.kind == .artist || item.kind == .album else {
             throw FoundationLibraryError.invalidResponse
         }
@@ -1204,6 +1995,7 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
     }
 
     func itemDetails(for item: FoundationItem) async throws -> FoundationItem? {
+        guard acceptsCatalogItem(item) else { throw FoundationLibraryError.unavailable }
         guard Self.validID(item.id), item.kind == .album || item.kind == .artist else {
             throw FoundationLibraryError.invalidResponse
         }
@@ -1214,10 +2006,33 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
         return try mappedItems([detail], kinds: [item.kind]).first
     }
 
+    /// Validate a continuation against the receiving account without expanding
+    /// collections, resolving audio or changing the artist-detail memo contract.
+    func handoffItem(for item: FoundationItem) async throws -> FoundationItem {
+        try Task.checkCancellation()
+        guard acceptsCatalogItem(item), catalogAvailable else {
+            throw FoundationLibraryError.unavailable
+        }
+        guard Self.validID(item.id),
+            [.track, .album, .artist, .playlist].contains(item.kind)
+        else { throw FoundationLibraryError.invalidResponse }
+        let detail: BaseItemDto = try await send(
+            Paths.getItem(itemID: item.id, userID: session.userID))
+        try Task.checkCancellation()
+        guard detail.id == item.id,
+            var resolved = try mappedItems([detail], kinds: [item.kind]).first
+        else { throw FoundationLibraryError.invalidResponse }
+        resolved.catalogSource = try .jellyfin(scope: catalogAccountIdentity)
+        return resolved
+    }
+
     private func artistDetails(for item: FoundationItem) async throws
         -> FoundationArtistDetailMemo.Value
     {
-        try await artistDetailMemo.value(key: item.id, revision: item.artistBrandingRevision) {
+        guard acceptsCatalogItem(item) else { throw FoundationLibraryError.unavailable }
+        return try await artistDetailMemo.value(
+            key: item.id, revision: item.artistBrandingRevision
+        ) {
             let detail: BaseItemDto = try await send(
                 Paths.getItem(itemID: item.id, userID: session.userID))
             guard detail.id == item.id,
@@ -1230,6 +2045,7 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
     }
 
     func invalidateItemDetails(for item: FoundationItem) async {
+        guard acceptsCatalogItem(item) else { return }
         if item.kind == .artist { await artistDetailMemo.invalidate(key: item.id) }
     }
 
@@ -1336,17 +2152,49 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
         guard catalogAvailable else { throw FoundationLibraryError.unavailable }
         // Artist and genre identities may span libraries. A selected library uses only its
         // resolved track/album identities; omitted relationships remain explicitly incomplete.
-        let result = try await FoundationPlaylistContentSearch.resolve(
-            context: effectiveContext, startIndex: startIndex,
+        return try await contentSearch(
+            context: effectiveContext, cursor: .init(candidateOffset: startIndex, pending: []),
+            omitted: omitsSharedIdentities)
+    }
+
+    func playlistsContainingMusic(
+        context: FoundationMusicSearchContext, cursor: FoundationPlaylistContentCursor
+    ) async throws -> FoundationPlaylistContentPage {
+        try Task.checkCancellation()
+        try context.validate()
+        guard context.identities.allSatisfy(Self.validID),
+            cursor.pending.count <= FoundationPlaylistContentSearch.candidateLimit,
+            cursor.candidateOffset.map({ $0 >= 0 }) ?? true,
+            cursor.pending.allSatisfy({
+                Self.validID($0.playlist.id) && $0.playlist.kind == .playlist && $0.trackOffset >= 0
+            })
+        else { throw FoundationLibraryError.invalidResponse }
+        guard catalogAvailable, cursor.pending.allSatisfy({ acceptsCatalogItem($0.playlist) })
+        else { throw FoundationLibraryError.unavailable }
+        let omitted =
+            musicLibraryID != nil && (!context.artistIDs.isEmpty || !context.genreIDs.isEmpty)
+        let effective =
+            musicLibraryID == nil
+            ? context
+            : FoundationMusicSearchContext(trackIDs: context.trackIDs, albumIDs: context.albumIDs)
+        return try await contentSearch(context: effective, cursor: cursor, omitted: omitted)
+    }
+
+    private func contentSearch(
+        context: FoundationMusicSearchContext, cursor: FoundationPlaylistContentCursor,
+        omitted: Bool
+    ) async throws -> FoundationPlaylistContentPage {
+        let result = try await FoundationPlaylistContentSearch.continueSearch(
+            context: context, cursor: cursor,
             playlists: { offset, limit in
                 try await page(kinds: [.playlist], parent: nil, startIndex: offset, limit: limit)
             },
-            tracks: { id in try await playlistTracks(playlistID: id, startIndex: 0) })
+            tracks: { id, offset in try await playlistTracks(playlistID: id, startIndex: offset) })
         try Task.checkCancellation()
         return .init(
             items: result.items, nextStartIndex: result.nextStartIndex,
-            hasIncompleteCoverage: result.hasIncompleteCoverage || omitsSharedIdentities,
-            partialFailureCount: result.partialFailureCount)
+            hasIncompleteCoverage: result.hasIncompleteCoverage || omitted,
+            partialFailureCount: result.partialFailureCount, continuation: result.continuation)
     }
 
     func playlistTracks(playlistID: String, startIndex: Int = 0) async throws -> FoundationPage {
@@ -1365,16 +2213,17 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
     }
 
     func homeGenres() async throws -> FoundationPage {
-        let page = try await rankedGenres(albumOnly: true)
+        let page = try await rankedAlbumGenres()
         return FoundationPage(items: Array(page.items.prefix(5)), nextStartIndex: nil)
     }
 
     func searchGenres() async throws -> FoundationPage {
-        try await rankedGenres(albumOnly: false)
+        // Search and Library browse the same bounded catalog; presentation owns layout.
+        try await genres(startIndex: 0)
     }
 
     /// Rank one complete, bounded summary response without scanning genre contents.
-    private func rankedGenres(albumOnly: Bool) async throws -> FoundationPage {
+    private func rankedAlbumGenres() async throws -> FoundationPage {
         let limit = 1000
         guard catalogAvailable else { throw FoundationLibraryError.unavailable }
         var parameters = Paths.GetGenresParameters()
@@ -1382,11 +2231,10 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
         parameters.parentID = musicLibraryID
         parameters.startIndex = 0
         parameters.limit = limit
-        parameters.includeItemTypes =
-            albumOnly ? [.musicAlbum] : [.musicAlbum, .audio, .musicArtist]
+        parameters.includeItemTypes = [.musicAlbum]
         parameters.fields = [.itemCounts]
         parameters.enableTotalRecordCount = true
-        parameters.enableImages = !albumOnly
+        parameters.enableImages = false
         parameters.enableImageTypes = [.primary]
         parameters.imageTypeLimit = 1
         let endpoint = Request<BaseItemDtoQueryResult>(
@@ -1398,9 +2246,7 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
         let page = try mappedPage(result, kinds: [.genre], startIndex: 0, limit: limit)
         let ranked = try zip(page.items, entries).map {
             item, entry -> (item: FoundationItem, count: Int?) in
-            let counts =
-                albumOnly
-                ? [entry.albumCount] : [entry.albumCount, entry.songCount, entry.artistCount]
+            let counts = [entry.albumCount]
             guard counts.allSatisfy({ $0 != nil }) else { return (item, nil) }
             let count = try counts.reduce(0) { total, value in
                 guard let value, value >= 0 else { throw FoundationLibraryError.unavailable }
@@ -1409,7 +2255,7 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
                 return sum
             }
             return (item: item, count: count)
-        }.filter { !albumOnly || ($0.count ?? 0) > 0 }.sorted {
+        }.filter { ($0.count ?? 0) > 0 }.sorted {
             if let left = $0.count, let right = $1.count {
                 if left != right { return left > right }
             } else if ($0.count != nil) != ($1.count != nil) {
@@ -1451,6 +2297,200 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
         try await genrePage(startIndex: startIndex, limit: 50)
     }
 
+    var primaryGenreIndexScope: FoundationPrimaryGenreIndex.Scope? {
+        guard catalogAvailable,
+            let source = try? FoundationCatalogSource.jellyfin(
+                scope: catalogAccountIdentity)
+        else { return nil }
+        return .init(source: source, libraryID: musicLibraryID)
+    }
+
+    /// Visible primary-genre pages resolve only their canonical per-song membership.
+    func primaryGenreSongs(ids: [String]) async throws -> [FoundationItem] {
+        guard catalogAvailable else { throw FoundationLibraryError.unavailable }
+        guard (1...50).contains(ids.count), ids.allSatisfy(Self.validID),
+            Set(ids).count == ids.count
+        else {
+            throw FoundationLibraryError.invalidResponse
+        }
+        var parameters = Paths.GetItemsParameters()
+        parameters.userID = session.userID
+        parameters.parentID = musicLibraryID
+        parameters.isRecursive = true
+        parameters.includeItemTypes = [.audio]
+        parameters.ids = ids
+        parameters.fields = [.genres]
+        parameters.startIndex = 0
+        parameters.limit = ids.count
+        parameters.enableImages = true
+        parameters.imageTypeLimit = 1
+        parameters.enableImageTypes = [.primary]
+        parameters.enableUserData = true
+        parameters.enableTotalRecordCount = true
+        let result: BaseItemDtoQueryResult = try await send(
+            Paths.getItems(parameters: parameters), maximumBytes: 4 * 1_024 * 1_024)
+        try Task.checkCancellation()
+        guard let entries = result.items, result.startIndex == 0,
+            result.totalRecordCount == ids.count, entries.count == ids.count
+        else {
+            throw FoundationLibraryError.unavailable
+        }
+        let mapped = try mappedItems(entries, kinds: [.track])
+        guard Set(mapped.map(\.id)) == Set(ids), Set(mapped.map(\.id)).count == mapped.count else {
+            throw FoundationLibraryError.unavailable
+        }
+        let byID = Dictionary(uniqueKeysWithValues: mapped.map { ($0.id, $0) })
+        return ids.compactMap { byID[$0] }
+    }
+
+    /// One visible page resolves only IDs proven by the canonical song census.
+    func primaryGenreCollections(ids: [String], kind: FoundationItem.Kind) async throws
+        -> [FoundationItem]
+    {
+        let entries = try await primaryGenreCollectionEntries(
+            ids: ids, kind: kind, namesOnly: false)
+        let mapped = try mappedItems(entries, kinds: [kind])
+        guard Set(mapped.map(\.id)) == Set(ids), Set(mapped.map(\.id)).count == mapped.count else {
+            throw FoundationLibraryError.unavailable
+        }
+        let byID = Dictionary(uniqueKeysWithValues: mapped.map { ($0.id, $0) })
+        return ids.compactMap { byID[$0] }
+    }
+
+    /// Only conflicting relationships from the same census need authoritative container Names.
+    func primaryGenreCanonicalNames(ids: [String], kind: FoundationItem.Kind) async throws
+        -> [FoundationItemReference]
+    {
+        let entries = try await primaryGenreCollectionEntries(ids: ids, kind: kind, namesOnly: true)
+        let source = try FoundationCatalogSource.jellyfin(scope: catalogAccountIdentity)
+        let names = try entries.map { entry -> FoundationItemReference in
+            guard entry.type == Self.itemType(kind), let id = entry.id, Self.validID(id),
+                let name = entry.name, !name.isEmpty, name.utf8.count <= 512,
+                !name.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains)
+            else { throw FoundationLibraryError.invalidResponse }
+            return .init(id: id, title: name, catalogSource: source)
+        }
+        guard Set(names.map(\.id)) == Set(ids), Set(names.map(\.id)).count == names.count else {
+            throw FoundationLibraryError.invalidResponse
+        }
+        return names
+    }
+
+    /// Album ParentId and user ownership remain scoped. Artists are shared containers whose
+    /// selected-library relationship is already proven by the complete song census.
+    private func primaryGenreCollectionEntries(
+        ids: [String], kind: FoundationItem.Kind, namesOnly: Bool
+    ) async throws -> [BaseItemDto] {
+        guard catalogAvailable else { throw FoundationLibraryError.unavailable }
+        guard [.album, .artist].contains(kind), (1...50).contains(ids.count),
+            ids.allSatisfy(Self.validID), Set(ids).count == ids.count
+        else { throw FoundationLibraryError.invalidResponse }
+        var parameters = Paths.GetItemsParameters()
+        parameters.userID = session.userID
+        parameters.parentID = kind == .artist ? nil : musicLibraryID
+        parameters.isRecursive = true
+        parameters.includeItemTypes = [Self.itemType(kind)]
+        parameters.ids = ids
+        parameters.startIndex = 0
+        parameters.limit = ids.count
+        parameters.enableImages = !namesOnly
+        parameters.imageTypeLimit = 1
+        parameters.enableImageTypes = [.primary]
+        parameters.enableUserData = !namesOnly
+        parameters.enableTotalRecordCount = true
+        let result: BaseItemDtoQueryResult = try await FoundationRequestIntent.$isPlayback
+            .withValue(false) {
+                try await send(
+                    Paths.getItems(parameters: parameters), maximumBytes: 4 * 1_024 * 1_024)
+            }
+        try Task.checkCancellation()
+        guard let entries = result.items, result.startIndex == 0,
+            result.totalRecordCount == ids.count, entries.count == ids.count
+        else { throw FoundationLibraryError.unavailable }
+        return entries
+    }
+
+    /// The app-owned complete metadata census; ordinary browsing never calls this operation.
+    func primaryGenreMetadataPage(startIndex: Int) async throws
+        -> FoundationPrimaryGenreMetadataPage
+    {
+        guard (0...50_000).contains(startIndex) else {
+            throw FoundationLibraryError.invalidResponse
+        }
+        guard catalogAvailable else { throw FoundationLibraryError.unavailable }
+        var parameters = Paths.GetItemsParameters()
+        parameters.userID = session.userID
+        parameters.parentID = musicLibraryID
+        parameters.isRecursive = true
+        parameters.includeItemTypes = [.audio]
+        parameters.fields = [.genres, .dateCreated]
+        parameters.startIndex = startIndex
+        parameters.limit = 200
+        parameters.sortBy = [.sortName, .name]
+        parameters.sortOrder = [.ascending]
+        parameters.enableImages = false
+        parameters.enableUserData = false
+        parameters.enableTotalRecordCount = true
+        let result: BaseItemDtoQueryResult = try await FoundationRequestIntent.$isPlayback
+            .withValue(false) {
+                try await send(Paths.getItems(parameters: parameters), maximumBytes: 1_024 * 1_024)
+            }
+        try Task.checkCancellation()
+        guard let entries = result.items, entries.count <= 200,
+            result.startIndex == startIndex, let total = result.totalRecordCount, total >= 0
+        else { throw FoundationLibraryError.invalidResponse }
+        let songs = try entries.map { entry -> FoundationPrimaryGenreMetadataPage.Song in
+            guard entry.type == .audio, let id = entry.id, Self.validID(id) else {
+                throw FoundationLibraryError.invalidResponse
+            }
+            guard let raw = entry.genres, let references = entry.genreItems else {
+                #if DEBUG
+                    FoundationPrimaryGenreCensusDiagnostic.current?.note(.rawGenreFieldsMissing)
+                #endif
+                throw FoundationPrimaryGenreIndex.Failure.unknownMetadata
+            }
+            guard raw.count <= 128, references.count <= 128 else {
+                throw FoundationPrimaryGenreIndex.Failure.resourceLimit
+            }
+            let genres = try references.map { reference -> FoundationItemReference in
+                guard let id = reference.id, Self.validID(id), let title = reference.name,
+                    !title.isEmpty, title.utf8.count <= 512
+                else {
+                    #if DEBUG
+                        FoundationPrimaryGenreCensusDiagnostic.current?.note(
+                            .rawGenreDescriptorInvalid)
+                    #endif
+                    throw FoundationPrimaryGenreIndex.Failure.unknownMetadata
+                }
+                return .init(id: id, title: title)
+            }
+            guard Set(raw.filter { !$0.isEmpty }) == Set(genres.map(\.title)) else {
+                #if DEBUG
+                    FoundationPrimaryGenreCensusDiagnostic.current?.note(.rawGenreReferenceMismatch)
+                #endif
+                throw FoundationPrimaryGenreIndex.Failure.unknownMetadata
+            }
+            let item = try mappedItems([entry], kinds: [.track])[0]
+            return .init(
+                id: id, genres: genres,
+                content: .init(
+                    title: item.title, album: item.album,
+                    artist: item.artist,
+                    duration: item.duration.flatMap { $0.isFinite && $0 >= 0 ? $0 : nil },
+                    year: entry.productionYear.flatMap { (1...9999).contains($0) ? $0 : nil },
+                    dateAdded: entry.dateCreated.flatMap {
+                        $0.timeIntervalSinceReferenceDate.isFinite ? $0 : nil
+                    }))
+        }
+        let (end, overflow) = startIndex.addingReportingOverflow(entries.count)
+        guard !overflow, end <= total, !entries.isEmpty || end == total else {
+            throw FoundationLibraryError.invalidResponse
+        }
+        return .init(
+            startIndex: startIndex, total: total, songs: songs,
+            nextStartIndex: end < total ? end : nil)
+    }
+
     private func genrePage(
         startIndex: Int, limit: Int, query: String? = nil,
         sortNameBoundary: String? = nil
@@ -1488,6 +2528,7 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
     }
 
     func setFavorite(for item: FoundationItem, isFavorite: Bool) async throws {
+        guard acceptsCatalogItem(item) else { throw FoundationLibraryError.unavailable }
         guard item.kind != .genre else { throw FoundationLibraryError.unavailable }
         guard Self.validID(item.id), Self.validID(session.userID) else {
             throw FoundationLibraryError.invalidResponse
@@ -1503,6 +2544,7 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
 
     /// Only the lyrics endpoint treats a missing resource as optional metadata.
     func lyrics(for item: FoundationItem) async throws -> FoundationLyrics? {
+        guard acceptsCatalogItem(item) else { throw FoundationLibraryError.unavailable }
         guard item.kind == .track, Self.validID(item.id) else {
             throw FoundationLibraryError.invalidResponse
         }
@@ -1536,6 +2578,7 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
     }
 
     func downloadSource(for item: FoundationItem) async throws -> FoundationDownloadSource {
+        guard acceptsCatalogItem(item) else { throw FoundationLibraryError.unavailable }
         guard item.kind == .track, Self.validID(item.id) else {
             throw FoundationDownloadError.unsupported
         }
@@ -1562,7 +2605,7 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
         request.httpMethod = "GET"
         request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
         request.setValue(
-            "MediaBrowser Client=\"Velacanto Native\", Device=\"Apple\", DeviceId=\"\(session.deviceID)\", Version=\"1\", Token=\"\(session.accessToken)\"",
+            "MediaBrowser Client=\"Velacanto Native\", Device=\"\(deviceName.rawValue)\", DeviceId=\"\(session.deviceID)\", Version=\"1\", Token=\"\(session.accessToken)\"",
             forHTTPHeaderField: "Authorization")
         return FoundationDownloadSource(
             request: request, fileExtension: container == "mp4" ? "m4a" : container,
@@ -1572,14 +2615,60 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
     func downloadPreparation(for item: FoundationItem, quality: FoundationDownloadQuality)
         async throws -> FoundationDownloadPreparation
     {
+        guard acceptsCatalogItem(item) else { throw FoundationLibraryError.unavailable }
         if quality == .original { return .original(try await downloadSource(for: item)) }
         return .converted(try await convertedDownloadProposal(for: item, quality: quality))
+    }
+
+    func nativeDownloadProposal(
+        for item: FoundationItem, quality: FoundationDownloadQuality, allowsCellular: Bool
+    )
+        async throws -> FoundationNativeDownloadProposal
+    {
+        guard quality != .original else {
+            throw FoundationDownloadError.originalSystemManagementUnavailable
+        }
+        #if !os(iOS)
+            throw FoundationDownloadError.systemManagementUnavailable
+        #else
+            // Reuse fresh CanDownload/user/transcode/source authorization and unique
+            // server conversion lifetime. Preparing this does not start a conversion.
+            let converted = try await convertedDownloadProposal(for: item, quality: quality)
+            var components = URLComponents(
+                url: converted.request.url!, resolvingAgainstBaseURL: false)!
+            components.path = components.path.replacingOccurrences(
+                of: "/stream.m4a", with: "/master.m3u8")
+            components.queryItems = try converted.plan.nativeQueryItems(deviceID: session.deviceID)
+            guard let url = components.url else { throw FoundationDownloadError.response }
+            // Preflight uses the SAME modern MediaBrowser Authorization as the verified
+            // converted proposal; legacy X-Emby-Token is disabled by default in v12.
+            var request = converted.request
+            request.url = url
+            var route = URLComponents()
+            route.path = "/Audio/\(item.id)/master.m3u8"
+            route.queryItems = components.queryItems
+            let authenticatedMaster = try Self.hlsURL(
+                route.string ?? "", itemID: item.id, sourceID: converted.plan.sourceID,
+                serverSession: converted.plan.sessionID.uuidString,
+                base: session.serverURL, token: session.accessToken, deviceID: session.deviceID)
+            let artwork = try? await downloadArtwork(
+                for: item.catalogArtworkItem, size: 640, allowsCellular: allowsCellular)
+            try Task.checkCancellation()
+            let proposal = FoundationNativeDownloadProposal(
+                request: request, authenticatedMasterURL: authenticatedMaster,
+                expectedToken: session.accessToken, expectedDeviceID: session.deviceID,
+                cleanupRequest: converted.cleanupRequest,
+                plan: converted.plan, title: item.title, artwork: artwork)
+            _ = try proposal.validatedNativeMasterURL()
+            return proposal
+        #endif
     }
 
     /// Fresh authorization and source checks, before starting this transfer's conversion.
     func convertedDownloadProposal(for item: FoundationItem, quality: FoundationDownloadQuality)
         async throws -> FoundationDownloadConversionProposal
     {
+        guard acceptsCatalogItem(item) else { throw FoundationLibraryError.unavailable }
         guard item.kind == .track, Self.validID(item.id), quality.aacBitrate != nil else {
             throw FoundationDownloadError.unsupported
         }
@@ -1630,7 +2719,7 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
         else { throw FoundationDownloadError.permission }
         request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
         request.setValue(
-            "MediaBrowser Client=\"Velacanto Native\", Device=\"Apple\", DeviceId=\"\(session.deviceID)\", Version=\"1\", Token=\"\(session.accessToken)\"",
+            "MediaBrowser Client=\"Velacanto Native\", Device=\"\(deviceName.rawValue)\", DeviceId=\"\(session.deviceID)\", Version=\"1\", Token=\"\(session.accessToken)\"",
             forHTTPHeaderField: "Authorization")
         var cleanupRequest = request
         cleanupRequest.url = try Self.url(
@@ -1680,6 +2769,7 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
     }
 
     func playbackResource(for item: FoundationItem) async throws -> FoundationPlaybackResource {
+        guard acceptsCatalogItem(item) else { throw FoundationLibraryError.unavailable }
         let quality = await streamingQuality().resolved(for: FoundationStreamingPath())
         #if DEBUG
             return try await hlsResource(
@@ -1692,6 +2782,7 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
     private func hlsResource(
         for item: FoundationItem, quality: FoundationStreamingQuality, resolveMetadata: Bool = true
     ) async throws -> FoundationPlaybackResource {
+        guard acceptsCatalogItem(item) else { throw FoundationLibraryError.unavailable }
         try Task.checkCancellation()
         guard item.kind == .track, Self.validID(item.id) else {
             throw FoundationLibraryError.unavailable
@@ -2197,6 +3288,7 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
 
     // Compatibility URL-only helper; live playback uses playbackResource to retain its HLS lease.
     func playbackURL(for item: FoundationItem) async throws -> URL {
+        guard acceptsCatalogItem(item) else { throw FoundationLibraryError.unavailable }
         try Task.checkCancellation()
         guard item.kind == .track, Self.validID(item.id),
             !session.accessToken.isEmpty
@@ -2220,20 +3312,31 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
     }
 
     func retryArtwork(for item: FoundationItem) async {
+        guard acceptsCatalogItem(item) else { return }
         await artworkCache?.clearFailures(for: item)
+    }
+
+    func immediateArtworkResult(for item: FoundationItem, size: Int)
+        -> FoundationCurrentArtwork.Result?
+    {
+        guard acceptsCatalogItem(item) else { return nil }
+        return artworkCache?.immediateResult(for: item, pixels: size)
     }
 
     func cachedArtworkResult(for item: FoundationItem, size: Int) async throws
         -> FoundationCurrentArtwork.Result?
     {
-        try await artworkCache?.cachedResult(for: item, pixels: size)
+        guard acceptsCatalogItem(item) else { throw FoundationLibraryError.unavailable }
+        return try await artworkCache?.cachedResult(for: item, pixels: size)
     }
 
     func artwork(for item: FoundationItem) async throws -> Data? {
-        try await artwork(for: item, size: 160)
+        guard acceptsCatalogItem(item) else { throw FoundationLibraryError.unavailable }
+        return try await artwork(for: item, size: 160)
     }
 
     func artwork(for item: FoundationItem, size: Int) async throws -> Data? {
+        guard acceptsCatalogItem(item) else { throw FoundationLibraryError.unavailable }
         if artworkCache != nil {
             return try await artworkResult(for: item, size: size, allowsNetwork: true)?.data
         }
@@ -2243,12 +3346,14 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
     func downloadArtwork(for item: FoundationItem, size: Int, allowsCellular: Bool) async throws
         -> Data?
     {
-        try await readArtwork(for: item, size: size, allowsCellular: allowsCellular)
+        guard acceptsCatalogItem(item) else { throw FoundationLibraryError.unavailable }
+        return try await readArtwork(for: item, size: size, allowsCellular: allowsCellular)
     }
 
     func artworkResult(for item: FoundationItem, size: Int, allowsNetwork: Bool) async throws
         -> FoundationCurrentArtwork.Result?
     {
+        guard acceptsCatalogItem(item) else { throw FoundationLibraryError.unavailable }
         guard let artworkCache else {
             guard allowsNetwork else { return nil }
             let data = try await readArtwork(
@@ -2269,11 +3374,13 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
     private func readArtwork(for item: FoundationItem, size: Int, allowsCellular: Bool?)
         async throws -> Data?
     {
+        guard acceptsCatalogItem(item) else { throw FoundationLibraryError.unavailable }
         try Task.checkCancellation()
         let tag = item.primaryImageTag.flatMap { $0.isEmpty ? nil : $0 }
-        // Artist and album references may omit image tags. Jellyfin accepts
-        // an untagged Primary request; missing version metadata is not missing artwork.
-        guard item.kind != .track, tag != nil || item.kind == .artist || item.kind == .album
+        // Canonical genre descriptors and artist/album references may omit image tags.
+        // Jellyfin accepts an untagged Primary request; unknown revision is not missing artwork.
+        guard item.kind != .track,
+            tag != nil || item.kind == .artist || item.kind == .album || item.kind == .genre
         else { return nil }
         guard Self.validID(item.id) else { throw FoundationLibraryError.invalidResponse }
         let pixels = min(2048, max(1, size))
@@ -2372,6 +3479,13 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
                 guard let id = reference.id, Self.validID(id) else { return nil }
                 return FoundationItemReference(id: id, title: reference.name ?? "Artist")
             }.first
+            let genres = (entry.genreItems ?? []).compactMap {
+                reference -> FoundationItemReference? in
+                guard let id = reference.id, Self.validID(id), let title = reference.name,
+                    !title.isEmpty
+                else { return nil }
+                return FoundationItemReference(id: id, title: title)
+            }
             return FoundationItem(
                 id: id, title: entry.name ?? "Untitled",
                 subtitle: entry.albumArtist ?? entry.artists?.joined(separator: ", ") ?? "",
@@ -2383,23 +3497,26 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
                 backdropImageTag: kind == .artist ? entry.backdropImageTags?.first : nil,
                 isFavorite: kind == .genre ? nil : entry.userData?.isFavorite,
                 album: album, artist: artist,
-                genres: (entry.genreItems ?? []).compactMap { reference in
-                    guard let id = reference.id, Self.validID(id), let title = reference.name,
-                        !title.isEmpty
-                    else { return nil }
-                    return FoundationItemReference(id: id, title: title)
-                }, playCount: max(0, entry.userData?.playCount ?? 0), sortName: entry.sortName,
+                genres: genres,
+                genreMetadataIsComplete: entry.genreItems.map { $0.count == genres.count },
+                playCount: max(0, entry.userData?.playCount ?? 0), sortName: entry.sortName,
                 playlistEntryID: entry.playlistItemID,
+                hasLyrics: kind == .track ? entry.hasLyrics : nil,
                 trackNumber: entry.indexNumber, discNumber: entry.parentIndexNumber)
         }
     }
 
-    private func send<Response: Decodable>(_ endpoint: Request<Response>) async throws -> Response {
+    private func send<Response: Decodable>(
+        _ endpoint: Request<Response>, maximumBytes: Int? = nil
+    ) async throws -> Response {
         #if DEBUG
             let timing = FoundationLoadTiming.current ?? FoundationLoadTiming(.catalog)
             timing.record(.requestStarted)
         #endif
         let data = try await responseData(endpoint)
+        if let maximumBytes, data.count > maximumBytes {
+            throw FoundationPrimaryGenreIndex.Failure.resourceLimit
+        }
         #if DEBUG
             timing.record(.responseReceived)
             timing.record(.decodeStarted)
@@ -2466,7 +3583,8 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
 
     private func responseData<Response>(
         _ endpoint: Request<Response>, accept: String = "application/json",
-        notFoundIsEmpty: Bool = false, allowsCellular: Bool? = nil, loadOverride: Load? = nil
+        notFoundIsEmpty: Bool = false, allowsCellular: Bool? = nil, loadOverride: Load? = nil,
+        requestTimeout: TimeInterval? = nil, rawBody: Data? = nil, contentType: String? = nil
     ) async throws -> Data {
         #if DEBUG
             let operationID = UUID().uuidString
@@ -2483,6 +3601,7 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
             try Task.checkCancellation()
             var request = URLRequest(url: try Self.url(endpoint, base: session.serverURL))
             request.httpMethod = endpoint.method.rawValue
+            if let requestTimeout { request.timeoutInterval = requestTimeout }
             if let allowsCellular {
                 request.allowsCellularAccess = allowsCellular
                 request.allowsExpensiveNetworkAccess = allowsCellular
@@ -2497,9 +3616,12 @@ struct FoundationJellyfinLibrary: FoundationLibrary {
             let token = session.accessToken
             let device = session.deviceID
             request.setValue(
-                "MediaBrowser Client=\"Velacanto Native\", Device=\"Apple\", DeviceId=\"\(device)\", Version=\"1\", Token=\"\(token)\"",
+                "MediaBrowser Client=\"Velacanto Native\", Device=\"\(deviceName.rawValue)\", DeviceId=\"\(device)\", Version=\"1\", Token=\"\(token)\"",
                 forHTTPHeaderField: "Authorization")
-            if let body = endpoint.body {
+            if let rawBody {
+                request.httpBody = rawBody
+                request.setValue(contentType, forHTTPHeaderField: "Content-Type")
+            } else if let body = endpoint.body {
                 request.httpBody = try JSONEncoder().encode(body)
                 request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             }
@@ -2812,4 +3934,54 @@ actor FoundationNetworkAdmission {
         var pendingCount: Int { waiters.count }
         var activeCount: Int { active.count }
     #endif
+}
+
+// Provider-specific decoding stays at the adapter boundary.
+extension FoundationItemMetadata {
+    static func jellyfin(_ item: BaseItemDto) -> Self {
+        let people = item.people ?? []
+        var seen = Set<Credit>()
+        let credits = people.prefix(128).compactMap { person -> Credit? in
+            guard let name = text(person.name) else { return nil }
+            let role: String
+            switch person.type {
+            case .composer: role = "Composer"
+            case .writer: role = "Writer"
+            case .producer: role = "Producer"
+            case .conductor: role = "Conductor"
+            case .lyricist: role = "Lyricist"
+            case .arranger: role = "Arranger"
+            case .engineer: role = "Engineer"
+            case .mixer: role = "Mixer"
+            case .remixer: role = "Remixer"
+            case .artist: role = "Artist"
+            case .albumArtist: role = "Album Artist"
+            default: role = "Contributor"
+            }
+            let credit = Credit(name: name, role: role, detail: text(person.role))
+            return seen.insert(credit).inserted ? credit : nil
+        }
+        var seenGenres = Set<String>()
+        let genres = (item.genres ?? []).prefix(32).compactMap { value -> String? in
+            guard let genre = text(value), seenGenres.insert(genre).inserted else { return nil }
+            return genre
+        }
+        return Self(
+            credits: credits,
+            year: item.productionYear.flatMap { (1...9999).contains($0) ? $0 : nil },
+            genres: genres, hasAdditionalCredits: people.count > 128,
+            hasAdditionalGenres: (item.genres?.count ?? 0) > 32)
+    }
+
+    private static func text(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let cleaned = String(
+            String.UnicodeScalarView(
+                value.unicodeScalars.filter {
+                    !CharacterSet.controlCharacters.contains($0)
+                        || CharacterSet.whitespacesAndNewlines.contains($0)
+                })
+        ).split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        return cleaned.isEmpty ? nil : String(cleaned.prefix(256))
+    }
 }

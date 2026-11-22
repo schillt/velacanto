@@ -147,14 +147,10 @@ final class FoundationBrowseModel: ObservableObject {
     }
 
     /// Build only from already-loaded songs; preserve repeated occurrences.
-    func trackQueue(selecting sourceIndex: Int) -> (items: [FoundationItem], index: Int)? {
-        guard items.indices.contains(sourceIndex), items[sourceIndex].kind == .track else {
-            return nil
-        }
-        return (
-            items.filter { $0.kind == .track },
-            items.prefix(sourceIndex).filter { $0.kind == .track }.count
-        )
+    func trackQueue(
+        selecting sourceIndex: Int, isAvailable: (FoundationItem) -> Bool = { _ in true }
+    ) -> FoundationTrackQueueSelection? {
+        FoundationTrackQueueSelection(in: items, selecting: sourceIndex, isAvailable: isAvailable)
     }
 
     /// Install complete known membership without inventing a remote page or filtering occurrences.

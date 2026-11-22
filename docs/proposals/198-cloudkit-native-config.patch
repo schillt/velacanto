@@ -1,0 +1,106 @@
+--- /dev/null
++++ b/NativeFoundation/Resources/Velacanto-iOS-CloudKit.entitlements
+@@ -0,0 +1,8 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
++<plist version="1.0"><dict>
++<key>com.apple.developer.carplay-audio</key><true/>
++<key>com.apple.developer.siri</key><true/>
++<key>com.apple.developer.icloud-container-identifiers</key><array><string>iCloud.com.chameleonenterprise.velacanto</string></array>
++<key>com.apple.developer.icloud-services</key><array><string>CloudKit</string></array>
++</dict></plist>
+--- /dev/null
++++ b/NativeFoundation/Resources/Velacanto-macOS-CloudKit.entitlements
+@@ -0,0 +1,10 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
++<plist version="1.0"><dict>
++<key>com.apple.security.app-sandbox</key><true/>
++<key>com.apple.security.network.client</key><true/>
++<key>com.apple.application-identifier</key><string>$(AppIdentifierPrefix)$(PRODUCT_BUNDLE_IDENTIFIER)</string>
++<key>keychain-access-groups</key><array><string>$(AppIdentifierPrefix)$(PRODUCT_BUNDLE_IDENTIFIER)</string></array>
++<key>com.apple.developer.icloud-container-identifiers</key><array><string>iCloud.com.chameleonenterprise.velacanto</string></array>
++<key>com.apple.developer.icloud-services</key><array><string>CloudKit</string></array>
++</dict></plist>
+--- /dev/null
++++ b/NativeFoundation/Resources/Info-CloudKit.plist
+@@ -0,0 +1,31 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
++<plist version="1.0"><dict>
++<key>VelacantoPinSyncContainerIdentifier</key><string>iCloud.com.chameleonenterprise.velacanto</string>
++<key>CFBundleDevelopmentRegion</key><string>en</string>
++<key>CFBundleDisplayName</key><string>$(VELACANTO_APP_DISPLAY_NAME)</string>
++<key>CFBundleExecutable</key><string>$(EXECUTABLE_NAME)</string>
++<key>CFBundleIdentifier</key><string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
++<key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
++<key>CFBundleName</key><string>$(VELACANTO_APP_DISPLAY_NAME)</string>
++<key>CFBundlePackageType</key><string>APPL</string>
++<key>CFBundleShortVersionString</key><string>$(MARKETING_VERSION)</string>
++<key>CFBundleVersion</key><string>$(CURRENT_PROJECT_VERSION)</string>
++<key>ITSAppUsesNonExemptEncryption</key><false/>
++<key>NSUserActivityTypes</key><array><string>com.chameleonenterprise.velacanto.continuation.v1</string></array>
++<key>LSApplicationCategoryType</key><string>public.app-category.music</string>
++<key>NSLocalNetworkUsageDescription</key><string>Connect to your personal music library.</string>
++<key>UILaunchScreen</key><dict/>
++<key>UIBackgroundModes</key><array><string>audio</string></array>
++<key>UISupportedInterfaceOrientations</key><array><string>UIInterfaceOrientationPortrait</string><string>UIInterfaceOrientationLandscapeLeft</string><string>UIInterfaceOrientationLandscapeRight</string></array>
++<key>UISupportedInterfaceOrientations~ipad</key><array><string>UIInterfaceOrientationPortrait</string><string>UIInterfaceOrientationPortraitUpsideDown</string><string>UIInterfaceOrientationLandscapeLeft</string><string>UIInterfaceOrientationLandscapeRight</string></array>
++<key>UIApplicationSceneManifest</key><dict>
++<key>UIApplicationSupportsMultipleScenes</key><true/>
++<key>UISceneConfigurations</key><dict>
++<key>CPTemplateApplicationSceneSessionRoleApplication</key><array><dict>
++<key>UISceneConfigurationName</key><string>CarPlay</string>
++<key>UISceneClassName</key><string>CPTemplateApplicationScene</string>
++<key>UISceneDelegateClassName</key><string>$(PRODUCT_MODULE_NAME).FoundationCarPlaySceneDelegate</string>
++</dict></array>
++</dict></dict>
++</dict></plist>
+--- /dev/null
++++ b/NativeFoundation/Resources/Info-iOS-CloudKit.plist
+@@ -0,0 +1,32 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
++<plist version="1.0"><dict>
++<key>VelacantoPinSyncContainerIdentifier</key><string>iCloud.com.chameleonenterprise.velacanto</string>
++<key>CFBundleDevelopmentRegion</key><string>en</string>
++<key>CFBundleDisplayName</key><string>$(VELACANTO_APP_DISPLAY_NAME)</string>
++<key>CFBundleExecutable</key><string>$(EXECUTABLE_NAME)</string>
++<key>CFBundleIdentifier</key><string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
++<key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
++<key>CFBundleName</key><string>$(VELACANTO_APP_DISPLAY_NAME)</string>
++<key>CFBundlePackageType</key><string>APPL</string>
++<key>CFBundleShortVersionString</key><string>$(MARKETING_VERSION)</string>
++<key>CFBundleVersion</key><string>$(CURRENT_PROJECT_VERSION)</string>
++<key>ITSAppUsesNonExemptEncryption</key><false/>
++<key>LSApplicationCategoryType</key><string>public.app-category.music</string>
++<key>NSSiriUsageDescription</key><string>Ask Siri to find and play music in your library.</string>
++<key>INIntentsSupported</key><array><string>INPlayMediaIntent</string></array>
++<key>NSLocalNetworkUsageDescription</key><string>Connect to your personal music library.</string>
++<key>UILaunchScreen</key><dict/>
++<key>UIBackgroundModes</key><array><string>audio</string></array>
++<key>UISupportedInterfaceOrientations</key><array><string>UIInterfaceOrientationPortrait</string><string>UIInterfaceOrientationLandscapeLeft</string><string>UIInterfaceOrientationLandscapeRight</string></array>
++<key>UISupportedInterfaceOrientations~ipad</key><array><string>UIInterfaceOrientationPortrait</string><string>UIInterfaceOrientationPortraitUpsideDown</string><string>UIInterfaceOrientationLandscapeLeft</string><string>UIInterfaceOrientationLandscapeRight</string></array>
++<key>UIApplicationSceneManifest</key><dict>
++<key>UIApplicationSupportsMultipleScenes</key><true/>
++<key>UISceneConfigurations</key><dict>
++<key>CPTemplateApplicationSceneSessionRoleApplication</key><array><dict>
++<key>UISceneConfigurationName</key><string>CarPlay</string>
++<key>UISceneClassName</key><string>CPTemplateApplicationScene</string>
++<key>UISceneDelegateClassName</key><string>$(PRODUCT_MODULE_NAME).FoundationCarPlaySceneDelegate</string>
++</dict></array>
++</dict></dict>
++</dict></plist>
+--- a/NativeFoundation/VelacantoFoundation.xcodeproj/project.pbxproj
++++ b/NativeFoundation/VelacantoFoundation.xcodeproj/project.pbxproj
+@@ -285,8 +285,8 @@
+ 73EBF6644258C120893E685D = { isa = XCBuildConfiguration; buildSettings = { CLANG_ENABLE_MODULES = "YES"; SWIFT_VERSION = "5.0"; IPHONEOS_DEPLOYMENT_TARGET = "27.0"; MACOSX_DEPLOYMENT_TARGET = "27.0"; SDKROOT = "iphoneos"; SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx"; ENABLE_USER_SCRIPT_SANDBOXING = "YES"; SWIFT_STRICT_CONCURRENCY = "complete"; ONLY_ACTIVE_ARCH = "YES"; SWIFT_OPTIMIZATION_LEVEL = "-Onone"; DEBUG_INFORMATION_FORMAT = "dwarf"; ENABLE_TESTABILITY = "YES"; SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)"; }; name = Debug; };
+ 0B0C687DF8B6B8DC790B519C = { isa = XCBuildConfiguration; buildSettings = { CLANG_ENABLE_MODULES = "YES"; SWIFT_VERSION = "5.0"; IPHONEOS_DEPLOYMENT_TARGET = "27.0"; MACOSX_DEPLOYMENT_TARGET = "27.0"; SDKROOT = "iphoneos"; SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx"; ENABLE_USER_SCRIPT_SANDBOXING = "YES"; SWIFT_STRICT_CONCURRENCY = "complete"; ONLY_ACTIVE_ARCH = "NO"; SWIFT_OPTIMIZATION_LEVEL = "-O"; DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym"; ENABLE_TESTABILITY = "NO"; SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited)"; }; name = Release; };
+ 76F8DEC3DFE0BDB465198890 = { isa = XCConfigurationList; buildConfigurations = (18E59B0FDE7A4A19B3C988BB, 73EBF6644258C120893E685D, 0B0C687DF8B6B8DC790B519C); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+-B00CCDD09424E369308D67FA = { isa = XCBuildConfiguration; buildSettings = { SWIFT_TREAT_WARNINGS_AS_ERRORS = "YES"; MARKETING_VERSION = "0.6.0"; CURRENT_PROJECT_VERSION = "219"; PRODUCT_NAME = "Velacanto"; VELACANTO_APP_DISPLAY_NAME = "VelaCanto Alpha"; PRODUCT_MODULE_NAME = "VelacantoFoundation"; "CODE_SIGN_ENTITLEMENTS[sdk=iphoneos*]" = "Resources/Velacanto-iOS.entitlements"; "CODE_SIGN_ENTITLEMENTS[sdk=macosx*]" = "Resources/Velacanto-macOS.entitlements"; VELACANTO_APP_BUNDLE_IDENTIFIER = "com.chameleonenterprise.velacanto"; PRODUCT_BUNDLE_IDENTIFIER = "$(VELACANTO_APP_BUNDLE_IDENTIFIER)"; INFOPLIST_FILE = "Resources/Info.plist"; "INFOPLIST_FILE[sdk=iphone*]" = "Resources/Info-iOS.plist"; CODE_SIGN_STYLE = "Automatic"; DEVELOPMENT_TEAM = "B9X8T5LT8Q"; TARGETED_DEVICE_FAMILY = "1,2"; ASSETCATALOG_COMPILER_APPICON_NAME = "AppIcon"; ENABLE_HARDENED_RUNTIME = "YES"; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks"; SWIFT_EMIT_LOC_STRINGS = "YES"; }; name = Debug; };
+-1B104479E55E37CF8A63CBDF = { isa = XCBuildConfiguration; buildSettings = { SWIFT_TREAT_WARNINGS_AS_ERRORS = "YES"; EXCLUDED_SOURCE_FILE_NAMES = "$(inherited) FoundationHomeReboundDiagnostic.swift"; MARKETING_VERSION = "0.6.0"; CURRENT_PROJECT_VERSION = "219"; PRODUCT_NAME = "Velacanto"; VELACANTO_APP_DISPLAY_NAME = "VelaCanto"; PRODUCT_MODULE_NAME = "VelacantoFoundation"; "CODE_SIGN_ENTITLEMENTS[sdk=iphoneos*]" = "Resources/Velacanto-iOS.entitlements"; "CODE_SIGN_ENTITLEMENTS[sdk=macosx*]" = "Resources/Velacanto-macOS.entitlements"; VELACANTO_APP_BUNDLE_IDENTIFIER = "com.chameleonenterprise.velacanto"; PRODUCT_BUNDLE_IDENTIFIER = "$(VELACANTO_APP_BUNDLE_IDENTIFIER)"; INFOPLIST_FILE = "Resources/Info.plist"; "INFOPLIST_FILE[sdk=iphone*]" = "Resources/Info-iOS.plist"; CODE_SIGN_STYLE = "Automatic"; DEVELOPMENT_TEAM = "B9X8T5LT8Q"; TARGETED_DEVICE_FAMILY = "1,2"; ASSETCATALOG_COMPILER_APPICON_NAME = "AppIcon"; ENABLE_HARDENED_RUNTIME = "YES"; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks"; SWIFT_EMIT_LOC_STRINGS = "YES"; }; name = Release; };
++B00CCDD09424E369308D67FA = { isa = XCBuildConfiguration; buildSettings = { SWIFT_TREAT_WARNINGS_AS_ERRORS = "YES"; MARKETING_VERSION = "0.6.0"; CURRENT_PROJECT_VERSION = "219"; PRODUCT_NAME = "Velacanto"; VELACANTO_APP_DISPLAY_NAME = "VelaCanto Alpha"; PRODUCT_MODULE_NAME = "VelacantoFoundation"; "CODE_SIGN_ENTITLEMENTS[sdk=iphoneos*]" = "Resources/Velacanto-iOS-CloudKit.entitlements"; "CODE_SIGN_ENTITLEMENTS[sdk=macosx*]" = "Resources/Velacanto-macOS-CloudKit.entitlements"; VELACANTO_APP_BUNDLE_IDENTIFIER = "com.chameleonenterprise.velacanto"; PRODUCT_BUNDLE_IDENTIFIER = "$(VELACANTO_APP_BUNDLE_IDENTIFIER)"; INFOPLIST_FILE = "Resources/Info-CloudKit.plist"; "INFOPLIST_FILE[sdk=iphone*]" = "Resources/Info-iOS-CloudKit.plist"; CODE_SIGN_STYLE = "Automatic"; DEVELOPMENT_TEAM = "B9X8T5LT8Q"; TARGETED_DEVICE_FAMILY = "1,2"; ASSETCATALOG_COMPILER_APPICON_NAME = "AppIcon"; ENABLE_HARDENED_RUNTIME = "YES"; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks"; SWIFT_EMIT_LOC_STRINGS = "YES"; }; name = Debug; };
++1B104479E55E37CF8A63CBDF = { isa = XCBuildConfiguration; buildSettings = { SWIFT_TREAT_WARNINGS_AS_ERRORS = "YES"; EXCLUDED_SOURCE_FILE_NAMES = "$(inherited) FoundationHomeReboundDiagnostic.swift"; MARKETING_VERSION = "0.6.0"; CURRENT_PROJECT_VERSION = "219"; PRODUCT_NAME = "Velacanto"; VELACANTO_APP_DISPLAY_NAME = "VelaCanto"; PRODUCT_MODULE_NAME = "VelacantoFoundation"; "CODE_SIGN_ENTITLEMENTS[sdk=iphoneos*]" = "Resources/Velacanto-iOS-CloudKit.entitlements"; "CODE_SIGN_ENTITLEMENTS[sdk=macosx*]" = "Resources/Velacanto-macOS-CloudKit.entitlements"; VELACANTO_APP_BUNDLE_IDENTIFIER = "com.chameleonenterprise.velacanto"; PRODUCT_BUNDLE_IDENTIFIER = "$(VELACANTO_APP_BUNDLE_IDENTIFIER)"; INFOPLIST_FILE = "Resources/Info-CloudKit.plist"; "INFOPLIST_FILE[sdk=iphone*]" = "Resources/Info-iOS-CloudKit.plist"; CODE_SIGN_STYLE = "Automatic"; DEVELOPMENT_TEAM = "B9X8T5LT8Q"; TARGETED_DEVICE_FAMILY = "1,2"; ASSETCATALOG_COMPILER_APPICON_NAME = "AppIcon"; ENABLE_HARDENED_RUNTIME = "YES"; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks"; SWIFT_EMIT_LOC_STRINGS = "YES"; }; name = Release; };
+ 06CB67C35A91E16DBD17B949 = { isa = XCConfigurationList; buildConfigurations = (488DC09A99EC492886EE2EEA, B00CCDD09424E369308D67FA, 1B104479E55E37CF8A63CBDF); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+ DD3F495F7D6A5AA1C1769021 = { isa = XCBuildConfiguration; buildSettings = { SWIFT_TREAT_WARNINGS_AS_ERRORS = "YES"; PRODUCT_NAME = "$(TARGET_NAME)"; PRODUCT_BUNDLE_IDENTIFIER = "com.chameleonenterprise.velacanto.tests"; GENERATE_INFOPLIST_FILE = "YES"; CODE_SIGN_STYLE = "Automatic"; DEVELOPMENT_TEAM = "B9X8T5LT8Q"; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Velacanto.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Velacanto"; BUNDLE_LOADER = "$(TEST_HOST)"; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks @loader_path/Frameworks"; }; name = Debug; };
+ E670BC2FFE794172EBC92AE3 = { isa = XCBuildConfiguration; buildSettings = { SWIFT_TREAT_WARNINGS_AS_ERRORS = "YES"; PRODUCT_NAME = "$(TARGET_NAME)"; PRODUCT_BUNDLE_IDENTIFIER = "com.chameleonenterprise.velacanto.tests"; GENERATE_INFOPLIST_FILE = "YES"; CODE_SIGN_STYLE = "Automatic"; DEVELOPMENT_TEAM = "B9X8T5LT8Q"; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Velacanto.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Velacanto"; BUNDLE_LOADER = "$(TEST_HOST)"; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks @loader_path/Frameworks"; }; name = Release; };

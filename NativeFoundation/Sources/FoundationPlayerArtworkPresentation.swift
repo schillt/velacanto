@@ -75,7 +75,14 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
 
     @MainActor
     final class FoundationPlayerArtworkPresentationModel: ObservableObject {
-        enum Role { case compact, expanded }
+        enum Role { case compact, expanded, queue }
+        enum MetadataField: CaseIterable { case title, detail }
+        private struct MetadataAnchor {
+            weak var view: UIView?
+            let token: UUID
+            let identity: String
+            let text: String
+        }
 
         struct Artwork {
             let identity: String
@@ -99,7 +106,11 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
         @Published private(set) var hiddenArtworkIdentity: String?
         #if DEBUG && targetEnvironment(simulator)
             @Published private(set) var transitionSummary =
-                "morph 0; fade 0; cancelled 0; completed 0; glass 0; intermediate 0"
+                "morph 0; fade 0; cancelled 0; completed 0; glass 0; intermediate 0; queueMorph 0; queueCompleted 0; queuePhase 0; metadataCompleted 0"
+            private var metadataCompleted = 0
+            private var queuePhase = 0
+            private var queueMorphCount = 0
+            private var queueCompletedCount = 0
             private var glassCount = 0
             private var intermediateCount = 0
             private var morphCount = 0
@@ -109,7 +120,7 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
 
             private func publishTransitionSummary() {
                 transitionSummary =
-                    "morph \(morphCount); fade \(fadeCount); cancelled \(cancelledCount); completed \(completedCount); glass \(glassCount); intermediate \(intermediateCount)"
+                    "morph \(morphCount); fade \(fadeCount); cancelled \(cancelledCount); completed \(completedCount); glass \(glassCount); intermediate \(intermediateCount); queueMorph \(queueMorphCount); queueCompleted \(queueCompletedCount); queuePhase \(queuePhase); metadataCompleted \(metadataCompleted)"
             }
 
             fileprivate func recordIntermediateSurface(
@@ -137,14 +148,331 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
         private var surfaceIdentity: String?
         var allowsInteractiveDismissal = true
         var interactiveDismissalHeaderOnly = false
+        static let dismissalHeaderHeight: CGFloat = 64
         private var compact: Anchor?
         private var expanded: Anchor?
+        private var queueArtwork: Anchor?
+        private var queueDisplayed = false
+        @Published private(set) var queueHiddenArtworkIdentity: String?
+        private var queueSnapshot: UIImageView?
+        private var queueAnimator: UIViewPropertyAnimator?
+        private var queueToken: UUID?
+        private var queueImage: Artwork?
+        private weak var queueContainer: UIView?
+        fileprivate weak var queueArtworkLayer: UIView?
+        fileprivate weak var queueMetadataLayer: UIView?
+        @Published private(set) var queueHiddenMetadataIdentity: String?
+        private var expandedMetadata: [MetadataField: MetadataAnchor] = [:]
+        private var queueMetadata: [MetadataField: MetadataAnchor] = [:]
+        private var restingMetadata: [MetadataField: CGRect] = [:]
+        private var metadataLabels: [MetadataField: UILabel] = [:]
+        private var queueTarget: Role?
+        private var queueGeometryScheduled = false
+        private var queueRestingHero: (identity: String, frame: CGRect, bounds: CGRect)?
         private var generation: UInt = 0
         private var activeAnimator: FoundationPlayerArtworkAnimator?
         fileprivate weak var host: FoundationPlayerArtworkHost?
 
         func hidesArtwork(identity: String?) -> Bool {
             identity != nil && hiddenArtworkIdentity == identity
+        }
+
+        func queuePresentationChanged(showing: Bool) {
+            queueDisplayed = showing
+            if !showing && queueTarget == .queue { cancelQueueTransition() }
+        }
+
+        /// One decoded image crosses the existing hero and native queue anchors.
+        func prepareQueueTransition(
+            showing: Bool, artwork image: Artwork?, reduceMotion requestedReduceMotion: Bool
+        ) {
+            #if DEBUG && targetEnvironment(simulator)
+                queuePhase = 1
+                publishTransitionSummary()
+            #endif
+            let priorFrame = queueSnapshot?.layer.presentation()?.frame ?? queueSnapshot?.frame
+            let priorRadius = queueSnapshot?.layer.presentation()?.cornerRadius
+            let priorIdentity = queueHiddenArtworkIdentity
+            cancelQueueTransition()
+            guard !requestedReduceMotion, !reduceMotion, !isSurfaceTransitioning, let image,
+                let source = showing ? expanded : queueArtwork,
+                source.identity == image.identity, let view = source.view, let window = view.window
+            else { return }
+            // This explicit SwiftUI artwork plane shares the hero's fade mask and
+            // sits below queue content and transport, rather than above the window.
+            guard let container = queueArtworkLayer, container.window === window else { return }
+            let frame =
+                priorIdentity == image.identity
+                ? priorFrame ?? view.convert(view.bounds, to: container)
+                : view.convert(view.bounds, to: container)
+            guard frame.width > 0, frame.height > 0, container.bounds.intersects(frame) else {
+                return
+            }
+            if showing, priorIdentity == nil || queueRestingHero?.identity != image.identity {
+                queueRestingHero = (
+                    image.identity, view.convert(view.bounds, to: container), window.bounds
+                )
+            }
+            let snapshot = UIImageView(image: UIImage(cgImage: image.image))
+            snapshot.contentMode = .scaleAspectFill
+            snapshot.clipsToBounds = true
+            snapshot.layer.cornerCurve = .continuous
+            snapshot.layer.cornerRadius = priorRadius ?? (showing ? 24 : source.cornerRadius)
+            snapshot.isUserInteractionEnabled = false
+            snapshot.isAccessibilityElement = false
+            snapshot.frame = frame
+            container.addSubview(snapshot)
+            queueSnapshot = snapshot
+            queueImage = image
+            queueContainer = container
+            queueToken = UUID()
+            queueTarget = showing ? .queue : .expanded
+            prepareMetadata(showing: showing, identity: image.identity)
+            queueHiddenArtworkIdentity = image.identity
+            #if DEBUG && targetEnvironment(simulator)
+                queuePhase = 2
+                publishTransitionSummary()
+            #endif
+            if !showing { startQueueTransition() }
+        }
+
+        /// Called by the native queue only after its opening anchor has been applied.
+        func queueGeometryReady() {
+            guard queueTarget == .queue, queueSnapshot != nil, queueAnimator == nil,
+                !queueGeometryScheduled, let token = queueToken
+            else { return }
+            queueGeometryScheduled = true
+            #if DEBUG && targetEnvironment(simulator)
+                queuePhase = 3
+                publishTransitionSummary()
+            #endif
+            // A single layout-bound hop lets hosted artwork attach. There is no polling.
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.queueToken == token else { return }
+                self.queueGeometryScheduled = false
+                self.startQueueTransition()
+            }
+        }
+
+        private func startQueueTransition() {
+            guard let container = queueContainer, let image = queueImage, !reduceMotion,
+                let window = (container as? UIWindow) ?? container.window,
+                image.identity == queueHiddenArtworkIdentity,
+                let queueArtwork, let expanded,
+                queueArtwork.identity == image.identity, expanded.identity == image.identity,
+                let queueView = queueArtwork.view, let expandedView = expanded.view,
+                queueView.window === window, expandedView.window === window,
+                let snapshot = queueSnapshot, let token = queueToken, let target = queueTarget
+            else {
+                cancelQueueTransition()
+                #if DEBUG && targetEnvironment(simulator)
+                    queuePhase = 5
+                    publishTransitionSummary()
+                #endif
+                return
+            }
+            let queueFrame = queueView.convert(queueView.bounds, to: container)
+            let expandedFrame = expandedView.convert(expandedView.bounds, to: container)
+            guard
+                case .morph = FoundationPlayerArtworkTransitionDecision.resolve(
+                    artworkIdentity: image.identity, compactIdentity: queueArtwork.identity,
+                    expandedIdentity: expanded.identity, compactRect: queueFrame,
+                    expandedRect: expandedFrame, containerBounds: container.bounds,
+                    reduceMotion: false)
+            else {
+                cancelQueueTransition()
+                #if DEBUG && targetEnvironment(simulator)
+                    queuePhase = 6
+                    publishTransitionSummary()
+                #endif
+                return
+            }
+            let destination: CGRect
+            if target == .expanded {
+                guard let resting = queueRestingHero, resting.identity == image.identity,
+                    resting.bounds == window.bounds
+                else {
+                    cancelQueueTransition()
+                    return
+                }
+                destination = resting.frame
+            } else {
+                destination = queueFrame
+            }
+            let radius =
+                target == .queue ? queueArtwork.cornerRadius : max(24, expanded.cornerRadius)
+            let metadataTargets = metadataDestinations(target: target, identity: image.identity)
+            let animator = UIViewPropertyAnimator(duration: 0.35, curve: .easeInOut) {
+                snapshot.frame = destination
+                snapshot.layer.cornerRadius = radius
+                for (label, rect, scale) in metadataTargets {
+                    label.bounds.size = CGSize(
+                        width: rect.width / scale, height: rect.height / scale)
+                    label.center = CGPoint(x: rect.midX, y: rect.midY)
+                    label.transform = CGAffineTransform(scaleX: scale, y: scale)
+                }
+            }
+            queueAnimator = animator
+            #if DEBUG && targetEnvironment(simulator)
+                queuePhase = 7
+                queueMorphCount += 1
+                publishTransitionSummary()
+            #endif
+            animator.addCompletion { [weak self, weak snapshot] _ in
+                guard let self, self.queueToken == token else {
+                    snapshot?.removeFromSuperview()
+                    return
+                }
+                #if DEBUG && targetEnvironment(simulator)
+                    self.queuePhase = 8
+                    self.queueCompletedCount += 1
+                    if metadataTargets.count == MetadataField.allCases.count {
+                        self.metadataCompleted += 1
+                    }
+                    self.publishTransitionSummary()
+                #endif
+                self.queueAnimator = nil
+                self.queueSnapshot = nil
+                self.queueToken = nil
+                self.queueTarget = nil
+                self.queueImage = nil
+                self.queueContainer = nil
+                self.queueHiddenArtworkIdentity = nil
+                self.clearMetadataLabels()
+                snapshot?.removeFromSuperview()
+            }
+            animator.startAnimation()
+        }
+
+        fileprivate func registerMetadata(
+            _ view: UIView, token: UUID, role: Role, field: MetadataField,
+            identity: String, text: String
+        ) {
+            let anchor = MetadataAnchor(view: view, token: token, identity: identity, text: text)
+            if role == .expanded { expandedMetadata[field] = anchor }
+            if role == .queue { queueMetadata[field] = anchor }
+        }
+
+        fileprivate func unregisterMetadata(token: UUID, role: Role, field: MetadataField) {
+            if role == .expanded, expandedMetadata[field]?.token == token {
+                expandedMetadata[field] = nil
+            }
+            if role == .queue, queueMetadata[field]?.token == token { queueMetadata[field] = nil }
+        }
+
+        private func metadataFont(role: Role, field: MetadataField, view: UIView) -> UIFont {
+            let style: UIFont.TextStyle =
+                field == .title
+                ? (role == .expanded ? .title2 : .headline)
+                : (role == .expanded ? .subheadline : .caption1)
+            let font = UIFont.preferredFont(
+                forTextStyle: style, compatibleWith: view.traitCollection)
+            if field == .title, role == .expanded,
+                let descriptor = font.fontDescriptor.withSymbolicTraits(.traitBold)
+            {
+                return UIFont(descriptor: descriptor, size: font.pointSize)
+            }
+            return font
+        }
+
+        private func prepareMetadata(showing: Bool, identity: String) {
+            guard let layer = queueMetadataLayer, let window = layer.window else { return }
+            let source = showing ? expandedMetadata : queueMetadata
+            guard
+                MetadataField.allCases.allSatisfy({ field in
+                    guard let anchor = source[field], anchor.identity == identity,
+                        let view = anchor.view, view.window === window
+                    else { return false }
+                    return view.bounds.width > 0 && view.bounds.height > 0
+                })
+            else { return }
+            if showing { restingMetadata.removeAll() }
+            for field in MetadataField.allCases {
+                guard let anchor = source[field], let view = anchor.view else { continue }
+                let rect = view.convert(view.bounds, to: layer)
+                if showing { restingMetadata[field] = rect }
+                let label = UILabel(frame: rect)
+                label.overrideUserInterfaceStyle = .dark
+                label.text = anchor.text
+                label.font = metadataFont(
+                    role: showing ? .expanded : .queue, field: field, view: view)
+                label.textColor = field == .title ? .label : .secondaryLabel
+                label.numberOfLines = 0
+                label.lineBreakMode = .byTruncatingTail
+                label.clipsToBounds = true
+                label.isUserInteractionEnabled = false
+                label.isAccessibilityElement = false
+                layer.addSubview(label)
+                metadataLabels[field] = label
+            }
+            queueHiddenMetadataIdentity = identity
+        }
+
+        private func metadataDestinations(target: Role, identity: String) -> [(
+            UILabel, CGRect, CGFloat
+        )] {
+            guard let layer = queueMetadataLayer, let window = layer.window,
+                metadataLabels.count == MetadataField.allCases.count
+            else {
+                clearMetadataLabels()
+                return []
+            }
+            var targets: [(UILabel, CGRect, CGFloat)] = []
+            for field in MetadataField.allCases {
+                guard let label = metadataLabels[field] else { continue }
+                let rect: CGRect
+                let font: UIFont
+                if target == .queue {
+                    guard let anchor = queueMetadata[field], anchor.identity == identity,
+                        let view = anchor.view, view.window === window
+                    else {
+                        clearMetadataLabels()
+                        return []
+                    }
+                    rect = view.convert(view.bounds, to: layer)
+                    font = metadataFont(role: .queue, field: field, view: view)
+                } else {
+                    guard let resting = restingMetadata[field] else {
+                        clearMetadataLabels()
+                        return []
+                    }
+                    rect = resting
+                    font = metadataFont(role: .expanded, field: field, view: layer)
+                }
+                guard rect.width > 0, rect.height > 0, layer.bounds.intersects(rect) else {
+                    clearMetadataLabels()
+                    return []
+                }
+                targets.append((label, rect, font.pointSize / label.font.pointSize))
+            }
+            return targets
+        }
+
+        private func clearMetadataLabels() {
+            for label in metadataLabels.values { label.removeFromSuperview() }
+            metadataLabels.removeAll()
+            queueHiddenMetadataIdentity = nil
+        }
+
+        fileprivate func retireQueueTransitionLayer(_ view: UIView) {
+            guard queueArtworkLayer === view || queueMetadataLayer === view else { return }
+            cancelQueueTransition()
+            if queueArtworkLayer === view { queueArtworkLayer = nil }
+            if queueMetadataLayer === view { queueMetadataLayer = nil }
+        }
+
+        func cancelQueueTransition() {
+            clearMetadataLabels()
+            queueToken = nil
+            queueTarget = nil
+            queueGeometryScheduled = false
+            queueAnimator?.stopAnimation(true)
+            queueAnimator = nil
+            queueSnapshot?.removeFromSuperview()
+            queueSnapshot = nil
+            queueImage = nil
+            queueContainer = nil
+            queueHiddenArtworkIdentity = nil
         }
 
         fileprivate func register(
@@ -155,6 +483,7 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
             switch role {
             case .compact: compact = anchor
             case .expanded: expanded = anchor
+            case .queue: queueArtwork = anchor
             }
         }
 
@@ -162,6 +491,7 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
             switch role {
             case .compact: if compact?.token == token { compact = nil }
             case .expanded: if expanded?.token == token { expanded = nil }
+            case .queue: if queueArtwork?.token == token { queueArtwork = nil }
             }
         }
 
@@ -199,6 +529,7 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
         }
 
         fileprivate func endpoints(in container: UIView) -> Endpoints? {
+            let expanded = queueDisplayed ? queueArtwork : self.expanded
             guard !reduceMotion, let artwork = artwork(),
                 let compact, let expanded,
                 compact.identity == artwork.identity, expanded.identity == artwork.identity,
@@ -226,7 +557,7 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
             else { return false }
             // Header dismissal never depends on artwork attachment. Queue playback can
             // replace the hidden artwork anchor while a different album is resolving.
-            if location.y <= view.safeAreaInsets.top + 64 { return true }
+            if location.y <= view.safeAreaInsets.top + Self.dismissalHeaderHeight { return true }
             guard !interactiveDismissalHeaderOnly else { return false }
             if let artView = expanded?.view, artView.window === view.window {
                 return artView.convert(artView.bounds, to: view).contains(location)
@@ -240,6 +571,7 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
             _ animator: FoundationPlayerArtworkAnimator,
             identity: String?, glass: Bool
         ) -> UInt {
+            cancelQueueTransition()
             generation &+= 1
             activeAnimator = animator
             hiddenArtworkIdentity = identity
@@ -268,6 +600,14 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
         // same canonical identity + result.id keeps the bounded transition image.
         func artworkSelectionChanged() {
             activeAnimator?.retireSnapshotIfIdentityChanged()
+            if reduceMotion { cancelQueueTransition() }
+        }
+
+        func queueArtworkChanged(identity: String?, imageID: UUID?) {
+            guard queueSnapshot != nil else { return }
+            if queueImage?.identity != identity || queueImage?.imageID != imageID {
+                cancelQueueTransition()
+            }
         }
 
         func dismiss() {
@@ -277,6 +617,7 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
 
         fileprivate func retirePresentation(of host: FoundationPlayerArtworkHost) {
             guard self.host === host else { return }
+            cancelQueueTransition()
             generation &+= 1
             activeAnimator?.invalidate()
             activeAnimator = nil
@@ -287,6 +628,7 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
         }
 
         func invalidate() {
+            cancelQueueTransition()
             generation &+= 1
             activeAnimator?.invalidate()
             activeAnimator = nil
@@ -295,11 +637,120 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
             isSurfaceTransitioning = false
             compact = nil
             expanded = nil
+            queueArtwork = nil
+            queueDisplayed = false
+            queueRestingHero = nil
+            queueArtworkLayer = nil
+            queueMetadataLayer = nil
+            expandedMetadata.removeAll()
+            queueMetadata.removeAll()
+            restingMetadata.removeAll()
             compactSurface = nil
             surfaceToken = nil
             surfaceIdentity = nil
             artwork = { nil }
             host = nil
+        }
+    }
+
+    /// A public, inert drawing plane composed under the player's existing fade.
+    struct FoundationPlayerQueueTransitionLayer: UIViewRepresentable {
+        let model: FoundationPlayerArtworkPresentationModel?
+        var isMetadata = false
+
+        final class Coordinator {
+            weak var model: FoundationPlayerArtworkPresentationModel?
+        }
+
+        func makeCoordinator() -> Coordinator { Coordinator() }
+        func makeUIView(context: Context) -> UIView {
+            let view = UIView()
+            view.backgroundColor = .clear
+            view.isUserInteractionEnabled = false
+            view.accessibilityElementsHidden = true
+            return view
+        }
+        func updateUIView(_ view: UIView, context: Context) {
+            if context.coordinator.model !== model {
+                context.coordinator.model?.retireQueueTransitionLayer(view)
+            }
+            context.coordinator.model = model
+            if isMetadata {
+                model?.queueMetadataLayer = view
+            } else {
+                model?.queueArtworkLayer = view
+            }
+        }
+        static func dismantleUIView(_ view: UIView, coordinator: Coordinator) {
+            coordinator.model?.retireQueueTransitionLayer(view)
+        }
+    }
+
+    struct FoundationPlayerMetadataRegistration<Content: View>: View {
+        @ObservedObject var model: FoundationPlayerArtworkPresentationModel
+        let role: FoundationPlayerArtworkPresentationModel.Role
+        let field: FoundationPlayerArtworkPresentationModel.MetadataField
+        let identity: String
+        let text: String
+        let content: Content
+
+        var body: some View {
+            content.overlay {
+                FoundationPlayerMetadataAnchor(
+                    model: model, role: role, field: field, identity: identity, text: text
+                )
+                .allowsHitTesting(false).accessibilityHidden(true)
+            }
+            .opacity(model.queueHiddenMetadataIdentity == identity ? 0 : 1)
+        }
+    }
+
+    private struct FoundationPlayerMetadataAnchor: UIViewRepresentable {
+        let model: FoundationPlayerArtworkPresentationModel
+        let role: FoundationPlayerArtworkPresentationModel.Role
+        let field: FoundationPlayerArtworkPresentationModel.MetadataField
+        let identity: String
+        let text: String
+        final class Coordinator {
+            let token = UUID()
+            var unregister: (() -> Void)?
+        }
+        func makeCoordinator() -> Coordinator { Coordinator() }
+        func makeUIView(context: Context) -> UIView {
+            let view = UIView()
+            view.isUserInteractionEnabled = false
+            view.accessibilityElementsHidden = true
+            return view
+        }
+        func updateUIView(_ view: UIView, context: Context) {
+            context.coordinator.unregister?()
+            let token = context.coordinator.token
+            model.registerMetadata(
+                view, token: token, role: role, field: field,
+                identity: identity, text: text)
+            context.coordinator.unregister = { [weak model] in
+                model?.unregisterMetadata(token: token, role: role, field: field)
+            }
+        }
+        static func dismantleUIView(_ view: UIView, coordinator: Coordinator) {
+            coordinator.unregister?()
+        }
+    }
+
+    struct FoundationPlayerMetadataModifier: ViewModifier {
+        let role: FoundationPlayerArtworkPresentationModel.Role
+        let field: FoundationPlayerArtworkPresentationModel.MetadataField
+        let identity: String
+        let text: String
+        @Environment(\.foundationPlayerArtworkPresentation) private var model
+        @ViewBuilder func body(content: Content) -> some View {
+            if let model {
+                FoundationPlayerMetadataRegistration(
+                    model: model, role: role, field: field,
+                    identity: identity, text: text, content: content)
+            } else {
+                content
+            }
         }
     }
 
@@ -401,7 +852,11 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
                 }
                 // Parent supplies exact final image frame. Probe remains layout-bound
                 // even while the live image rendering is hidden for the snapshot.
-                .opacity(model.hidesArtwork(identity: identity) ? 0 : 1)
+                .opacity(
+                    model.hidesArtwork(identity: identity)
+                        || (role != .compact && identity != nil
+                            && model.queueHiddenArtworkIdentity == identity)
+                        ? 0 : 1)
         }
     }
 
@@ -833,7 +1288,11 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
             if gestureRecognizer === edgePan { return true }
             // The grabber is also a button. Let a downward pan begin on that
             // header while keeping queue rows, sliders and other controls native.
-            if touch.location(in: view).y <= view.safeAreaInsets.top + 64 { return true }
+            if touch.location(in: view).y <= view.safeAreaInsets.top
+                + FoundationPlayerArtworkPresentationModel.dismissalHeaderHeight
+            {
+                return true
+            }
             var touched = touch.view
             while let candidate = touched, candidate !== view {
                 if candidate is UIControl || candidate is UIScrollView { return false }
@@ -1182,12 +1641,23 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
 
 #if os(iOS)
     /// Native movement is restricted to the queue handle; rows keep their own actions.
-    struct FoundationQueueReorderList<Row: View>: UIViewRepresentable {
+    struct FoundationQueueReorderList<Row: View, Header: View, HistoryHeader: View>:
+        UIViewRepresentable
+    {
         let history: [FoundationQueueEntry]
         let current: FoundationQueueEntry?
         let upcoming: [FoundationQueueEntry]
         let dynamicTypeSize: DynamicTypeSize
+        let shuffleEnabled: Bool
+        let repeatMode: FoundationPlayer.RepeatMode
+        var historyIsVisible = false
+        var historyVisibilityChanged: (Bool) -> Void = { _ in }
+        let play: (UUID, FoundationPlayer.QueuePosition) -> Void
+        let remove: (UUID) -> Void
+        let geometryReady: () -> Void
         let move: (UUID, UUID?) -> Void
+        let header: () -> Header
+        let historyHeader: () -> HistoryHeader
         let row: (FoundationQueueEntry, Bool) -> Row
 
         func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
@@ -1198,33 +1668,47 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
                 [weak coordinator] section, environment in
                 var configuration = UICollectionLayoutListConfiguration(appearance: .plain)
                 configuration.backgroundColor = .clear
-                configuration.showsSeparators = true
-                configuration.separatorConfiguration.color = .white.withAlphaComponent(0.12)
+                configuration.showsSeparators = false
+                configuration.leadingSwipeActionsConfigurationProvider = {
+                    [weak coordinator] path in
+                    coordinator?.swipeActions(at: path, leading: true)
+                }
+                configuration.trailingSwipeActionsConfigurationProvider = {
+                    [weak coordinator] path in
+                    coordinator?.swipeActions(at: path, leading: false)
+                }
                 configuration.headerMode =
                     section == 2 || coordinator?.sections[section].isEmpty == false
                     ? .supplementary : .none
                 let listSection = NSCollectionLayoutSection.list(
                     using: configuration, layoutEnvironment: environment)
-                // Section insets reduce each row's width; scroll-view horizontal
-                // content insets would add overflow beyond the visible viewport.
-                listSection.contentInsets.leading = 16
-                listSection.contentInsets.trailing = 16
+                // One native pinned header travels with Now Playing and its controls.
+                if section == 0 || section == 2 {
+                    for header in listSection.boundarySupplementaryItems {
+                        header.pinToVisibleBounds = true
+                    }
+                }
                 return listSection
             }
             let view = QueueCollectionView(frame: .zero, collectionViewLayout: layout)
-            view.didLayout = { [weak coordinator] in coordinator?.anchorOnOpenIfNeeded() }
+            view.didLayout = { [weak coordinator] in
+                coordinator?.anchorOnOpenIfNeeded()
+                coordinator?.clipRowsBelowHeader()
+                coordinator?.parent.geometryReady()
+            }
             view.backgroundColor = .clear
             view.overrideUserInterfaceStyle = .dark
             view.alwaysBounceVertical = true
             view.alwaysBounceHorizontal = false
             view.isDirectionalLockEnabled = true
-            // Match the queue mask's top fade, keeping the opening heading fully readable.
-            view.contentInset = UIEdgeInsets(top: 24, left: 0, bottom: 12, right: 0)
+            view.contentInset = UIEdgeInsets(top: 0, left: 0, bottom: 12, right: 0)
             view.register(UICollectionViewListCell.self, forCellWithReuseIdentifier: "queue-row")
-            view.register(
-                QueueHeader.self,
-                forSupplementaryViewOfKind: UICollectionView.elementKindSectionHeader,
-                withReuseIdentifier: "queue-header")
+            for identifier in ["queue-header", "queue-history-header"] {
+                view.register(
+                    QueueHeader.self,
+                    forSupplementaryViewOfKind: UICollectionView.elementKindSectionHeader,
+                    withReuseIdentifier: identifier)
+            }
             view.dataSource = coordinator
             view.delegate = coordinator
             let gesture = UILongPressGestureRecognizer(
@@ -1238,11 +1722,22 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
 
         func updateUIView(_ view: UICollectionView, context: Context) {
             let coordinator = context.coordinator
-            let incoming = [history, current.map { [$0] } ?? [], upcoming]
+            let incoming = [history, [], upcoming]
             let needsReload =
                 incoming != coordinator.sections
                 || dynamicTypeSize != coordinator.parent.dynamicTypeSize
+                || shuffleEnabled != coordinator.parent.shuffleEnabled
+                || repeatMode != coordinator.parent.repeatMode
+                || current != coordinator.parent.current
+            let historyVisibilityChanged = historyIsVisible != coordinator.parent.historyIsVisible
             coordinator.parent = self
+            if historyVisibilityChanged,
+                let header = view.supplementaryView(
+                    forElementKind: UICollectionView.elementKindSectionHeader,
+                    at: IndexPath(item: 0, section: 2)) as? QueueHeader
+            {
+                header.setContent(coordinator.parent.header())
+            }
             guard needsReload else { return }
             // A playback advance, removal, or shuffle invalidates this drag's boundaries.
             coordinator.cancelMovement()
@@ -1264,7 +1759,7 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
             var sections: [[FoundationQueueEntry]]
             weak var collectionView: UICollectionView?
             private var needsOpeningAnchor = true
-            private let openingEntryID: UUID?
+            private var reportedHistoryVisibility = false
             private var movingID: UUID?
             private var dragMembership: [[UUID]]?
             private var fingerOffset = CGPoint.zero
@@ -1272,17 +1767,15 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
 
             init(parent: FoundationQueueReorderList) {
                 self.parent = parent
-                openingEntryID = parent.current?.id
-                sections = [parent.history, parent.current.map { [$0] } ?? [], parent.upcoming]
+                sections = [parent.history, [], parent.upcoming]
             }
 
             func anchorOnOpenIfNeeded() {
                 guard needsOpeningAnchor, let collectionView,
                     collectionView.bounds.width > 0, collectionView.bounds.height > 0
                 else { return }
-                // Capture the occurrence at creation; playback updates never request another jump.
-                let section =
-                    sections[1].first?.id == openingEntryID && openingEntryID != nil ? 1 : 2
+                // Open at current + Up Next; native scrolling reveals prior history.
+                let section = 2
                 guard
                     let heading = collectionView.collectionViewLayout
                         .layoutAttributesForSupplementaryView(
@@ -1330,9 +1823,16 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
                 viewForSupplementaryElementOfKind kind: String, at indexPath: IndexPath
             ) -> UICollectionReusableView {
                 let header = collectionView.dequeueReusableSupplementaryView(
-                    ofKind: kind, withReuseIdentifier: "queue-header", for: indexPath)
+                    ofKind: kind,
+                    withReuseIdentifier: indexPath.section == 0
+                        ? "queue-history-header" : "queue-header",
+                    for: indexPath)
                 if let header = header as? QueueHeader {
-                    header.label.text = ["History", "Now Playing", "Up Next"][indexPath.section]
+                    if indexPath.section == 0 {
+                        header.setContent(parent.historyHeader())
+                    } else {
+                        header.setContent(parent.header())
+                    }
                 }
                 return header
             }
@@ -1371,6 +1871,122 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
                 let boundary = next < sections[2].count ? sections[2][next].id : nil
                 clearMovementAppearance()
                 parent.move(entry.id, boundary)
+            }
+
+            func scrollViewDidScroll(_ scrollView: UIScrollView) {
+                clipRowsBelowHeader()
+            }
+
+            /// Keep the player's own backdrop visible through the pinned header.
+            /// Only visible native rows are clipped; no content extent or offset changes.
+            func clipRowsBelowHeader() {
+                guard let collectionView else { return }
+                let currentHeader = collectionView.supplementaryView(
+                    forElementKind: UICollectionView.elementKindSectionHeader,
+                    at: IndexPath(item: 0, section: 2))
+                let historyVisible =
+                    !sections[0].isEmpty
+                    && (currentHeader.map {
+                        $0.frame.minY > collectionView.contentOffset.y
+                            + collectionView.adjustedContentInset.top + 2
+                    } ?? true)
+                if historyVisible != reportedHistoryVisibility {
+                    reportedHistoryVisibility = historyVisible
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self, self.reportedHistoryVisibility == historyVisible else {
+                            return
+                        }
+                        self.parent.historyVisibilityChanged(historyVisible)
+                    }
+                }
+                CATransaction.begin()
+                CATransaction.setDisableActions(true)
+                defer { CATransaction.commit() }
+                for cell in collectionView.visibleCells {
+                    guard cell !== movingCell,
+                        let section = collectionView.indexPath(for: cell)?.section,
+                        let heading = collectionView.supplementaryView(
+                            forElementKind: UICollectionView.elementKindSectionHeader,
+                            at: IndexPath(item: 0, section: section))
+                    else {
+                        if cell.layer.mask is QueueRowMask { cell.layer.mask = nil }
+                        continue
+                    }
+                    let top = min(cell.bounds.height, max(0, heading.frame.maxY - cell.frame.minY))
+                    guard top > 0 else {
+                        if cell.layer.mask is QueueRowMask { cell.layer.mask = nil }
+                        continue
+                    }
+                    guard cell.layer.mask == nil || cell.layer.mask is QueueRowMask else {
+                        continue
+                    }
+                    let mask = (cell.layer.mask as? QueueRowMask) ?? QueueRowMask()
+                    mask.frame = cell.bounds
+                    mask.path =
+                        UIBezierPath(
+                            rect: CGRect(
+                                x: 0, y: top, width: cell.bounds.width,
+                                height: max(0, cell.bounds.height - top))
+                        ).cgPath
+                    cell.layer.mask = mask
+                }
+            }
+
+            func swipeActions(at path: IndexPath, leading: Bool) -> UISwipeActionsConfiguration? {
+                guard path.section == 2, sections[2].indices.contains(path.item) else { return nil }
+                let id = sections[2][path.item].id
+                func action(
+                    _ title: String, position: FoundationPlayer.QueuePosition
+                ) -> UIContextualAction {
+                    UIContextualAction(style: .normal, title: title) { [weak self] _, _, complete in
+                        guard let self, self.parent.upcoming.contains(where: { $0.id == id }) else {
+                            complete(false)
+                            return
+                        }
+                        self.parent.play(id, position)
+                        complete(true)
+                    }
+                }
+                let actions: [UIContextualAction]
+                if leading {
+                    let next = action("Play Next", position: .next)
+                    let last = action("Play Last", position: .last)
+                    next.backgroundColor = .systemIndigo
+                    last.backgroundColor = .systemBlue
+                    actions = [next, last]
+                } else {
+                    let remove = UIContextualAction(
+                        style: .destructive, title: "Remove from Up Next"
+                    ) {
+                        [weak self] _, _, complete in
+                        guard let self, self.parent.upcoming.contains(where: { $0.id == id }) else {
+                            complete(false)
+                            return
+                        }
+                        self.parent.remove(id)
+                        complete(true)
+                    }
+                    remove.image = UIImage(systemName: "minus")
+                    actions = [remove]
+                }
+                for action in actions {
+                    let label = action.title ?? ""
+                    let symbol =
+                        label == "Play Next"
+                        ? "text.line.first.and.arrowtriangle.forward"
+                        : label == "Play Last"
+                            ? "text.line.last.and.arrowtriangle.forward" : "minus"
+                    action.title = nil
+                    action.accessibilityLabel = label
+                    action.image = UIImage(
+                        systemName: symbol,
+                        withConfiguration: UIImage.SymbolConfiguration(
+                            pointSize: 20, weight: symbol == "minus" ? .bold : .semibold))
+                    action.image?.accessibilityLabel = label
+                }
+                let configuration = UISwipeActionsConfiguration(actions: actions)
+                configuration.performsFirstActionWithFullSwipe = true
+                return configuration
             }
 
             func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
@@ -1437,6 +2053,8 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
             }
         }
 
+        private final class QueueRowMask: CAShapeLayer {}
+
         final class QueueCollectionView: UICollectionView {
             var didLayout: (() -> Void)?
 
@@ -1447,25 +2065,39 @@ enum FoundationPlayerSurfaceTransitionDecision: Equatable {
         }
 
         final class QueueHeader: UICollectionReusableView {
-            let label = UILabel()
+            private var hostedContent: (UIView & UIContentView)?
 
-            override init(frame: CGRect) {
-                super.init(frame: frame)
-                label.font = .preferredFont(forTextStyle: .headline)
-                label.adjustsFontForContentSizeCategory = true
-                label.textColor = .secondaryLabel
-                label.accessibilityTraits.insert(.header)
-                label.translatesAutoresizingMaskIntoConstraints = false
-                addSubview(label)
-                NSLayoutConstraint.activate([
-                    label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
-                    label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
-                    label.topAnchor.constraint(equalTo: topAnchor, constant: 12),
-                    label.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -4),
-                ])
+            func setContent<Content: View>(_ content: Content) {
+                let configuration = UIHostingConfiguration { content }.margins(.all, 0)
+                if let hostedContent {
+                    hostedContent.configuration = configuration
+                } else {
+                    let view = configuration.makeContentView()
+                    view.translatesAutoresizingMaskIntoConstraints = false
+                    addSubview(view)
+                    NSLayoutConstraint.activate([
+                        view.leadingAnchor.constraint(equalTo: leadingAnchor),
+                        view.trailingAnchor.constraint(equalTo: trailingAnchor),
+                        view.topAnchor.constraint(equalTo: topAnchor),
+                        view.bottomAnchor.constraint(equalTo: bottomAnchor),
+                    ])
+                    hostedContent = view
+                }
             }
 
-            required init?(coder: NSCoder) { nil }
+            override func preferredLayoutAttributesFitting(
+                _ layoutAttributes: UICollectionViewLayoutAttributes
+            ) -> UICollectionViewLayoutAttributes {
+                let attributes = super.preferredLayoutAttributesFitting(layoutAttributes)
+                attributes.size.height =
+                    systemLayoutSizeFitting(
+                        CGSize(width: attributes.size.width, height: 0),
+                        withHorizontalFittingPriority: .required,
+                        verticalFittingPriority: .fittingSizeLevel
+                    ).height
+                return attributes
+            }
         }
+
     }
 #endif

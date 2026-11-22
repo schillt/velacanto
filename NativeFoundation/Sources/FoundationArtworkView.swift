@@ -1,5 +1,41 @@
 import SwiftUI
 
+#if DEBUG
+    /// Synthetic hosted tests observe first-frame reuse and task epochs; nil in ordinary views.
+    struct FoundationArtworkTaskObservation: Sendable {
+        let phase: UUID
+        var rendered: (@MainActor @Sendable (UUID, Image?) -> Void)? = nil
+        var beforeLoad: (@Sendable () async throws -> Void)? = nil
+        var leafUpdated: (@MainActor @Sendable (UUID, UUID, Image?) -> Void)? = nil
+        let finished: @MainActor @Sendable (UUID, Bool) -> Void
+    }
+
+    /// Test-only leaf lifetime observation: no logging, timers, or effect when no observer exists.
+    private struct FoundationArtworkLeafObservation: ViewModifier {
+        let observation: FoundationArtworkTaskObservation?
+        let image: Image?
+        @State private var lifetime = UUID()
+
+        func body(content: Content) -> some View {
+            content.onChange(of: image, initial: true) { _, image in
+                guard let observation else { return }
+                observation.leafUpdated?(observation.phase, lifetime, image)
+            }
+        }
+    }
+
+    private struct FoundationArtworkTaskObservationKey: EnvironmentKey {
+        static let defaultValue: FoundationArtworkTaskObservation? = nil
+    }
+
+    extension EnvironmentValues {
+        var foundationArtworkTaskObservation: FoundationArtworkTaskObservation? {
+            get { self[FoundationArtworkTaskObservationKey.self] }
+            set { self[FoundationArtworkTaskObservationKey.self] = newValue }
+        }
+    }
+#endif
+
 /// View publication is owned locally; catalog bytes and decoding share the account cache.
 struct FoundationCatalogArtwork: View {
     enum Source {
@@ -7,7 +43,6 @@ struct FoundationCatalogArtwork: View {
         case current(FoundationCurrentArtwork.Result?)
     }
     @Environment(\.displayScale) private var displayScale
-    @Environment(\.foundationReduceMotion) private var reduceMotion
     @State private var isLoadingUpgrade = false
     @State private var loadGeneration = UUID()
     @State private var installedCurrentRevision: UUID?
@@ -30,12 +65,13 @@ struct FoundationCatalogArtwork: View {
     var loadedImage: Binding<Image?>? = nil
     var upperEdgeColors: Binding<[Color]?>? = nil
     @State private var image: Image?
-    @State private var installedDecodedIdentity: ObjectIdentifier?
-    @State private var imageRevision = UUID()
     @State private var installedPixels = 0
     @State private var installedIdentity: String?
+    @State private var installedRetainedArtworkIdentity: String?
+    @State private var installedRetainedArtworkPixels = 0
     #if DEBUG
         @Environment(\.foundationTraceOrigin) private var traceOrigin
+        @Environment(\.foundationArtworkTaskObservation) private var taskObservation
     #endif
 
     private var artworkCornerRadius: CGFloat {
@@ -43,24 +79,31 @@ struct FoundationCatalogArtwork: View {
     }
 
     var body: some View {
+        #if DEBUG
+            // Capture the immutable render epoch before the asynchronous task can be replaced.
+            let observation = taskObservation
+            let observedActive = isActive
+            let _ = observation.map { observation in
+                observation.rendered?(observation.phase, displayImage)
+            }
+        #endif
         ZStack {
             RoundedRectangle(cornerRadius: artworkCornerRadius).fill(
                 .quaternary)
             ZStack {
                 if let displayImage {
                     displayImage.resizable().scaledToFill()
-                        .blur(radius: isLoadingUpgrade && !isCurrentArtwork ? min(4, size / 40) : 0)
                         .scaleEffect(item.kind == .genre ? 2 : 1, anchor: .topLeading)
-                        .id(imageRevision)
-                        .transition(.opacity)
+                        #if DEBUG
+                            .modifier(
+                                FoundationArtworkLeafObservation(
+                                    observation: observation, image: displayImage))
+                        #endif
                 } else {
                     Image(systemName: item.kind == .artist ? "music.mic" : "music.note")
                         .foregroundStyle(.secondary)
                 }
             }
-            // Animate decoded-image replacement only; sizing and sampled-color bindings
-            // retain their existing publication behavior. Clearing identity is immediate.
-            .animation(artworkArrivalAnimation, value: imageRevision)
         }
         .frame(width: size, height: displayHeight ?? size)
         .clipShape(
@@ -76,8 +119,20 @@ struct FoundationCatalogArtwork: View {
             }
         }
         .task(id: artworkTaskIdentity) {
+            #if DEBUG
+                defer {
+                    if let observation { observation.finished(observation.phase, observedActive) }
+                }
+            #endif
             guard isActive, !Task.isCancelled else { return }
+            #if DEBUG
+                if let beforeLoad = observation?.beforeLoad {
+                    do { try await beforeLoad() } catch { return }
+                }
+            #endif
             prepareArtworkIdentity()
+            let warm = immediateCatalogResult
+            if let warm { installImage(warm.image) }
             if case .current(let result) = source, let result {
                 if installedCurrentRevision != result.revision {
                     installedCurrentRevision = result.revision
@@ -88,13 +143,28 @@ struct FoundationCatalogArtwork: View {
             loadGeneration = generation
             isLoadingUpgrade = installedPixels < targetPixels
             defer { if loadGeneration == generation { isLoadingUpgrade = false } }
-            if let data = await downloads.retainedArtwork(for: item) {
+            let retainedIdentity = downloads.retainedArtworkIdentity(for: item)
+            if let warm, max(warm.image.width, warm.image.height) >= targetPixels {
+                // The account cache already supplies the current cover at this rendition.
+                // A recreated card must not replace it with a second decode of retained bytes.
+                installedRetainedArtworkIdentity = retainedIdentity
+                installedRetainedArtworkPixels = targetPixels
+            }
+            if let retainedIdentity,
+                installedRetainedArtworkIdentity != retainedIdentity
+                    || installedRetainedArtworkPixels < targetPixels,
+                let data = await downloads.retainedArtwork(for: item)
+            {
                 let pixels = targetPixels
                 let result = await Task.detached(priority: .utility) {
                     FoundationCurrentArtwork.decode(data, maximumPixels: pixels)
                 }.value
                 guard !Task.isCancelled else { return }
-                if let result { installImage(result.image) }
+                if let result {
+                    installImage(result.image)
+                    installedRetainedArtworkIdentity = retainedIdentity
+                    installedRetainedArtworkPixels = pixels
+                }
             }
             #if DEBUG
                 await FoundationTrace.withPage(origin: traceOrigin, page: .artwork) {
@@ -113,12 +183,13 @@ struct FoundationCatalogArtwork: View {
             return (installedCurrentRevision == result?.revision ? image : nil)
                 ?? result.map { Image(decorative: $0.image, scale: 1) }
         }
-        return image
+        if installedIdentity == artworkIdentity, let image { return image }
+        return immediateCatalogResult.map { Image(decorative: $0.image, scale: 1) }
     }
 
-    private var artworkArrivalAnimation: Animation? {
-        if case .current = source { return nil }
-        return reduceMotion ? nil : .easeInOut(duration: 0.2)
+    private var immediateCatalogResult: FoundationCurrentArtwork.Result? {
+        guard case .catalog = source else { return nil }
+        return library.immediateArtworkResult(for: item, size: targetPixels)
     }
 
     private func loadCatalogArtwork() async {
@@ -140,13 +211,18 @@ struct FoundationCatalogArtwork: View {
         }
     }
 
+    private var artworkIdentity: String {
+        "\(library.metadataScopeID)-\(FoundationArtworkCache.key(item, pixels: targetPixels).identity)"
+    }
+
     private func prepareArtworkIdentity() {
-        let identity =
-            "\(library.catalogScopeID)-\(FoundationArtworkCache.key(item, pixels: targetPixels).identity)"
+        let identity = artworkIdentity
         guard installedIdentity != identity else { return }
         installImage(nil)
         installedIdentity = identity
         installedCurrentRevision = nil
+        installedRetainedArtworkIdentity = nil
+        installedRetainedArtworkPixels = 0
     }
 
     private var isCurrentArtwork: Bool {
@@ -164,8 +240,14 @@ struct FoundationCatalogArtwork: View {
 
     private var artworkTaskIdentity: String {
         let key = FoundationArtworkCache.key(item, pixels: targetPixels)
-        return
-            "\(library.catalogScopeID)-\(currentResultRevision?.uuidString ?? "catalog")-\(isActive)-\(key.identity)-\(key.pixels)-\(downloads.retainedArtworkIdentity(for: item) ?? "")-\(connectivity.localOnly)-\(connectivity.successfulRetryRevision)"
+        let identity =
+            "\(library.metadataScopeID)-\(currentResultRevision?.uuidString ?? "catalog")-\(isActive)-\(key.identity)-\(key.pixels)-\(downloads.retainedArtworkIdentity(for: item) ?? "")-\(connectivity.localOnly)-\(connectivity.successfulRetryRevision)"
+        #if DEBUG
+            // A hosted proof can force each conservative activation epoch to execute. Ordinary
+            // views have no observer and keep their original task identity/coalescing behavior.
+            if let phase = taskObservation?.phase { return "\(identity)-proof-\(phase)" }
+        #endif
+        return identity
     }
 
     private func installImage(
@@ -182,11 +264,8 @@ struct FoundationCatalogArtwork: View {
                 return
             }
         }
-        let decodedIdentity = cgImage.map { ObjectIdentifier($0) }
-        if decodedIdentity != nil, decodedIdentity != installedDecodedIdentity {
-            imageRevision = UUID()
-        }
-        installedDecodedIdentity = decodedIdentity
+        // Resolution upgrades replace pixels within this same image leaf. Scoped identity
+        // clearing still owns actual item/revision changes; equivalent covers never fade out.
         installedPixels = cgImage.map { max($0.width, $0.height) } ?? 0
         image = displayImage ?? cgImage.map { Image(decorative: $0, scale: 1) }
         loadedImage?.wrappedValue = image
@@ -294,10 +373,14 @@ extension FoundationItem {
     }
 
     var catalogArtworkItem: FoundationItem {
-        guard kind == .track, let album else { return self }
+        guard kind == .track, let album,
+            catalogSource == nil || album.catalogSource == nil
+                || album.catalogSource == catalogSource
+        else { return self }
         return FoundationItem(
             id: album.id, title: album.title, subtitle: "", kind: .album,
-            duration: nil, primaryImageTag: album.primaryImageTag)
+            duration: nil, primaryImageTag: album.primaryImageTag,
+            catalogSource: album.catalogSource ?? catalogSource)
     }
 }
 

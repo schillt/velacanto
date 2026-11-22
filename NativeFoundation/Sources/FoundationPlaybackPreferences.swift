@@ -57,14 +57,18 @@ final class FoundationPlaybackPreferences: ObservableObject {
     static let streamingCellularQualityKey = "audio.streaming.cellularQuality"
     static let streamingCellularKey = "audio.streaming.allowCellular"
     static let downloadQualityKey = "audio.downloads.quality"
+    static let systemManagedDownloadsKey = "audio.downloads.systemManaged"
     static let downloadsCellularKey = "audio.downloads.allowCellular"
+    static let offlineModeKey = "library.offlineMode"
     static let duplicateAlbumTracksKey = "library.showDuplicateAlbumTracks"
     @Published private(set) var streamingWiFiQuality: FoundationStreamingQuality
     @Published private(set) var streamingCellularQuality: FoundationStreamingQuality
     @Published private(set) var downloadQuality: FoundationDownloadQuality
+    @Published private(set) var systemManagedDownloads: Bool
     @Published private(set) var allowsCellularStreaming: Bool
     @Published private(set) var allowsCellularDownloads: Bool
     @Published private(set) var showDuplicateAlbumTracks: Bool
+    @Published private(set) var offlineMode: Bool
     private let defaults: UserDefaults
     private var observer: NSObjectProtocol?
 
@@ -79,12 +83,15 @@ final class FoundationPlaybackPreferences: ObservableObject {
             defaults, key: Self.streamingWiFiQualityKey, fallback: .original)
         streamingCellularQuality = Self.readStreamingQuality(
             defaults, key: Self.streamingCellularQualityKey, fallback: .auto)
-        downloadQuality =
+        let quality =
             defaults.string(forKey: Self.downloadQualityKey)
             .flatMap(FoundationDownloadQuality.init(rawValue:)) ?? .original
+        downloadQuality = quality
+        systemManagedDownloads = Self.readSystemManagedDownloads(defaults, quality: quality)
         allowsCellularStreaming = defaults.bool(forKey: Self.streamingCellularKey)
         allowsCellularDownloads = defaults.bool(forKey: Self.downloadsCellularKey)
         showDuplicateAlbumTracks = defaults.bool(forKey: Self.duplicateAlbumTracksKey)
+        offlineMode = defaults.bool(forKey: Self.offlineModeKey)
         observer = NotificationCenter.default.addObserver(
             forName: UserDefaults.didChangeNotification, object: defaults, queue: .main
         ) { [weak self] _ in
@@ -94,6 +101,19 @@ final class FoundationPlaybackPreferences: ObservableObject {
 
     isolated deinit {
         if let observer { NotificationCenter.default.removeObserver(observer) }
+    }
+
+    /// Match the explicit in-app choice across Settings.bundle edits and cold launch.
+    /// Original is never converted or silently routed under an enabled native option.
+    private static func readSystemManagedDownloads(
+        _ defaults: UserDefaults, quality: FoundationDownloadQuality
+    ) -> Bool {
+        let enabled = defaults.bool(forKey: systemManagedDownloadsKey)
+        if enabled && quality == .original {
+            defaults.set(false, forKey: systemManagedDownloadsKey)
+            return false
+        }
+        return enabled
     }
 
     private static func migrateStreamingProfiles(_ defaults: UserDefaults) {
@@ -148,13 +168,33 @@ final class FoundationPlaybackPreferences: ObservableObject {
         let quality =
             defaults.string(forKey: Self.downloadQualityKey)
             .flatMap(FoundationDownloadQuality.init(rawValue:)) ?? .original
-        if quality != downloadQuality { downloadQuality = quality }
+        let managed = Self.readSystemManagedDownloads(defaults, quality: quality)
+        // Publish in an order that never exposes Original + ON to synchronous observers.
+        if quality == .original {
+            if managed != systemManagedDownloads { systemManagedDownloads = managed }
+            if quality != downloadQuality { downloadQuality = quality }
+        } else {
+            if quality != downloadQuality { downloadQuality = quality }
+            if managed != systemManagedDownloads { systemManagedDownloads = managed }
+        }
         let streaming = defaults.bool(forKey: Self.streamingCellularKey)
         let downloads = defaults.bool(forKey: Self.downloadsCellularKey)
         if streaming != allowsCellularStreaming { allowsCellularStreaming = streaming }
         if downloads != allowsCellularDownloads { allowsCellularDownloads = downloads }
+        let offline = defaults.bool(forKey: Self.offlineModeKey)
+        if offline != offlineMode { offlineMode = offline }
         let duplicates = defaults.bool(forKey: Self.duplicateAlbumTracksKey)
         if duplicates != showDuplicateAlbumTracks { showDuplicateAlbumTracks = duplicates }
+    }
+
+    func setOfflineMode(_ value: Bool) {
+        defaults.set(value, forKey: Self.offlineModeKey)
+        refresh()
+    }
+
+    func setSystemManagedDownloads(_ value: Bool) {
+        defaults.set(value && downloadQuality != .original, forKey: Self.systemManagedDownloadsKey)
+        refresh()
     }
 
     func setDownloadQuality(_ value: FoundationDownloadQuality) {
@@ -178,7 +218,22 @@ final class FoundationPlaybackPreferences: ObservableObject {
     }
 
     func makePlayerItem(for url: URL) -> AVPlayerItem {
-        guard !url.isFileURL else { return AVPlayerItem(url: url) }
+        if url.isFileURL {
+            let asset = AVURLAsset(
+                url: url,
+                options: [
+                    AVURLAssetReferenceRestrictionsKey:
+                        NSNumber(
+                            value: AVAssetReferenceRestrictions.forbidLocalReferenceToRemote
+                                .rawValue),
+                    AVURLAssetAllowsCellularAccessKey: false,
+                    AVURLAssetAllowsExpensiveNetworkAccessKey: false,
+                    AVURLAssetAllowsConstrainedNetworkAccessKey: false,
+                ])
+            let item = AVPlayerItem(asset: asset)
+            item.canUseNetworkResourcesForLiveStreamingWhilePaused = false
+            return item
+        }
         let asset = AVURLAsset(
             url: url, options: [AVURLAssetAllowsCellularAccessKey: allowsCellularStreaming])
         return AVPlayerItem(asset: asset)

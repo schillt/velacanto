@@ -309,6 +309,33 @@ final class FoundationDownloadTransportTests: XCTestCase {
             XCTFail("Garbage must not be promoted to ready audio")
         } catch { XCTAssertEqual(error as? FoundationDownloadError, .incomplete) }
     }
+    #if DEBUG
+        func testNativeRenditionDiagnosticReportsOnlyBoundedShapeAndRecognizedErrors() {
+            let secret = "https://private.invalid/media?api_key=never-log-this"
+            let underlying = NSError(
+                domain: NSOSStatusErrorDomain, code: -12780,
+                userInfo: [NSLocalizedDescriptionKey: secret, NSFilePathErrorKey: secret])
+            let error = NSError(
+                domain: AVFoundationErrorDomain, code: -11800,
+                userInfo: [NSLocalizedDescriptionKey: secret, NSUnderlyingErrorKey: underlying])
+            let diagnostic = FoundationConvertedDownload.RenditionDiagnostic(
+                stage: .readerInit, readable: false, audioTracks: 1, videoTracks: 0,
+                formats: 100, sawPacket: false)
+            let event = diagnostic.failure(error)
+            XCTAssertEqual(
+                event,
+                "download.native stage=rendition.inspect substage=readerInit outcome=failed readable=no audioTracks=1 videoTracks=0 formats=2 sawPacket=0 domain=AVFoundation code=-11800 underlyingDomain=OSStatus underlyingCode=-12780"
+            )
+            for value in [secret, "private.invalid", "api_key", "never-log-this"] {
+                XCTAssertFalse(event.contains(value))
+            }
+            let unknown = diagnostic.failure(
+                NSError(domain: secret, code: 123, userInfo: [NSLocalizedDescriptionKey: secret]))
+            XCTAssertTrue(
+                unknown.hasSuffix("domain=other code=0 underlyingDomain=other underlyingCode=0"))
+            XCTAssertFalse(unknown.contains(secret))
+        }
+    #endif
 }
 
 final class FoundationDownloadQualityTests: XCTestCase {
@@ -359,6 +386,228 @@ final class FoundationDownloadQualityTests: XCTestCase {
             id: "00000000000000000000000000000001", title: "Fixture", subtitle: "", kind: .track,
             duration: 180)
     }
+
+    private var nativeMetadata: String {
+        """
+        {"Id":"00000000000000000000000000000001","Type":"Audio","CanDownload":true,
+         "RunTimeTicks":1800000000,"MediaSources":[{
+          "Id":"00000000000000000000000000000003","Protocol":"File","RunTimeTicks":1800000000,
+          "MediaStreams":[{"Type":"Audio","Codec":"opus","Index":0}]}]}
+        """
+    }
+
+    private func nativeProposal(_ quality: FoundationDownloadQuality = .aac320) async throws
+        -> FoundationNativeDownloadProposal
+    {
+        let converted = try await proposalLibrary(metadata: nativeMetadata)
+            .convertedDownloadProposal(
+                for: proposalTrack, quality: quality)
+        var relative = URLComponents()
+        relative.path = "/Audio/\(proposalTrack.id)/master.m3u8"
+        relative.queryItems = try converted.plan.nativeQueryItems(deviceID: "fixture-device")
+        var request = converted.request
+        var tokenFree = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!
+        tokenFree.path = tokenFree.path.replacingOccurrences(
+            of: "/stream.m4a", with: "/master.m3u8")
+        tokenFree.queryItems = relative.queryItems
+        request.url = tokenFree.url
+        let native = try FoundationJellyfinLibrary.hlsURL(
+            relative.string!, itemID: proposalTrack.id, sourceID: converted.plan.sourceID,
+            serverSession: converted.plan.sessionID.uuidString, base: base,
+            token: "fixture-token", deviceID: "fixture-device")
+        return .init(
+            request: request, authenticatedMasterURL: native, expectedToken: "fixture-token",
+            expectedDeviceID: "fixture-device", cleanupRequest: converted.cleanupRequest,
+            plan: converted.plan, title: "Fixture", artwork: nil)
+    }
+
+    #if DEBUG
+        func testNativeCaptureDiagnosticsContainOnlyFixedStageShapeAndWriteCodes() throws {
+            let secret = "private-callback-secret"
+            let base = try XCTUnwrap(URL(string: "file:///tmp/\(secret)/"))
+            let based = try XCTUnwrap(URL(string: "asset.movpkg", relativeTo: base))
+            XCTAssertNotNil(based.baseURL)
+            let error = NSError(
+                domain: NSCocoaErrorDomain, code: 513,
+                userInfo: [
+                    NSLocalizedDescriptionKey: secret, NSFilePathErrorKey: "/tmp/\(secret)",
+                    NSURLErrorFailingURLErrorKey: based,
+                    NSUnderlyingErrorKey: NSError(
+                        domain: NSPOSIXErrorDomain, code: 13,
+                        userInfo: [NSLocalizedDescriptionKey: secret]),
+                ])
+            for stage in FoundationNativeDownloadErrorFields.CaptureStage.allCases {
+                let event = FoundationNativeDownloadErrorFields.capture(
+                    stage: stage, location: based, writeError: error)
+                XCTAssertEqual(
+                    event,
+                    "download.native stage=allocation.capture substage=\(stage.rawValue) outcome=failed fileURL=1 basePresent=1 plain=0 domain=Cocoa code=513 underlyingDomain=POSIX underlyingCode=13"
+                )
+                XCTAssertFalse(event.contains(secret))
+                XCTAssertFalse(event.contains("file:"))
+                XCTAssertFalse(event.contains("movpkg"))
+            }
+            let unknown = NSError(
+                domain: secret, code: 987654, userInfo: [NSLocalizedDescriptionKey: secret])
+            XCTAssertEqual(
+                FoundationNativeDownloadErrorFields.persistence(
+                    stage: .beginResuming, error: unknown),
+                "download.native stage=allocation.persistence substage=beginResuming domain=other code=0 underlyingDomain=other underlyingCode=0"
+            )
+            XCTAssertEqual(
+                FoundationNativeDownloadErrorFields.terminal(
+                    taskMatches: false, observedAllocation: true, cleanupFailed: true),
+                "download.native stage=allocation.terminal taskMatches=0 observedAllocation=1 cleanupFailed=1"
+            )
+            let unbased = based.absoluteURL
+            XCTAssertEqual(
+                FoundationNativeDownloadErrorFields.capture(
+                    stage: .allocatedWrite, location: unbased),
+                "download.native stage=allocation.capture substage=allocatedWrite outcome=failed fileURL=1 basePresent=0 plain=1"
+            )
+        }
+
+        func testNativeDiagnosticErrorsExposeOnlyRecognizedScalarCodes() {
+            let secret = "https://private.invalid/Audio/private?ApiKey=private-token"
+            let nested = NSError(domain: NSOSStatusErrorDomain, code: -123456)
+            let underlying = NSError(
+                domain: "AVFoundationErrorDomain", code: -11800,
+                userInfo: [
+                    NSUnderlyingErrorKey: nested, NSLocalizedDescriptionKey: secret,
+                    NSURLErrorFailingURLErrorKey: URL(string: secret)!,
+                ])
+            let error = NSError(
+                domain: NSURLErrorDomain, code: -1005,
+                userInfo: [NSUnderlyingErrorKey: underlying, NSLocalizedDescriptionKey: secret])
+            let fields = FoundationNativeDownloadErrorFields.scalars(error)
+            XCTAssertEqual(
+                fields,
+                "domain=URL code=-1005 underlyingDomain=AVFoundation underlyingCode=-11800")
+            XCTAssertFalse(fields.contains("private"))
+            XCTAssertFalse(fields.contains("-123456"))
+            let unknown = NSError(
+                domain: secret, code: 987654,
+                userInfo: [NSUnderlyingErrorKey: NSError(domain: secret, code: 654321)])
+            XCTAssertEqual(
+                FoundationNativeDownloadErrorFields.scalars(unknown),
+                "domain=other code=0 underlyingDomain=other underlyingCode=0")
+            XCTAssertEqual(
+                FoundationNativeDownloadErrorFields.scalars(nested),
+                "domain=OSStatus code=-123456 underlyingDomain=other underlyingCode=0")
+        }
+    #endif
+
+    func testNativeHLSUsesTokenFreeModernPreflightAndExactLocalMediaAuthentication() async throws {
+        for quality in [FoundationDownloadQuality.aac320, .aac192, .aac128] {
+            let proposal = try await nativeProposal(quality)
+            XCTAssertNil(proposal.request.value(forHTTPHeaderField: "X-Emby-Token"))
+            XCTAssertTrue(
+                proposal.request.value(forHTTPHeaderField: "Authorization")?.hasPrefix(
+                    "MediaBrowser ") == true)
+            XCTAssertTrue(
+                proposal.request.value(forHTTPHeaderField: "Authorization")?.contains(
+                    "Token=\"fixture-token\"") == true)
+            XCTAssertFalse(proposal.request.url!.absoluteString.contains("fixture-token"))
+            let native = try proposal.validatedNativeMasterURL()
+            let components = try XCTUnwrap(
+                URLComponents(url: native, resolvingAgainstBaseURL: false))
+            XCTAssertEqual(components.path, "/jellyfin/Audio/\(proposalTrack.id)/master.m3u8")
+            XCTAssertEqual(
+                components.queryItems?.filter { $0.name == "ApiKey" },
+                [.init(name: "ApiKey", value: "fixture-token")])
+            XCTAssertEqual(
+                components.queryItems?.filter { $0.name != "ApiKey" },
+                try proposal.plan.nativeQueryItems(deviceID: "fixture-device"))
+            // Preflight trusts only token-free same-origin references. The credential
+            // URL is locally generated for the native task, never taken from a playlist.
+            XCTAssertNoThrow(
+                try FoundationNativeDownloadTransport.safeResource(
+                    "main.m3u8?SegmentContainer=mp4", relativeTo: proposal.request.url!))
+            for reference in [
+                "main.m3u8?ApiKey=fixture-token", "https://foreign.invalid/main.m3u8",
+            ] {
+                XCTAssertThrowsError(
+                    try FoundationNativeDownloadTransport.safeResource(
+                        reference, relativeTo: proposal.request.url!))
+            }
+        }
+    }
+
+    func testNativeMediaAuthenticationRejectsOriginPathCredentialAndPlanDrift() async throws {
+        let proposal = try await nativeProposal()
+        func modified(_ change: (inout URLComponents) -> Void) throws -> URL {
+            var components = try XCTUnwrap(
+                URLComponents(
+                    url: proposal.authenticatedMasterURL, resolvingAgainstBaseURL: false))
+            change(&components)
+            return try XCTUnwrap(components.url)
+        }
+        func validate(_ url: URL, request: URLRequest? = nil) throws {
+            let changed = FoundationNativeDownloadProposal(
+                request: request ?? proposal.request, authenticatedMasterURL: url,
+                expectedToken: proposal.expectedToken, expectedDeviceID: proposal.expectedDeviceID,
+                cleanupRequest: proposal.cleanupRequest, plan: proposal.plan, title: "Fixture",
+                artwork: nil)
+            _ = try changed.validatedNativeMasterURL()
+        }
+        let invalid = try [
+            modified { $0.host = "foreign.invalid" },
+            modified { $0.scheme = "http" },
+            modified { $0.percentEncodedPath = "/Audio/other/master.m3u8" },
+            modified { $0.queryItems?.append(.init(name: "ApiKey", value: "fixture-token")) },
+            modified { $0.queryItems?.append(.init(name: "api_key", value: "fixture-token")) },
+            modified { $0.queryItems?.append(.init(name: "Authorization", value: "untrusted")) },
+            modified {
+                $0.queryItems = $0.queryItems?.map {
+                    $0.name == "ApiKey" ? .init(name: "ApiKey", value: "other") : $0
+                }
+            },
+            modified { $0.queryItems = $0.queryItems?.filter { $0.name != "ApiKey" } },
+        ]
+        for url in invalid { XCTAssertThrowsError(try validate(url)) }
+        var legacy = proposal.request
+        legacy.setValue(nil, forHTTPHeaderField: "Authorization")
+        legacy.setValue("fixture-token", forHTTPHeaderField: "X-Emby-Token")
+        XCTAssertThrowsError(try validate(proposal.authenticatedMasterURL, request: legacy))
+        var wrongHeader = proposal.request
+        wrongHeader.setValue("MediaBrowser Token=\"other\"", forHTTPHeaderField: "Authorization")
+        XCTAssertThrowsError(try validate(proposal.authenticatedMasterURL, request: wrongHeader))
+        var credentialed = proposal.request
+        var source = try XCTUnwrap(
+            URLComponents(url: credentialed.url!, resolvingAgainstBaseURL: false))
+        source.queryItems?.append(.init(name: "ApiKey", value: "server-supplied"))
+        credentialed.url = source.url
+        XCTAssertThrowsError(try validate(proposal.authenticatedMasterURL, request: credentialed))
+        // Even matching drift in both URLs cannot change the authorized conversion plan.
+        for key in ["AudioBitRate", "PlaySessionId", "MediaSourceId", "DeviceId"] {
+            let changed = try modified { components in
+                components.queryItems = components.queryItems?.map {
+                    $0.name == key ? .init(name: key, value: "changed") : $0
+                }
+            }
+            var request = proposal.request
+            var clean = try XCTUnwrap(URLComponents(url: changed, resolvingAgainstBaseURL: false))
+            clean.queryItems?.removeAll { $0.name == "ApiKey" }
+            request.url = clean.url
+            XCTAssertThrowsError(try validate(changed, request: request))
+        }
+    }
+
+    #if os(iOS)
+        func testActualNativeProposalRetainsConvertedModernHeaderAndProxyBase() async throws {
+            let proposal = try await proposalLibrary(metadata: nativeMetadata)
+                .nativeDownloadProposal(
+                    for: proposalTrack, quality: .aac320, allowsCellular: false)
+            XCTAssertNil(proposal.request.value(forHTTPHeaderField: "X-Emby-Token"))
+            XCTAssertTrue(
+                proposal.request.value(forHTTPHeaderField: "Authorization")?.contains(
+                    "Token=\"fixture-token\"") == true)
+            XCTAssertFalse(proposal.request.url!.absoluteString.contains("fixture-token"))
+            XCTAssertEqual(try proposal.validatedNativeMasterURL(), proposal.authenticatedMasterURL)
+            XCTAssertEqual(
+                proposal.request.url?.path, "/jellyfin/Audio/\(proposalTrack.id)/master.m3u8")
+        }
+    #endif
 
     private func convertedFixture() throws -> (root: URL, temporary: URL, destination: URL) {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -647,6 +896,104 @@ final class FoundationDownloadQualityTests: XCTestCase {
         do {
             _ = try await FoundationConvertedDownload.inspectFile(fixture.temporary, longer)
             XCTFail("Reader EOF and valid AAC cannot substitute for complete expected duration")
+        } catch { XCTAssertEqual(error as? FoundationDownloadError, .incomplete) }
+    }
+
+    func testNativeHLSValidationRecordsRequestedQualityAndDeclarationWithoutFileMeasurements()
+        async throws
+    {
+        let fixture = try convertedFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        for quality in [FoundationDownloadQuality.aac128, .aac192, .aac320] {
+            let plan = try FoundationDownloadConversionPlan(
+                quality: quality, duration: 1, sourceID: "fixture-source", audioStreamIndex: 0)
+            let rendition = try await FoundationConvertedDownload.inspectNativePackage(
+                fixture.root, plan: plan,
+                load: { asset in
+                    XCTAssertEqual(asset.url, fixture.root)
+                    return .init(
+                        completeOffline: true, duration: 1,
+                        variants: [
+                            .init(
+                                declaredAudioFormats: [kAudioFormatMPEG4AAC], declaresVideo: false)
+                        ])
+                })
+            XCTAssertEqual(rendition.requestedQuality, quality)
+            XCTAssertEqual(rendition.declaredAudioCodec, "aac")
+            XCTAssertEqual(rendition.container, "hls")
+            let file = FoundationDownloadManifest.File(
+                name: "synthetic.movpkg", bytes: 1, digest: "",
+                nativePackage: .init(
+                    nativeURL: fixture.root, bookmark: Data([1]), sessionIdentifier: "synthetic"),
+                nativeRendition: rendition)
+            let encoded = try JSONEncoder().encode(file)
+            let decoded = try JSONDecoder().decode(
+                FoundationDownloadManifest.File.self, from: encoded)
+            XCTAssertEqual(decoded.nativeRendition, rendition)
+            XCTAssertNil(decoded.convertedRendition)
+            let json = String(decoding: encoded, as: UTF8.self)
+            XCTAssertFalse(json.contains("sampleRate"))
+            XCTAssertFalse(json.contains("channels"))
+            let legacy = FoundationDownloadManifest.File(
+                name: "legacy.flac", bytes: 1, digest: "legacy")
+            XCTAssertNil(
+                try JSONDecoder().decode(
+                    FoundationDownloadManifest.File.self, from: JSONEncoder().encode(legacy)
+                ).nativeRendition)
+        }
+    }
+
+    func testNativeHLSValidationRejectsIncompleteOrAmbiguousDeclaredRendition() async throws {
+        let fixture = try convertedFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        typealias Snapshot = FoundationConvertedDownload.NativePackageSnapshot
+        typealias Variant = FoundationConvertedDownload.NativeVariant
+        let audio = Variant(declaredAudioFormats: [kAudioFormatMPEG4AAC], declaresVideo: false)
+        let plan = try FoundationDownloadConversionPlan(
+            quality: .aac320, duration: 1, sourceID: "fixture-source", audioStreamIndex: 0)
+        let invalid: [Snapshot] = [
+            .init(completeOffline: false, duration: 1, variants: [audio]),
+            .init(completeOffline: true, duration: 2, variants: [audio]),
+            .init(completeOffline: true, duration: .nan, variants: [audio]),
+            .init(completeOffline: true, duration: 1, variants: []),
+            .init(completeOffline: true, duration: 1, variants: [audio, audio]),
+            .init(
+                completeOffline: true, duration: 1,
+                variants: [.init(declaredAudioFormats: [kAudioFormatMPEG4AAC], declaresVideo: true)]
+            ),
+            .init(
+                completeOffline: true, duration: 1,
+                variants: [
+                    .init(declaredAudioFormats: [kAudioFormatMPEGLayer3], declaresVideo: false)
+                ]),
+            .init(
+                completeOffline: true, duration: 1,
+                variants: [.init(declaredAudioFormats: [], declaresVideo: false)]),
+        ]
+        for snapshot in invalid {
+            do {
+                _ = try await FoundationConvertedDownload.inspectNativePackage(
+                    fixture.root, plan: plan, load: { _ in snapshot })
+                XCTFail("Invalid native evidence was accepted")
+            } catch { XCTAssertEqual(error as? FoundationDownloadError, .incomplete) }
+        }
+    }
+
+    func testNativeHLSValidationPreservesCancellationAndFailsClosedOnMetadataError() async throws {
+        let fixture = try convertedFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let plan = try FoundationDownloadConversionPlan(
+            quality: .aac192, duration: 1, sourceID: "fixture-source", audioStreamIndex: 0)
+        do {
+            _ = try await FoundationConvertedDownload.inspectNativePackage(
+                fixture.root, plan: plan, load: { _ in throw CancellationError() })
+            XCTFail("Cancellation returned verified metadata")
+        } catch { XCTAssertTrue(error is CancellationError) }
+        do {
+            _ = try await FoundationConvertedDownload.inspectNativePackage(
+                fixture.root, plan: plan,
+                load: { _ in throw NSError(domain: AVFoundationErrorDomain, code: -11800) })
+            XCTFail("Unavailable native metadata was accepted")
         } catch { XCTAssertEqual(error as? FoundationDownloadError, .incomplete) }
     }
 

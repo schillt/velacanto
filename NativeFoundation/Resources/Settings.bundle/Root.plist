@@ -76,7 +76,7 @@
 		</dict>
 		<dict>
 			<key>FooterText</key>
-			<string>Quality applies to new downloads. Existing files are kept. AAC conversion requires server permission. Manage downloaded music and storage in VelaCanto Settings.</string>
+			<string>Manage new AAC downloads in Settings &gt; General &gt; iPhone Storage. Existing downloads remain in VelaCanto. Original requires this option to be off.</string>
 			<key>Title</key>
 			<string>Downloads</string>
 			<key>Type</key>
@@ -105,6 +105,16 @@
 				<string>aac192</string>
 				<string>aac128</string>
 			</array>
+		</dict>
+		<dict>
+			<key>DefaultValue</key>
+			<false/>
+			<key>Key</key>
+			<string>audio.downloads.systemManaged</string>
+			<key>Title</key>
+			<string>Manage New Downloads in iPhone Storage</string>
+			<key>Type</key>
+			<string>PSToggleSwitchSpecifier</string>
 		</dict>
 		<dict>
 			<key>DefaultValue</key>
